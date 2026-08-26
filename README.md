@@ -6,6 +6,24 @@
 [![License](https://img.shields.io/github/license/mars-base/pgcli)](https://github.com/mars-base/pgcli/blob/main/LICENSE)
 [![Platform](https://img.shields.io/badge/platform-linux%20|%20macOS-blue)]()
 
+Create, manage, and backup PostgreSQL databases with ease. pgcli provides a simple CLI to launch isolated PostgreSQL instances in containers — one command to spin up a database, automatic backups via pgBackRest, and point-in-time recovery when you need it.
+
+Whether you're running multiple dev databases, managing staging environments, or need reliable backup strategies, pgcli handles the complexity so you can focus on your application.
+
+**Key capabilities:**
+- One-command instance creation with automatic port assignment
+- Automated backup and PITR setup (no manual pgBackRest configuration)
+- Multi-instance isolation with separate data directories
+- Cross-platform support (Linux and macOS)
+
+## Features
+
+- **Containerized PostgreSQL** — Each instance runs in an isolated Podman container
+- **PITR (Point-In-Time Recovery)** — Full backup and time-travel recovery via pgBackRest
+- **Snapshot Management** — Create, list, and delete database snapshots
+- **Multi-Instance Support** — Run multiple isolated PostgreSQL instances on different ports
+- **Linux + macOS** — Native Podman on Linux, podman machine on macOS
+
 ## Install
 
 ```bash
