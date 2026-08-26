@@ -6,28 +6,13 @@
 [![License](https://img.shields.io/github/license/mars-base/pgcli)](https://github.com/mars-base/pgcli/blob/main/LICENSE)
 [![Platform](https://img.shields.io/badge/platform-linux%20|%20macOS-blue)]()
 
-One command to create, backup, and restore PostgreSQL databases in containers.
+## Install
 
 ```bash
-# Install
 curl -fsSL https://raw.githubusercontent.com/mars-base/pgcli/main/scripts/install.sh | bash
-
-# Create and start
-pg start
-
-# Backup
-pg snapshot create
-
-# Restore to any point in time
-pg restore --time "2026-08-26 15:30:00+00"
 ```
 
-## Features
-
-- **Containerized** — Each instance runs in an isolated Podman container
-- **PITR** — Point-in-time recovery via pgBackRest (time-travel to any second)
-- **Multi-instance** — Run multiple isolated databases on different ports
-- **Cross-platform** — Linux (native) and macOS (podman machine)
+This installs `pg` to `~/.local/bin`, sets up Podman if needed, and pre-pulls container images.
 
 ## Quick Start
 
@@ -127,31 +112,6 @@ pg restore --time "2026-08-26 15:30:00+00" --promote --force
 **Recovery workflow:** Stop → pgBackRest restore → Start → WAL replay to target time
 
 **Note:** After `--promote`, create a new full snapshot before further PITR.
-
-## Installation
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/mars-base/pgcli/main/scripts/install.sh | bash
-```
-
-Installs:
-- `pg` binary to `~/.local/bin`
-- Podman (if not present)
-- Pre-pulls container images
-
-## Building from Source
-
-```bash
-git clone https://github.com/mars-base/pgcli.git
-cd pgcli
-make build
-```
-
-Container images:
-```bash
-make container-build      # Build multi-arch PG image
-make container-push       # Push to GHCR
-```
 
 ## License
 
