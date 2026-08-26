@@ -351,23 +351,30 @@ func (m *BackupManager) WritePgbackrestConf() (string, error) {
 
 // --- Container management ---------------------------------------------
 
-// EnsureBackupContainer creates and starts the backup container, recreating it
-// if it already exists. All platforms use host networking -- the container is
-// always refreshed to pick up the latest SSH config (per-instance ports). The
-// container runs sleep-infinity, so recreation is cheap.
+// EnsureBackupContainer creates and starts the backup container if needed.
+// SSH config and pgbackrest.conf are bind-mounted, so host file updates are
+// reflected inside the container without recreation. Only (re)create if the
+// container does not exist or is not running.
 func (m *BackupManager) EnsureBackupContainer(confPath string) error {
 	containerName := m.cfg.Backup.ContainerName
+
+	running, err := m.containerRunning(containerName)
+	if err != nil {
+		return err
+	}
+	if running {
+		fmt.Println("-> Backup container already running")
+		return nil
+	}
 
 	exists, err := m.containerExists(containerName)
 	if err != nil {
 		return err
 	}
-
 	if exists {
-		fmt.Println("-> Recreating backup container to refresh SSH config...")
-		if _, err := m.run("rm", "-f", containerName); err != nil {
-			return fmt.Errorf("removing backup container: %w", err)
-		}
+		// Container exists but not running — start it
+		fmt.Println("-> Starting backup container...")
+		return m.StartBackupContainer()
 	}
 
 	fmt.Println("-> Creating and starting backup container...")
