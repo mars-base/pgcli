@@ -17,7 +17,7 @@ build:
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) .
 
 install:
-	go install -ldflags "$(LDFLAGS)" .
+	go build -ldflags "$(LDFLAGS)" -o $(GOPATH)/bin/$(BINARY) .
 
 build-all:
 	@for target in $(PLATFORMS); do \
