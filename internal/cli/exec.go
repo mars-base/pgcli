@@ -41,6 +41,16 @@ Examples:
 
 		containerName := cfg.Podman.ContainerName
 
+		// Check if container is running
+		checkCmd := exec.Command("podman", "inspect", "-f", "{{.State.Running}}", containerName)
+		output, err := checkCmd.Output()
+		if err != nil {
+			return fmt.Errorf("container '%s' not found. Run 'pg start -i %s' to create and start it", containerName, cfg.Instance)
+		}
+		if strings.TrimSpace(string(output)) != "true" {
+			return fmt.Errorf("container '%s' is stopped. Run 'pg start -i %s' to start it", containerName, cfg.Instance)
+		}
+
 		// Check if -- was used (cobra passes args after -- as positional args).
 		// If the user provided --, args are raw container commands.
 		// If not, treat the joined args as SQL for psql.
