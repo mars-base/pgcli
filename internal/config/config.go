@@ -38,9 +38,9 @@ type PostgresConfig struct {
 	URL      string `yaml:"url"`      // connection string (postgres://user:pass@host:port/db)
 	Host     string `yaml:"host"`     // host, default localhost
 	Port     int    `yaml:"port"`     // port, default 5432
-	User     string `yaml:"user"`     // user, default pgcli
-	Password string `yaml:"password"` // password, default pgcli
-	Database string `yaml:"database"` // database name, default pgcli
+	User     string `yaml:"user"`     // user, default admin
+	Password string `yaml:"password"` // password, default admin
+	Database string `yaml:"database"` // database name, default admin
 }
 
 // PodmanConfig holds Podman container settings.
@@ -80,9 +80,9 @@ func Default() *Config {
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
-			User:     "pgcli",
-			Password: "pgcli",
-			Database: "pgcli",
+			User:     "admin",
+			Password: "admin",
+			Database: "admin",
 		},
 		Podman: PodmanConfig{
 			ContainerName: "pgcli-pg",

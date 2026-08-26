@@ -38,7 +38,7 @@ pg start
 pg status
 
 # Connect via psql (password shown during create/start)
-psql postgres://pgcli:<password>@localhost:<port>/<instance>_db
+psql postgres://admin:<password>@localhost:<port>/<instance>_db
 
 # Or execute SQL directly (auto-connects with instance user/database)
 pg exec "SELECT version()"
@@ -72,8 +72,8 @@ pg list
 
 Each pgcli instance automatically creates two database roles:
 
-### pgcli (Primary User)
-- **Username**: `pgcli` (configurable in config)
+### admin (Primary User)
+- **Username**: `admin` (configurable in config)
 - **Password**: Auto-generated 16-character random password (shown during `pg create` or `pg start`)
 - **Database**: `<instance>_db` (e.g., `proj01_db`, `default_db`)
 - **Permissions**: Superuser with full database access
@@ -81,7 +81,7 @@ Each pgcli instance automatically creates two database roles:
 
 Connect using the connection string shown in `pg status` output:
 ```bash
-psql postgres://pgcli:<password>@localhost:35432/proj01_db
+psql postgres://admin:<password>@localhost:35432/proj01_db
 ```
 
 ### postgres (System Role)
@@ -91,7 +91,7 @@ psql postgres://pgcli:<password>@localhost:35432/proj01_db
 - **Purpose**: pgBackRest backup system requires this role for SSH-based backup connections
 - **Access**: Only accessible from within the container via peer authentication
 
-**Note**: The `postgres` role is created automatically and should not be used for application connections. Use the `pgcli` user for all database operations.
+**Note**: The `postgres` role is created automatically and should not be used for application connections. Use the `admin` user for all database operations.
 
 ## Commands
 
@@ -118,9 +118,9 @@ base_dir: /data/pg
 network: pgcli-net
 
 postgres:
-  user: pgcli
-  password: pgcli
-  database: pgcli
+  user: admin
+  password: admin
+  database: admin
 
 podman:
   image_tag: "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0"
