@@ -6,8 +6,6 @@ set -euo pipefail
 REPO="mars-base/pgcli"
 BINARY="pg"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
-CONFIG_DIR="$HOME/.pgcli"
-CONFIG_FILE="$CONFIG_DIR/pg.yaml"
 
 red()   { printf '\033[0;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[0;32m%s\033[0m\n' "$*"; }
@@ -73,42 +71,6 @@ install_podman_launcher() {
     green "  [OK] podman-launcher installed"
 }
 
-create_default_config() {
-    mkdir -p "$CONFIG_DIR"
-    if [ -f "$CONFIG_FILE" ]; then
-        yellow "  Config file already exists: $CONFIG_FILE (skipping)"
-        return
-    fi
-    cat > "$CONFIG_FILE" << 'EOF'
-# pgcli configuration
-# See: https://github.com/mars-base/pgcli
-
-postgres:
-  user: pgcli_user
-  password: pgcli_pass
-  database: pgcli_db
-
-podman:
-  image_tag: "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0"
-  network: pgcli-net
-
-pitr:
-  enabled: true
-  pgbackrest_stanza: pgcli
-
-backup:
-  container_name: pgcli-backup
-  image_tag: "ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0"
-  data_dir: "~/.pgcli/backup/data"
-  log_dir: "~/.pgcli/backup/log"
-  retention_full: 2
-
-logging:
-  level: info
-EOF
-    green "  [OK] Default config created: $CONFIG_FILE"
-}
-
 check_path() {
     if ! command -v "$BINARY" &>/dev/null && [ ! -x "$INSTALL_DIR/$BINARY" ]; then
         yellow ""
@@ -142,14 +104,13 @@ main() {
 
     install_binary "$os" "$arch" "$version"
     install_podman_launcher
-    create_default_config
     check_path
 
     echo ""
     green "Installation complete!"
     echo ""
     echo "  Quick start:"
-    echo "    pg create default --data-dir ~/.pgcli/instances/default"
+    echo "    pg config init --add default --base-dir /data/pg"
     echo "    pg start"
     echo "    pg status"
     echo ""
