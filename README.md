@@ -83,6 +83,22 @@ pg start --all
 | `pg destroy` | Destroy instance |
 | `pg config` | Configuration management |
 
+## PostgreSQL Configuration
+
+Modify PostgreSQL runtime parameters via `pg exec` with `ALTER SYSTEM`, then reload:
+
+```bash
+# Change a parameter
+pg exec "ALTER SYSTEM SET work_mem = '256MB'"
+pg exec "SELECT pg_reload_conf()"
+
+# For a specific instance
+pg exec -i proj01 "ALTER SYSTEM SET effective_cache_size = '4GB'"
+pg exec -i proj01 "SELECT pg_reload_conf()"
+```
+
+**Note:** Some parameters (e.g. `shared_buffers`, `max_connections`) require a restart rather than reload. Use `pg stop && pg start` to apply those changes.
+
 ## Backup and Restore
 
 ### Snapshots
