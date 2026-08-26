@@ -78,7 +78,7 @@ func (m *BackupManager) WriteSSHConfig() (string, error) {
 		}
 		sshPort := inst.Podman.SSHPort
 		if sshPort == 0 {
-			sshPort = 32201
+			sshPort = 42201
 		}
 		fmt.Fprintf(&sb, "Host %s\n", inst.Podman.ContainerName)
 		// macOS + bridge: containers resolve each other via Podman DNS.

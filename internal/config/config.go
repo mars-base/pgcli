@@ -48,8 +48,8 @@ type PodmanConfig struct {
 	ContainerName string `yaml:"container_name"` // PG container name, default pgcli-pg
 	DataDir       string `yaml:"data_dir"`       // PG data directory (host path), default ~/.pgcli/dbdata/<name>/data
 	ImageTag      string `yaml:"image_tag"`      // image tag, default ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0
-	HostPort      int    `yaml:"host_port"`      // host port for PG mapping, 0=auto-assign from 25432
-	SSHPort       int    `yaml:"ssh_port"`       // SSH port for pgbackrest, 0=auto-assign from 32201
+	HostPort      int    `yaml:"host_port"`      // host port for PG mapping, 0=auto-assign from 35432
+	SSHPort       int    `yaml:"ssh_port"`       // SSH port for pgbackrest, 0=auto-assign from 42201
 	Network       string `yaml:"network"`        // podman network name, default pgcli-net
 }
 
@@ -388,8 +388,8 @@ func (c *Config) ApplyDefaults() {
 }
 
 // autoAssignPorts assigns sequential host ports (PG + SSH) to instances that
-// have HostPort=0 / SSHPort=0. PG ports start at 25432, SSH ports start at
-// 32201.
+// have HostPort=0 / SSHPort=0. PG ports start at 35432, SSH ports start at
+// 42201.
 //
 // Instances are processed in alphabetical order by name. Explicitly-set ports
 // are respected and skipped. The "default" instance always gets the base port.
@@ -410,9 +410,9 @@ func (c *Config) autoAssignPorts() {
 		}
 	}
 
-	// All platforms use host networking: PG from 25432, SSH from 32201.
-	pgBase := 25432
-	sshBase := 32201
+	// All platforms use host networking: PG from 35432, SSH from 42201.
+	pgBase := 35432
+	sshBase := 42201
 
 	// Probe already-used ports so multiple config files (or other services)
 	// on the same host don't collide.

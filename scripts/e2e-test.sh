@@ -119,14 +119,14 @@ logging:
 instances:
   $INSTANCE:
     postgres:
-      port: 25432
+      port: 35432
       user: pgcli_user
       password: pgcli_pass
       database: pgcli_db
     podman:
       container_name: pgcli-pg-$INSTANCE
-      host_port: 25432
-      ssh_port: 32201
+      host_port: 35432
+      ssh_port: 42201
       data_dir: "$TEST_DIR/$INSTANCE"
       image_tag: "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0"
       network: pgcli-e2e-net
@@ -211,14 +211,14 @@ EOF
     cat >> "$CONFIG_FILE" << EOF
   $INSTANCE2:
     postgres:
-      port: 25433
+      port: 35433
       user: pgcli_user
       password: pgcli_pass
       database: pgcli_db
     podman:
       container_name: pgcli-pg-$INSTANCE2
-      host_port: 25433
-      ssh_port: 32202
+      host_port: 35433
+      ssh_port: 42202
       data_dir: "$TEST_DIR/$INSTANCE2"
       image_tag: "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0"
       network: pgcli-e2e-net
