@@ -23,7 +23,7 @@ func init() {
 	restoreCmd.Flags().StringVar(&restoreTime, "time", "", "Restore to specified time (e.g. '2026-06-14 15:04:05+00' or '2026-06-14 15:04:05')")
 	restoreCmd.Flags().BoolVar(&restoreDryRun, "dry-run", false, "Only show what would be done, do not execute")
 	restoreCmd.Flags().BoolVar(&restoreForce, "force", false, "Skip confirmation prompt")
-	restoreCmd.Flags().BoolVar(&restorePromote, "promote", false, "Promote the cluster to read-write after recovery (switches timeline). By default the cluster is left paused at the target time in read-only state so you can inspect the data and restore again to a different point.")
+	restoreCmd.Flags().BoolVar(&restorePromote, "promote", false, "Promote the instance to read-write after recovery (switches timeline). By default the instance is left paused at the target time in read-only state so you can inspect the data and restore again to a different point.")
 	restoreCmd.Flags().BoolVar(&restoreTailLogs, "tail-logs", false, "Stream restore container logs to stdout during recovery")
 }
 
@@ -34,14 +34,14 @@ var restoreCmd = &cobra.Command{
 
 WARNING: All changes after the target time will be permanently lost!
 
-By default the cluster is recovered to the target time and then PAUSED in a
+By default the instance is recovered to the target time and then PAUSED in a
 read-only state (recovery_target_action=pause). This lets you inspect the data
 at that point in time. If it is not what you expect, run restore again with a
 different --time -- no timeline switch happens, so the WAL archive stays intact
 and repeated time-travel remains possible.
 
-Once the restored state is confirmed correct, use --promote to make the cluster
-read-write. Promote switches the cluster to a new timeline; further PITR to
+Once the restored state is confirmed correct, use --promote to make the instance
+read-write. Promote switches the instance to a new timeline; further PITR to
 points after the last backup then requires a new snapshot first.
 
 Process:
@@ -165,9 +165,9 @@ Examples:
 			fmt.Printf("  Instance:    %s\n", cfg.Instance)
 			fmt.Printf("  Target time: %s\n", targetTime.Format("2006-01-02 15:04:05"))
 			if restorePromote {
-				fmt.Printf("  Action:       promote (cluster becomes read-write, timeline switches)\n")
+				fmt.Printf("  Action:       promote (instance becomes read-write, timeline switches)\n")
 			} else {
-				fmt.Printf("  Action:       pause (cluster stays read-only at target time; restore again to adjust)\n")
+				fmt.Printf("  Action:       pause (instance stays read-only at target time; restore again to adjust)\n")
 			}
 			fmt.Printf("  This will restore the database to that time point. All changes after it will be permanently lost!\n")
 			fmt.Println()

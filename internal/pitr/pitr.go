@@ -268,12 +268,12 @@ func (m *Manager) Restore(targetTime time.Time, promote, dryRun, tailLogs bool) 
 					diff = -diff
 				}
 				if diff < 2*time.Second {
-					fmt.Println("  Cluster already paused at target time, promoting directly (skip re-restore)...")
+					fmt.Println("  Instance already paused at target time, promoting directly (skip re-restore)...")
 					out, err := m.podman.PGPromoteAfterRecovery()
 					if err != nil {
 						return fmt.Errorf("promoting after recovery: %w\n%s", err, out)
 					}
-					fmt.Println("[OK] Cluster promoted to read-write")
+					fmt.Println("[OK] Instance promoted to read-write")
 					return nil
 				}
 				fmt.Printf("  Paused at %s, target is %s — full restore required\n",
@@ -346,12 +346,12 @@ func (m *Manager) RestoreToWriter(w io.Writer, targetTime time.Time, promote boo
 					diff = -diff
 				}
 				if diff < 2*time.Second {
-					fmt.Fprintln(w, "  Cluster already paused at target time, promoting directly...")
+					fmt.Fprintln(w, "  Instance already paused at target time, promoting directly...")
 					out, err := m.podman.PGPromoteAfterRecovery()
 					if err != nil {
 						return fmt.Errorf("promoting after recovery: %w\n%s", err, out)
 					}
-					fmt.Fprintln(w, "[OK] Cluster promoted to read-write")
+					fmt.Fprintln(w, "[OK] Instance promoted to read-write")
 					return nil
 				}
 				fmt.Fprintf(w, "  Paused at %s, target is %s — full restore required\n",
