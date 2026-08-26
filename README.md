@@ -4,9 +4,9 @@ A CLI tool for managing containerized PostgreSQL database instances using Podman
 
 ## About
 
-pgcli simplifies PostgreSQL database management by providing a unified CLI interface to create, manage, and backup PostgreSQL instances running in Podman containers. It integrates pgBackRest for enterprise-grade backup and Point-In-Time Recovery (PITR) capabilities, allowing you to restore your database to any point in time.
+Create, manage, and backup PostgreSQL databases with ease. pgcli provides a simple CLI to launch isolated PostgreSQL instances in containers — one command to spin up a database, automatic backups via pgBackRest, and point-in-time recovery when you need it.
 
-Whether you're running multiple development databases, managing staging environments, or need reliable backup strategies, pgcli handles the complexity of containerized PostgreSQL while keeping your workflow simple.
+Whether you're running multiple dev databases, managing staging environments, or need reliable backup strategies, pgcli handles the complexity so you can focus on your application.
 
 **Key capabilities:**
 - One-command instance creation with automatic port assignment
