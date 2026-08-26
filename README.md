@@ -68,6 +68,31 @@ pg start -i proj01
 pg list
 ```
 
+## PostgreSQL Accounts
+
+Each pgcli instance automatically creates two database roles:
+
+### pgcli (Primary User)
+- **Username**: `pgcli` (configurable in config)
+- **Password**: Auto-generated 16-character random password (shown during `pg create` or `pg start`)
+- **Database**: `<instance>_db` (e.g., `proj01_db`, `default_db`)
+- **Permissions**: Superuser with full database access
+- **Usage**: Application connections, development, and general database operations
+
+Connect using the connection string shown in `pg status` output:
+```bash
+psql postgres://pgcli:<password>@localhost:35432/proj01_db
+```
+
+### postgres (System Role)
+- **Username**: `postgres`
+- **Password**: No password (peer authentication only)
+- **Permissions**: Superuser
+- **Purpose**: pgBackRest backup system requires this role for SSH-based backup connections
+- **Access**: Only accessible from within the container via peer authentication
+
+**Note**: The `postgres` role is created automatically and should not be used for application connections. Use the `pgcli` user for all database operations.
+
 ## Commands
 
 | Command | Description |
