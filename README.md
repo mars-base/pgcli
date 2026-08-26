@@ -1,51 +1,48 @@
-# pgcli — PostgreSQL Database Instance Manager
+# pgcli
 
-A CLI tool for managing containerized PostgreSQL database instances using Podman and pgBackRest.
+**Easy-to-use PostgreSQL instance manager**
 
-## About
+[![Release](https://img.shields.io/github/v/release/mars-base/pgcli)](https://github.com/mars-base/pgcli/releases)
+[![License](https://img.shields.io/github/license/mars-base/pgcli)](https://github.com/mars-base/pgcli/blob/main/LICENSE)
+[![Platform](https://img.shields.io/badge/platform-linux%20|%20macOS-blue)]()
 
-Create, manage, and backup PostgreSQL databases with ease. pgcli provides a simple CLI to launch isolated PostgreSQL instances in containers — one command to spin up a database, automatic backups via pgBackRest, and point-in-time recovery when you need it.
-
-Whether you're running multiple dev databases, managing staging environments, or need reliable backup strategies, pgcli handles the complexity so you can focus on your application.
-
-**Key capabilities:**
-- One-command instance creation with automatic port assignment
-- Automated backup and PITR setup (no manual pgBackRest configuration)
-- Multi-instance isolation with separate data directories
-- Cross-platform support (Linux and macOS)
-
-## Features
-
-- **Containerized PostgreSQL** — Each instance runs in an isolated Podman container
-- **PITR (Point-In-Time Recovery)** — Full backup and time-travel recovery via pgBackRest
-- **Snapshot Management** — Create, list, and delete database snapshots
-- **Multi-Instance Support** — Run multiple isolated PostgreSQL instances on different ports
-- **Linux + macOS** — Native Podman on Linux, podman machine on macOS
-
-## Quick Start
+One command to create, backup, and restore PostgreSQL databases in containers.
 
 ```bash
 # Install
 curl -fsSL https://raw.githubusercontent.com/mars-base/pgcli/main/scripts/install.sh | bash
 
-# Initialize config (creates ~/.pgcli/pg.yaml)
-pg config init --add default --base-dir /data/pg
-
-# Start the instance
+# Create and start
 pg start
 
-# Check status (shows port, connection info)
+# Backup
+pg snapshot create
+
+# Restore to any point in time
+pg restore --time "2026-08-26 15:30:00+00"
+```
+
+## Features
+
+- **Containerized** — Each instance runs in an isolated Podman container
+- **PITR** — Point-in-time recovery via pgBackRest (time-travel to any second)
+- **Multi-instance** — Run multiple isolated databases on different ports
+- **Cross-platform** — Linux (native) and macOS (podman machine)
+
+## Quick Start
+
+```bash
+# Start instance (auto-creates config, assigns port)
+pg start
+
+# Check status and connection info
 pg status
 
-# Connect via psql (password shown during create/start)
-psql postgres://admin:<password>@localhost:<port>/<instance>_db
+# Connect via psql
+psql postgres://admin:<password>@localhost:35432/admin_db
 
-# Or execute SQL directly (auto-connects with instance user/database)
+# Execute SQL directly
 pg exec "SELECT version()"
-pg exec -i myinst "SELECT count(*) FROM users"
-
-# Or run arbitrary commands inside the container
-pg exec -- bash -c "cat /var/lib/postgresql/data/postgresql.conf"
 
 # Stop
 pg stop
@@ -58,121 +55,104 @@ pg stop
 pg create -i proj01 --base-dir /data/pg
 pg create -i proj02 --base-dir /data/pg
 
-# Start all instances
-pg start --all
-
-# Or start individually
-pg start -i proj01
-
 # List all instances
 pg list
+
+# Start all
+pg start --all
 ```
-
-## PostgreSQL Accounts
-
-Each pgcli instance automatically creates two database roles:
-
-### admin (Primary User)
-- **Username**: `admin` (configurable in config)
-- **Password**: Auto-generated 16-character random password (shown during `pg create` or `pg start`)
-- **Database**: `<instance>_db` (e.g., `proj01_db`, `default_db`)
-- **Permissions**: Superuser with full database access
-- **Usage**: Application connections, development, and general database operations
-
-Connect using the connection string shown in `pg status` output:
-```bash
-psql postgres://admin:<password>@localhost:35432/proj01_db
-```
-
-### postgres (System Role)
-- **Username**: `postgres`
-- **Password**: No password (peer authentication only)
-- **Permissions**: Superuser
-- **Purpose**: pgBackRest backup system requires this role for SSH-based backup connections
-- **Access**: Only accessible from within the container via peer authentication
-
-**Note**: The `postgres` role is created automatically and should not be used for application connections. Use the `admin` user for all database operations.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `pg backup` | Manage the shared pgbackrest backup container |
-| `pg config` | Configuration management |
-| `pg create` | Create a new database instance |
-| `pg destroy` | Destroy an instance and remove its configuration |
-| `pg exec` | Execute SQL or a command inside the PostgreSQL container |
-| `pg list` | List all configured instances |
+| `pg start` | Start instance + backup services |
+| `pg stop` | Stop services |
+| `pg status` | Show status and connection info |
+| `pg list` | List all instances |
+| `pg exec` | Execute SQL or shell commands |
+| `pg snapshot` | Manage backups (create/list/delete) |
 | `pg restore` | PITR point-in-time recovery |
-| `pg snapshot` | Snapshot management (create/list/delete) |
-| `pg start` | Start PostgreSQL + pgBackRest services |
-| `pg status` | Show pgcli running status and health check |
-| `pg stop` | Stop pg services |
+| `pg create` | Create new instance |
+| `pg destroy` | Destroy instance |
+| `pg config` | Configuration management |
 
 ## Backup and Restore
 
-### Snapshot (Backup)
-
-pgcli uses a shared pgBackRest backup container. On first `pg start`, the backup infrastructure is set up automatically.
+### Snapshots
 
 ```bash
-# Create a full backup snapshot
+# Create snapshot (full backup)
 pg snapshot create -i proj01
 
-# Create a differential backup (changes since last full backup) (recommended)
+# Create differential backup (recommended)
 pg snapshot create --type diff -i proj01
 
-# Create an incremental backup (changes since last backup)
-pg snapshot create --type incr -i proj01
-
-# List all snapshots
+# List snapshots
 pg snapshot list -i proj01
 
-# Delete a specific snapshot
+# Delete snapshot
 pg snapshot delete 20260826-073712F -i proj01
 ```
 
-Snapshot types:
-- **full** — Complete database backup (default, largest but self-contained)
-- **incr** — Only changes since the last backup of any type
-- **diff** — Changes since the last full backup
+**Snapshot types:**
+- `full` — Complete backup (default, self-contained)
+- `diff` — Changes since last full backup
+- `incr` — Changes since last backup
 
-### Point-in-Time Recovery (PITR) (UTC Time)
+### Point-in-Time Recovery (PITR)
 
-Restore the database to any point in time after the earliest backup, using WAL replay.
+Restore to any point in time after the first backup.
 
 ```bash
-# Dry run — show what would be done without executing
-pg restore --time "2026-08-26 15:30:00+00" --dry-run
-
-# Restore to a specific time (default: pause in read-only mode)
+# Restore (read-only, inspect before committing)
 pg restore --time "2026-08-26 15:30:00+00"
 
-# Inspect the restored state, then restore again to a different time if needed
+# Try different time if needed
 pg restore --time "2026-08-26 15:25:00+00"
 
-# Once satisfied, promote to read-write (switches timeline)
+# Promote to read-write (switches timeline)
 pg restore --time "2026-08-26 15:30:00+00" --promote
 
-# Skip confirmation prompt
+# Skip confirmation
 pg restore --time "2026-08-26 15:30:00+00" --promote --force
 ```
 
-Supported time formats:
-- `2026-08-26 15:30:00+08:00` — with timezone offset (colons)
-- `2026-08-26 15:30:00+0800` — with timezone offset (no colons)
-- `2026-08-26 15:30:00+08` — with timezone hour only
-- `2026-08-26 15:30:00Z` — UTC (Zulu)
-- `2026-08-26 15:30:00` — without timezone (assumed as UTC)
+**Time formats:**
+- `2026-08-26 15:30:00+08:00` — with timezone offset
+- `2026-08-26 15:30:00+08` — timezone hour only
+- `2026-08-26 15:30:00Z` — UTC
+- `2026-08-26 15:30:00` — assumed UTC
 
-Recovery workflow:
-1. **Stop** — PostgreSQL container is stopped
-2. **Restore** — pgBackRest restores base backup and WAL to the target time
-3. **Start** — PostgreSQL restarts and replays WAL up to the target
+**Recovery workflow:** Stop → pgBackRest restore → Start → WAL replay to target time
 
-By default the instance is left paused in read-only mode so you can inspect the restored data before committing. Use `--promote` when you are satisfied to switch to a new timeline and resume read-write operations.
+**Note:** After `--promote`, create a new full snapshot before further PITR.
 
-**Note**: After a promote, you should create a new full snapshot before attempting further PITR.
+## Installation
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mars-base/pgcli/main/scripts/install.sh | bash
+```
+
+Installs:
+- `pg` binary to `~/.local/bin`
+- Podman (if not present)
+- Pre-pulls container images
+
+## Building from Source
+
+```bash
+git clone https://github.com/mars-base/pgcli.git
+cd pgcli
+make build
+```
+
+Container images:
+```bash
+make container-build      # Build multi-arch PG image
+make container-push       # Push to GHCR
+```
 
 ## License
+
 MIT
