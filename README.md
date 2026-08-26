@@ -40,8 +40,12 @@ pg status
 # Connect via psql (password shown during create/start)
 psql postgres://pgcli:<password>@localhost:<port>/<instance>_db
 
-# Or execute commands inside the container
-pg exec -- psql -U pgcli -d default_db -c "SELECT 1"
+# Or execute SQL directly (auto-connects with instance user/database)
+pg exec "SELECT version()"
+pg exec -i myinst "SELECT count(*) FROM users"
+
+# Or run arbitrary commands inside the container
+pg exec -- bash -c "cat /var/lib/postgresql/data/postgresql.conf"
 
 # Stop
 pg stop
