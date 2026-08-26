@@ -12,12 +12,15 @@
 curl -fsSL https://raw.githubusercontent.com/mars-base/pgcli/main/scripts/install.sh | bash
 ```
 
-This installs `pg` to `~/.local/bin`, sets up Podman if needed, and pre-pulls container images.
+This installs `pg` to `~/.local/bin`.
 
 ## Quick Start
 
 ```bash
-# Start instance (auto-creates config, assigns port)
+# Initialize config (creates ~/.pgcli/pg.yaml with default instance)
+pg config init --add default --base-dir /data/pg
+
+# Start instance
 pg start
 
 # Check status and connection info
@@ -109,7 +112,7 @@ pg restore --time "2026-08-26 15:30:00+00" --promote --force
 - `2026-08-26 15:30:00Z` — UTC
 - `2026-08-26 15:30:00` — assumed UTC
 
-**Recovery workflow:** Stop → pgBackRest restore → Start → WAL replay to target time
+**Recovery workflow:** Stop → Restore → Start → WAL replay to target time
 
 **Note:** After `--promote`, create a new full snapshot before further PITR.
 
