@@ -358,6 +358,13 @@ func (m *BackupManager) WritePgbackrestConf() (string, error) {
 func (m *BackupManager) EnsureBackupContainer(confPath string) error {
 	containerName := m.cfg.Backup.ContainerName
 
+	// Always refresh SSH config — it's bind-mounted, so host-side updates
+	// are immediately visible inside the container. New instances may have
+	// been added since the container was last created.
+	if _, err := m.WriteSSHConfig(); err != nil {
+		fmt.Printf("  [!] ssh config update warning: %v\n", err)
+	}
+
 	running, err := m.containerRunning(containerName)
 	if err != nil {
 		return err
