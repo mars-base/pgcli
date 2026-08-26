@@ -1,13 +1,11 @@
 BINARY = pg
 MODULE = github.com/mars-base/pgcli
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
 LDFLAGS = -s -w \
-	-X $(MODULE)/internal/cli.version=$(VERSION) \
-	-X $(MODULE)/internal/cli.commit=$(COMMIT) \
-	-X $(MODULE)/internal/cli.buildDate=$(DATE)
+	-X $(MODULE)/internal/cli.Version=$(VERSION) \
+	-X $(MODULE)/internal/cli.BuildTime=$(DATE)
 
 PLATFORMS = linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 

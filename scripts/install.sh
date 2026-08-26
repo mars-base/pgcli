@@ -46,7 +46,7 @@ install_binary() {
     yellow "-> Downloading $BINARY $version ($os/$arch)..."
     local tmp
     tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"' EXIT
+    trap "rm -rf '$tmp'" EXIT
 
     if ! curl -fsSL -o "$tmp/$tarball" "$url"; then
         die "Download failed: $url"
