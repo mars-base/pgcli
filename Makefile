@@ -37,11 +37,23 @@ clean:
 	rm -rf bin/ dist/
 
 container-build:
-	podman build --platform linux/amd64 -t ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 -f embed/Containerfile embed/
+	podman build --platform linux/amd64 -t ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0-amd64 -f embed/Containerfile embed/
+	podman build --platform linux/arm64 -t ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0-arm64 -f embed/Containerfile embed/
 
 container-build-backup:
-	podman build --platform linux/amd64 -t ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 -f embed/backup.Containerfile embed/
+	podman build --platform linux/amd64 -t ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0-amd64 -f embed/backup.Containerfile embed/
+	podman build --platform linux/arm64 -t ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0-arm64 -f embed/backup.Containerfile embed/
+
+container-manifest:
+	podman manifest rm ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 2>/dev/null || true
+	podman manifest create ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 \
+		ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0-amd64 \
+		ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0-arm64
+	podman manifest rm ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 2>/dev/null || true
+	podman manifest create ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 \
+		ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0-amd64 \
+		ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0-arm64
 
 container-push:
-	podman push ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0
-	podman push ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0
+	podman manifest push ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 --all
+	podman manifest push ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 --all

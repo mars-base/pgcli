@@ -117,21 +117,19 @@ pgcli uses a shared pgBackRest backup container. On first `pg start`, the backup
 
 ```bash
 # Create a full backup snapshot
-pg snapshot create
 pg snapshot create -i proj01
 
-# Create an incremental backup (changes since last backup)
-pg snapshot create --type incr
+# Create a differential backup (changes since last full backup) (recommended)
+pg snapshot create --type diff -i proj01
 
-# Create a differential backup (changes since last full backup)
-pg snapshot create --type diff
+# Create an incremental backup (changes since last backup)
+pg snapshot create --type incr -i proj01
 
 # List all snapshots
-pg snapshot list
 pg snapshot list -i proj01
 
 # Delete a specific snapshot
-pg snapshot delete 20260826-073712F
+pg snapshot delete 20260826-073712F -i proj01
 ```
 
 Snapshot types:
@@ -139,26 +137,33 @@ Snapshot types:
 - **incr** — Only changes since the last backup of any type
 - **diff** — Changes since the last full backup
 
-### Point-in-Time Recovery (PITR)
+### Point-in-Time Recovery (PITR) (UTC Time)
 
 Restore the database to any point in time after the earliest backup, using WAL replay.
 
 ```bash
 # Dry run — show what would be done without executing
-pg restore --time "2026-08-26 15:30:00" --dry-run
+pg restore --time "2026-08-26 15:30:00+00" --dry-run
 
 # Restore to a specific time (default: pause in read-only mode)
-pg restore --time "2026-08-26 15:30:00"
+pg restore --time "2026-08-26 15:30:00+00"
 
 # Inspect the restored state, then restore again to a different time if needed
-pg restore --time "2026-08-26 15:25:00"
+pg restore --time "2026-08-26 15:25:00+00"
 
 # Once satisfied, promote to read-write (switches timeline)
-pg restore --time "2026-08-26 15:30:00" --promote
+pg restore --time "2026-08-26 15:30:00+00" --promote
 
 # Skip confirmation prompt
-pg restore --time "2026-08-26 15:30:00" --promote --force
+pg restore --time "2026-08-26 15:30:00+00" --promote --force
 ```
+
+Supported time formats:
+- `2026-08-26 15:30:00+08:00` — with timezone offset (colons)
+- `2026-08-26 15:30:00+0800` — with timezone offset (no colons)
+- `2026-08-26 15:30:00+08` — with timezone hour only
+- `2026-08-26 15:30:00Z` — UTC (Zulu)
+- `2026-08-26 15:30:00` — without timezone (assumed as UTC)
 
 Recovery workflow:
 1. **Stop** — PostgreSQL container is stopped
@@ -169,6 +174,5 @@ By default the instance is left paused in read-only mode so you can inspect the 
 
 **Note**: After a promote, you should create a new full snapshot before attempting further PITR.
 
-## Building from Source
-
+## License
 MIT
