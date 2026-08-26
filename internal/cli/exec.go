@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -13,31 +14,53 @@ func init() {
 }
 
 var execCmd = &cobra.Command{
-	Use:   "exec [flags] -- <command> [args...]",
-	Short: "Execute a command inside the PostgreSQL container",
-	Long: `exec runs a command inside the running PostgreSQL container via podman exec.
-Use -- to separate pg flags from the container command.
+	Use:   "exec [flags] [-- <command> [args...]]",
+	Short: "Execute SQL or a command inside the PostgreSQL container",
+	Long: `exec runs SQL or a command inside the running PostgreSQL container.
+
+Without --, the arguments are treated as SQL and executed via psql
+with the instance's configured user and database.
+
+With --, the arguments are passed directly as a container command.
 
 Examples:
-  pg exec -- psql -U pgcli_user -d pgcli_db -c "SELECT 1"
-  pg exec -i myinst -- pg_isready
-  pg exec -- bash -c "cat /var/lib/postgresql/data/postgresql.conf"`,
+  pg exec "SELECT version()"
+  pg exec "CREATE TABLE test (id serial PRIMARY KEY, msg text)"
+  pg exec -i myinst "SELECT count(*) FROM users"
+  pg exec -- psql -U pgcli -d mydb
+  pg exec -- bash -c "cat /var/lib/postgresql/data/postgresql.conf"
+  pg exec -- pg_isready`,
 	DisableFlagParsing: false,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := loadConfig(); err != nil {
 			return err
 		}
 		if len(args) == 0 {
-			return fmt.Errorf("no command specified. Usage: pg exec -- <command> [args...]")
+			return fmt.Errorf("no command specified. Usage: pg exec \"SELECT 1\" or pg exec -- <command>")
 		}
 
 		containerName := cfg.Podman.ContainerName
 
-		podmanArgs := []string{"exec", "-i", containerName}
-		podmanArgs = append(podmanArgs, args...)
+		// Check if -- was used (cobra passes args after -- as positional args).
+		// If the user provided --, args are raw container commands.
+		// If not, treat the joined args as SQL for psql.
+		dashDash := cmd.ArgsLenAtDash()
+		var podmanArgs []string
 
-		podmanBin := "podman"
-		execCmd := exec.Command(podmanBin, podmanArgs...)
+		if dashDash == -1 {
+			// No -- : treat as SQL
+			sql := strings.Join(args, " ")
+			podmanArgs = []string{"exec", "-i", containerName,
+				"psql", "-U", cfg.Postgres.User, "-d", cfg.Postgres.Database,
+				"-c", sql,
+			}
+		} else {
+			// -- present: pass through as container command
+			podmanArgs = []string{"exec", "-i", containerName}
+			podmanArgs = append(podmanArgs, args...)
+		}
+
+		execCmd := exec.Command("podman", podmanArgs...)
 		execCmd.Stdin = os.Stdin
 		execCmd.Stdout = os.Stdout
 		execCmd.Stderr = os.Stderr
