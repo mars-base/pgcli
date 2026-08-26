@@ -68,17 +68,17 @@ pg list
 
 | Command | Description |
 |---------|-------------|
-| `pg create` | Create a new database instance |
-| `pg start` | Start PostgreSQL + pgBackRest services |
-| `pg stop` | Stop services |
-| `pg status` | Show running status and health check |
-| `pg list` | List all configured instances |
-| `pg destroy` | Remove an instance |
-| `pg exec` | Execute a command inside the container |
-| `pg snapshot create/list/delete` | Manage snapshots |
-| `pg restore` | PITR point-in-time recovery |
-| `pg backup` | Manage the shared backup container |
+| `pg backup` | Manage the shared pgbackrest backup container |
 | `pg config` | Configuration management |
+| `pg create` | Create a new database instance |
+| `pg destroy` | Destroy an instance and remove its configuration |
+| `pg exec` | Execute a command inside the PostgreSQL container |
+| `pg list` | List all configured instances |
+| `pg restore` | PITR point-in-time recovery |
+| `pg snapshot` | Snapshot management (create/list/delete) |
+| `pg start` | Start PostgreSQL + pgBackRest services |
+| `pg status` | Show pgcli running status and health check |
+| `pg stop` | Stop pg services |
 
 ## Configuration
 
