@@ -30,9 +30,9 @@ func init() {
 var restoreCmd = &cobra.Command{
 	Use:   "restore",
 	Short: "PITR point-in-time recovery",
-	Long: `restore rolls back the entire PostgreSQL database to a specified point in time.
+	Long: `restore rolls back the PostgreSQL database to a specified point in time (PITR).
 
-WARNING: Restore will overwrite ALL current database data!
+WARNING: All changes after the target time will be permanently lost!
 
 By default the cluster is recovered to the target time and then PAUSED in a
 read-only state (recovery_target_action=pause). This lets you inspect the data
@@ -51,6 +51,7 @@ Process:
 
 Examples:
   pg restore --time "2026-06-14 15:04:05+00"
+  pg restore -i myinst --time "2026-06-14 15:04:05+00"
   pg restore --time "2026-06-14 15:04:05+00" --dry-run
   pg restore --time "2026-06-14 15:04:05+00" --tail-logs
   pg restore --time "2026-06-14 15:04:05+00" --promote
