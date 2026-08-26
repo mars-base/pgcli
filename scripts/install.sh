@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# pgcli install script — installs the pg binary and creates default config.
+# pgcli install script — installs the pg binary and pulls container images.
 # Supports Linux and macOS (amd64/arm64).
 set -euo pipefail
 
 REPO="mars-base/pgcli"
 BINARY="pg"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
+
+# Container images (pulled during install for faster first startup)
+PG_IMAGE="ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0"
+BACKUP_IMAGE="ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0"
 
 red()   { printf '\033[0;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[0;32m%s\033[0m\n' "$*"; }
@@ -56,19 +60,42 @@ install_binary() {
 }
 
 install_podman_launcher() {
-    if [ "$(uname -s)" != "Linux" ]; then
-        return
-    fi
     if command -v podman &>/dev/null; then
         green "  [OK] podman already available"
         return
     fi
+
+    if [ "$(uname -s)" = "Darwin" ]; then
+        # macOS: install via Homebrew
+        if ! command -v brew &>/dev/null; then
+            yellow "  [!] Homebrew not found. Install Podman manually:"
+            yellow "      /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+            yellow "      brew install podman"
+            return
+        fi
+        yellow "-> Installing podman via Homebrew..."
+        brew install podman
+        green "  [OK] podman installed via Homebrew"
+        return
+    fi
+
+    # Linux: install podman-launcher
     yellow "-> Installing podman-launcher..."
     mkdir -p "$HOME/.local/bin"
     curl -fsSL -o "$HOME/.local/bin/podman" \
         "https://github.com/89luca89/podman-launcher/releases/latest/download/podman-launcher-amd64"
     chmod +x "$HOME/.local/bin/podman"
     green "  [OK] podman-launcher installed"
+}
+
+pull_images() {
+    if ! command -v podman &>/dev/null; then
+        yellow "  [!] podman not available, skipping image pull"
+        return
+    fi
+    yellow "-> Pulling container images..."
+    podman pull "$PG_IMAGE" 2>/dev/null && green "  [OK] PostgreSQL image pulled" || yellow "  [!] Failed to pull PostgreSQL image (will pull on first use)"
+    podman pull "$BACKUP_IMAGE" 2>/dev/null && green "  [OK] Backup image pulled" || yellow "  [!] Failed to pull backup image (will pull on first use)"
 }
 
 check_path() {
@@ -104,6 +131,7 @@ main() {
 
     install_binary "$os" "$arch" "$version"
     install_podman_launcher
+    pull_images
     check_path
 
     echo ""
