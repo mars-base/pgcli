@@ -29,7 +29,7 @@ Whether you're running multiple dev databases, managing staging environments, or
 curl -fsSL https://raw.githubusercontent.com/mars-base/pgcli/main/scripts/install.sh | bash
 
 # Initialize config (creates ~/.pgcli/pg.yaml)
-pg config init --add default
+pg config init --add default --base-dir /data/pg
 
 # Start the instance
 pg start
