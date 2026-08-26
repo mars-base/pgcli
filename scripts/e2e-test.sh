@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # pgcli end-to-end test script.
-# Tests: create, start, status, backup, PITR, stop, destroy, multi-instance.
+# Tests: config init, create, start, status, exec SQL, backup, PITR, stop,
+#        destroy, multi-instance isolation.
 #
 # Usage:
 #   bash scripts/e2e-test.sh                 # full test
@@ -42,8 +43,15 @@ run_test() {
     fi
 }
 
+# pg wraps the binary with the test config file
 pg() {
     "$BINARY" -c "$CONFIG_FILE" "$@"
+}
+
+# sql runs a SQL command via pg exec (auto-connects with instance user/database)
+sql() {
+    local inst="$1"; shift
+    pg exec -i "$inst" "$@"
 }
 
 cleanup() {
@@ -58,6 +66,7 @@ cleanup() {
     pg destroy -i "$INSTANCE2" --force 2>/dev/null || true
     rm -rf "$CONFIG_DIR"
     rm -rf "$TEST_DIR/$INSTANCE" "$TEST_DIR/$INSTANCE2"
+    rm -rf "$TEST_DIR/backup-data" "$TEST_DIR/backup-log"
     green "  Cleanup done"
 }
 
@@ -84,86 +93,54 @@ main() {
         exit 1
     fi
 
-    # Setup config
+    # ---- Setup ----
     section "Setup"
+    rm -rf "$CONFIG_DIR"
     mkdir -p "$CONFIG_DIR"
     mkdir -p "$TEST_DIR"
 
-    cat > "$CONFIG_FILE" << EOF
-base_dir: "$CONFIG_DIR"
-network: pgcli-e2e-net
+    # Test 1: config init with --base-dir
+    run_test "config init" pg config init \
+        -o "$CONFIG_FILE" \
+        --base-dir "$TEST_DIR" \
+        --add "$INSTANCE"
 
-postgres:
-  user: pgcli_user
-  password: pgcli_pass
-  database: pgcli_db
-
-podman:
-  image_tag: "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0"
-  network: pgcli-e2e-net
-
-pitr:
-  enabled: true
-  pgbackrest_stanza: pgcli_e2e
-
-backup:
-  container_name: pgcli-e2e-backup
-  image_tag: "ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0"
-  data_dir: "$TEST_DIR/backup-data"
-  log_dir: "$TEST_DIR/backup-log"
-  retention_full: 2
-
-logging:
-  level: info
-
-instances:
-  $INSTANCE:
-    postgres:
-      port: 35432
-      user: pgcli_user
-      password: pgcli_pass
-      database: pgcli_db
-    podman:
-      container_name: pgcli-pg-$INSTANCE
-      host_port: 35432
-      ssh_port: 42201
-      data_dir: "$TEST_DIR/$INSTANCE"
-      image_tag: "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0"
-      network: pgcli-e2e-net
-    pitr:
-      enabled: true
-      pgbackrest_stanza: pgcli_e2e_test
-EOF
-
-    pass "Config created"
-
-    # Test 1: Create instance
+    # ---- Test 2: Create Instance ----
     section "Test: Create Instance"
-    run_test "Create instance" pg create "$INSTANCE" --base-dir "$TEST_DIR/$INSTANCE"
+    run_test "Create instance (second)" pg create -i "$INSTANCE2" --base-dir "$TEST_DIR/$INSTANCE2"
 
-    # Test 2: Start instance
+    # ---- Test 3: Start Instance ----
     section "Test: Start Instance"
     run_test "Start instance" pg start -i "$INSTANCE"
 
-    # Test 3: Status check
+    # ---- Test 4: Status ----
     section "Test: Status"
     run_test "Status shows running" pg status -i "$INSTANCE"
 
-    # Test 4: PG health check via psql
+    # ---- Test 5: Database Connectivity ----
     section "Test: Database Connectivity"
     sleep 3  # extra wait for PG to be fully ready
-    run_test "psql SELECT 1" pg exec -i "$INSTANCE" -- psql -U pgcli_user -d pgcli_db -tAc "SELECT 1"
 
-    # Test 5: Create table and insert data
+    run_test "pg exec SQL: SELECT 1" sql "$INSTANCE" "SELECT 1"
+    run_test "pg exec SQL: SELECT version()" sql "$INSTANCE" "SELECT version()"
+
+    # ---- Test 6: Data Operations ----
     section "Test: Data Operations"
-    run_test "CREATE TABLE" pg exec -i "$INSTANCE" -- psql -U pgcli_user -d pgcli_db -c \
-        "CREATE TABLE IF NOT EXISTS e2e_test (id serial PRIMARY KEY, msg text, ts timestamptz DEFAULT now())"
-    run_test "INSERT data" pg exec -i "$INSTANCE" -- psql -U pgcli_user -d pgcli_db -c \
-        "INSERT INTO e2e_test (msg) VALUES ('before-backup'), ('row-2'), ('row-3')"
-    run_test "SELECT verify" pg exec -i "$INSTANCE" -- psql -U pgcli_user -d pgcli_db -tAc \
-        "SELECT count(*) FROM e2e_test"
 
-    # Test 6: Snapshot (backup)
+    run_test "CREATE TABLE" sql "$INSTANCE" \
+        "CREATE TABLE IF NOT EXISTS e2e_test (id serial PRIMARY KEY, msg text, ts timestamptz DEFAULT now())"
+
+    run_test "INSERT data" sql "$INSTANCE" \
+        "INSERT INTO e2e_test (msg) VALUES ('before-backup'), ('row-2'), ('row-3')"
+
+    COUNT=$(sql "$INSTANCE" "SELECT count(*) FROM e2e_test" | xargs)
+    if [ "$COUNT" = "3" ]; then
+        pass "SELECT count(*) = 3"
+    else
+        fail "SELECT count(*) expected 3, got '$COUNT'"
+    fi
+
+    # ---- Test 7: Snapshot (backup) ----
     section "Test: Backup / Snapshot"
     if [ "$SKIP_PITR" != "1" ]; then
         run_test "Create snapshot" pg snapshot create -i "$INSTANCE" e2e-snap-1
@@ -172,72 +149,70 @@ EOF
         yellow "  Skipping PITR/backup tests (SKIP_PITR=1)"
     fi
 
-    # Test 7: Record timestamp, insert more data, then PITR
+    # ---- Test 8: PITR Recovery ----
     section "Test: PITR Recovery"
     if [ "$SKIP_PITR" != "1" ]; then
-        PITR_TIME=$(pg exec -i "$INSTANCE" -- psql -U pgcli_user -d pgcli_db -tAc "SELECT now()")
-        PITR_TIME="$(echo "$PITR_TIME" | xargs)"
+        PITR_TIME=$(sql "$INSTANCE" "SELECT now()" | xargs)
         sleep 5
 
-        run_test "Insert post-snapshot data" pg exec -i "$INSTANCE" -- psql -U pgcli_user -d pgcli_db -c \
+        run_test "Insert post-snapshot data" sql "$INSTANCE" \
             "INSERT INTO e2e_test (msg) VALUES ('after-snapshot-should-be-gone')"
+
+        AFTER_COUNT=$(sql "$INSTANCE" "SELECT count(*) FROM e2e_test" | xargs)
+        if [ "$AFTER_COUNT" = "4" ]; then
+            pass "Post-snapshot count = 4"
+        else
+            fail "Post-snapshot count expected 4, got '$AFTER_COUNT'"
+        fi
 
         run_test "PITR restore (dry-run)" pg restore -i "$INSTANCE" --time "$PITR_TIME" --dry-run
         run_test "PITR restore" pg restore -i "$INSTANCE" --time "$PITR_TIME" --force --tail-logs
 
         # After restore with pause, verify data then resume
-        run_test "Verify pre-snapshot data exists" pg exec -i "$INSTANCE" -- psql -U pgcli_user -d pgcli_db -tAc \
-            "SELECT count(*) FROM e2e_test WHERE msg = 'before-backup'"
+        RESTORE_COUNT=$(sql "$INSTANCE" "SELECT count(*) FROM e2e_test" | xargs)
+        if [ "$RESTORE_COUNT" = "3" ]; then
+            pass "PITR restored count = 3 (post-snapshot row gone)"
+        else
+            fail "PITR restored count expected 3, got '$RESTORE_COUNT'"
+        fi
 
         # Start instance to promote from paused recovery
         run_test "Start after PITR" pg start -i "$INSTANCE"
         sleep 3
-
-        # Test 8: List command
-        section "Test: List Instances"
-        run_test "List instances" pg list
     else
         yellow "  Skipping PITR tests (SKIP_PITR=1)"
     fi
 
-    # Test 9: Stop instance
+    # ---- Test 9: List Instances ----
+    section "Test: List Instances"
+    run_test "List instances" pg list
+
+    # ---- Test 10: Stop Instance ----
     section "Test: Stop Instance"
     run_test "Stop instance" pg stop -i "$INSTANCE"
 
-    # Test 10: Multi-instance — create a second instance
+    # ---- Test 11: Multi-Instance Isolation ----
     section "Test: Multi-Instance Isolation"
-
-    # Add second instance to config
-    cat >> "$CONFIG_FILE" << EOF
-  $INSTANCE2:
-    postgres:
-      port: 35433
-      user: pgcli_user
-      password: pgcli_pass
-      database: pgcli_db
-    podman:
-      container_name: pgcli-pg-$INSTANCE2
-      host_port: 35433
-      ssh_port: 42202
-      data_dir: "$TEST_DIR/$INSTANCE2"
-      image_tag: "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0"
-      network: pgcli-e2e-net
-    pitr:
-      enabled: false
-EOF
-
-    run_test "Create second instance" pg create "$INSTANCE2" --base-dir "$TEST_DIR/$INSTANCE2"
     run_test "Start second instance" pg start -i "$INSTANCE2"
     sleep 3
-    run_test "Second instance psql" pg exec -i "$INSTANCE2" -- psql -U pgcli_user -d pgcli_db -tAc "SELECT 1"
+    run_test "Second instance SQL" sql "$INSTANCE2" "SELECT 1"
+
+    # Verify isolation: second instance should not have the first instance's table
+    TABLE_CHECK=$(sql "$INSTANCE2" "SELECT count(*) FROM information_schema.tables WHERE table_name = 'e2e_test'" | xargs)
+    if [ "$TABLE_CHECK" = "0" ]; then
+        pass "Instance isolation: e2e_test table not present in instance2"
+    else
+        fail "Instance isolation: e2e_test table leaked into instance2"
+    fi
+
     run_test "Stop second instance" pg stop -i "$INSTANCE2"
 
-    # Test 11: Destroy
+    # ---- Test 12: Destroy Instances ----
     section "Test: Destroy Instances"
     run_test "Destroy instance 2" pg destroy -i "$INSTANCE2" --force
     run_test "Destroy instance 1 with data" pg destroy -i "$INSTANCE" --force --clean
 
-    # Summary
+    # ---- Summary ----
     echo ""
     echo "=========================================="
     if [ "$FAILED" -eq 0 ]; then
