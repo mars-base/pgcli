@@ -27,7 +27,7 @@ func init() {
 
 	configShowCmd.Flags().BoolVar(&configJSON, "json", false, "output in JSON format")
 	configInitCmd.Flags().StringVar(&configAdd, "add", "", "add an instance with this name during init (default: no instances)")
-	configInitCmd.Flags().StringVar(&configBaseDir, "base-dir", "", "base directory for all data paths (default ~/.pg)")
+	configInitCmd.Flags().StringVar(&configBaseDir, "base-dir", "", "base directory for all data paths (default ~/.pgcli)")
 }
 
 var configCmd = &cobra.Command{
@@ -79,7 +79,7 @@ Use --output / -o to specify a custom output path.
 Use --base-dir to set a custom base directory for all data paths (backup and db data).
 
 Examples:
-  pg config init                              # empty instances (default path ~/.pg)
+  pg config init                              # empty instances (default path ~/.pgcli)
   pg config init -o ./my-pg.yaml          # custom output path
   pg config init --add default                # add a "default" instance
   pg config init --base-dir /data/pg        # all data under /data/pg
