@@ -4,8 +4,8 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
 LDFLAGS = -s -w \
-	-X $(MODULE)/internal/cli.Version=$(VERSION) \
-	-X $(MODULE)/internal/cli.BuildTime=$(DATE)
+	-X main.version=$(VERSION) \
+	-X main.buildTime=$(DATE)
 
 PLATFORMS = linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 

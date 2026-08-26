@@ -10,8 +10,8 @@ builds:
     main: .
     ldflags:
       - -s -w
-      - -X github.com/mars-base/pgcli/internal/cli.Version={{.Version}}
-      - -X github.com/mars-base/pgcli/internal/cli.BuildTime={{.Date}}
+      - -X main.version={{.Version}}
+      - -X main.buildTime={{.Date}}
     goos:
       - linux
       - darwin
