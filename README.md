@@ -109,6 +109,80 @@ psql postgres://admin:<password>@localhost:35432/proj01_db
 | `pg status` | Show pgcli running status and health check |
 | `pg stop` | Stop pg services |
 
+## Backup and Restore
+
+### Snapshot (Backup)
+
+pgcli uses a shared pgBackRest backup container. On first `pg start`, the backup infrastructure is set up automatically.
+
+```bash
+# Create a full backup snapshot
+pg snapshot create
+pg snapshot create -i proj01
+
+# Create an incremental backup (changes since last backup)
+pg snapshot create --type incr
+
+# Create a differential backup (changes since last full backup)
+pg snapshot create --type diff
+
+# List all snapshots
+pg snapshot list
+pg snapshot list -i proj01
+
+# Delete a specific snapshot
+pg snapshot delete 20260826-073712F
+```
+
+Snapshot types:
+- **full** — Complete database backup (default, largest but self-contained)
+- **incr** — Only changes since the last backup of any type
+- **diff** — Changes since the last full backup
+
+### Point-in-Time Recovery (PITR)
+
+Restore the database to any point in time after the earliest backup, using WAL replay.
+
+```bash
+# Dry run — show what would be done without executing
+pg restore --time "2026-08-26 15:30:00" --dry-run
+
+# Restore to a specific time (default: pause in read-only mode)
+pg restore --time "2026-08-26 15:30:00"
+
+# Inspect the restored state, then restore again to a different time if needed
+pg restore --time "2026-08-26 15:25:00"
+
+# Once satisfied, promote to read-write (switches timeline)
+pg restore --time "2026-08-26 15:30:00" --promote
+
+# Skip confirmation prompt
+pg restore --time "2026-08-26 15:30:00" --promote --force
+```
+
+Recovery workflow:
+1. **Stop** — PostgreSQL container is stopped
+2. **Restore** — pgBackRest restores base backup and WAL to the target time
+3. **Start** — PostgreSQL restarts and replays WAL up to the target
+
+By default the instance is left paused in read-only mode so you can inspect the restored data before committing. Use `--promote` when you are satisfied to switch to a new timeline and resume read-write operations.
+
+**Note**: After a promote, you should create a new full snapshot before attempting further PITR.
+
+### Backup Container Management
+
+```bash
+# Check backup container status
+pg backup status
+
+# Restart backup container
+pg backup stop
+pg backup start
+
+# Re-initialize backup infrastructure
+pg backup setup
+```
+
 ## Configuration
 
 Default config file: `~/.pgcli/pg.yaml`
