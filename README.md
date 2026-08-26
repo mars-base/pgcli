@@ -28,18 +28,40 @@ Whether you're running multiple dev databases, managing staging environments, or
 # Install
 curl -fsSL https://raw.githubusercontent.com/mars-base/pgcli/main/scripts/install.sh | bash
 
-# Create and start an instance
-pg create default --data-dir ~/.pgcli/instances/default
+# Initialize config (creates ~/.pgcli/pg.yaml)
+pg config init --add default
+
+# Start the instance
 pg start
 
-# Check status
+# Check status (shows port, connection info)
 pg status
 
-# Connect via psql
-psql postgres://pgcli_user:pgcli_pass@localhost:25432/pgcli_db
+# Connect via psql (password shown during create/start)
+psql postgres://pgcli:<password>@localhost:<port>/<instance>_db
+
+# Or execute commands inside the container
+pg exec -- psql -U pgcli -d default_db -c "SELECT 1"
 
 # Stop
 pg stop
+```
+
+### Multi-Instance
+
+```bash
+# Create additional instances
+pg create -i proj01 --base-dir /data/pg
+pg create -i proj02 --base-dir /data/pg
+
+# Start all instances
+pg start --all
+
+# Or start individually
+pg start -i proj01
+
+# List all instances
+pg list
 ```
 
 ## Commands
