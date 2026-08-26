@@ -37,10 +37,10 @@ clean:
 	rm -rf bin/ dist/
 
 container-build:
-	podman build -t ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 -f embed/Containerfile embed/
+	podman build --platform linux/amd64 -t ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 -f embed/Containerfile embed/
 
 container-build-backup:
-	podman build -t ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 -f embed/backup.Containerfile embed/
+	podman build --platform linux/amd64 -t ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 -f embed/backup.Containerfile embed/
 
 container-push:
 	podman push ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0

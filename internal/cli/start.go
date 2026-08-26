@@ -208,15 +208,37 @@ func doStart(c *config.Config) error {
 
 		stanza := c.PITR.PgBackRestStanza
 		archiveCmd := fmt.Sprintf("pgbackrest --stanza=%s archive-push %%p", stanza)
-		setSQL := fmt.Sprintf("ALTER SYSTEM SET archive_command TO '%s'", archiveCmd)
 
-		if _, err := pm.Exec("psql", "-U", c.Postgres.User, "-d", c.Postgres.Database, "-c", setSQL); err != nil {
+		// archive_mode is a postmaster-level parameter — needs restart.
+		// Set it together with archive_command, then restart if either changed.
+		if _, err := pm.Exec("psql", "-U", c.Postgres.User, "-d", c.Postgres.Database, "-c",
+			"ALTER SYSTEM SET archive_mode = on"); err != nil {
+			fmt.Printf("  [!] setting archive_mode: %v\n", err)
+		}
+		if _, err := pm.Exec("psql", "-U", c.Postgres.User, "-d", c.Postgres.Database, "-c",
+			fmt.Sprintf("ALTER SYSTEM SET archive_command TO '%s'", archiveCmd)); err != nil {
 			fmt.Printf("  [!] setting archive_command: %v\n", err)
 		} else {
 			fmt.Println("-> archive_command configured")
 		}
 
-		pm.Exec("psql", "-U", c.Postgres.User, "-d", c.Postgres.Database, "-c", "SELECT pg_reload_conf()")
+		// archive_mode requires a restart (not just reload). Check if it's
+		// already active; if not, restart the container.
+		modeOut, _ := pm.Exec("psql", "-U", c.Postgres.User, "-d", c.Postgres.Database,
+			"-t", "-A", "-c", "SHOW archive_mode")
+		if strings.TrimSpace(modeOut) != "on" {
+			fmt.Println("-> Restarting PostgreSQL to enable archive_mode...")
+			pm.StopContainer()
+			pm.StartContainer()
+			for i := 0; i < 60; i++ {
+				if ready, _ := pm.PGIsReady(); ready {
+					break
+				}
+				time.Sleep(time.Second)
+			}
+		} else {
+			pm.Exec("psql", "-U", c.Postgres.User, "-d", c.Postgres.Database, "-c", "SELECT pg_reload_conf()")
+		}
 		pm.Exec("psql", "-U", c.Postgres.User, "-d", c.Postgres.Database, "-c", "SELECT pg_switch_wal()")
 
 		if err := pt.CheckStanza(); err != nil {

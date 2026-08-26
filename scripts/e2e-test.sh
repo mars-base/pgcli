@@ -10,7 +10,7 @@
 set -euo pipefail
 
 BINARY="${PG_BINARY:-./bin/pg}"
-TEST_DIR="${PGCLI_TEST_DIR:-/home/fish/bucket/pgcli-data}"
+TEST_DIR="${PGCLI_TEST_DIR:-$HOME/bucket/pgcli-test}"
 CONFIG_DIR="$HOME/.pgcli-e2e"
 CONFIG_FILE="$CONFIG_DIR/pg.yaml"
 INSTANCE="e2e-test"
@@ -52,6 +52,12 @@ pg() {
 sql() {
     local inst="$1"; shift
     pg exec -i "$inst" "$@"
+}
+
+# sqlval runs a SQL query and returns only the raw value (no headers/footers).
+sqlval() {
+    local inst="$1"; shift
+    podman exec -i "pgcli-pg-$inst" psql -t -A -U pgcli -d "${inst}_db" -c "$@"
 }
 
 cleanup() {
@@ -96,6 +102,18 @@ main() {
     # ---- Setup ----
     section "Setup"
     rm -rf "$CONFIG_DIR"
+
+    # Remove leftover pgcli containers from previous runs before deleting dirs,
+    # otherwise stale volume mounts (SSH keys, pgbackrest.conf) cause start failures.
+    for c in $(podman ps -a --filter "name=pgcli-" --format "{{.Names}}" 2>/dev/null); do
+        podman rm -f "$c" 2>/dev/null || true
+    done
+
+    # Podman rootless creates files with mapped UIDs — need podman unshare to
+    # delete leftover data directories from previous runs.
+    if [ -d "$TEST_DIR" ]; then
+        podman unshare rm -rf "$TEST_DIR" 2>/dev/null || rm -rf "$TEST_DIR" 2>/dev/null || true
+    fi
     mkdir -p "$CONFIG_DIR"
     mkdir -p "$TEST_DIR"
 
@@ -107,7 +125,7 @@ main() {
 
     # ---- Test 2: Create Instance ----
     section "Test: Create Instance"
-    run_test "Create instance (second)" pg create -i "$INSTANCE2" --base-dir "$TEST_DIR/$INSTANCE2"
+    run_test "Create instance (second)" pg create -i "$INSTANCE2" --base-dir "$TEST_DIR"
 
     # ---- Test 3: Start Instance ----
     section "Test: Start Instance"
@@ -133,7 +151,7 @@ main() {
     run_test "INSERT data" sql "$INSTANCE" \
         "INSERT INTO e2e_test (msg) VALUES ('before-backup'), ('row-2'), ('row-3')"
 
-    COUNT=$(sql "$INSTANCE" "SELECT count(*) FROM e2e_test" | xargs)
+    COUNT=$(sqlval "$INSTANCE" "SELECT count(*) FROM e2e_test")
     if [ "$COUNT" = "3" ]; then
         pass "SELECT count(*) = 3"
     else
@@ -152,24 +170,31 @@ main() {
     # ---- Test 8: PITR Recovery ----
     section "Test: PITR Recovery"
     if [ "$SKIP_PITR" != "1" ]; then
-        PITR_TIME=$(sql "$INSTANCE" "SELECT now()" | xargs)
         sleep 5
+        # Capture PITR time 1 second in the past so it's safely within
+        # already-archived WAL (avoids edge-case where now() equals the
+        # last WAL timestamp).
+        PITR_TIME=$(sqlval "$INSTANCE" "SELECT now() - interval '1 second'")
 
         run_test "Insert post-snapshot data" sql "$INSTANCE" \
             "INSERT INTO e2e_test (msg) VALUES ('after-snapshot-should-be-gone')"
 
-        AFTER_COUNT=$(sql "$INSTANCE" "SELECT count(*) FROM e2e_test" | xargs)
+        AFTER_COUNT=$(sqlval "$INSTANCE" "SELECT count(*) FROM e2e_test")
         if [ "$AFTER_COUNT" = "4" ]; then
             pass "Post-snapshot count = 4"
         else
             fail "Post-snapshot count expected 4, got '$AFTER_COUNT'"
         fi
 
+        # Force WAL switch and wait for archiver to catch up before PITR.
+        sql "$INSTANCE" "SELECT pg_switch_wal()" >/dev/null
+        sleep 3
+
         run_test "PITR restore (dry-run)" pg restore -i "$INSTANCE" --time "$PITR_TIME" --dry-run
         run_test "PITR restore" pg restore -i "$INSTANCE" --time "$PITR_TIME" --force --tail-logs
 
         # After restore with pause, verify data then resume
-        RESTORE_COUNT=$(sql "$INSTANCE" "SELECT count(*) FROM e2e_test" | xargs)
+        RESTORE_COUNT=$(sqlval "$INSTANCE" "SELECT count(*) FROM e2e_test")
         if [ "$RESTORE_COUNT" = "3" ]; then
             pass "PITR restored count = 3 (post-snapshot row gone)"
         else
@@ -198,7 +223,7 @@ main() {
     run_test "Second instance SQL" sql "$INSTANCE2" "SELECT 1"
 
     # Verify isolation: second instance should not have the first instance's table
-    TABLE_CHECK=$(sql "$INSTANCE2" "SELECT count(*) FROM information_schema.tables WHERE table_name = 'e2e_test'" | xargs)
+    TABLE_CHECK=$(sqlval "$INSTANCE2" "SELECT count(*) FROM information_schema.tables WHERE table_name = 'e2e_test'")
     if [ "$TABLE_CHECK" = "0" ]; then
         pass "Instance isolation: e2e_test table not present in instance2"
     else
@@ -210,7 +235,7 @@ main() {
     # ---- Test 12: Destroy Instances ----
     section "Test: Destroy Instances"
     run_test "Destroy instance 2" pg destroy -i "$INSTANCE2" --force
-    run_test "Destroy instance 1 with data" pg destroy -i "$INSTANCE" --force --clean
+    run_test "Destroy instance 1 with data" pg destroy -i "$INSTANCE" --force --clean-data
 
     # ---- Summary ----
     echo ""

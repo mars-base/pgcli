@@ -1,7 +1,9 @@
 FROM docker.io/library/debian:13-slim
 
 # Add PostgreSQL APT repository to get the same pgbackrest version as postgres:18
+# Unset proxy env vars so curl doesn't try to connect to a local proxy inside build.
 RUN apt-get update && apt-get install -y curl ca-certificates gnupg \
+    && unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY \
     && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | \
        gpg --dearmor -o /usr/share/keyrings/pgdg.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt trixie-pgdg main" \
