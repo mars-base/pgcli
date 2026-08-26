@@ -99,6 +99,24 @@ pg exec -i proj01 "SELECT pg_reload_conf()"
 
 **Note:** Some parameters (e.g. `shared_buffers`, `max_connections`) require a restart rather than reload. Use `pg stop && pg start` to apply those changes.
 
+## Destroy and Rebuild
+
+```bash
+# Destroy instance (keeps data directory)
+pg destroy -i proj01
+
+# Destroy with data cleanup (fresh start)
+pg destroy -i proj01 --clean-data
+
+# Recreate and start
+pg create -i proj01 --base-dir /data/pg
+pg start -i proj01
+```
+
+**Important:** Without `--clean-data`, the data directory is preserved. When restarting the instance, PostgreSQL uses the existing data and `init.sh` (which creates users) does **not** run again. This can cause issues if the data was created with a different user or schema.
+
+Use `--clean-data` when you need a completely fresh instance, or when changing the default user in configuration.
+
 ## Backup and Restore
 
 ### Snapshots
