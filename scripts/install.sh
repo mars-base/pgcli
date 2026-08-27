@@ -5,7 +5,7 @@ set -euo pipefail
 
 REPO="mars-base/pgcli"
 BINARY="pg"
-INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
+INSTALL_DIR="${INSTALL_DIR:-}"
 
 # Container images (pulled during install for faster first startup)
 PG_IMAGE="ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0"
@@ -24,6 +24,19 @@ case "$(uname -s)" in
     Darwin) IS_MACOS=true ;;
     Linux)  IS_LINUX=true ;;
 esac
+
+# Determine default install directory if not set via environment
+if [ -z "$INSTALL_DIR" ]; then
+    if [ -w /usr/local/bin ] 2>/dev/null; then
+        INSTALL_DIR="/usr/local/bin"
+    elif $IS_MACOS; then
+        INSTALL_DIR="/usr/local/bin"
+    elif command -v sudo &>/dev/null && sudo -n true 2>/dev/null; then
+        INSTALL_DIR="/usr/local/bin"
+    else
+        INSTALL_DIR="$HOME/.local/bin"
+    fi
+fi
 
 detect_os() {
     case "$(uname -s)" in
@@ -61,9 +74,15 @@ install_binary() {
     fi
 
     tar -xzf "$tmp/$tarball" -C "$tmp"
-    mkdir -p "$INSTALL_DIR"
-    mv "$tmp/$BINARY" "$INSTALL_DIR/$BINARY"
-    chmod +x "$INSTALL_DIR/$BINARY"
+    if [ -w "$INSTALL_DIR" ]; then
+        mkdir -p "$INSTALL_DIR"
+        mv "$tmp/$BINARY" "$INSTALL_DIR/$BINARY"
+        chmod +x "$INSTALL_DIR/$BINARY"
+    else
+        as_root mkdir -p "$INSTALL_DIR"
+        as_root mv "$tmp/$BINARY" "$INSTALL_DIR/$BINARY"
+        as_root chmod +x "$INSTALL_DIR/$BINARY"
+    fi
     green "  [OK] $BINARY installed to $INSTALL_DIR/$BINARY"
 }
 
@@ -285,10 +304,55 @@ pull_images() {
 }
 
 check_path() {
-    if ! command -v "$BINARY" &>/dev/null && [ ! -x "$INSTALL_DIR/$BINARY" ]; then
+    # Only need PATH setup when installed to a user-local directory
+    if [ "$INSTALL_DIR" = "/usr/local/bin" ] || [ "$INSTALL_DIR" = "/usr/bin" ]; then
+        return
+    fi
+
+    # Already in PATH — nothing to do
+    if command -v "$BINARY" &>/dev/null; then
+        return
+    fi
+
+    local rc_file=""
+    local path_line="export PATH=\"$INSTALL_DIR:\$PATH\""
+
+    # Detect shell and pick the right rc file
+    if $IS_MACOS; then
+        # macOS default shell is zsh
+        rc_file="$HOME/.zshrc"
+    else
+        case "${SHELL:-}" in
+            */zsh) rc_file="$HOME/.zshrc" ;;
+            */fish) rc_file="$HOME/.config/fish/config.fish" ;;
+            */bash|*/sh)
+                if [ -f "$HOME/.bashrc" ]; then
+                    rc_file="$HOME/.bashrc"
+                elif [ -f "$HOME/.profile" ]; then
+                    rc_file="$HOME/.profile"
+                fi
+                ;;
+            *) rc_file="$HOME/.bashrc" ;;
+        esac
+    fi
+
+    # Check if already present
+    if [ -n "$rc_file" ] && [ -f "$rc_file" ] && grep -qF "$INSTALL_DIR" "$rc_file" 2>/dev/null; then
+        yellow ""
+        yellow "  NOTE: $INSTALL_DIR already in $rc_file, but not in current PATH."
+        yellow "  Run: source $rc_file"
+        yellow ""
+        return
+    fi
+
+    if [ -n "$rc_file" ] && [ "$rc_file" != "$HOME/.config/fish/config.fish" ]; then
+        printf '\n# Added by pgcli installer\n%s\n' "$path_line" >> "$rc_file"
+        green "  [OK] Added $INSTALL_DIR to PATH in $rc_file"
+        yellow "  Run: source $rc_file"
+    else
         yellow ""
         yellow "  NOTE: Add $INSTALL_DIR to your PATH:"
-        yellow "    export PATH=\"$INSTALL_DIR:\$PATH\""
+        yellow "    $path_line"
         yellow ""
     fi
 }
