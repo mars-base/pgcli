@@ -57,7 +57,7 @@ sql() {
 # sqlval runs a SQL query and returns only the raw value (no headers/footers).
 sqlval() {
     local inst="$1"; shift
-    podman exec -i "pgcli-pg-$inst" psql -t -A -U pgcli -d "${inst}_db" -c "$@"
+    podman exec -i "pgcli-pg-$inst" psql -t -A -U admin -d "${inst}_db" -c "$@"
 }
 
 cleanup() {
