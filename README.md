@@ -112,6 +112,35 @@ pg list
 pg start --all
 ```
 
+### Interactive psql Session
+
+```bash
+# Open interactive psql shell (default instance)
+pg psql
+
+# Open psql for specific instance
+pg psql -i proj01
+
+# Run SQL from stdin (non-interactive, for scripts)
+echo "SELECT version();" | pg psql
+
+# Execute a single SQL command
+pg psql -- -c "SHOW work_mem"
+
+# Connect to a different database
+pg psql -- -d postgres
+
+# Use psql meta-commands
+pg psql -- -c "\dt"     # list tables
+pg psql -- -c "\du"     # list users
+pg psql -- -c "\l"      # list databases
+```
+
+Inside the interactive psql shell, you have full access to:
+- SQL queries with history and tab completion
+- psql meta-commands (`\dt`, `\du`, `\l`, etc.)
+- `\q` to quit
+
 ## Commands
 
 | Command | Description |
@@ -120,6 +149,7 @@ pg start --all
 | `pg stop` | Stop services |
 | `pg status` | Show status and connection info |
 | `pg list` | List all instances |
+| `pg psql` | Open interactive psql session |
 | `pg exec` | Execute SQL or shell commands |
 | `pg snapshot` | Manage backups (create/list/delete) |
 | `pg restore` | PITR point-in-time recovery |

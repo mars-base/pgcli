@@ -351,6 +351,40 @@ func (m *Manager) Exec(args ...string) (string, error) {
 	return execWithTimeout(m.podman, podmanArgs, 30*time.Second)
 }
 
+// ExecInteractive runs a command inside the container with stdin/stdout/stderr
+// attached (TTY). Used for interactive psql or shell sessions.
+// Detects whether stdin is a terminal to decide if -t (TTY) flag is needed.
+func (m *Manager) ExecInteractive(args ...string) error {
+	running, err := m.containerRunning(m.cfg.Podman.ContainerName)
+	if err != nil {
+		return fmt.Errorf("checking container status: %w", err)
+	}
+	if !running {
+		exists, _ := m.containerExists(m.cfg.Podman.ContainerName)
+		if !exists {
+			return fmt.Errorf("container '%s' not found. Run 'pg start -i %s' to create and start it", m.cfg.Podman.ContainerName, m.cfg.Instance)
+		}
+		return fmt.Errorf("container '%s' is stopped. Run 'pg start -i %s' to start it", m.cfg.Podman.ContainerName, m.cfg.Instance)
+	}
+
+	// Use -it for interactive terminal, -i only for piped input
+	execFlags := "-i"
+	if isTerminal(os.Stdin) {
+		execFlags = "-it"
+	}
+	podmanArgs := append([]string{"exec", execFlags, m.cfg.Podman.ContainerName}, args...)
+	return m.runInteractive(podmanArgs...)
+}
+
+// isTerminal checks if a file is a terminal (TTY).
+func isTerminal(f *os.File) bool {
+	stat, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return (stat.Mode() & os.ModeCharDevice) != 0
+}
+
 // Destroy removes the container. Data directories on the host are preserved.
 func (m *Manager) Destroy() error {
 	return m.DestroyWithData(false)
