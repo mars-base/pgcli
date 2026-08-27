@@ -188,7 +188,8 @@ setup_linux_deps() {
         green "  [OK] $policy_file exists"
     else
         yellow "  [!] $policy_file not found — creating..."
-        if mkdir -p /etc/containers 2>/dev/null && printf '%s\n' "$policy_default" > "$policy_file" 2>/dev/null; then
+        if [ -w /etc/containers ] 2>/dev/null || { mkdir -p /etc/containers 2>/dev/null && [ -w /etc/containers ]; }; then
+            printf '%s\n' "$policy_default" > "$policy_file"
             green "  [OK] Created $policy_file"
         elif sudo mkdir -p /etc/containers 2>/dev/null && printf '%s\n' "$policy_default" | sudo tee "$policy_file" >/dev/null 2>&1; then
             green "  [OK] Created $policy_file (via sudo)"
