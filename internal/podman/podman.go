@@ -633,6 +633,186 @@ func (m *Manager) ImportDatabase(inputFile, database string, clean bool, verbose
 	return nil
 }
 
+// ExportFromDSN exports a remote database to a file or stdout using a temporary container.
+func (m *Manager) ExportFromDSN(dsn, outputFile string, compressLevel int, verbose bool) error {
+	// Determine format
+	var writer io.Writer
+	var format string
+	var isGzipped bool
+
+	if outputFile == "" {
+		writer = os.Stdout
+		format = "custom"
+		isGzipped = false
+	} else {
+		format, isGzipped = detectFormat(outputFile)
+	}
+
+	// Build pg_dump arguments
+	args := []string{"pg_dump", "--dbname=" + dsn}
+	if verbose {
+		args = append(args, "-v")
+	}
+	if format == "plain" {
+		args = append(args, "-Fp")
+	} else {
+		args = append(args, "-Fc")
+	}
+
+	// Create output file if not in pipe mode
+	if outputFile != "" {
+		file, err := os.Create(outputFile)
+		if err != nil {
+			return fmt.Errorf("creating output file: %w", err)
+		}
+		defer file.Close()
+
+		if isGzipped {
+			level := compressLevel
+			if level <= 0 {
+				level = gzip.DefaultCompression
+			}
+			gzWriter, err := gzip.NewWriterLevel(file, level)
+			if err != nil {
+				return fmt.Errorf("creating gzip writer: %w", err)
+			}
+			defer gzWriter.Close()
+			writer = gzWriter
+		} else {
+			writer = file
+		}
+	}
+
+	// Run pg_dump in a temporary container with host network
+	imageTag := m.cfg.Podman.ImageTag
+	containerName := fmt.Sprintf("pgcli-export-%d", time.Now().UnixNano())
+
+	// Clean up container after export
+	defer func() {
+		m.run("rm", "-f", containerName)
+	}()
+
+	// Build podman run arguments
+	podmanArgs := []string{
+		"run", "--rm", "--name", containerName,
+		"--network", "host",
+		imageTag,
+	}
+	podmanArgs = append(podmanArgs, args...)
+
+	cmd := podmanCommand(m.podman, podmanArgs...)
+	cmd.Stdout = writer
+	cmd.Stderr = os.Stderr
+
+	if outputFile != "" {
+		fmt.Fprintf(os.Stderr, "Exporting from %s to %s...\n", dsn, outputFile)
+	}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("export failed: %w", err)
+	}
+
+	// Get file size if not in pipe mode
+	if outputFile != "" {
+		info, err := os.Stat(outputFile)
+		if err == nil {
+			fmt.Fprintf(os.Stderr, "✓ Export complete: %s (%s)\n", outputFile, formatSize(info.Size()))
+		}
+	}
+
+	return nil
+}
+
+// ImportToDSN imports a database from a file or stdin to a remote database using a temporary container.
+func (m *Manager) ImportToDSN(dsn, inputFile string, clean bool, verbose bool) error {
+	var reader io.Reader
+	var format string
+	var isGzipped bool
+
+	if inputFile == "" {
+		// Pipe mode: read from stdin, assume custom format
+		reader = os.Stdin
+		format = "custom"
+		isGzipped = false
+	} else {
+		// Check if input file exists
+		if _, err := os.Stat(inputFile); os.IsNotExist(err) {
+			return fmt.Errorf("input file not found: %s", inputFile)
+		}
+
+		format, isGzipped = detectFormatByContent(inputFile)
+
+		// Open input file
+		file, err := os.Open(inputFile)
+		if err != nil {
+			return fmt.Errorf("opening input file: %w", err)
+		}
+		defer file.Close()
+
+		if isGzipped {
+			gzReader, err := gzip.NewReader(file)
+			if err != nil {
+				return fmt.Errorf("creating gzip reader: %w", err)
+			}
+			defer gzReader.Close()
+			reader = gzReader
+		} else {
+			reader = file
+		}
+	}
+
+	// Build command arguments
+	var args []string
+	if format == "plain" {
+		// Use psql for plain SQL format
+		args = []string{"psql", "--dbname=" + dsn}
+	} else {
+		// Use pg_restore for custom format
+		args = []string{"pg_restore", "--dbname=" + dsn}
+		if verbose {
+			args = append(args, "-v")
+		}
+		if clean {
+			args = append(args, "--clean", "--if-exists")
+		}
+		args = append(args, "--no-owner", "--no-privileges")
+	}
+
+	// Run pg_restore/psql in a temporary container with host network
+	imageTag := m.cfg.Podman.ImageTag
+	containerName := fmt.Sprintf("pgcli-import-%d", time.Now().UnixNano())
+
+	// Clean up container after import
+	defer func() {
+		m.run("rm", "-f", containerName)
+	}()
+
+	// Build podman run arguments
+	podmanArgs := []string{
+		"run", "--rm", "--name", containerName,
+		"--network", "host",
+		"-i",
+		imageTag,
+	}
+	podmanArgs = append(podmanArgs, args...)
+
+	cmd := podmanCommand(m.podman, podmanArgs...)
+	cmd.Stdin = reader
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if inputFile != "" {
+		fmt.Printf("Importing from %s to %s...\n", inputFile, dsn)
+	}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("import failed: %w", err)
+	}
+
+	if inputFile != "" {
+		fmt.Printf("✓ Import complete\n")
+	}
+	return nil
+}
+
 // Destroy removes the container. Data directories on the host are preserved.
 func (m *Manager) Destroy() error {
 	return m.DestroyWithData(false)

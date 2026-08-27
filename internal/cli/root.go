@@ -60,6 +60,24 @@ func loadConfig() error {
 	return nil
 }
 
+// loadConfigForDSN loads configuration without requiring an instance.
+// Used for DSN mode where only the image tag is needed.
+func loadConfigForDSN() error {
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	cfgPath = path
+	c, err := config.Load(path)
+	if err != nil {
+		// If config doesn't exist, use defaults
+		cfg = config.Default()
+		return nil
+	}
+	cfg = c
+	return nil
+}
+
 // newPodman creates a Podman manager.
 func newPodman() (*podman.Manager, error) {
 	return podman.New(cfg)

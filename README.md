@@ -216,6 +216,12 @@ pg export -i proj01 -d mydb | pg import -i proj02 -d mydb --clean
 pg export -i proj01 | ssh user@remote "pg import -i proj02"
 ssh user@remote "pg export -i proj01" | pg import -i proj02
 ssh user@host1 "pg export -i proj01" | ssh user@host2 "pg import -i proj02"
+
+# Work with remote databases via connection string (--dsn)
+pg export --dsn postgres://user:pass@host:5432/mydb -o backup.dump
+pg import --dsn postgres://user:pass@host:5432/mydb backup.dump --clean
+pg export -i proj01 | pg import --dsn postgres://user:pass@host:5432/mydb
+pg export --dsn postgres://user:pass@host1:5432/db1 | pg import --dsn postgres://user:pass@host2:5432/db2
 ```
 
 **Format comparison:**
@@ -234,10 +240,16 @@ ssh user@host1 "pg export -i proj01" | ssh user@host2 "pg import -i proj02"
 - `.gz` extension or gzip magic bytes (`0x1f 0x8b`) → automatic decompression
 - Extension is used as fallback if content detection fails
 
+**Remote databases (--dsn):** Connect to any PostgreSQL instance using a connection string.
+- Uses `pg_dump` and `pg_restore` from the pgcli container image (no local PostgreSQL installation needed)
+- Works with local-to-remote, remote-to-local, and remote-to-remote migrations
+- Supports all the same flags as local instances (`-o`, `-d`, `--clean`, `-v`, `--compress`)
+
 **Note on existing data:** Importing into a database with existing tables will fail unless you use the `--clean` flag, which drops objects before restoring. Use `--clean` when importing into a database that already contains data.
 
 **Use cases:**
 - Migrate data between instances: `pg export -i proj01 | pg import -i proj02`
+- Cross-host migration: `pg export -i proj01 | pg import --dsn postgres://user:pass@remote:5432/db`
 - Share database with team: `pg export -i proj01 -o dump.dump.gz` (compressed, smaller file)
 - Backup before major changes: `pg export -i proj01 -o pre-migration.sql.gz`
 - CI/CD pipelines: export test data, import into fresh test databases

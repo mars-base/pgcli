@@ -20,9 +20,35 @@ Examples:
   pg import -i proj02 dump.dump.gz              # custom + gzip
   pg import -i proj02 -d other_db dump.sql         # specific database
   pg import -i proj02 --clean dump.dump         # drop objects before restore
-  pg export -i proj01 | pg import -i proj02     # pipe between instances`,
+  pg export -i proj01 | pg import -i proj02     # pipe between instances
+  pg export -i proj01 | pg import --dsn postgres://user:pass@host:5432/db  # pipe to remote`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		dsn, _ := cmd.Flags().GetString("dsn")
+
+		// DSN mode - import to remote database
+		if dsn != "" {
+			if err := loadConfigForDSN(); err != nil {
+				return err
+			}
+
+			pm, err := newPodman()
+			if err != nil {
+				return err
+			}
+
+			var inputFile string
+			if len(args) > 0 {
+				inputFile = args[0]
+			}
+
+			clean, _ := cmd.Flags().GetBool("clean")
+			verbose, _ := cmd.Flags().GetBool("verbose")
+
+			return pm.ImportToDSN(dsn, inputFile, clean, verbose)
+		}
+
+		// Local instance mode
 		if err := loadConfig(); err != nil {
 			return err
 		}
@@ -53,6 +79,7 @@ func init() {
 	importCmd.Flags().StringP("database", "d", "", "database name (default: instance database)")
 	importCmd.Flags().Bool("clean", false, "drop database objects before restoring")
 	importCmd.Flags().BoolP("verbose", "v", false, "show progress during import")
+	importCmd.Flags().String("dsn", "", "database connection string for remote database (postgres://user:pass@host:port/db)")
 
 	rootCmd.AddCommand(importCmd)
 }
