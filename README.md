@@ -16,6 +16,48 @@ Whether you're running multiple dev databases, managing staging environments, or
 - Multi-instance isolation with separate data directories
 - Cross-platform support (Linux and macOS)
 
+## System Requirements
+
+### Supported Platforms
+
+| Platform | Architecture | Status | Notes |
+|----------|--------------|--------|-------|
+| **Linux** | amd64, arm64 | ✅ **Recommended** | Native podman, best performance |
+| macOS | amd64, arm64 | Supported | Requires podman machine (VM overhead) |
+| Windows | - | ❌ Not supported | Use WSL2 with Linux |
+
+### Linux Distributions
+
+Tested and verified on:
+- **Debian 12 (bookworm)** - LTS
+- **Debian 13 (trixie)** - Current stable
+- Ubuntu 20.04+ (LTS releases)
+- RHEL/CentOS 8+, Fedora 36+
+- Other distributions with podman 4.0+ should work
+
+### Prerequisites
+
+**Linux:**
+- `podman` 4.0+ (rootless mode)
+- `uidmap` package (for rootless container user mapping)
+- `/etc/containers/policy.json` (container policy)
+- Kernel user namespaces enabled (`/proc/sys/kernel/unprivileged_userns_clone`)
+
+**macOS:**
+- `podman` 4.0+ via Homebrew
+- `podman machine` initialized and running
+
+### Installation Privileges
+
+**Sudo privileges are recommended** for the best experience:
+
+| Privilege Level | Installation Path | Auto-setup |
+|----------------|-------------------|------------|
+| **With sudo** (recommended) | `/usr/local/bin` | ✅ Automatically installs dependencies, creates policy.json |
+| Without sudo | `~/.local/bin` | ⚠️ Requires manual PATH setup, dependency installation |
+
+The installer automatically detects available privileges and adapts accordingly.
+
 ## Features
 
 - **Containerized PostgreSQL** — Each instance runs in an isolated Podman container
