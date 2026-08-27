@@ -31,6 +31,7 @@ Whether you're running multiple dev databases, managing staging environments, or
 Tested and verified on:
 - **Debian 12 (bookworm)** - LTS
 - **Debian 13 (trixie)** - Current stable
+- **Ubuntu 24.04 (noble)** - LTS
 - Ubuntu 20.04+ (LTS releases)
 - RHEL/CentOS 8+, Fedora 36+
 - Other distributions with podman 4.0+ should work
