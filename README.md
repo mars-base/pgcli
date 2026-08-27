@@ -222,6 +222,9 @@ pg export --dsn postgres://user:pass@host:5432/mydb -o backup.dump
 pg import --dsn postgres://user:pass@host:5432/mydb backup.dump --clean
 pg export -i proj01 | pg import --dsn postgres://user:pass@host:5432/mydb
 pg export --dsn postgres://user:pass@host1:5432/db1 | pg import --dsn postgres://user:pass@host2:5432/db2
+
+# DSN can also be used for local instances (useful when ports differ from defaults)
+pg export --dsn postgres://admin:pass@127.0.0.1:35432/mydb | pg import --dsn postgres://admin:pass@127.0.0.1:35433/mydb --clean
 ```
 
 **Format comparison:**
