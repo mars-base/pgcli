@@ -548,15 +548,15 @@ func (m *BackupManager) createBackupContainer(confPath string) error {
 	}
 
 	args = append(args,
-		"-v", fmt.Sprintf("%s:/var/lib/pgbackrest", hostMountPath(m.cfg.Backup.DataDir)),
-		"-v", fmt.Sprintf("%s:/var/log/pgbackrest", hostMountPath(m.cfg.Backup.LogDir)),
-		"-v", fmt.Sprintf("%s:/etc/pgbackrest/pgbackrest.conf:ro", hostMountPath(confPath)),
+		"-v", fmt.Sprintf("%s:/var/lib/pgbackrest:z", hostMountPath(m.cfg.Backup.DataDir)),
+		"-v", fmt.Sprintf("%s:/var/log/pgbackrest:z", hostMountPath(m.cfg.Backup.LogDir)),
+		"-v", fmt.Sprintf("%s:/etc/pgbackrest/pgbackrest.conf:ro,z", hostMountPath(confPath)),
 		// SSH keys are mounted writable (not :ro) so the ownership-migration
 		// step below can chown them to postgres; the container runs as postgres
 		// and needs to own its private key for ssh to accept it.
-		"-v", fmt.Sprintf("%s:/home/postgres/.ssh/id_rsa", hostMountPath(keys.Private)),
-		"-v", fmt.Sprintf("%s:/home/postgres/.ssh/id_rsa.pub", hostMountPath(keys.Public)),
-		"-v", fmt.Sprintf("%s:/home/postgres/.ssh/config", hostMountPath(sshConfPath)),
+		"-v", fmt.Sprintf("%s:/home/postgres/.ssh/id_rsa:z", hostMountPath(keys.Private)),
+		"-v", fmt.Sprintf("%s:/home/postgres/.ssh/id_rsa.pub:z", hostMountPath(keys.Public)),
+		"-v", fmt.Sprintf("%s:/home/postgres/.ssh/config:z", hostMountPath(sshConfPath)),
 		m.cfg.Backup.ImageTag,
 	)
 

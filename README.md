@@ -33,7 +33,8 @@ Tested and verified on:
 - **Debian 13 (trixie)** - Current stable
 - **Ubuntu 24.04 (noble)** - LTS
 - **Ubuntu 26.04 (resolute)** - LTS
-- RHEL/CentOS 8+, Fedora 36+
+- **Fedora 44** - SELinux Enforcing mode supported
+- RHEL/CentOS 8+
 - Other distributions with podman 4.0+ should work
 
 ### Prerequisites

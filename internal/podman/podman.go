@@ -428,7 +428,7 @@ func removeHostDir(podmanPath, dir string) error {
 	}
 
 	cmd := podmanCommand(podmanPath, "run", "--rm",
-		"-v", fmt.Sprintf("%s:/target", hostMountPath(parent)),
+		"-v", fmt.Sprintf("%s:/target:z", hostMountPath(parent)),
 		"alpine:3.20", "sh", "-c", fmt.Sprintf("rm -rf /target/%s", base),
 	)
 	if err := cmd.Run(); err != nil {
@@ -601,7 +601,7 @@ func (m *Manager) RunRestoreContainer(stanza, target string, promote, tailLogs b
 		"-u", "root",
 		"--name", restoreName+"-wipe",
 		"--network", "host",
-		"-v", fmt.Sprintf("%s:/var/lib/postgresql", dataVol),
+		"-v", fmt.Sprintf("%s:/var/lib/postgresql:z", dataVol),
 		m.cfg.Podman.ImageTag,
 		"sh", "-c", "rm -rf /var/lib/postgresql/data && mkdir -p /var/lib/postgresql/data && chmod 700 /var/lib/postgresql/data",
 	)
@@ -622,9 +622,9 @@ func (m *Manager) RunRestoreContainer(stanza, target string, promote, tailLogs b
 		"run", "--rm",
 		"--name", restoreName,
 		"--network", "host",
-		"-v", fmt.Sprintf("%s:/var/lib/postgresql", dataVol),
-		"-v", fmt.Sprintf("%s:/var/lib/pgbackrest", hostMountPath(m.cfg.Backup.DataDir)),
-		"-v", fmt.Sprintf("%s:/etc/pgbackrest/pgbackrest.conf:ro", hostMountPath(confPath)),
+		"-v", fmt.Sprintf("%s:/var/lib/postgresql:z", dataVol),
+		"-v", fmt.Sprintf("%s:/var/lib/pgbackrest:z", hostMountPath(m.cfg.Backup.DataDir)),
+		"-v", fmt.Sprintf("%s:/etc/pgbackrest/pgbackrest.conf:ro,z", hostMountPath(confPath)),
 		m.cfg.Podman.ImageTag,
 		"pgbackrest", "--stanza=" + stanza, "restore",
 		"--type=time", "--target=" + target,
@@ -695,7 +695,7 @@ func (m *Manager) RunRestoreContainerToWriter(w io.Writer, stanza, target string
 		"-u", "root",
 		"--name", restoreName+"-wipe",
 		"--network", "host",
-		"-v", fmt.Sprintf("%s:/var/lib/postgresql", dataVol),
+		"-v", fmt.Sprintf("%s:/var/lib/postgresql:z", dataVol),
 		m.cfg.Podman.ImageTag,
 		"sh", "-c", "rm -rf /var/lib/postgresql/data && mkdir -p /var/lib/postgresql/data && chmod 700 /var/lib/postgresql/data",
 	)
@@ -712,9 +712,9 @@ func (m *Manager) RunRestoreContainerToWriter(w io.Writer, stanza, target string
 		"run", "--rm",
 		"--name", restoreName,
 		"--network", "host",
-		"-v", fmt.Sprintf("%s:/var/lib/postgresql", dataVol),
-		"-v", fmt.Sprintf("%s:/var/lib/pgbackrest", hostMountPath(m.cfg.Backup.DataDir)),
-		"-v", fmt.Sprintf("%s:/etc/pgbackrest/pgbackrest.conf:ro", hostMountPath(confPath)),
+		"-v", fmt.Sprintf("%s:/var/lib/postgresql:z", dataVol),
+		"-v", fmt.Sprintf("%s:/var/lib/pgbackrest:z", hostMountPath(m.cfg.Backup.DataDir)),
+		"-v", fmt.Sprintf("%s:/etc/pgbackrest/pgbackrest.conf:ro,z", hostMountPath(confPath)),
 		m.cfg.Podman.ImageTag,
 		"pgbackrest", "--stanza=" + stanza, "restore",
 		"--type=time", "--target=" + target,
@@ -847,9 +847,9 @@ func (m *Manager) createContainer() error {
 	}
 
 	args = append(args,
-		"-v", fmt.Sprintf("%s:/var/lib/postgresql", hostMountPath(m.cfg.Podman.DataDir)),
-		"-v", fmt.Sprintf("%s:/var/lib/pgbackrest", hostMountPath(backupVol)),
-		"-v", fmt.Sprintf("%s:/etc/pgbackrest/pgbackrest.conf:ro", hostMountPath(confPath)),
+		"-v", fmt.Sprintf("%s:/var/lib/postgresql:z", hostMountPath(m.cfg.Podman.DataDir)),
+		"-v", fmt.Sprintf("%s:/var/lib/pgbackrest:z", hostMountPath(backupVol)),
+		"-v", fmt.Sprintf("%s:/etc/pgbackrest/pgbackrest.conf:ro,z", hostMountPath(confPath)),
 		"-e", fmt.Sprintf("POSTGRES_DB=%s", m.cfg.Postgres.Database),
 		"-e", fmt.Sprintf("POSTGRES_USER=%s", m.cfg.Postgres.User),
 		"-e", fmt.Sprintf("POSTGRES_PASSWORD=%s", m.cfg.Postgres.Password),
@@ -870,7 +870,7 @@ func (m *Manager) createContainer() error {
 			return fmt.Errorf("ensuring backup ssh key: %w", err)
 		}
 		args = append(args,
-			"-v", fmt.Sprintf("%s:/run/pgcli/backup_id_rsa.pub:ro", hostMountPath(keys.Public)),
+			"-v", fmt.Sprintf("%s:/run/pgcli/backup_id_rsa.pub:ro,z", hostMountPath(keys.Public)),
 		)
 	}
 
