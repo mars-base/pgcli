@@ -166,6 +166,55 @@ The shell runs as `root` user inside the container, giving you full access to:
 - Log files (`/var/log/postgresql/`)
 - All system tools and utilities
 
+### Data Import/Export
+
+Export and import databases using `pg_dump` and `pg_restore`/`psql`. Supports custom format (recommended) and plain SQL, with automatic gzip compression.
+
+```bash
+# Export to custom format (recommended, fastest restore)
+pg export -i proj01 -o backup.dump
+
+# Export to SQL format (human-readable)
+pg export -i proj01 -o backup.sql
+
+# Export with gzip compression (auto-detected from .gz extension)
+pg export -i proj01 -o backup.dump.gz
+pg export -i proj01 -o backup.sql.gz
+
+# Export specific database
+pg export -i proj01 -d mydb -o backup.dump
+
+# Export with custom compression level (0-9)
+pg export -i proj01 -o backup.sql.gz --compress=9
+
+# Import from custom format
+pg import -i proj02 backup.dump
+
+# Import from SQL format
+pg import -i proj02 backup.sql
+
+# Import compressed file (auto-detected from .gz extension)
+pg import -i proj02 backup.dump.gz
+
+# Import to specific database
+pg import -i proj02 -d mydb backup.dump
+
+# Import with cleanup (drop existing objects before restore)
+pg import -i proj02 --clean backup.dump
+```
+
+**Format detection:** Uses magic bytes (content-based) with extension fallback.
+- Files starting with `PGDMP` → custom format (uses `pg_restore`)
+- `.sql` or `.sql.gz` → plain SQL format (uses `psql`)
+- `.gz` extension or gzip magic bytes (`0x1f 0x8b`) → automatic decompression
+- Extension is used as fallback if content detection fails
+
+**Use cases:**
+- Migrate data between instances: `pg export -i proj01 -o dump.dump && pg import -i proj02 dump.dump`
+- Share database with team: `pg export -i proj01 -o dump.dump.gz` (compressed, smaller file)
+- Backup before major changes: `pg export -i proj01 -o pre-migration.sql.gz`
+- CI/CD pipelines: export test data, import into fresh test databases
+
 ## Commands
 
 | Command | Description |
@@ -177,6 +226,8 @@ The shell runs as `root` user inside the container, giving you full access to:
 | `pg psql` | Open interactive psql session |
 | `pg shell` | Open interactive bash shell in container |
 | `pg exec` | Execute SQL or shell commands |
+| `pg export` | Export database to dump file |
+| `pg import` | Import database from dump file |
 | `pg snapshot` | Manage backups (create/list/delete) |
 | `pg restore` | PITR point-in-time recovery |
 | `pg create` | Create new instance |

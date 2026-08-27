@@ -3,6 +3,7 @@
 package podman
 
 import (
+	"compress/gzip"
 	"fmt"
 	"io"
 	"log/slog"
@@ -383,6 +384,197 @@ func isTerminal(f *os.File) bool {
 		return false
 	}
 	return (stat.Mode() & os.ModeCharDevice) != 0
+}
+
+// detectFormat determines the dump format and compression from filename.
+// Returns "plain" for SQL files, "custom" for pg_dump custom format.
+// Returns true for isGzipped if filename ends with .gz.
+func detectFormat(filename string) (format string, isGzipped bool) {
+	name := strings.ToLower(filename)
+	isGzipped = strings.HasSuffix(name, ".gz")
+	if isGzipped {
+		name = strings.TrimSuffix(name, ".gz")
+	}
+
+	if strings.HasSuffix(name, ".sql") {
+		return "plain", isGzipped
+	}
+	return "custom", isGzipped
+}
+
+// detectFormatByContent detects the dump format by reading file magic bytes.
+// Falls back to extension-based detection if content detection fails.
+func detectFormatByContent(filename string) (format string, isGzipped bool) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return detectFormat(filename)
+	}
+	defer f.Close()
+
+	// Read first 5 bytes for magic number detection
+	header := make([]byte, 5)
+	n, err := f.Read(header)
+	if err != nil || n < 2 {
+		return detectFormat(filename)
+	}
+
+	// Check for gzip magic number: 0x1f 0x8b
+	if n >= 2 && header[0] == 0x1f && header[1] == 0x8b {
+		isGzipped = true
+		// Try to read compressed content to detect inner format
+		if _, err := f.Seek(0, io.SeekStart); err == nil {
+			gzReader, err := gzip.NewReader(f)
+			if err == nil {
+				defer gzReader.Close()
+				inner := make([]byte, 5)
+				if rn, err := gzReader.Read(inner); rn >= 5 && err == nil {
+					if string(inner[:5]) == "PGDMP" {
+						return "custom", true
+					}
+				}
+			}
+		}
+		// Gzip but not PGDMP → assume plain SQL
+		return "plain", true
+	}
+
+	// Check for pg_dump custom format magic: "PGDMP"
+	if n >= 5 && string(header[:5]) == "PGDMP" {
+		return "custom", false
+	}
+
+	// Everything else → plain SQL
+	return "plain", false
+}
+
+// ExportDatabase exports the database to a file using pg_dump.
+// Supports custom format (default) and plain SQL format, with optional gzip compression.
+func (m *Manager) ExportDatabase(outputFile, database string, compressLevel int) error {
+	running, err := m.containerRunning(m.cfg.Podman.ContainerName)
+	if err != nil {
+		return fmt.Errorf("checking container status: %w", err)
+	}
+	if !running {
+		return fmt.Errorf("container '%s' is not running. Run 'pg start -i %s' first", m.cfg.Podman.ContainerName, m.cfg.Instance)
+	}
+
+	format, isGzipped := detectFormat(outputFile)
+
+	// Build pg_dump arguments
+	args := []string{"pg_dump", "-U", m.cfg.Postgres.User}
+	if format == "plain" {
+		args = append(args, "-Fp")
+	} else {
+		args = append(args, "-Fc")
+	}
+
+	args = append(args, "-d", database)
+
+	// Create output file
+	file, err := os.Create(outputFile)
+	if err != nil {
+		return fmt.Errorf("creating output file: %w", err)
+	}
+	defer file.Close()
+
+	var writer io.Writer = file
+	if isGzipped {
+		level := compressLevel
+		if level <= 0 {
+			level = gzip.DefaultCompression
+		}
+		gzWriter, err := gzip.NewWriterLevel(file, level)
+		if err != nil {
+			return fmt.Errorf("creating gzip writer: %w", err)
+		}
+		defer gzWriter.Close()
+		writer = gzWriter
+	}
+
+	// Execute podman exec with stdout redirected to file
+	podmanArgs := append([]string{"exec", "-i", m.cfg.Podman.ContainerName}, args...)
+	cmd := podmanCommand(m.podman, podmanArgs...)
+	cmd.Stdout = writer
+	cmd.Stderr = os.Stderr
+
+	fmt.Printf("Exporting %s to %s...\n", database, outputFile)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("export failed: %w", err)
+	}
+
+	// Get file size
+	info, err := os.Stat(outputFile)
+	if err == nil {
+		fmt.Printf("✓ Export complete: %s (%.2f MB)\n", outputFile, float64(info.Size())/1024/1024)
+	}
+
+	return nil
+}
+
+// ImportDatabase imports a database from a dump file using pg_restore or psql.
+// Supports custom format (pg_restore) and plain SQL format (psql), with optional gzip decompression.
+func (m *Manager) ImportDatabase(inputFile, database string, clean bool) error {
+	running, err := m.containerRunning(m.cfg.Podman.ContainerName)
+	if err != nil {
+		return fmt.Errorf("checking container status: %w", err)
+	}
+	if !running {
+		return fmt.Errorf("container '%s' is not running. Run 'pg start -i %s' first", m.cfg.Podman.ContainerName, m.cfg.Instance)
+	}
+
+	// Check if input file exists
+	if _, err := os.Stat(inputFile); os.IsNotExist(err) {
+		return fmt.Errorf("input file not found: %s", inputFile)
+	}
+
+	format, isGzipped := detectFormatByContent(inputFile)
+
+	// Open input file
+	file, err := os.Open(inputFile)
+	if err != nil {
+		return fmt.Errorf("opening input file: %w", err)
+	}
+	defer file.Close()
+
+	var reader io.Reader = file
+	if isGzipped {
+		gzReader, err := gzip.NewReader(file)
+		if err != nil {
+			return fmt.Errorf("creating gzip reader: %w", err)
+		}
+		defer gzReader.Close()
+		reader = gzReader
+	}
+
+	// Build command arguments
+	var podmanArgs []string
+	if format == "plain" {
+		// Use psql for plain SQL format
+		podmanArgs = []string{"exec", "-i", m.cfg.Podman.ContainerName,
+			"psql", "-U", m.cfg.Postgres.User, "-d", database}
+	} else {
+		// Use pg_restore for custom format
+		podmanArgs = []string{"exec", "-i", m.cfg.Podman.ContainerName,
+			"pg_restore", "-U", m.cfg.Postgres.User, "-d", database}
+		if clean {
+			podmanArgs = append(podmanArgs, "--clean", "--if-exists")
+		}
+		podmanArgs = append(podmanArgs, "--no-owner", "--no-privileges")
+	}
+
+	// Execute podman exec with stdin from file
+	cmd := podmanCommand(m.podman, podmanArgs...)
+	cmd.Stdin = reader
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	fmt.Printf("Importing from %s to %s...\n", inputFile, database)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("import failed: %w", err)
+	}
+
+	fmt.Printf("✓ Import complete\n")
+	return nil
 }
 
 // Destroy removes the container. Data directories on the host are preserved.
