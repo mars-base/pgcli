@@ -197,15 +197,28 @@ func (m *Manager) DeleteSnapshot(name string) error {
 	if err != nil {
 		return fmt.Errorf("checking snapshots: %w", err)
 	}
-	found := false
-	for _, s := range snapshots {
-		if s.Name == name {
-			found = true
+	var target *Snapshot
+	for i := range snapshots {
+		if snapshots[i].Name == name {
+			target = &snapshots[i]
 			break
 		}
 	}
-	if !found {
+	if target == nil {
 		return fmt.Errorf("snapshot %s not found", name)
+	}
+
+	// Prevent deleting the only full backup — pgBackRest requires at least one.
+	if target.Type == "full" {
+		fullCount := 0
+		for _, s := range snapshots {
+			if s.Type == "full" {
+				fullCount++
+			}
+		}
+		if fullCount == 1 {
+			return fmt.Errorf("cannot delete %s: it is the only full backup; create another full backup first", name)
+		}
 	}
 
 	stanza := m.cfg.PITR.PgBackRestStanza
