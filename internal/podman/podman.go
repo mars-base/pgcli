@@ -386,6 +386,20 @@ func isTerminal(f *os.File) bool {
 	return (stat.Mode() & os.ModeCharDevice) != 0
 }
 
+// formatSize returns a human-readable file size string.
+func formatSize(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
 // detectFormat determines the dump format and compression from filename.
 // Returns "plain" for SQL files, "custom" for pg_dump custom format.
 // Returns true for isGzipped if filename ends with .gz.
@@ -505,7 +519,7 @@ func (m *Manager) ExportDatabase(outputFile, database string, compressLevel int)
 	// Get file size
 	info, err := os.Stat(outputFile)
 	if err == nil {
-		fmt.Printf("✓ Export complete: %s (%.2f MB)\n", outputFile, float64(info.Size())/1024/1024)
+		fmt.Printf("✓ Export complete: %s (%s)\n", outputFile, formatSize(info.Size()))
 	}
 
 	return nil
