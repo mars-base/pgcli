@@ -42,8 +42,9 @@ Examples:
 		}
 
 		compressLevel, _ := cmd.Flags().GetInt("compress")
+		verbose, _ := cmd.Flags().GetBool("verbose")
 
-		return pm.ExportDatabase(outputFile, database, compressLevel)
+		return pm.ExportDatabase(outputFile, database, compressLevel, verbose)
 	},
 }
 
@@ -51,6 +52,7 @@ func init() {
 	exportCmd.Flags().StringP("output", "o", "", "output file (required)")
 	exportCmd.Flags().StringP("database", "d", "", "database name (default: instance database)")
 	exportCmd.Flags().Int("compress", 6, "compression level (0-9, for plain format)")
+	exportCmd.Flags().BoolP("verbose", "v", false, "show progress during export")
 	exportCmd.MarkFlagRequired("output")
 
 	rootCmd.AddCommand(exportCmd)

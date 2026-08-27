@@ -187,6 +187,9 @@ pg export -i proj01 -d mydb -o backup.dump
 # Export with custom compression level (0-9)
 pg export -i proj01 -o backup.sql.gz --compress=9
 
+# Export with verbose output (show progress)
+pg export -i proj01 -o backup.dump -v
+
 # Import from custom format
 pg import -i proj02 backup.dump
 
@@ -201,6 +204,9 @@ pg import -i proj02 -d mydb backup.dump
 
 # Import with cleanup (drop existing objects before restore)
 pg import -i proj02 --clean backup.dump
+
+# Import with verbose output
+pg import -i proj02 backup.dump -v
 ```
 
 **Format detection:** Uses magic bytes (content-based) with extension fallback.
@@ -208,6 +214,8 @@ pg import -i proj02 --clean backup.dump
 - `.sql` or `.sql.gz` → plain SQL format (uses `psql`)
 - `.gz` extension or gzip magic bytes (`0x1f 0x8b`) → automatic decompression
 - Extension is used as fallback if content detection fails
+
+**Note on existing data:** Importing into a database with existing tables will fail unless you use the `--clean` flag, which drops objects before restoring. Use `--clean` when importing into a database that already contains data.
 
 **Use cases:**
 - Migrate data between instances: `pg export -i proj01 -o dump.dump && pg import -i proj02 dump.dump`

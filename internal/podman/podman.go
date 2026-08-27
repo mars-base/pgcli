@@ -463,7 +463,7 @@ func detectFormatByContent(filename string) (format string, isGzipped bool) {
 
 // ExportDatabase exports the database to a file using pg_dump.
 // Supports custom format (default) and plain SQL format, with optional gzip compression.
-func (m *Manager) ExportDatabase(outputFile, database string, compressLevel int) error {
+func (m *Manager) ExportDatabase(outputFile, database string, compressLevel int, verbose bool) error {
 	running, err := m.containerRunning(m.cfg.Podman.ContainerName)
 	if err != nil {
 		return fmt.Errorf("checking container status: %w", err)
@@ -476,6 +476,9 @@ func (m *Manager) ExportDatabase(outputFile, database string, compressLevel int)
 
 	// Build pg_dump arguments
 	args := []string{"pg_dump", "-U", m.cfg.Postgres.User}
+	if verbose {
+		args = append(args, "-v")
+	}
 	if format == "plain" {
 		args = append(args, "-Fp")
 	} else {
@@ -527,7 +530,7 @@ func (m *Manager) ExportDatabase(outputFile, database string, compressLevel int)
 
 // ImportDatabase imports a database from a dump file using pg_restore or psql.
 // Supports custom format (pg_restore) and plain SQL format (psql), with optional gzip decompression.
-func (m *Manager) ImportDatabase(inputFile, database string, clean bool) error {
+func (m *Manager) ImportDatabase(inputFile, database string, clean bool, verbose bool) error {
 	running, err := m.containerRunning(m.cfg.Podman.ContainerName)
 	if err != nil {
 		return fmt.Errorf("checking container status: %w", err)
@@ -570,6 +573,9 @@ func (m *Manager) ImportDatabase(inputFile, database string, clean bool) error {
 		// Use pg_restore for custom format
 		podmanArgs = []string{"exec", "-i", m.cfg.Podman.ContainerName,
 			"pg_restore", "-U", m.cfg.Postgres.User, "-d", database}
+		if verbose {
+			podmanArgs = append(podmanArgs, "-v")
+		}
 		if clean {
 			podmanArgs = append(podmanArgs, "--clean", "--if-exists")
 		}

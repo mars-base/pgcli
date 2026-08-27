@@ -38,14 +38,16 @@ Examples:
 		}
 
 		clean, _ := cmd.Flags().GetBool("clean")
+		verbose, _ := cmd.Flags().GetBool("verbose")
 
-		return pm.ImportDatabase(inputFile, database, clean)
+		return pm.ImportDatabase(inputFile, database, clean, verbose)
 	},
 }
 
 func init() {
 	importCmd.Flags().StringP("database", "d", "", "database name (default: instance database)")
 	importCmd.Flags().Bool("clean", false, "drop database objects before restoring")
+	importCmd.Flags().BoolP("verbose", "v", false, "show progress during import")
 
 	rootCmd.AddCommand(importCmd)
 }
