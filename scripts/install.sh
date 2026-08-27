@@ -282,6 +282,16 @@ install_podman_launcher() {
         "https://github.com/89luca89/podman-launcher/releases/latest/download/podman-launcher-${arch}"
     chmod +x "$HOME/.local/bin/podman"
     green "  [OK] podman-launcher installed"
+
+    # Trigger podman-launcher to download the actual podman binary.
+    # The launcher fetches the real podman on first invocation.
+    export PATH="$HOME/.local/bin:$PATH"
+    yellow "-> Triggering podman binary download..."
+    if "$HOME/.local/bin/podman" --version 2>/dev/null; then
+        green "  [OK] podman binary downloaded"
+    else
+        yellow "  [!] podman binary download deferred (will fetch on first use)"
+    fi
 }
 
 # ─── Image pull ──────────────────────────────────────────────────────
