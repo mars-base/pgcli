@@ -274,21 +274,32 @@ install_podman_launcher() {
         return
     fi
 
-    yellow "-> Installing podman-launcher..."
-    mkdir -p "$HOME/.local/bin"
+    # Choose podman install dir: same as INSTALL_DIR when system-level, otherwise ~/.local/bin
+    local podman_dir="$HOME/.local/bin"
+    if [ "$INSTALL_DIR" = "/usr/local/bin" ] || [ "$INSTALL_DIR" = "/usr/bin" ]; then
+        podman_dir="$INSTALL_DIR"
+    fi
+
+    yellow "-> Installing podman-launcher to $podman_dir..."
     local arch
     arch="$(detect_arch)"
-    curl -fsSL -o "$HOME/.local/bin/podman" \
-        "https://github.com/89luca89/podman-launcher/releases/latest/download/podman-launcher-${arch}"
-    chmod +x "$HOME/.local/bin/podman"
-    green "  [OK] podman-launcher installed"
+    local launcher_url="https://github.com/89luca89/podman-launcher/releases/latest/download/podman-launcher-${arch}"
+
+    if [ -w "$podman_dir" ]; then
+        mkdir -p "$podman_dir"
+        curl -fsSL -o "$podman_dir/podman" "$launcher_url"
+        chmod +x "$podman_dir/podman"
+    else
+        as_root mkdir -p "$podman_dir"
+        as_root bash -c "curl -fsSL -o '$podman_dir/podman' '$launcher_url' && chmod +x '$podman_dir/podman'"
+    fi
+    green "  [OK] podman-launcher installed to $podman_dir/podman"
 
     # Trigger podman-launcher to download the actual podman binary.
-    # The launcher fetches the real podman on first invocation.
-    export PATH="$HOME/.local/bin:$PATH"
+    export PATH="$podman_dir:$PATH"
     yellow "-> Triggering podman binary download..."
-    if "$HOME/.local/bin/podman" --version 2>/dev/null; then
-        green "  [OK] podman binary downloaded"
+    if "$podman_dir/podman" --version 2>/dev/null; then
+        green "  [OK] podman binary downloaded ($(podman --version 2>/dev/null | head -1))"
     else
         yellow "  [!] podman binary download deferred (will fetch on first use)"
     fi
