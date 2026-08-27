@@ -74,7 +74,7 @@ The installer automatically detects available privileges and adapts accordingly.
 curl -fsSL https://raw.githubusercontent.com/mars-base/pgcli/main/scripts/install.sh | bash
 ```
 
-This installs `pg` to `~/.local/bin`.
+The installer auto-detects sudo privileges and installs to `/usr/local/bin` (with sudo) or `~/.local/bin` (without sudo). PATH is configured automatically.
 
 ## Quick Start
 
