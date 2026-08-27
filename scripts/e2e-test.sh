@@ -161,22 +161,47 @@ main() {
     # ---- Test 7: Snapshot (backup) ----
     section "Test: Backup / Snapshot"
     if [ "$SKIP_PITR" != "1" ]; then
-        run_test "Create snapshot" pg snapshot create -i "$INSTANCE" e2e-snap-1
+        # Create full snapshot and capture the actual pgBackRest name
+        CREATE_OUT=$(pg snapshot create -i "$INSTANCE" 2>&1)
+        echo "$CREATE_OUT"
+        FULL_SNAP=$(echo "$CREATE_OUT" | grep -oP 'Name: \K\S+')
+        if [ -n "$FULL_SNAP" ]; then
+            pass "Create snapshot: $FULL_SNAP"
+        else
+            fail "Create snapshot (could not capture name)"
+            FULL_SNAP=""
+        fi
+
         run_test "List snapshots" pg snapshot list -i "$INSTANCE"
 
         # Snapshot delete validation
         run_test "Delete non-existent snapshot fails" \
             bash -c 'out=$(pg snapshot delete nonexistent-snap -i "$INSTANCE" 2>&1); rc=$?; [ "$rc" -ne 0 ] && echo "$out" | grep -q "not found"'
 
-        run_test "Delete only full backup fails" \
-            bash -c 'out=$(pg snapshot delete e2e-snap-1 -i "$INSTANCE" 2>&1); rc=$?; [ "$rc" -ne 0 ] && echo "$out" | grep -q "only full backup"'
+        if [ -n "$FULL_SNAP" ]; then
+            run_test "Delete only full backup fails" \
+                bash -c "out=\$('$BINARY' -c '$CONFIG_FILE' snapshot delete '$FULL_SNAP' -i '$INSTANCE' 2>&1); rc=\$?; [ \"\$rc\" -ne 0 ] && echo \"\$out\" | grep -q 'only full backup'"
+        fi
 
-        # Create additional snapshots for delete testing
-        run_test "Create diff snapshot" pg snapshot create --type diff -i "$INSTANCE" e2e-snap-1-diff
-        run_test "Delete diff snapshot" pg snapshot delete e2e-snap-1-diff -i "$INSTANCE"
+        # Create diff snapshot and delete it
+        DIFF_OUT=$(pg snapshot create --type diff -i "$INSTANCE" 2>&1)
+        echo "$DIFF_OUT"
+        DIFF_SNAP=$(echo "$DIFF_OUT" | grep -oP 'Name: \K\S+')
+        if [ -n "$DIFF_SNAP" ]; then
+            run_test "Delete diff snapshot" pg snapshot delete "$DIFF_SNAP" -i "$INSTANCE"
+        else
+            fail "Create diff snapshot (could not capture name)"
+        fi
 
-        run_test "Create incr snapshot" pg snapshot create --type incr -i "$INSTANCE" e2e-snap-1-incr
-        run_test "Delete incr snapshot" pg snapshot delete e2e-snap-1-incr -i "$INSTANCE"
+        # Create incr snapshot and delete it
+        INCR_OUT=$(pg snapshot create --type incr -i "$INSTANCE" 2>&1)
+        echo "$INCR_OUT"
+        INCR_SNAP=$(echo "$INCR_OUT" | grep -oP 'Name: \K\S+')
+        if [ -n "$INCR_SNAP" ]; then
+            run_test "Delete incr snapshot" pg snapshot delete "$INCR_SNAP" -i "$INSTANCE"
+        else
+            fail "Create incr snapshot (could not capture name)"
+        fi
 
     else
         yellow "  Skipping PITR/backup tests (SKIP_PITR=1)"
@@ -207,6 +232,15 @@ main() {
 
         run_test "PITR restore (dry-run)" pg restore -i "$INSTANCE" --time "$PITR_TIME" --dry-run
         run_test "PITR restore" pg restore -i "$INSTANCE" --time "$PITR_TIME" --force --tail-logs
+
+        # Wait for PostgreSQL to be ready after restore
+        sleep 5
+        for _i in $(seq 1 10); do
+            if podman exec "pgcli-pg-$INSTANCE" pg_isready -U admin 2>/dev/null | grep -q "accepting"; then
+                break
+            fi
+            sleep 2
+        done
 
         # After restore with pause, verify data then resume
         RESTORE_COUNT=$(sqlval "$INSTANCE" "SELECT count(*) FROM e2e_test")
