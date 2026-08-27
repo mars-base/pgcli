@@ -163,6 +163,21 @@ main() {
     if [ "$SKIP_PITR" != "1" ]; then
         run_test "Create snapshot" pg snapshot create -i "$INSTANCE" e2e-snap-1
         run_test "List snapshots" pg snapshot list -i "$INSTANCE"
+
+        # Snapshot delete validation
+        run_test "Delete non-existent snapshot fails" \
+            bash -c 'out=$(pg snapshot delete nonexistent-snap -i "$INSTANCE" 2>&1); rc=$?; [ "$rc" -ne 0 ] && echo "$out" | grep -q "not found"'
+
+        run_test "Delete only full backup fails" \
+            bash -c 'out=$(pg snapshot delete e2e-snap-1 -i "$INSTANCE" 2>&1); rc=$?; [ "$rc" -ne 0 ] && echo "$out" | grep -q "only full backup"'
+
+        # Create additional snapshots for delete testing
+        run_test "Create diff snapshot" pg snapshot create --type diff -i "$INSTANCE" e2e-snap-1-diff
+        run_test "Delete diff snapshot" pg snapshot delete e2e-snap-1-diff -i "$INSTANCE"
+
+        run_test "Create incr snapshot" pg snapshot create --type incr -i "$INSTANCE" e2e-snap-1-incr
+        run_test "Delete incr snapshot" pg snapshot delete e2e-snap-1-incr -i "$INSTANCE"
+
     else
         yellow "  Skipping PITR/backup tests (SKIP_PITR=1)"
     fi
