@@ -192,6 +192,22 @@ func (m *Manager) ListSnapshots(limit int) ([]Snapshot, error) {
 
 // DeleteSnapshot deletes a specific backup.
 func (m *Manager) DeleteSnapshot(name string) error {
+	// Check if snapshot exists before attempting to delete.
+	snapshots, err := m.ListSnapshots(0)
+	if err != nil {
+		return fmt.Errorf("checking snapshots: %w", err)
+	}
+	found := false
+	for _, s := range snapshots {
+		if s.Name == name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("snapshot %s not found", name)
+	}
+
 	stanza := m.cfg.PITR.PgBackRestStanza
 	args := []string{
 		"--stanza=" + stanza,
