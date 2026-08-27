@@ -141,6 +141,31 @@ Inside the interactive psql shell, you have full access to:
 - psql meta-commands (`\dt`, `\du`, `\l`, etc.)
 - `\q` to quit
 
+### Container Shell
+
+```bash
+# Open bash shell in container (default instance)
+pg shell
+
+# Open shell for specific instance
+pg shell -i proj01
+
+# Run a command directly
+pg shell -- -c "ls -la /var/lib/postgresql/data"
+
+# Check PostgreSQL configuration
+pg shell -- -c "cat /etc/postgresql/postgresql.conf"
+
+# View logs
+pg shell -- -c "tail -f /var/log/postgresql/postgresql-*.log"
+```
+
+The shell runs as `root` user inside the container, giving you full access to:
+- PostgreSQL data directory (`/var/lib/postgresql/data`)
+- Configuration files (`/etc/postgresql/`)
+- Log files (`/var/log/postgresql/`)
+- All system tools and utilities
+
 ## Commands
 
 | Command | Description |
@@ -150,6 +175,7 @@ Inside the interactive psql shell, you have full access to:
 | `pg status` | Show status and connection info |
 | `pg list` | List all instances |
 | `pg psql` | Open interactive psql session |
+| `pg shell` | Open interactive bash shell in container |
 | `pg exec` | Execute SQL or shell commands |
 | `pg snapshot` | Manage backups (create/list/delete) |
 | `pg restore` | PITR point-in-time recovery |
