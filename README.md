@@ -156,6 +156,47 @@ Inside the interactive psql shell, you have full access to:
 | `pg create` | Create new instance |
 | `pg destroy` | Destroy instance |
 | `pg config` | Configuration management |
+| `pg completion` | Generate shell completion scripts |
+
+## Shell Completion
+
+Enable tab completion for commands, flags, and instance names.
+
+### Bash
+
+```bash
+# Linux
+pg completion bash > /etc/bash_completion.d/pg
+
+# macOS (with Homebrew bash-completion)
+pg completion bash > $(brew --prefix)/etc/bash_completion.d/pg
+
+# Or load in current session
+source <(pg completion bash)
+```
+
+### Zsh
+
+```bash
+# Enable completion system (once)
+echo "autoload -U compinit; compinit" >> ~/.zshrc
+
+# Install completion
+pg completion zsh > "${fpath[1]}/_pg"
+```
+
+### Fish
+
+```bash
+pg completion fish > ~/.config/fish/completions/pg.fish
+```
+
+### PowerShell
+
+```powershell
+pg completion powershell > pg.ps1
+# Source from your PowerShell profile
+```
 
 ## PostgreSQL Configuration
 
