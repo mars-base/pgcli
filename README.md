@@ -168,7 +168,7 @@ The shell runs as `root` user inside the container, giving you full access to:
 
 ### Data Import/Export
 
-Export and import databases using `pg_dump` and `pg_restore`/`psql`. Supports custom format (recommended) and plain SQL, with automatic gzip compression.
+Export and import databases to dump files. Supports custom format (recommended) and plain SQL, with automatic gzip compression. Also supports piping between instances.
 
 ```bash
 # Export to custom format (recommended, fastest restore)
@@ -207,7 +207,26 @@ pg import -i proj02 --clean backup.dump
 
 # Import with verbose output
 pg import -i proj02 backup.dump -v
+
+# Pipe between instances (no temp file)
+pg export -i proj01 | pg import -i proj02
+pg export -i proj01 -d mydb | pg import -i proj02 -d mydb --clean
+
+# Pipe across hosts via SSH
+pg export -i proj01 | ssh user@remote "pg import -i proj02"
+ssh user@remote "pg export -i proj01" | pg import -i proj02
+ssh user@host1 "pg export -i proj01" | ssh user@host2 "pg import -i proj02"
 ```
+
+**Format comparison:**
+
+| Feature | Custom (`.dump`) | SQL (`.sql`) |
+|---------|------------------|--------------|
+| Import speed | Faster (binary COPY, parallel restore) | Slower (text INSERT) |
+| File size | Smaller (compressed) | Larger (plain text) |
+| Human-readable | No | Yes |
+| Selective restore | Yes (specific tables) | No |
+| Best for | Migration, backup, large databases | Version control, CI seed data, manual editing |
 
 **Format detection:** Uses magic bytes (content-based) with extension fallback.
 - Files starting with `PGDMP` → custom format (uses `pg_restore`)
@@ -218,7 +237,7 @@ pg import -i proj02 backup.dump -v
 **Note on existing data:** Importing into a database with existing tables will fail unless you use the `--clean` flag, which drops objects before restoring. Use `--clean` when importing into a database that already contains data.
 
 **Use cases:**
-- Migrate data between instances: `pg export -i proj01 -o dump.dump && pg import -i proj02 dump.dump`
+- Migrate data between instances: `pg export -i proj01 | pg import -i proj02`
 - Share database with team: `pg export -i proj01 -o dump.dump.gz` (compressed, smaller file)
 - Backup before major changes: `pg export -i proj01 -o pre-migration.sql.gz`
 - CI/CD pipelines: export test data, import into fresh test databases

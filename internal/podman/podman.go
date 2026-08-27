@@ -463,6 +463,7 @@ func detectFormatByContent(filename string) (format string, isGzipped bool) {
 
 // ExportDatabase exports the database to a file using pg_dump.
 // Supports custom format (default) and plain SQL format, with optional gzip compression.
+// If outputFile is empty, writes to stdout for pipe usage.
 func (m *Manager) ExportDatabase(outputFile, database string, compressLevel int, verbose bool) error {
 	running, err := m.containerRunning(m.cfg.Podman.ContainerName)
 	if err != nil {
@@ -472,7 +473,18 @@ func (m *Manager) ExportDatabase(outputFile, database string, compressLevel int,
 		return fmt.Errorf("container '%s' is not running. Run 'pg start -i %s' first", m.cfg.Podman.ContainerName, m.cfg.Instance)
 	}
 
-	format, isGzipped := detectFormat(outputFile)
+	// Pipe mode: write to stdout, always custom format
+	var writer io.Writer
+	var format string
+	var isGzipped bool
+
+	if outputFile == "" {
+		writer = os.Stdout
+		format = "custom"
+		isGzipped = false
+	} else {
+		format, isGzipped = detectFormat(outputFile)
+	}
 
 	// Build pg_dump arguments
 	args := []string{"pg_dump", "-U", m.cfg.Postgres.User}
@@ -487,42 +499,49 @@ func (m *Manager) ExportDatabase(outputFile, database string, compressLevel int,
 
 	args = append(args, "-d", database)
 
-	// Create output file
-	file, err := os.Create(outputFile)
-	if err != nil {
-		return fmt.Errorf("creating output file: %w", err)
-	}
-	defer file.Close()
-
-	var writer io.Writer = file
-	if isGzipped {
-		level := compressLevel
-		if level <= 0 {
-			level = gzip.DefaultCompression
-		}
-		gzWriter, err := gzip.NewWriterLevel(file, level)
+	// Create output file if not in pipe mode
+	if outputFile != "" {
+		file, err := os.Create(outputFile)
 		if err != nil {
-			return fmt.Errorf("creating gzip writer: %w", err)
+			return fmt.Errorf("creating output file: %w", err)
 		}
-		defer gzWriter.Close()
-		writer = gzWriter
+		defer file.Close()
+
+		if isGzipped {
+			level := compressLevel
+			if level <= 0 {
+				level = gzip.DefaultCompression
+			}
+			gzWriter, err := gzip.NewWriterLevel(file, level)
+			if err != nil {
+				return fmt.Errorf("creating gzip writer: %w", err)
+			}
+			defer gzWriter.Close()
+			writer = gzWriter
+		} else {
+			writer = file
+		}
 	}
 
-	// Execute podman exec with stdout redirected to file
+	// Execute podman exec with stdout redirected
 	podmanArgs := append([]string{"exec", "-i", m.cfg.Podman.ContainerName}, args...)
 	cmd := podmanCommand(m.podman, podmanArgs...)
 	cmd.Stdout = writer
 	cmd.Stderr = os.Stderr
 
-	fmt.Printf("Exporting %s to %s...\n", database, outputFile)
+	if outputFile != "" {
+		fmt.Fprintf(os.Stderr, "Exporting %s to %s...\n", database, outputFile)
+	}
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("export failed: %w", err)
 	}
 
-	// Get file size
-	info, err := os.Stat(outputFile)
-	if err == nil {
-		fmt.Printf("✓ Export complete: %s (%s)\n", outputFile, formatSize(info.Size()))
+	// Get file size if not in pipe mode
+	if outputFile != "" {
+		info, err := os.Stat(outputFile)
+		if err == nil {
+			fmt.Fprintf(os.Stderr, "✓ Export complete: %s (%s)\n", outputFile, formatSize(info.Size()))
+		}
 	}
 
 	return nil
@@ -530,6 +549,7 @@ func (m *Manager) ExportDatabase(outputFile, database string, compressLevel int,
 
 // ImportDatabase imports a database from a dump file using pg_restore or psql.
 // Supports custom format (pg_restore) and plain SQL format (psql), with optional gzip decompression.
+// If inputFile is empty, reads from stdin for pipe usage.
 func (m *Manager) ImportDatabase(inputFile, database string, clean bool, verbose bool) error {
 	running, err := m.containerRunning(m.cfg.Podman.ContainerName)
 	if err != nil {
@@ -539,28 +559,40 @@ func (m *Manager) ImportDatabase(inputFile, database string, clean bool, verbose
 		return fmt.Errorf("container '%s' is not running. Run 'pg start -i %s' first", m.cfg.Podman.ContainerName, m.cfg.Instance)
 	}
 
-	// Check if input file exists
-	if _, err := os.Stat(inputFile); os.IsNotExist(err) {
-		return fmt.Errorf("input file not found: %s", inputFile)
-	}
+	var reader io.Reader
+	var format string
+	var isGzipped bool
 
-	format, isGzipped := detectFormatByContent(inputFile)
-
-	// Open input file
-	file, err := os.Open(inputFile)
-	if err != nil {
-		return fmt.Errorf("opening input file: %w", err)
-	}
-	defer file.Close()
-
-	var reader io.Reader = file
-	if isGzipped {
-		gzReader, err := gzip.NewReader(file)
-		if err != nil {
-			return fmt.Errorf("creating gzip reader: %w", err)
+	if inputFile == "" {
+		// Pipe mode: read from stdin, assume custom format
+		reader = os.Stdin
+		format = "custom"
+		isGzipped = false
+	} else {
+		// Check if input file exists
+		if _, err := os.Stat(inputFile); os.IsNotExist(err) {
+			return fmt.Errorf("input file not found: %s", inputFile)
 		}
-		defer gzReader.Close()
-		reader = gzReader
+
+		format, isGzipped = detectFormatByContent(inputFile)
+
+		// Open input file
+		file, err := os.Open(inputFile)
+		if err != nil {
+			return fmt.Errorf("opening input file: %w", err)
+		}
+		defer file.Close()
+
+		if isGzipped {
+			gzReader, err := gzip.NewReader(file)
+			if err != nil {
+				return fmt.Errorf("creating gzip reader: %w", err)
+			}
+			defer gzReader.Close()
+			reader = gzReader
+		} else {
+			reader = file
+		}
 	}
 
 	// Build command arguments
@@ -582,18 +614,22 @@ func (m *Manager) ImportDatabase(inputFile, database string, clean bool, verbose
 		podmanArgs = append(podmanArgs, "--no-owner", "--no-privileges")
 	}
 
-	// Execute podman exec with stdin from file
+	// Execute podman exec with stdin from reader
 	cmd := podmanCommand(m.podman, podmanArgs...)
 	cmd.Stdin = reader
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	fmt.Printf("Importing from %s to %s...\n", inputFile, database)
+	if inputFile != "" {
+		fmt.Printf("Importing from %s to %s...\n", inputFile, database)
+	}
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("import failed: %w", err)
 	}
 
-	fmt.Printf("✓ Import complete\n")
+	if inputFile != "" {
+		fmt.Printf("✓ Import complete\n")
+	}
 	return nil
 }
 
