@@ -125,6 +125,7 @@ See the full [Quick Start](docs/quickstart.md) guide for multi-instance setup, i
 | `pg export` | Export database to dump file |
 | `pg import` | Import database from dump file |
 | `pg snapshot` | Manage backups (create/list/delete) |
+| `pg backup` | Manage the shared pgBackRest backup container (setup/start/stop/status) |
 | `pg restore` | PITR point-in-time recovery |
 | `pg create` | Create new instance |
 | `pg destroy` | Destroy instance |

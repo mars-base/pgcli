@@ -56,11 +56,36 @@ pg exec -i proj01 "SELECT pg_reload_conf()"
 
 **Note:** Some parameters (e.g. `shared_buffers`, `max_connections`) require a restart rather than reload. Use `pg stop && pg start` to apply those changes.
 
+## Configuration File Management
+
+Inspect or validate the config file (`~/.pgcli/pg.yaml` by default, override with `-c`).
+
+```bash
+# Show current configuration (YAML)
+pg config show
+
+# Show configuration as JSON
+pg config show --json
+
+# Validate config file structure
+pg config validate
+```
+
+Init generates a default config; `--add` creates a named instance in the same file, `-o` writes to a custom path:
+
+```bash
+pg config init --add default --base-dir /data/pg
+pg config init --add proj01 --base-dir /data/pg -o ./my-pg.yaml
+```
+
 ## Destroy and Rebuild
 
 ```bash
 # Destroy instance (keeps data directory)
 pg destroy -i proj01
+
+# Destroy without confirmation prompt
+pg destroy -i proj01 --force
 
 # Destroy with data cleanup (fresh start)
 pg destroy -i proj01 --clean-data
