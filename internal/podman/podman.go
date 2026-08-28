@@ -21,9 +21,10 @@ import (
 
 // Manager encapsulates Podman operations, bound to a configuration.
 type Manager struct {
-	cfg     *config.Config
-	podman  string // podman binary path
-	dataDir string // pg data directory (~/.pgcli)
+	cfg      *config.Config
+	podman   string // podman binary path
+	dataDir  string // pg data directory (~/.pgcli)
+	repaired bool   // stale podman state already repaired this process
 }
 
 var (
@@ -84,11 +85,77 @@ func New(cfg *config.Config) (*Manager, error) {
 		dataDir = platform.DefaultConfigDir()
 	}
 
-	return &Manager{
+	m := &Manager{
 		cfg:     cfg,
 		podman:  path,
 		dataDir: dataDir,
-	}, nil
+	}
+	m.ensurePodmanReady()
+	return m, nil
+}
+
+// migrateSignals are error fragments podman (podman-launcher) emits when its
+// rootless pause-process record is stale. This happens after a host reboot:
+// the pause process dies but its bookkeeping survives, so every podman
+// command fails until `podman system migrate` resets it.
+var migrateSignals = []string{
+	"need podman system migrate",
+	"try resetting the pause process",
+	"invalid internal status",
+}
+
+// needsMigrate reports whether podman output indicates a stale rootless
+// state that requires `podman system migrate`.
+func needsMigrate(output string) bool {
+	lower := strings.ToLower(output)
+	for _, sig := range migrateSignals {
+		if strings.Contains(lower, sig) {
+			return true
+		}
+	}
+	return false
+}
+
+// ensurePodmanReady probes podman once per process and transparently runs
+// `podman system migrate` when a stale rootless state is detected, so pg
+// commands work on first use after a reboot.
+func (m *Manager) ensurePodmanReady() {
+	if runtime.GOOS != "linux" || m.repaired {
+		return
+	}
+	probe := podmanCommand(m.podman, "ps", "-a", "--format", "{{.Names}}")
+	if out, err := probe.CombinedOutput(); err != nil && needsMigrate(string(out)) {
+		m.runMigrate()
+	}
+}
+
+// runMigrate runs `podman system migrate` once per process.
+func (m *Manager) runMigrate() {
+	if m.repaired {
+		return
+	}
+	m.repaired = true
+	fmt.Println("-> Detected stale podman state (likely after a reboot); running 'podman system migrate'...")
+	if mg := podmanCommand(m.podman, "system", "migrate"); mg.Run() != nil {
+		slog.Warn("podman system migrate failed; run 'podman system migrate' manually if podman errors persist")
+	}
+}
+
+// tryRepair inspects a podman error and, when it indicates a stale rootless
+// pause-process state, repairs it once so the caller can retry.
+func (m *Manager) tryRepair(err error) bool {
+	if runtime.GOOS != "linux" || m.repaired {
+		return false
+	}
+	var stderr string
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		stderr = string(exitErr.Stderr)
+	}
+	if !needsMigrate(stderr) {
+		return false
+	}
+	m.runMigrate()
+	return true
 }
 
 // --- Machine management -----------------------------------------
@@ -1215,6 +1282,10 @@ func (m *Manager) run(args ...string) (string, error) {
 	slog.Debug("podman", "args", args)
 	cmd := podmanCommand(m.podman, args...)
 	out, err := cmd.Output()
+	if err != nil && m.tryRepair(err) {
+		cmd = podmanCommand(m.podman, args...)
+		out, err = cmd.Output()
+	}
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return "", fmt.Errorf("podman %s: %s", strings.Join(args, " "), string(exitErr.Stderr))
