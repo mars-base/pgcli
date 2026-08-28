@@ -117,6 +117,7 @@ See the full [Quick Start](docs/quickstart.md) guide for multi-instance setup, i
 |---------|-------------|
 | `pg config` | Configuration management |
 | `pg create` | Create new instance |
+| `pg clone` | Clone an instance into a new one via logical dump |
 | `pg start` | Start instance + backup services |
 | `pg stop` | Stop services |
 | `pg status` | Show status and connection info |

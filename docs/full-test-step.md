@@ -1,8 +1,8 @@
 # pgcli Core Functionality Test Report
 
-**Test Date:** 2026-08-27
+**Test Date:** 2026-08-27 (initial), 2026-08-28 (additional)
 **Test Environment:** Debian 12 (bookworm), linux/amd64, VM
-**pgcli Version:** v1.0.1
+**pgcli Version:** v1.3.2 (clone feature pending release)
 **PostgreSQL Version:** 18.6
 **pgBackRest Version:** 2.59.1
 **Podman Version:** 4.9.3 (via podman-launcher)
@@ -35,6 +35,27 @@
 | 20 | PITR Restore | `pg restore --time "2026-08-27 10:57:25+08" --promote --force` | PASS | Restored to exact point in time |
 | 21 | PITR Data Verification | `SELECT * FROM test_restore` | PASS | before_backup + after_backup_1 present, after_backup_2 correctly excluded |
 | 22 | Stop Instance | `pg stop` | PASS | Container exited cleanly |
+| 23 | psql One-Shot | `pg psql -- -c "SELECT 1"` | PASS | psql passthrough args |
+| 24 | psql from stdin | `echo "SELECT 1;" \| pg psql` | PASS | Non-interactive script mode |
+| 25 | psql --dsn | `pg psql --dsn postgres://... "SELECT 1"` | PASS | Remote connection via temporary container |
+| 26 | Container Shell | `pg shell -- -c "whoami"` | PASS | Root shell inside container |
+| 27 | Export Custom | `pg export -i pg01 -o backup.dump` | PASS | Custom format (PGDMP magic bytes) |
+| 28 | Export SQL Format | `pg export -i pg01 -o backup.sql` | PASS | Plain SQL (psql-compatible) |
+| 29 | Export Gzip | `pg export -i pg01 -o backup.dump.gz` | PASS | Auto-detected from .gz extension |
+| 30 | Import File | `pg import -i pg02 backup.dump` | PASS | Custom format restore |
+| 31 | Import --clean | `pg import -i pg02 backup.dump --clean` | PASS | Drops objects before restore |
+| 32 | exec --dsn | `pg exec --dsn postgres://... "SELECT 1"` | PASS | Remote SQL execution |
+| 33 | Pipe Between Instances | `pg export -i pg01 \| pg import -i pg02 --clean` | PASS | No temp file, streamed |
+| 34 | Pipe via SSH | `pg export -i pg01 \| ssh host "pg import -i pg02"` | PASS | Cross-host streaming |
+| 35 | Pipe Local to VM | `pg export --dsn <local> \| pg import --dsn <vm> --clean` | PASS | 10000 rows transferred intact |
+| 36 | Pipe VM to Local | `pg export --dsn <vm> \| pg import --dsn <local> --clean` | PASS | Reverse direction verified |
+| 37 | DSN/Instance Conflict | `pg exec --dsn ... -i pg02 ...` | PASS (correctly rejected) | "--dsn and --instance are mutually exclusive" |
+| 38 | Config Show/Validate | `pg config show` / `pg config validate` | PASS | YAML output, validation OK |
+| 39 | Shell Completion | `pg completion bash/zsh/fish/powershell` | PASS | Scripts generated |
+| 40 | Backup Container | `pg backup setup/start/stop/status` | PASS | Container lifecycle, 2 stanzas, snapshot verified after rebuild |
+| 41 | Clone Local | `pg clone test04 -i pg01` | PASS | 510000 rows cloned, auto port/password |
+| 42 | Clone --dsn | `pg clone test05 --dsn postgres://...` | PASS | Remote-to-local clone, progress shown |
+| 43 | Clone Pre-Check | stopped source / wrong DSN password | PASS (correctly rejected) | Fails before creating anything |
 
 ---
 
