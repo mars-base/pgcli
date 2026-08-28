@@ -20,10 +20,11 @@ Whether you're running multiple dev databases, managing staging environments, or
 
 | Document | Description |
 |----------|-------------|
-| [Quick Start](docs/quickstart.md) | Initial setup, multi-instance, psql session, container shell |
-| [Data Import/Export](docs/import-export.md) | Export/import databases, piping, remote DSN |
-| [Backup and Restore](docs/backup-restore.md) | Snapshots and point-in-time recovery (PITR) |
-| [Administration](docs/administration.md) | Shell completion, PostgreSQL config, destroy/rebuild |
+| [Quick Start](docs/quickstart.md) | Install, init config, start/stop instances, multi-instance, interactive psql session, container shell, remote connection via `--dsn` |
+| [Data Import/Export](docs/import-export.md) | Export/import in custom or SQL format, gzip compression, specific database, stream piping between instances, across hosts via SSH, and to remote databases via `--dsn` |
+| [Backup and Restore](docs/backup-restore.md) | Full/differential snapshots, snapshot list/delete, point-in-time recovery (PITR) with read-only inspection before promoting |
+| [Administration](docs/administration.md) | Shell completion (bash/zsh/fish/PowerShell), PostgreSQL parameter tuning, instance destroy/rebuild |
+| [Test Report](docs/full-test-step.md) | Core functionality test report: DSN piping, PITR verification, known issues, install script test |
 
 ## System Requirements
 
