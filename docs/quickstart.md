@@ -56,6 +56,10 @@ pg psql -- -d postgres
 pg psql -- -c "\dt"     # list tables
 pg psql -- -c "\du"     # list users
 pg psql -- -c "\l"      # list databases
+
+# Connect to a remote database via connection string (--dsn)
+pg psql --dsn postgres://user:pass@host:5432/db
+pg exec --dsn postgres://user:pass@host:5432/db "SELECT version()"
 ```
 
 Inside the interactive psql shell, you have full access to:

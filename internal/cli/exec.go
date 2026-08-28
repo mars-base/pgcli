@@ -10,6 +10,7 @@ import (
 )
 
 func init() {
+	execCmd.Flags().String("dsn", "", "database connection string for remote database (postgres://user:pass@host:port/db)")
 	rootCmd.AddCommand(execCmd)
 }
 
@@ -29,16 +30,35 @@ Examples:
   pg exec -i myinst "SELECT count(*) FROM users"
   pg exec -- psql -U pgcli -d mydb
   pg exec -- bash -c "cat /var/lib/postgresql/data/postgresql.conf"
-  pg exec -- pg_isready`,
+  pg exec -- pg_isready
+  pg exec --dsn postgres://user:pass@host:5432/db "SELECT count(*) FROM users"`,
 	DisableFlagParsing: false,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := loadConfig(); err != nil {
-			return err
-		}
+		dsn, _ := cmd.Flags().GetString("dsn")
+
 		if len(args) == 0 {
 			return fmt.Errorf("no command specified. Usage: pg exec \"SELECT 1\" or pg exec -- <command>")
 		}
 
+		// Container commands (after --) only make sense for a local instance.
+		if dsn != "" && cmd.ArgsLenAtDash() != -1 {
+			return fmt.Errorf("--dsn only supports SQL mode; container commands require a local instance (drop --dsn)")
+		}
+
+		if dsn != "" {
+			if err := loadConfigForDSN(); err != nil {
+				return err
+			}
+			pm, err := newPodman()
+			if err != nil {
+				return err
+			}
+			return pm.ExecDSN(dsn, strings.Join(args, " "))
+		}
+
+		if err := loadConfig(); err != nil {
+			return err
+		}
 		containerName := cfg.Podman.ContainerName
 
 		// Check if container is running

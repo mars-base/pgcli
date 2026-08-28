@@ -880,6 +880,55 @@ func (m *Manager) ImportToDSN(dsn, inputFile string, clean bool, verbose bool) e
 	return nil
 }
 
+// ExecDSN runs a SQL statement against a remote database via a temporary
+// container, so no host PostgreSQL tools are required.
+func (m *Manager) ExecDSN(dsn, sql string) error {
+	imageTag := m.cfg.Podman.ImageTag
+	containerName := fmt.Sprintf("pgcli-exec-%d", time.Now().UnixNano())
+	defer m.run("rm", "-f", containerName)
+
+	podmanArgs := []string{
+		"run", "--rm", "--name", containerName,
+		"--network", "host",
+		"-i",
+		imageTag,
+		"psql", "--dbname=" + dsn, "-c", sql,
+	}
+	cmd := podmanCommand(m.podman, podmanArgs...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// PsqlDSN opens an interactive psql session against a remote database via a
+// temporary container, so no host PostgreSQL tools are required.
+func (m *Manager) PsqlDSN(dsn string, psqlArgs []string) error {
+	imageTag := m.cfg.Podman.ImageTag
+	containerName := fmt.Sprintf("pgcli-psql-%d", time.Now().UnixNano())
+	defer m.run("rm", "-f", containerName)
+
+	runFlags := "-i"
+	if isTerminal(os.Stdin) {
+		runFlags = "-it"
+	}
+
+	podmanArgs := []string{
+		"run", "--rm", "--name", containerName,
+		"--network", "host",
+		runFlags,
+		imageTag,
+		"psql", "--dbname=" + dsn,
+	}
+	podmanArgs = append(podmanArgs, psqlArgs...)
+
+	cmd := podmanCommand(m.podman, podmanArgs...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
 // Destroy removes the container. Data directories on the host are preserved.
 func (m *Manager) Destroy() error {
 	return m.DestroyWithData(false)

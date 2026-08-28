@@ -117,9 +117,9 @@ See the full [Quick Start](docs/quickstart.md) guide for multi-instance setup, i
 | `pg stop` | Stop services |
 | `pg status` | Show status and connection info |
 | `pg list` | List all instances |
-| `pg psql` | Open interactive psql session |
+| `pg psql` | Open interactive psql session (also via `--dsn` for remote DBs) |
 | `pg shell` | Open interactive bash shell in container |
-| `pg exec` | Execute SQL or shell commands |
+| `pg exec` | Execute SQL or shell commands (also via `--dsn` for remote DBs) |
 | `pg export` | Export database to dump file |
 | `pg import` | Import database from dump file |
 | `pg snapshot` | Manage backups (create/list/delete) |
