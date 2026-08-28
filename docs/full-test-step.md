@@ -1,7 +1,7 @@
 # pgcli Core Functionality Test Report
 
 **Test Date:** 2026-08-27
-**Test Environment:** Debian 12 (bookworm), linux/amd64, VM at 10.241.20.147
+**Test Environment:** Debian 12 (bookworm), linux/amd64, VM
 **pgcli Version:** v1.0.1
 **PostgreSQL Version:** 18.6
 **pgBackRest Version:** 2.59.1
