@@ -25,6 +25,7 @@ Whether you're running multiple dev databases, managing staging environments, or
 | [Data Import/Export](docs/import-export.md) | Export/import in custom or SQL format, gzip compression, specific database, stream piping between instances, across hosts via SSH, and to remote databases via `--dsn` |
 | [Clone](docs/clone.md) | Copy an instance into a new one via logical dump pipe, remote `--dsn` source, pre-flight connectivity check, live progress |
 | [Backup and Restore](docs/backup-restore.md) | Full/differential snapshots, snapshot list/delete, point-in-time recovery (PITR) with read-only inspection before promoting |
+| [Replica](docs/replica.md) | Read-only physical standby of an instance: create/list, live WAL streaming, lag, slot lifecycle |
 | [Administration](docs/administration.md) | Shell completion (bash/zsh/fish/PowerShell), PostgreSQL parameter tuning, instance destroy/rebuild |
 | [Test Report](docs/full-test-step.md) | Core functionality test report: DSN piping, PITR verification, known issues, install script test |
 
@@ -77,6 +78,7 @@ The installer automatically detects available privileges and adapts accordingly.
 - **Containerized PostgreSQL** — Each instance runs in an isolated Podman container
 - **PITR (Point-In-Time Recovery)** — Full backup and time-travel recovery via pgBackRest
 - **Snapshot Management** — Create, list, and delete database snapshots
+- **Read-only Replicas** — Physical standby instances streaming WAL from a primary, for read/write split
 - **Multi-Instance Support** — Run multiple isolated PostgreSQL instances on different ports
 - **Linux + macOS** — Native Podman on Linux, podman machine on macOS
 
@@ -130,6 +132,7 @@ See the full [Quick Start](docs/quickstart.md) guide for multi-instance setup, i
 | `pg import` | Import database from dump file |
 | `pg snapshot` | Manage backups (create/list/delete) |
 | `pg restore` | PITR point-in-time recovery |
+| `pg replica` | Create/list read-only physical replicas (standbys) of an instance |
 | `pg destroy` | Destroy instance |
 | `pg backup` | Manage the shared backup container (setup/start/stop/status) |
 | `pg completion` | Generate shell completion scripts |

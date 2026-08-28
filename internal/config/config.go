@@ -31,6 +31,9 @@ type InstanceConfig struct {
 	Postgres PostgresConfig `yaml:"postgres"`
 	Podman   PodmanConfig   `yaml:"podman"`
 	PITR     PITRConfig     `yaml:"pitr"`
+	// ReplicaOf names the primary instance this instance streams from via
+	// physical replication. Empty means the instance is a primary.
+	ReplicaOf string `yaml:"replica_of,omitempty"`
 }
 
 // PostgresConfig holds PostgreSQL connection settings.
@@ -147,7 +150,6 @@ func (c *Config) SetInstance(name string) error {
 	if !ok {
 		return fmt.Errorf("instance %q not found in config", name)
 	}
-
 	// Merge Postgres config
 	if inst.Postgres.Host != "" {
 		c.Postgres.Host = inst.Postgres.Host
@@ -194,6 +196,23 @@ func (c *Config) SetInstance(name string) error {
 	}
 
 	return nil
+}
+
+// IsReplica reports whether the currently-selected instance is a physical
+// replica (ReplicaOf set) of another instance.
+func (c *Config) IsReplica() bool {
+	inst, ok := c.Instances[c.Instance]
+	return ok && inst.ReplicaOf != ""
+}
+
+// ReplicaOf returns the primary instance name for a replica, or "" if the
+// named instance is not a replica.
+func (c *Config) ReplicaOf(name string) string {
+	inst, ok := c.Instances[name]
+	if !ok {
+		return ""
+	}
+	return inst.ReplicaOf
 }
 
 // Load reads configuration from a file and merges it with defaults.

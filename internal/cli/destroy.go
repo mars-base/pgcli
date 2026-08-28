@@ -91,19 +91,36 @@ Examples:
 			}
 		}
 
-		// 1. Destroy container (and data if requested)
+		// 1. Replicas: drop the physical replication slot on the primary so
+		// WAL is not held forever on its behalf (best-effort — a stopped
+		// primary just leaves the slot for manual cleanup).
+		if primary := cfg.ReplicaOf(cfgInstance); primary != "" {
+			pc := *cfg
+			if err := pc.SetInstance(primary); err == nil {
+				ppm, perr := podman.New(&pc)
+				if perr == nil && ppm.CheckContainerRunning() == nil {
+					if err := ppm.DropReplicaSlot(cfgInstance); err != nil {
+						fmt.Printf("  [!]  Warning: dropping replication slot on primary %q: %v\n", primary, err)
+					} else {
+						fmt.Printf("  [OK] replication slot for replica %q removed from primary %q\n", cfgInstance, primary)
+					}
+				}
+			}
+		}
+
+		// 2. Destroy container (and data if requested)
 		fmt.Printf("-> Stopping and removing container %s...\n", inst.Podman.ContainerName)
 		if err := pm.DestroyWithData(destroyCleanData); err != nil {
 			fmt.Printf("  [!]  Warning: failed to destroy container: %v\n", err)
 		}
 
-		// 2. Remove config entry
+		// 3. Remove config entry
 		delete(cfg.Instances, cfgInstance)
 		if err := cfg.Save(path); err != nil {
 			return fmt.Errorf("failed to save config: %w", err)
 		}
 
-		// 3. Rebuild or remove backup container depending on remaining instances.
+		// 4. Rebuild or remove backup container depending on remaining instances.
 		if cfg.PITR.Enabled {
 			bm, err := podman.NewBackupManager(cfg)
 			if err != nil {

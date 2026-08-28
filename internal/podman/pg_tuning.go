@@ -146,6 +146,11 @@ func (m *Manager) ApplyPGTuning() (needsRestart bool, err error) {
 	if _, err := m.run("cp", tmpPath, m.cfg.Podman.ContainerName+":"+pgConfPath); err != nil {
 		return false, fmt.Errorf("pg_tuning: podman cp postgresql.conf: %w", err)
 	}
+	// podman cp writes as container root — restore postgres ownership so the
+	// postmaster can read the file on reload/restart.
+	if err := m.chownDataFile(m.cfg.Podman.ContainerName, pgConfPath); err != nil {
+		return false, fmt.Errorf("pg_tuning: chown postgresql.conf: %w", err)
+	}
 
 	fmt.Println("-> PostgreSQL performance tuning applied")
 

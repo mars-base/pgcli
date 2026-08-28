@@ -136,12 +136,19 @@ func doStart(c *config.Config) error {
 		return err
 	}
 
-	// 7. Create and start container
+	// 7. Replica instances: initialize data via pg_basebackup before the
+	// container is created (skips initdb). No-op for primaries and on
+	// subsequent starts.
+	if err := pm.EnsureReplica(); err != nil {
+		return err
+	}
+
+	// 8. Create and start container
 	if err := pm.EnsureContainer(); err != nil {
 		return err
 	}
 
-	// 7a. EnsurePGPortProxy is a no-op on Unix platforms.
+	// 8a. EnsurePGPortProxy is a no-op on Unix platforms.
 	pm.EnsurePGPortProxy()
 
 	// Wait for PostgreSQL to finish initialization (initdb + init scripts).

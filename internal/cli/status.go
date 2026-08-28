@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -49,7 +50,18 @@ var statusCmd = &cobra.Command{
 		if cs.Running {
 			ready, _ := pm.PGIsReady()
 			if ready {
+				// Distinguish replicas: a standby serves the same data but is
+				// read-only and streams WAL from its primary.
+				role := "primary"
+				if out, err := pm.Exec("psql", "-U", cfg.Postgres.User, "-d", cfg.Postgres.Database,
+					"-t", "-A", "-c", "SELECT pg_is_in_recovery()"); err == nil && strings.TrimSpace(out) == "t" {
+					role = "standby"
+					if prim := cfg.ReplicaOf(cfg.Instance); prim != "" {
+						role = "standby (replica of " + prim + ")"
+					}
+				}
 				fmt.Println("\nPostgreSQL: [OK] accepting connections")
+				fmt.Printf("  Role: %s\n", role)
 				fmt.Printf("  Connection: %s\n", cfg.GetPostgresURL())
 			} else {
 				fmt.Println("\nPostgreSQL: [X] not accepting connections")

@@ -1018,7 +1018,7 @@ func (m *Manager) DestroyWithData(cleanData bool) error {
 		if desc.path == "" {
 			continue
 		}
-		if err := removeHostDir(m.podman, desc.path); err != nil {
+		if err := removeHostDir(m.podman, m.cfg.Podman.ImageTag, desc.path); err != nil {
 			return fmt.Errorf("removing %s directory %s: %w", desc.name, desc.path, err)
 		}
 		fmt.Printf("  [OK] %s directory removed: %s\n", desc.name, desc.path)
@@ -1030,7 +1030,7 @@ func (m *Manager) DestroyWithData(cleanData bool) error {
 		repo := m.cfg.Backup.DataDir
 		for _, sub := range []string{"backup", "archive"} {
 			p := filepath.Join(repo, sub, stanza)
-			if err := removeHostDir(m.podman, p); err != nil {
+			if err := removeHostDir(m.podman, m.cfg.Podman.ImageTag, p); err != nil {
 				return fmt.Errorf("removing repo %s directory %s: %w", sub, p, err)
 			}
 		}
@@ -1040,9 +1040,12 @@ func (m *Manager) DestroyWithData(cleanData bool) error {
 	return nil
 }
 
-// removeHostDir deletes a host directory, handling rootless podman ownership
-// by falling back to a temporary container with the parent directory mounted.
-func removeHostDir(podmanPath, dir string) error {
+// removeHostDir deletes a host directory, handling rootless podman ownership:
+// container-written files belong to a subordinate UID the host user cannot
+// delete (EACCES), so on Linux the directory is removed inside the podman
+// user namespace, and elsewhere via a temporary container (image must exist
+// locally, e.g. the pg image) with the parent directory mounted.
+func removeHostDir(podmanPath, image, dir string) error {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return nil
 	}
@@ -1051,8 +1054,12 @@ func removeHostDir(podmanPath, dir string) error {
 		return nil
 	}
 
-	// Fallback: delete from inside a container running as root within the
-	// user namespace so subordinate-UID files can be removed.
+	if runtime.GOOS == "linux" {
+		if err := podmanUnshareRm(podmanPath, dir); err == nil {
+			return nil
+		}
+	}
+
 	parent := filepath.Dir(dir)
 	base := filepath.Base(dir)
 	if parent == dir || parent == "" {
@@ -1061,12 +1068,18 @@ func removeHostDir(podmanPath, dir string) error {
 
 	cmd := podmanCommand(podmanPath, "run", "--rm",
 		"-v", fmt.Sprintf("%s:/target:z", hostMountPath(parent)),
-		"alpine:3.20", "sh", "-c", fmt.Sprintf("rm -rf /target/%s", base),
+		image, "sh", "-c", fmt.Sprintf("rm -rf /target/%s", base),
 	)
 	if err := cmd.Run(); err != nil {
 		return err
 	}
 	return nil
+}
+
+// podmanUnshareRm removes a path from inside the rootless podman user
+// namespace, where subordinate-UID files are accessible to the host process.
+func podmanUnshareRm(podmanPath, path string) error {
+	return podmanCommand(podmanPath, "unshare", "rm", "-rf", path).Run()
 }
 
 // PGIsReady checks if PostgreSQL is accepting connections by running pg_isready

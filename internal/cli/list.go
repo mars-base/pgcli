@@ -41,40 +41,45 @@ var listCmd = &cobra.Command{
 			return nil
 		}
 
-		fmt.Printf("%-12s %-30s\n", "NAME", "STATUS")
-		fmt.Println(strings.Repeat("-", 43))
+		fmt.Printf("%-12s %-9s %-12s %-30s\n", "NAME", "ROLE", "PRIMARY", "STATUS")
+		fmt.Println(strings.Repeat("-", 64))
 
 		for name := range cfg.Instances {
+			role, primary := "primary", "-"
+			if of := cfg.Instances[name].ReplicaOf; of != "" {
+				role, primary = "replica", of
+			}
+
 			// Work on a per-instance view of the config.
 			if err := cfg.SetInstance(name); err != nil {
-				printRow(name, "config error")
+				printRow(name, role, primary, "config error")
 				continue
 			}
 
 			pm, err := podman.New(cfg)
 			if err != nil {
-				printRow(name, friendlyError(err))
+				printRow(name, role, primary, friendlyError(err))
 				continue
 			}
 
 			cs, err := pm.Status()
 			if err != nil {
-				printRow(name, friendlyError(err))
+				printRow(name, role, primary, friendlyError(err))
 				continue
 			}
 
-			printRow(name, cs.Status)
+			printRow(name, role, primary, cs.Status)
 		}
 
 		return nil
 	},
 }
 
-func printRow(name, status string) {
+func printRow(name, role, primary, status string) {
 	if len(status) > 28 {
 		status = status[:25] + "..."
 	}
-	fmt.Printf("%-12s %-30s\n", name, status)
+	fmt.Printf("%-12s %-9s %-12s %-30s\n", name, role, primary, status)
 }
 
 func friendlyError(err error) string {
