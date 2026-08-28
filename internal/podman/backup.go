@@ -441,19 +441,24 @@ func (m *BackupManager) BackupContainerStatus() (*ContainerStatus, error) {
 		return nil, fmt.Errorf("querying backup container status: %w", err)
 	}
 
-	out = strings.TrimSpace(out)
-	if out == "" {
-		return &ContainerStatus{Name: m.cfg.Backup.ContainerName, Status: "not created"}, nil
-	}
-
-	parts := strings.SplitN(out, "\t", 3)
 	cs := &ContainerStatus{Name: m.cfg.Backup.ContainerName}
-	if len(parts) >= 2 {
-		cs.Status = parts[1]
-		cs.Running = strings.HasPrefix(strings.ToLower(parts[1]), "up")
+	// podman's name filter is a substring match — pick the exact line.
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, m.cfg.Backup.ContainerName+"\t") {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) >= 2 {
+			cs.Status = parts[1]
+			cs.Running = strings.HasPrefix(strings.ToLower(parts[1]), "up")
+		}
+		if len(parts) >= 3 {
+			cs.Ports = parts[2]
+		}
+		break
 	}
-	if len(parts) >= 3 {
-		cs.Ports = parts[2]
+	if cs.Status == "" {
+		cs.Status = "not created"
 	}
 	return cs, nil
 }

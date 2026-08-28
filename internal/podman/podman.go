@@ -397,19 +397,24 @@ func (m *Manager) Status() (*ContainerStatus, error) {
 		return nil, fmt.Errorf("querying container status: %w", err)
 	}
 
-	out = strings.TrimSpace(out)
-	if out == "" {
-		return &ContainerStatus{Name: m.cfg.Podman.ContainerName, Status: "not created"}, nil
-	}
-
-	parts := strings.SplitN(out, "\t", 3)
 	cs := &ContainerStatus{Name: m.cfg.Podman.ContainerName}
-	if len(parts) >= 2 {
-		cs.Status = parts[1]
-		cs.Running = strings.HasPrefix(strings.ToLower(parts[1]), "up")
+	// podman's name filter is a substring match — pick the exact line.
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, m.cfg.Podman.ContainerName+"\t") {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) >= 2 {
+			cs.Status = parts[1]
+			cs.Running = strings.HasPrefix(strings.ToLower(parts[1]), "up")
+		}
+		if len(parts) >= 3 {
+			cs.Ports = parts[2]
+		}
+		break
 	}
-	if len(parts) >= 3 {
-		cs.Ports = parts[2]
+	if cs.Status == "" {
+		cs.Status = "not created"
 	}
 	return cs, nil
 }
@@ -1433,7 +1438,14 @@ func (m *Manager) containerRunning(name string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return strings.TrimSpace(out) == name, nil
+	// podman's name filter is a substring match, so e.g. checking
+	// "pgcli-pg-a" also matches "pgcli-pg-a2" — compare line by line.
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == name {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // CheckContainerRunning verifies the instance container is running,

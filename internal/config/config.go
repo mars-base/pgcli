@@ -418,6 +418,20 @@ func (c *Config) autoAssignPorts() {
 	// on the same host don't collide.
 	usedPorts := platform.GetUsedPorts()
 
+	// Collect explicitly-assigned ports from this config: a stopped instance's
+	// port is not listening, so without this a new instance (e.g. a clone)
+	// could steal it and break the original when it starts later.
+	assignedPG := map[int]bool{}
+	assignedSSH := map[int]bool{}
+	for _, inst := range c.Instances {
+		if inst.Podman.HostPort != 0 {
+			assignedPG[inst.Podman.HostPort] = true
+		}
+		if inst.Podman.SSHPort != 0 {
+			assignedSSH[inst.Podman.SSHPort] = true
+		}
+	}
+
 	nextPG := pgBase
 	nextSSH := sshBase
 	for _, name := range sorted {
@@ -425,7 +439,7 @@ func (c *Config) autoAssignPorts() {
 		changed := false
 
 		if inst.Podman.HostPort == 0 {
-			for usedPorts != nil && usedPorts[nextPG] {
+			for (usedPorts != nil && usedPorts[nextPG]) || assignedPG[nextPG] {
 				nextPG++
 			}
 			inst.Podman.HostPort = nextPG
@@ -436,7 +450,7 @@ func (c *Config) autoAssignPorts() {
 		}
 
 		if inst.Podman.SSHPort == 0 && sshBase > 0 {
-			for usedPorts != nil && usedPorts[nextSSH] {
+			for (usedPorts != nil && usedPorts[nextSSH]) || assignedSSH[nextSSH] {
 				nextSSH++
 			}
 			inst.Podman.SSHPort = nextSSH
