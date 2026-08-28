@@ -4,6 +4,7 @@ package podman
 
 import (
 	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -357,6 +358,14 @@ func (m *Manager) EnsureContainer() error {
 		return m.createContainer()
 	}
 
+	// The container name is taken — verify it is actually ours before reusing
+	// it. Different pgcli configs share the same podman daemon, so a name
+	// collision (e.g. two configs both creating "ro1") silently reuses the
+	// wrong instance's container and its data.
+	if err := m.verifyContainerMount(); err != nil {
+		return err
+	}
+
 	running, err := m.containerRunning(m.cfg.Podman.ContainerName)
 	if err != nil {
 		return err
@@ -368,6 +377,39 @@ func (m *Manager) EnsureContainer() error {
 
 	fmt.Printf("-> Container %s is already running\n", m.cfg.Podman.ContainerName)
 	return nil
+}
+
+// verifyContainerMount checks that an existing container with our name really
+// belongs to this instance: the bind source of /var/lib/postgresql must equal
+// this instance's data directory. A mismatch means the name is taken by
+// another instance (possibly from a different pgcli config sharing the same
+// podman daemon) and the container must not be reused.
+func (m *Manager) verifyContainerMount() error {
+	out, err := m.run("inspect", "--format", "{{json .Mounts}}", m.cfg.Podman.ContainerName)
+	if err != nil {
+		return fmt.Errorf("inspecting existing container %q: %w", m.cfg.Podman.ContainerName, err)
+	}
+
+	var mounts []struct {
+		Source      string `json:"Source"`
+		Destination string `json:"Destination"`
+	}
+	if err := json.Unmarshal([]byte(out), &mounts); err != nil {
+		return fmt.Errorf("parsing mounts of container %q: %w", m.cfg.Podman.ContainerName, err)
+	}
+
+	want := filepath.Clean(m.cfg.Podman.DataDir)
+	for _, mt := range mounts {
+		if filepath.Clean(mt.Destination) != "/var/lib/postgresql" {
+			continue
+		}
+		if filepath.Clean(mt.Source) == want {
+			return nil
+		}
+		return fmt.Errorf("container %q already exists but its data volume is %q, not %q -- the container name is taken by another instance or config; destroy that instance (or rename it) before starting this one",
+			m.cfg.Podman.ContainerName, mt.Source, want)
+	}
+	return fmt.Errorf("container %q exists but has no /var/lib/postgresql data volume; it is not a pgcli PostgreSQL container", m.cfg.Podman.ContainerName)
 }
 
 // StartContainer starts an existing container.
