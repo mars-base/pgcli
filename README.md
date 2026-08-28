@@ -23,6 +23,7 @@ Whether you're running multiple dev databases, managing staging environments, or
 | [Quick Start](docs/quickstart.md) | Install, init config, start/stop instances, multi-instance, interactive psql session, container shell, remote connection via `--dsn` |
 | [exec and psql](docs/exec-psql.md) | One-shot SQL vs interactive sessions, container command mode, stdin scripts, psql passthrough args, remote `--dsn` mode and its rules |
 | [Data Import/Export](docs/import-export.md) | Export/import in custom or SQL format, gzip compression, specific database, stream piping between instances, across hosts via SSH, and to remote databases via `--dsn` |
+| [Clone](docs/clone.md) | Copy an instance into a new one via logical dump pipe, remote `--dsn` source, pre-flight connectivity check, live progress |
 | [Backup and Restore](docs/backup-restore.md) | Full/differential snapshots, snapshot list/delete, point-in-time recovery (PITR) with read-only inspection before promoting |
 | [Administration](docs/administration.md) | Shell completion (bash/zsh/fish/PowerShell), PostgreSQL parameter tuning, instance destroy/rebuild |
 | [Test Report](docs/full-test-step.md) | Core functionality test report: DSN piping, PITR verification, known issues, install script test |
