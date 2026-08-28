@@ -78,6 +78,15 @@ func loadConfigForDSN() error {
 	return nil
 }
 
+// checkDSNInstanceConflict rejects an explicitly set --instance when --dsn is used:
+// the connection string fully determines the target, so -i would be silently ignored.
+func checkDSNInstanceConflict(cmd *cobra.Command) error {
+	if cmd.Flags().Changed("instance") {
+		return fmt.Errorf("--dsn and --instance are mutually exclusive: with --dsn the connection string determines host, port and database")
+	}
+	return nil
+}
+
 // newPodman creates a Podman manager.
 func newPodman() (*podman.Manager, error) {
 	return podman.New(cfg)

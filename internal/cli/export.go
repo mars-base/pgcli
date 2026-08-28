@@ -27,6 +27,9 @@ Examples:
 
 		// DSN mode - export from remote database
 		if dsn != "" {
+			if err := checkDSNInstanceConflict(cmd); err != nil {
+				return err
+			}
 			if err := loadConfigForDSN(); err != nil {
 				return err
 			}
