@@ -1,8 +1,8 @@
 # pgcli Core Functionality Test Report
 
 **Test Date:** 2026-08-27 (initial), 2026-08-28 (additional)
-**Test Environment:** Debian 12 (bookworm), linux/amd64, VM
-**pgcli Version:** v1.3.2 (clone feature pending release)
+**Test Environment:** Debian 12 (bookworm), linux/amd64, VM + local
+**pgcli Version:** v1.3.3 (clone feature; e2e automated suite)
 **PostgreSQL Version:** 18.6
 **pgBackRest Version:** 2.59.1
 **Podman Version:** 4.9.3 (via podman-launcher)
@@ -56,6 +56,19 @@
 | 41 | Clone Local | `pg clone test04 -i pg01` | PASS | 510000 rows cloned, auto port/password |
 | 42 | Clone --dsn | `pg clone test05 --dsn postgres://...` | PASS | Remote-to-local clone, progress shown |
 | 43 | Clone Pre-Check | stopped source / wrong DSN password | PASS (correctly rejected) | Fails before creating anything |
+| 44 | Export File Validity | `head -c 4` = PGDMP / SQL contains CREATE TABLE / `gzip -t` | PASS | All three formats verified valid |
+| 45 | Import Data Verify | `SELECT count(*)` after import = 3 | PASS | custom / SQL / gzip formats |
+| 46 | Pipe Data Verify | `pg export -i e2e-test \| pg import -i e2e-test2 --clean` | PASS | count = 3 |
+| 47 | Pipe --dsn Data Verify | `pg export --dsn <dsn1> \| pg import --dsn <dsn2> --clean` | PASS | count = 3 |
+| 48 | Clone Target Exists | `pg clone e2e-test -i e2e-test` | PASS (correctly rejected) | "already exists in config" |
+| 49 | Clone Source Missing | `pg clone e2e-bad2 -i nosuch-inst` | PASS (correctly rejected) | "not found in config" |
+| 50 | Clone --dsn + -i Conflict | `pg clone e2e-x --dsn <dsn> -i e2e-test` | PASS (correctly rejected) | "mutually exclusive" |
+| 51 | psql --dsn + -i Conflict | `pg psql --dsn <dsn> -i e2e-test -- -c "SELECT 1"` | PASS (correctly rejected) | "mutually exclusive" |
+| 52 | export --dsn + -i Conflict | `pg export --dsn <dsn> -i e2e-test -o x.dump` | PASS (correctly rejected) | "mutually exclusive" |
+| 53 | import --dsn + -i Conflict | `pg import --dsn <dsn> -i e2e-test f.dump` | PASS (correctly rejected) | "mutually exclusive" |
+| 54 | exec --dsn Container Cmd | `pg exec --dsn <dsn> -- -c "whoami"` | PASS (correctly rejected) | "only supports SQL mode" |
+| 55 | export --dsn to File | `pg export --dsn <dsn> -o dsn-export.dump` | PASS | PGDMP magic bytes verified |
+| 56 | import --dsn from File | `pg import --dsn <dsn2> dsn-export.dump --clean` | PASS | count = 3 |
 
 ---
 
@@ -92,6 +105,9 @@ All known issues have been fixed in v1.0.1:
 | Deleting non-existent snapshot reports success | **Fixed in v1.0.1** | 9640bbe |
 | Deleting only full backup unclear error | **Fixed in v1.0.1** | 2ebff3f |
 | WAL archive may lag behind real time | By design | pg restore validates WAL coverage before restoring |
+| podman name filter substring match: false "not running" with multiple instances | **Fixed in v1.3.3** | 519506d |
+| Clone steals the port of a stopped instance | **Fixed in v1.3.3** | 519506d |
+| e2e cleanup fails on rootless container files (permission denied) | **Fixed in v1.3.3** | 519506d |
 
 ---
 
