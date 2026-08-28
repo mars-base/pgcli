@@ -540,31 +540,14 @@ func (m *Manager) ExportDatabase(outputFile, database string, compressLevel int,
 	// Pipe mode: write to stdout, always custom format
 	var writer io.Writer
 	var format string
-	var isGzipped bool
 
 	if outputFile == "" {
 		writer = os.Stdout
 		format = "custom"
-		isGzipped = false
 	} else {
+		isGzipped := false
 		format, isGzipped = detectFormat(outputFile)
-	}
 
-	// Build pg_dump arguments
-	args := []string{"pg_dump", "-U", m.cfg.Postgres.User}
-	if verbose {
-		args = append(args, "-v")
-	}
-	if format == "plain" {
-		args = append(args, "-Fp")
-	} else {
-		args = append(args, "-Fc")
-	}
-
-	args = append(args, "-d", database)
-
-	// Create output file if not in pipe mode
-	if outputFile != "" {
 		file, err := os.Create(outputFile)
 		if err != nil {
 			return fmt.Errorf("creating output file: %w", err)
@@ -587,16 +570,11 @@ func (m *Manager) ExportDatabase(outputFile, database string, compressLevel int,
 		}
 	}
 
-	// Execute podman exec with stdout redirected
-	podmanArgs := append([]string{"exec", "-i", m.cfg.Podman.ContainerName}, args...)
-	cmd := podmanCommand(m.podman, podmanArgs...)
-	cmd.Stdout = writer
-	cmd.Stderr = os.Stderr
-
 	if outputFile != "" {
 		fmt.Fprintf(os.Stderr, "Exporting %s to %s...\n", database, outputFile)
 	}
-	if err := cmd.Run(); err != nil {
+
+	if err := m.exportTo(writer, database, verbose, format); err != nil {
 		return fmt.Errorf("export failed: %w", err)
 	}
 
@@ -609,6 +587,42 @@ func (m *Manager) ExportDatabase(outputFile, database string, compressLevel int,
 	}
 
 	return nil
+}
+
+// ExportDatabasePipe exports the instance database to an arbitrary writer
+// (custom format, no progress output) for programmatic piping, e.g. pg clone.
+func (m *Manager) ExportDatabasePipe(w io.Writer, database string) error {
+	running, err := m.containerRunning(m.cfg.Podman.ContainerName)
+	if err != nil {
+		return fmt.Errorf("checking container status: %w", err)
+	}
+	if !running {
+		return fmt.Errorf("container '%s' is not running. Run 'pg start -i %s' first", m.cfg.Podman.ContainerName, m.cfg.Instance)
+	}
+	if err := m.exportTo(w, database, false, "custom"); err != nil {
+		return fmt.Errorf("export failed: %w", err)
+	}
+	return nil
+}
+
+// exportTo runs pg_dump inside the instance container, writing to w.
+func (m *Manager) exportTo(w io.Writer, database string, verbose bool, format string) error {
+	args := []string{"pg_dump", "-U", m.cfg.Postgres.User}
+	if verbose {
+		args = append(args, "-v")
+	}
+	if format == "plain" {
+		args = append(args, "-Fp")
+	} else {
+		args = append(args, "-Fc")
+	}
+	args = append(args, "-d", database)
+
+	podmanArgs := append([]string{"exec", "-i", m.cfg.Podman.ContainerName}, args...)
+	cmd := podmanCommand(m.podman, podmanArgs...)
+	cmd.Stdout = w
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 // ImportDatabase imports a database from a dump file using pg_restore or psql.
@@ -625,19 +639,18 @@ func (m *Manager) ImportDatabase(inputFile, database string, clean bool, verbose
 
 	var reader io.Reader
 	var format string
-	var isGzipped bool
 
 	if inputFile == "" {
 		// Pipe mode: read from stdin, assume custom format
 		reader = os.Stdin
 		format = "custom"
-		isGzipped = false
 	} else {
 		// Check if input file exists
 		if _, err := os.Stat(inputFile); os.IsNotExist(err) {
 			return fmt.Errorf("input file not found: %s", inputFile)
 		}
 
+		isGzipped := false
 		format, isGzipped = detectFormatByContent(inputFile)
 
 		// Open input file
@@ -659,7 +672,39 @@ func (m *Manager) ImportDatabase(inputFile, database string, clean bool, verbose
 		}
 	}
 
-	// Build command arguments
+	if inputFile != "" {
+		fmt.Printf("Importing from %s to %s...\n", inputFile, database)
+	}
+
+	if err := m.importFrom(reader, database, clean, verbose, format); err != nil {
+		return fmt.Errorf("import failed: %w", err)
+	}
+
+	if inputFile != "" {
+		fmt.Printf("✓ Import complete\n")
+	}
+	return nil
+}
+
+// ImportDatabasePipe imports from an arbitrary reader into the instance database
+// (custom format, no progress output) for programmatic piping, e.g. pg clone.
+func (m *Manager) ImportDatabasePipe(r io.Reader, database string) error {
+	running, err := m.containerRunning(m.cfg.Podman.ContainerName)
+	if err != nil {
+		return fmt.Errorf("checking container status: %w", err)
+	}
+	if !running {
+		return fmt.Errorf("container '%s' is not running. Run 'pg start -i %s' first", m.cfg.Podman.ContainerName, m.cfg.Instance)
+	}
+	if err := m.importFrom(r, database, false, false, "custom"); err != nil {
+		return fmt.Errorf("import failed: %w", err)
+	}
+	return nil
+}
+
+// importFrom runs pg_restore (custom) or psql (plain) inside the instance
+// container, reading dump data from r.
+func (m *Manager) importFrom(r io.Reader, database string, clean bool, verbose bool, format string) error {
 	var podmanArgs []string
 	if format == "plain" {
 		// Use psql for plain SQL format
@@ -680,21 +725,10 @@ func (m *Manager) ImportDatabase(inputFile, database string, clean bool, verbose
 
 	// Execute podman exec with stdin from reader
 	cmd := podmanCommand(m.podman, podmanArgs...)
-	cmd.Stdin = reader
+	cmd.Stdin = r
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-
-	if inputFile != "" {
-		fmt.Printf("Importing from %s to %s...\n", inputFile, database)
-	}
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("import failed: %w", err)
-	}
-
-	if inputFile != "" {
-		fmt.Printf("✓ Import complete\n")
-	}
-	return nil
+	return cmd.Run()
 }
 
 // ExportFromDSN exports a remote database to a file or stdout using a temporary container.
@@ -702,29 +736,14 @@ func (m *Manager) ExportFromDSN(dsn, outputFile string, compressLevel int, verbo
 	// Determine format
 	var writer io.Writer
 	var format string
-	var isGzipped bool
 
 	if outputFile == "" {
 		writer = os.Stdout
 		format = "custom"
-		isGzipped = false
 	} else {
+		isGzipped := false
 		format, isGzipped = detectFormat(outputFile)
-	}
 
-	// Build pg_dump arguments
-	args := []string{"pg_dump", "--dbname=" + dsn}
-	if verbose {
-		args = append(args, "-v")
-	}
-	if format == "plain" {
-		args = append(args, "-Fp")
-	} else {
-		args = append(args, "-Fc")
-	}
-
-	// Create output file if not in pipe mode
-	if outputFile != "" {
 		file, err := os.Create(outputFile)
 		if err != nil {
 			return fmt.Errorf("creating output file: %w", err)
@@ -747,6 +766,48 @@ func (m *Manager) ExportFromDSN(dsn, outputFile string, compressLevel int, verbo
 		}
 	}
 
+	if outputFile != "" {
+		fmt.Fprintf(os.Stderr, "Exporting from %s to %s...\n", dsn, outputFile)
+	}
+
+	if err := m.exportFromDSNTo(writer, dsn, verbose, format); err != nil {
+		return fmt.Errorf("export failed: %w", err)
+	}
+
+	// Get file size if not in pipe mode
+	if outputFile != "" {
+		info, err := os.Stat(outputFile)
+		if err == nil {
+			fmt.Fprintf(os.Stderr, "✓ Export complete: %s (%s)\n", outputFile, formatSize(info.Size()))
+		}
+	}
+
+	return nil
+}
+
+// ExportFromDSNPipe exports a remote database to an arbitrary writer
+// (custom format, no progress output) for programmatic piping, e.g. pg clone.
+func (m *Manager) ExportFromDSNPipe(w io.Writer, dsn string) error {
+	if err := m.exportFromDSNTo(w, dsn, false, "custom"); err != nil {
+		return fmt.Errorf("export failed: %w", err)
+	}
+	return nil
+}
+
+// exportFromDSNTo runs pg_dump in a temporary container with host network,
+// writing dump data to w.
+func (m *Manager) exportFromDSNTo(w io.Writer, dsn string, verbose bool, format string) error {
+	// Build pg_dump arguments
+	args := []string{"pg_dump", "--dbname=" + dsn}
+	if verbose {
+		args = append(args, "-v")
+	}
+	if format == "plain" {
+		args = append(args, "-Fp")
+	} else {
+		args = append(args, "-Fc")
+	}
+
 	// Run pg_dump in a temporary container with host network
 	imageTag := m.cfg.Podman.ImageTag
 	containerName := fmt.Sprintf("pgcli-export-%d", time.Now().UnixNano())
@@ -765,25 +826,9 @@ func (m *Manager) ExportFromDSN(dsn, outputFile string, compressLevel int, verbo
 	podmanArgs = append(podmanArgs, args...)
 
 	cmd := podmanCommand(m.podman, podmanArgs...)
-	cmd.Stdout = writer
+	cmd.Stdout = w
 	cmd.Stderr = os.Stderr
-
-	if outputFile != "" {
-		fmt.Fprintf(os.Stderr, "Exporting from %s to %s...\n", dsn, outputFile)
-	}
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("export failed: %w", err)
-	}
-
-	// Get file size if not in pipe mode
-	if outputFile != "" {
-		info, err := os.Stat(outputFile)
-		if err == nil {
-			fmt.Fprintf(os.Stderr, "✓ Export complete: %s (%s)\n", outputFile, formatSize(info.Size()))
-		}
-	}
-
-	return nil
+	return cmd.Run()
 }
 
 // ImportToDSN imports a database from a file or stdin to a remote database using a temporary container.
@@ -1389,6 +1434,43 @@ func (m *Manager) containerRunning(name string) (bool, error) {
 		return false, err
 	}
 	return strings.TrimSpace(out) == name, nil
+}
+
+// CheckContainerRunning verifies the instance container is running,
+// returning an actionable error otherwise.
+func (m *Manager) CheckContainerRunning() error {
+	running, err := m.containerRunning(m.cfg.Podman.ContainerName)
+	if err != nil {
+		return fmt.Errorf("checking container status: %w", err)
+	}
+	if !running {
+		return fmt.Errorf("container '%s' is not running. Run 'pg start -i %s' first", m.cfg.Podman.ContainerName, m.cfg.Instance)
+	}
+	return nil
+}
+
+// CheckDSNReachable verifies a remote database accepts authenticated
+// connections via a temporary container.
+func (m *Manager) CheckDSNReachable(dsn string) error {
+	imageTag := m.cfg.Podman.ImageTag
+	containerName := fmt.Sprintf("pgcli-check-%d", time.Now().UnixNano())
+	defer func() {
+		m.run("rm", "-f", containerName)
+	}()
+
+	podmanArgs := []string{
+		"run", "--rm", "--name", containerName,
+		"--network", "host",
+		imageTag,
+		"psql", "--dbname=" + dsn, "-c", "SELECT 1",
+	}
+	cmd := podmanCommand(m.podman, podmanArgs...)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("cannot connect to source database: %w", err)
+	}
+	return nil
 }
 
 func (m *Manager) createContainer() error {
