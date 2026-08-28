@@ -91,7 +91,16 @@ Examples:
 			}
 		}
 
-		// 1. Replicas: drop the physical replication slot on the primary so
+		// 1. Destroy container (and data if requested). Must happen BEFORE the
+		// slot drop: a live replica holds an active slot, and
+		// pg_drop_replication_slot refuses active slots. Stopping the
+		// container first closes the streaming connection so the drop succeeds.
+		fmt.Printf("-> Stopping and removing container %s...\n", inst.Podman.ContainerName)
+		if err := pm.DestroyWithData(destroyCleanData); err != nil {
+			fmt.Printf("  [!]  Warning: failed to destroy container: %v\n", err)
+		}
+
+		// 2. Replicas: drop the physical replication slot on the primary so
 		// WAL is not held forever on its behalf (best-effort — a stopped
 		// primary just leaves the slot for manual cleanup).
 		if primary := cfg.ReplicaOf(cfgInstance); primary != "" {
@@ -106,12 +115,6 @@ Examples:
 					}
 				}
 			}
-		}
-
-		// 2. Destroy container (and data if requested)
-		fmt.Printf("-> Stopping and removing container %s...\n", inst.Podman.ContainerName)
-		if err := pm.DestroyWithData(destroyCleanData); err != nil {
-			fmt.Printf("  [!]  Warning: failed to destroy container: %v\n", err)
 		}
 
 		// 3. Remove config entry
