@@ -17,6 +17,7 @@ import (
 	res "github.com/mars-base/pgcli/embed"
 	"github.com/mars-base/pgcli/internal/config"
 	"github.com/mars-base/pgcli/internal/platform"
+	"golang.org/x/term"
 )
 
 // Manager encapsulates Podman operations, bound to a configuration.
@@ -446,11 +447,7 @@ func (m *Manager) ExecInteractive(args ...string) error {
 
 // isTerminal checks if a file is a terminal (TTY).
 func isTerminal(f *os.File) bool {
-	stat, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return (stat.Mode() & os.ModeCharDevice) != 0
+	return term.IsTerminal(int(f.Fd()))
 }
 
 // formatSize returns a human-readable file size string.
@@ -913,14 +910,21 @@ func (m *Manager) PsqlDSN(dsn string, psqlArgs []string) error {
 		runFlags = "-it"
 	}
 
+	// Disable psql's pager when stdin is not a TTY (pipes/scripts) so the
+	// session exits after the query instead of waiting in `less`.
+	psqlCmdArgs := []string{"psql", "--dbname=" + dsn}
+	if !isTerminal(os.Stdin) {
+		psqlCmdArgs = append(psqlCmdArgs, "-P", "pager=off")
+	}
+	psqlCmdArgs = append(psqlCmdArgs, psqlArgs...)
+
 	podmanArgs := []string{
 		"run", "--rm", "--name", containerName,
 		"--network", "host",
 		runFlags,
 		imageTag,
-		"psql", "--dbname=" + dsn,
 	}
-	podmanArgs = append(podmanArgs, psqlArgs...)
+	podmanArgs = append(podmanArgs, psqlCmdArgs...)
 
 	cmd := podmanCommand(m.podman, podmanArgs...)
 	cmd.Stdin = os.Stdin
