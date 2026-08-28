@@ -388,12 +388,29 @@ func (m *BackupManager) EnsureBackupContainer(confPath string) error {
 	return m.createBackupContainer(confPath)
 }
 
-// StartBackupContainer starts the backup container.
+// StartBackupContainer starts the backup container. If the container is in an
+// improper state (e.g. left "Stopping" after a host reboot), `podman start`
+// fails; the container is then removed and recreated automatically.
 func (m *BackupManager) StartBackupContainer() error {
 	if _, err := m.run("start", m.cfg.Backup.ContainerName); err != nil {
-		return fmt.Errorf("starting backup container: %w", err)
+		fmt.Printf("  [!] Starting backup container failed: %v\n", err)
+		return m.recreateBackupContainer()
 	}
 	return nil
+}
+
+// recreateBackupContainer removes the current backup container and creates a
+// fresh one. Bind-mounted backup data on the host is preserved.
+func (m *BackupManager) recreateBackupContainer() error {
+	confPath, err := m.WritePgbackrestConf()
+	if err != nil {
+		return fmt.Errorf("generating pgbackrest.conf: %w", err)
+	}
+	fmt.Println("  -> Removing and recreating backup container...")
+	if _, err := m.run("rm", "-f", m.cfg.Backup.ContainerName); err != nil {
+		return fmt.Errorf("removing stale backup container: %w", err)
+	}
+	return m.createBackupContainer(confPath)
 }
 
 // StopBackupContainer stops the backup container.
