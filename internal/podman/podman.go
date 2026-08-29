@@ -1044,6 +1044,15 @@ func (m *Manager) DestroyWithData(cleanData bool) error {
 	m.run("stop", m.cfg.Podman.ContainerName)
 	m.run("rm", "-f", m.cfg.Podman.ContainerName)
 
+	// Remove the per-instance pgbackrest.conf written for the PG container.
+	// Config, not data — removed regardless of --clean-data.
+	instConf := filepath.Join(m.dataDir, fmt.Sprintf("pgbackrest-%s.conf", m.cfg.Podman.ContainerName))
+	if err := os.Remove(instConf); err == nil {
+		fmt.Printf("  [OK] config removed: %s\n", instConf)
+	} else if !os.IsNotExist(err) {
+		fmt.Printf("  [!] warning: removing %s: %v\n", instConf, err)
+	}
+
 	if !cleanData {
 		fmt.Printf("  Data preserved at: %s\n", m.cfg.Podman.DataDir)
 		return nil
@@ -1075,14 +1084,6 @@ func (m *Manager) DestroyWithData(cleanData bool) error {
 		} else if removed {
 			fmt.Printf("  [OK] empty parent directory removed: %s\n", parent)
 		}
-	}
-
-	// Remove the per-instance pgbackrest.conf written for the PG container.
-	instConf := filepath.Join(m.dataDir, fmt.Sprintf("pgbackrest-%s.conf", m.cfg.Podman.ContainerName))
-	if err := os.Remove(instConf); err == nil {
-		fmt.Printf("  [OK] config removed: %s\n", instConf)
-	} else if !os.IsNotExist(err) {
-		fmt.Printf("  [!] warning: removing %s: %v\n", instConf, err)
 	}
 
 	// Remove pgBackRest stanza directories from the shared repo.

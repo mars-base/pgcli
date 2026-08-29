@@ -431,18 +431,37 @@ func (m *BackupManager) Destroy() error {
 	return nil
 }
 
+// RemoveHostConfig deletes the backup infrastructure's config and credential
+// files (pgbackrest.conf, SSH config and keys) while leaving backup data on
+// disk. Used when the last instance is destroyed without --clean-data so the
+// data stays available for a rebuild.
+func (m *BackupManager) RemoveHostConfig() error {
+	for _, p := range []string{
+		filepath.Join(m.dataDir, "pgbackrest.conf"),
+		filepath.Join(m.dataDir, "backup", "ssh_config"),
+		filepath.Join(m.dataDir, "backup", "id_rsa"),
+		filepath.Join(m.dataDir, "backup", "id_rsa.pub"),
+	} {
+		if err := os.Remove(p); err == nil {
+			fmt.Printf("  [OK] removed: %s\n", p)
+		} else if !os.IsNotExist(err) {
+			fmt.Printf("  [!]  Warning: removing %s: %v\n", p, err)
+		}
+	}
+	return nil
+}
+
 // RemoveHostData deletes everything the shared backup infrastructure left on
 // the host: the backup repo (stanza dirs are already removed per-instance),
 // the pgBackRest logs, the SSH credentials and the shared pgbackrest.conf.
-// Call after Destroy() when no instances remain. The dbdata directory is only
-// removed when empty (other instances may still use it).
+// Call after Destroy() when no instances remain and --clean-data is used. The
+// dbdata directory is only removed when empty (other instances may still use
+// it).
 func (m *BackupManager) RemoveHostData() error {
+	m.RemoveHostConfig()
+
 	baseDir := m.dataDir
 	for _, p := range []string{
-		filepath.Join(baseDir, "pgbackrest.conf"),
-		filepath.Join(baseDir, "backup", "ssh_config"),
-		filepath.Join(baseDir, "backup", "id_rsa"),
-		filepath.Join(baseDir, "backup", "id_rsa.pub"),
 		filepath.Join(baseDir, "backup", "log"),
 		filepath.Join(baseDir, "backup", "data"),
 		filepath.Join(baseDir, "backup"),

@@ -130,15 +130,22 @@ Examples:
 				fmt.Printf("  [!]  Warning: cannot rebuild backup container: %v\n", err)
 			} else if len(cfg.Instances) == 0 {
 				// No instances left — stop and remove the shared backup
-				// container, then clean up every file it left behind on the
-				// host (repo, logs, SSH credentials, pgbackrest.conf).
+				// container.
 				if err := bm.Destroy(); err != nil {
 					fmt.Printf("  [!]  Warning: failed to remove backup container: %v\n", err)
 				} else {
 					fmt.Println("  [OK] backup container removed (no instances remaining)")
 				}
-				if err := bm.RemoveHostData(); err != nil {
-					fmt.Printf("  [!]  Warning: cleaning up backup host data: %v\n", err)
+				// With --clean-data remove every file the container left
+				// behind (repo, logs, credentials). Without it keep the
+				// backup data so a rebuild can restore from the existing
+				// repo; only drop the config and credential files.
+				if destroyCleanData {
+					if err := bm.RemoveHostData(); err != nil {
+						fmt.Printf("  [!]  Warning: cleaning up backup host data: %v\n", err)
+					}
+				} else if err := bm.RemoveHostConfig(); err != nil {
+					fmt.Printf("  [!]  Warning: cleaning up backup host config: %v\n", err)
 				}
 			} else {
 				// Ensure SSH key exists before rebuilding backup container
