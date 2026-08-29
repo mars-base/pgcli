@@ -1066,6 +1066,25 @@ func (m *Manager) DestroyWithData(cleanData bool) error {
 		fmt.Printf("  [OK] %s directory removed: %s\n", desc.name, desc.path)
 	}
 
+	// Remove the now-empty parent (e.g. dbdata/<name>) so no empty shell
+	// directories remain. Never touches a non-empty directory.
+	parent := filepath.Dir(m.cfg.Podman.DataDir)
+	if parent != m.cfg.Podman.DataDir && parent != "." {
+		if removed, err := removeHostDirIfEmpty(m.podman, m.cfg.Podman.ImageTag, parent); err != nil {
+			fmt.Printf("  [!] warning: removing empty parent directory %s: %v\n", parent, err)
+		} else if removed {
+			fmt.Printf("  [OK] empty parent directory removed: %s\n", parent)
+		}
+	}
+
+	// Remove the per-instance pgbackrest.conf written for the PG container.
+	instConf := filepath.Join(m.dataDir, fmt.Sprintf("pgbackrest-%s.conf", m.cfg.Podman.ContainerName))
+	if err := os.Remove(instConf); err == nil {
+		fmt.Printf("  [OK] config removed: %s\n", instConf)
+	} else if !os.IsNotExist(err) {
+		fmt.Printf("  [!] warning: removing %s: %v\n", instConf, err)
+	}
+
 	// Remove pgBackRest stanza directories from the shared repo.
 	if m.cfg.PITR.Enabled && m.cfg.Backup.DataDir != "" {
 		stanza := m.cfg.PITR.PgBackRestStanza
@@ -1116,6 +1135,21 @@ func removeHostDir(podmanPath, image, dir string) error {
 		return err
 	}
 	return nil
+}
+
+// removeHostDirIfEmpty removes dir only when it is empty. Returns removed=true
+// when the directory is gone. Non-empty directories (or ones whose emptiness
+// cannot be verified because rootless podman hides ownership behind a
+// subordinate UID) are removed via removeHostDir, which deletes whatever the
+// instance wrote there.
+func removeHostDirIfEmpty(podmanPath, image, dir string) (bool, error) {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return false, nil
+	}
+	if entries, err := os.ReadDir(dir); err == nil && len(entries) > 0 {
+		return false, nil // not empty — leave it alone
+	}
+	return true, removeHostDir(podmanPath, image, dir)
 }
 
 // podmanUnshareRm removes a path from inside the rootless podman user

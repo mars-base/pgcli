@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 
 	"gopkg.in/yaml.v3"
@@ -14,14 +15,17 @@ import (
 
 // Config is the complete pgcli configuration.
 type Config struct {
-	BaseDir   string                    `yaml:"base_dir,omitempty"`
-	Network   string                    `yaml:"network,omitempty"` // shared podman network name, persisted at top level
-	Postgres  PostgresConfig            `yaml:"postgres"`
-	Podman    PodmanConfig              `yaml:"podman"`
-	PITR      PITRConfig                `yaml:"pitr"`
-	Logging   LoggingConfig             `yaml:"logging"`
-	Backup    BackupConfig              `yaml:"backup"`
-	Instances map[string]InstanceConfig `yaml:"instances"`
+	BaseDir     string                    `yaml:"base_dir,omitempty"`
+	Network     string                    `yaml:"network,omitempty"` // shared podman network name, persisted at top level
+	Namespace   string                    `yaml:"namespace,omitempty"` // container name namespace, empty = disabled (default)
+	PGStartPort int                       `yaml:"pg_start_port,omitempty"` // starting PG host port, default 35432
+	PGSSHPort   int                       `yaml:"pg_ssh_port,omitempty"` // starting SSH host port, default 42201
+	Postgres    PostgresConfig            `yaml:"postgres"`
+	Podman      PodmanConfig              `yaml:"podman"`
+	PITR        PITRConfig                `yaml:"pitr"`
+	Logging     LoggingConfig             `yaml:"logging"`
+	Backup      BackupConfig              `yaml:"backup"`
+	Instances   map[string]InstanceConfig `yaml:"instances"`
 
 	Instance string `yaml:"-"` // current instance name (set at runtime, not persisted)
 }
@@ -79,7 +83,9 @@ type BackupConfig struct {
 // Default returns a Config populated with default values.
 func Default() *Config {
 	return &Config{
-		BaseDir: "", // empty means use platform default
+		BaseDir:     "", // empty means use platform default
+		PGStartPort: 35432,
+		PGSSHPort:   42201,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -111,6 +117,14 @@ func Default() *Config {
 	}
 }
 
+// nsSuffix returns "-<namespace>" or "" for a namespace-prefixed name.
+func nsSuffix(namespace string) string {
+	if namespace == "" {
+		return ""
+	}
+	return "-" + namespace
+}
+
 // InstanceDefaults returns default configuration for the named instance.
 // Container names, stanza names, etc. are derived from the instance name.
 // If BaseDir is set, data paths are relative to it; otherwise uses platform default.
@@ -128,7 +142,7 @@ func (c *Config) InstanceDefaults(name string) *InstanceConfig {
 			Database: name + "_db",
 		},
 		Podman: PodmanConfig{
-			ContainerName: "pgcli-pg-" + name,
+			ContainerName: "pgcli-pg" + nsSuffix(c.Namespace) + "-" + name,
 			DataDir:       filepath.Join(baseDir, "dbdata", name, "data"),
 			ImageTag:      c.Podman.ImageTag,
 			HostPort:      0, // auto-assigned
@@ -238,21 +252,27 @@ func Load(path string) (*Config, error) {
 // displayConfig is the serializable subset of Config for save/display.
 // Global postgres/podman/pitr are excluded -- they are in-memory defaults only.
 type displayConfig struct {
-	BaseDir   string                    `yaml:"base_dir,omitempty"`
-	Network   string                    `yaml:"network,omitempty"`
-	Logging   LoggingConfig             `yaml:"logging"`
-	Backup    BackupConfig              `yaml:"backup"`
-	Instances map[string]InstanceConfig `yaml:"instances"`
+	BaseDir     string                    `yaml:"base_dir,omitempty"`
+	Network     string                    `yaml:"network,omitempty"`
+	Namespace   string                    `yaml:"namespace,omitempty"`
+	PGStartPort int                       `yaml:"pg_start_port,omitempty"`
+	PGSSHPort   int                       `yaml:"pg_ssh_port,omitempty"`
+	Logging     LoggingConfig             `yaml:"logging"`
+	Backup      BackupConfig              `yaml:"backup"`
+	Instances   map[string]InstanceConfig `yaml:"instances"`
 }
 
 // Display returns a view of the config suitable for display or saving.
 func (c *Config) Display() displayConfig {
 	return displayConfig{
-		BaseDir:   c.BaseDir,
-		Network:   c.Podman.Network,
-		Logging:   c.Logging,
-		Backup:    c.Backup,
-		Instances: c.Instances,
+		BaseDir:     c.BaseDir,
+		Network:     c.Podman.Network,
+		Namespace:   c.Namespace,
+		PGStartPort: c.PGStartPort,
+		PGSSHPort:   c.PGSSHPort,
+		Logging:     c.Logging,
+		Backup:      c.Backup,
+		Instances:   c.Instances,
 	}
 }
 
@@ -274,6 +294,17 @@ func (c *Config) Save(path string) error {
 
 // Validate checks that the configuration is complete.
 func (c *Config) Validate() error {
+	if c.Namespace != "" {
+		nsOK, err := regexp.MatchString(`^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`, c.Namespace)
+		if err != nil || !nsOK {
+			return fmt.Errorf("namespace %q must match [A-Za-z0-9][A-Za-z0-9_-]{0,31} (no spaces or slashes)", c.Namespace)
+		}
+	}
+	for name, val := range map[string]int{"pg_start_port": c.PGStartPort, "pg_ssh_port": c.PGSSHPort} {
+		if val < 1 || val > 65535 {
+			return fmt.Errorf("%s must be between 1 and 65535, got %d", name, val)
+		}
+	}
 	if c.Podman.ContainerName == "" {
 		return fmt.Errorf("podman.container_name must not be empty")
 	}
@@ -297,6 +328,14 @@ func (c *Config) GetPostgresURL() string {
 // applyDefaults fills zero-value fields with their defaults.
 func (c *Config) ApplyDefaults() {
 	d := Default()
+
+	// Namespace / port bases
+	if c.PGStartPort == 0 {
+		c.PGStartPort = d.PGStartPort
+	}
+	if c.PGSSHPort == 0 {
+		c.PGSSHPort = d.PGSSHPort
+	}
 
 	// Postgres
 	if c.Postgres.Host == "" {
@@ -346,6 +385,12 @@ func (c *Config) ApplyDefaults() {
 	// Backup
 	if c.Backup.ContainerName == "" {
 		c.Backup.ContainerName = d.Backup.ContainerName
+	}
+	// With a namespace, the shared backup container must be isolated too,
+	// otherwise configs sharing one host would collide on "pgcli-backup".
+	// Only rename while it still holds the bare default; an explicit name is kept.
+	if c.Namespace != "" && c.Backup.ContainerName == "pgcli-backup" {
+		c.Backup.ContainerName = "pgcli-backup" + nsSuffix(c.Namespace)
 	}
 	if c.Backup.ImageTag == "" {
 		c.Backup.ImageTag = d.Backup.ImageTag
@@ -407,8 +452,8 @@ func (c *Config) ApplyDefaults() {
 }
 
 // autoAssignPorts assigns sequential host ports (PG + SSH) to instances that
-// have HostPort=0 / SSHPort=0. PG ports start at 35432, SSH ports start at
-// 42201.
+// have HostPort=0 / SSHPort=0. PG ports start at pg_start_port (default
+// 35432), SSH ports start at pg_ssh_port (default 42201).
 //
 // Instances are processed in alphabetical order by name. Explicitly-set ports
 // are respected and skipped. The "default" instance always gets the base port.
@@ -429,9 +474,9 @@ func (c *Config) autoAssignPorts() {
 		}
 	}
 
-	// All platforms use host networking: PG from 35432, SSH from 42201.
-	pgBase := 35432
-	sshBase := 42201
+	// All platforms use host networking: PG from c.PGStartPort, SSH from c.PGSSHPort.
+	pgBase := c.PGStartPort
+	sshBase := c.PGSSHPort
 
 	// Probe already-used ports so multiple config files (or other services)
 	// on the same host don't collide.

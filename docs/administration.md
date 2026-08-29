@@ -78,6 +78,20 @@ pg config init --add default --base-dir /data/pg
 pg config init --add proj01 --base-dir /data/pg -o ./my-pg.yaml
 ```
 
+Isolation parameters for running multiple configs on one host (see [Quick Start](quickstart.md) for planning):
+
+```bash
+pg config init --namespace t1 --pg-start-port 38000 --pg-ssh-port 43000 --add proj01 -o ~/.pgcli-t1/pg.yaml
+```
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `--namespace` | `default` | Prefix for container names: `pgcli-pg-<namespace>-<instance>`, backup container `pgcli-backup-<namespace>`. Pass `--namespace ""` to keep legacy names without a prefix |
+| `--pg-start-port` | `35432` | First PG host port in the allocation range |
+| `--pg-ssh-port` | `42201` | First SSH host port in the allocation range |
+
+All three are saved into the config file (`namespace`, `pg_start_port`, `pg_ssh_port`); use disjoint port ranges across configs so allocations never collide.
+
 ## Destroy and Rebuild
 
 ```bash

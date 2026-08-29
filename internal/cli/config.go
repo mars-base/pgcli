@@ -14,9 +14,12 @@ import (
 )
 
 var (
-	configJSON    bool
-	configAdd     string
-	configBaseDir string
+	configJSON        bool
+	configAdd         string
+	configBaseDir     string
+	configNamespace   string
+	configPGStartPort int
+	configPGSSHPort   int
 )
 
 func init() {
@@ -28,6 +31,9 @@ func init() {
 	configShowCmd.Flags().BoolVar(&configJSON, "json", false, "output in JSON format")
 	configInitCmd.Flags().StringVar(&configAdd, "add", "", "add an instance with this name during init (default: no instances)")
 	configInitCmd.Flags().StringVar(&configBaseDir, "base-dir", "", "base directory for all data paths (default ~/.pgcli)")
+	configInitCmd.Flags().StringVar(&configNamespace, "namespace", "default", "namespace prefix for container names (isolates configs sharing one host; pass \"\" to disable)")
+	configInitCmd.Flags().IntVar(&configPGStartPort, "pg-start-port", 35432, "starting port for PG host port allocation")
+	configInitCmd.Flags().IntVar(&configPGSSHPort, "pg-ssh-port", 42201, "starting port for SSH host port allocation")
 }
 
 var configCmd = &cobra.Command{
@@ -78,12 +84,20 @@ By default, instances start empty. Use --add to include a named instance templat
 Use --output / -o to specify a custom output path.
 Use --base-dir to set a custom base directory for all data paths (backup and db data).
 
+--namespace prefixes every container name with <namespace>- so multiple config
+files on the same host can manage isolated instances without name clashes
+(default: "default"; pass --namespace "" to keep legacy names without a prefix).
+--pg-start-port / --pg-ssh-port set the starting ports for automatic PG and
+SSH port allocation (defaults 35432 / 42201); give different configs disjoint
+port ranges so they never collide.
+
 Examples:
   pg config init                              # empty instances (default path ~/.pgcli)
   pg config init -o ./my-pg.yaml          # custom output path
   pg config init --add default                # add a "default" instance
   pg config init --base-dir /data/pg        # all data under /data/pg
-  pg config init -o ./pg.yaml --add myproj --base-dir /mnt/storage/pg`,
+  pg config init -o ./pg.yaml --add myproj --base-dir /mnt/storage/pg
+  pg config init --namespace t1 --pg-start-port 38000 --pg-ssh-port 43000 --add proj1` ,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		path := cfgOutput
 		if path == "" {
@@ -95,6 +109,13 @@ Examples:
 		}
 
 		cfg := config.Default()
+
+		// Namespace and port bases (applied before ApplyDefaults so zero
+		// values fall back to defaults, and so the namespace can rename the
+		// backup container and instance container names).
+		cfg.Namespace = configNamespace
+		cfg.PGStartPort = configPGStartPort
+		cfg.PGSSHPort = configPGSSHPort
 
 		// Set base directory if --base-dir is provided
 		if configBaseDir != "" {
@@ -136,8 +157,11 @@ Examples:
 
 		fmt.Printf("[OK] config file generated: %s\n", path)
 		if configBaseDir != "" {
-			fmt.Printf("  base-dir:   %s\n", configBaseDir)
+			fmt.Printf("  base-dir:    %s\n", configBaseDir)
 		}
+		fmt.Printf("  namespace:   %s\n", cfg.Namespace)
+		fmt.Printf("  pg-start-port: %d\n", cfg.PGStartPort)
+		fmt.Printf("  pg-ssh-port:   %d\n", cfg.PGSSHPort)
 		if len(cfg.Instances) == 0 {
 			fmt.Println("  instances: (empty -- add instances manually or use --add)")
 		} else {

@@ -431,6 +431,45 @@ func (m *BackupManager) Destroy() error {
 	return nil
 }
 
+// RemoveHostData deletes everything the shared backup infrastructure left on
+// the host: the backup repo (stanza dirs are already removed per-instance),
+// the pgBackRest logs, the SSH credentials and the shared pgbackrest.conf.
+// Call after Destroy() when no instances remain. The dbdata directory is only
+// removed when empty (other instances may still use it).
+func (m *BackupManager) RemoveHostData() error {
+	baseDir := m.dataDir
+	for _, p := range []string{
+		filepath.Join(baseDir, "pgbackrest.conf"),
+		filepath.Join(baseDir, "backup", "ssh_config"),
+		filepath.Join(baseDir, "backup", "id_rsa"),
+		filepath.Join(baseDir, "backup", "id_rsa.pub"),
+		filepath.Join(baseDir, "backup", "log"),
+		filepath.Join(baseDir, "backup", "data"),
+		filepath.Join(baseDir, "backup"),
+	} {
+		if err := os.Remove(p); err == nil {
+			fmt.Printf("  [OK] removed: %s\n", p)
+			continue
+		} else if os.IsNotExist(err) {
+			continue
+		}
+		// Directory owned by container sub-UIDs (or a non-empty dir) — remove
+		// recursively through the podman user namespace.
+		if err := removeHostDir(m.podman, m.cfg.Backup.ImageTag, p); err == nil {
+			fmt.Printf("  [OK] removed: %s\n", p)
+		} else if !os.IsNotExist(err) {
+			fmt.Printf("  [!]  Warning: removing %s: %v\n", p, err)
+		}
+	}
+
+	if removed, err := removeHostDirIfEmpty(m.podman, m.cfg.Backup.ImageTag, filepath.Join(baseDir, "dbdata")); err != nil {
+		fmt.Printf("  [!]  Warning: removing empty dbdata directory: %v\n", err)
+	} else if removed {
+		fmt.Printf("  [OK] removed: %s\n", filepath.Join(baseDir, "dbdata"))
+	}
+	return nil
+}
+
 // BackupContainerStatus returns the backup container status.
 func (m *BackupManager) BackupContainerStatus() (*ContainerStatus, error) {
 	out, err := m.run("ps", "-a",

@@ -114,6 +114,9 @@ func (m *Manager) runBasebackup(primaryPM *Manager) error {
 	slot := replicaSlotName(m.cfg.Instance)
 
 	tmpName := "pgcli-bb-" + m.cfg.Instance
+	if m.cfg.Namespace != "" {
+		tmpName = "pgcli-bb-" + m.cfg.Namespace + "-" + m.cfg.Instance
+	}
 	defer func() {
 		_, _ = m.run("rm", "-f", tmpName)
 	}()

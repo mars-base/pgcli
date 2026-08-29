@@ -20,7 +20,7 @@ Whether you're running multiple dev databases, managing staging environments, or
 
 | Document | Description |
 |----------|-------------|
-| [Quick Start](docs/quickstart.md) | Install, init config, start/stop instances, multi-instance, interactive psql session, container shell, remote connection via `--dsn` |
+| [Quick Start](docs/quickstart.md) | Install, init config, start/stop instances, multi-instance, multi-config isolation (namespace + port ranges), interactive psql session, container shell, remote connection via `--dsn` |
 | [exec and psql](docs/exec-psql.md) | One-shot SQL vs interactive sessions, container command mode, stdin scripts, psql passthrough args, remote `--dsn` mode and its rules |
 | [Data Import/Export](docs/import-export.md) | Export/import in custom or SQL format, gzip compression, specific database, stream piping between instances, across hosts via SSH, and to remote databases via `--dsn` |
 | [Clone](docs/clone.md) | Copy an instance into a new one via logical dump pipe, remote `--dsn` source, pre-flight connectivity check, live progress |
@@ -80,6 +80,7 @@ The installer automatically detects available privileges and adapts accordingly.
 - **Snapshot Management** — Create, list, and delete database snapshots
 - **Read-only Replicas** — Physical standby instances streaming WAL from a primary, for read/write split
 - **Multi-Instance Support** — Run multiple isolated PostgreSQL instances on different ports
+- **Multi-Config Isolation** — Multiple config files on one host with namespaced containers and disjoint port ranges (`--namespace`, `--pg-start-port`, `--pg-ssh-port`)
 - **Linux + macOS** — Native Podman on Linux, podman machine on macOS
 
 ## Install
@@ -95,6 +96,10 @@ The installer auto-detects sudo privileges and installs to `/usr/local/bin` (wit
 ```bash
 # Initialize config (creates ~/.pgcli/pg.yaml with default instance)
 pg config init --add default --base-dir /data/pg
+
+# Isolated environments on one host: distinct namespace + disjoint port ranges
+pg config init -o ~/.pgcli-t1/pg.yaml --namespace t1 --pg-start-port 38000 --pg-ssh-port 43000 --add proj1
+pg -c ~/.pgcli-t1/pg.yaml start
 
 # Start instance
 pg start
