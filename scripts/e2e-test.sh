@@ -13,11 +13,12 @@
 #   SKIP_PITR=1 bash scripts/e2e-test.sh     # skip PITR tests (faster)
 #   PGCLI_NAMESPACE=t1 bash scripts/e2e-test.sh  # custom namespace
 #   PGCLI_PG_START_PORT=38100 PGCLI_SSH_START_PORT=43100 bash scripts/e2e-test.sh  # custom ports
+#   PGCLI_TEST_DIR=/mnt/pgcli-e2e PGCLI_CONFIG_DIR=/mnt/pgcli-e2e-config bash scripts/e2e-test.sh  # custom dirs
 set -euo pipefail
 
 BINARY="${PG_BINARY:-./bin/pg}"
-TEST_DIR="${PGCLI_TEST_DIR:-$HOME/bucket/pgcli-test}"
-CONFIG_DIR="$HOME/.pgcli-e2e"
+TEST_DIR="${PGCLI_TEST_DIR:-/tmp/pgcli-e2e}"
+CONFIG_DIR="${PGCLI_CONFIG_DIR:-/tmp/pgcli-e2e-config}"
 CONFIG_FILE="$CONFIG_DIR/pg.yaml"
 NAMESPACE="${PGCLI_NAMESPACE:-e2e}"
 PG_START_PORT="${PGCLI_PG_START_PORT:-38000}"
