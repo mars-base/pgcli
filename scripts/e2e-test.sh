@@ -3,17 +3,25 @@
 # Tests: config init, create, start, status, exec SQL, backup, PITR,
 #        export/import files, pipe streaming, clone, --dsn mode, backup
 #        container, stop, destroy, multi-instance isolation.
+# Uses an isolated --namespace (default "e2e") and a dedicated port range
+# (default PG 38000+ / SSH 43000+) so containers and ports never collide
+# with other pgcli configs on the same host.
 #
 # Usage:
 #   bash scripts/e2e-test.sh                 # full test
 #   bash scripts/e2e-test.sh --skip-destroy  # keep containers after test
 #   SKIP_PITR=1 bash scripts/e2e-test.sh     # skip PITR tests (faster)
+#   PGCLI_NAMESPACE=t1 bash scripts/e2e-test.sh  # custom namespace
+#   PGCLI_PG_START_PORT=38100 PGCLI_SSH_START_PORT=43100 bash scripts/e2e-test.sh  # custom ports
 set -euo pipefail
 
 BINARY="${PG_BINARY:-./bin/pg}"
 TEST_DIR="${PGCLI_TEST_DIR:-$HOME/bucket/pgcli-test}"
 CONFIG_DIR="$HOME/.pgcli-e2e"
 CONFIG_FILE="$CONFIG_DIR/pg.yaml"
+NAMESPACE="${PGCLI_NAMESPACE:-e2e}"
+PG_START_PORT="${PGCLI_PG_START_PORT:-38000}"
+PG_SSH_PORT="${PGCLI_SSH_START_PORT:-43000}"
 INSTANCE="e2e-test"
 INSTANCE2="e2e-test2"
 SKIP_DESTROY=false
@@ -58,7 +66,7 @@ sql() {
 # sqlval runs a SQL query and returns only the raw value (no headers/footers).
 sqlval() {
     local inst="$1"; shift
-    podman exec -i "pgcli-pg-$inst" psql -t -A -U admin -d "${inst}_db" -c "$@"
+    podman exec -i "pgcli-pg-$NAMESPACE-$inst" psql -t -A -U admin -d "${inst}_db" -c "$@"
 }
 
 # dsn_of builds a connection string for instance <name> from the config file,
@@ -104,6 +112,8 @@ main() {
     echo "  Binary:   $BINARY"
     echo "  Test dir: $TEST_DIR"
     echo "  Config:   $CONFIG_FILE"
+    echo "  Namespace: $NAMESPACE"
+    echo "  Ports:    PG $PG_START_PORT+ / SSH $PG_SSH_PORT+"
     echo "=========================================="
 
     # Pre-flight checks
@@ -122,9 +132,15 @@ main() {
     section "Setup"
     rm -rf "$CONFIG_DIR"
 
-    # Remove leftover pgcli containers from previous runs before deleting dirs,
-    # otherwise stale volume mounts (SSH keys, pgbackrest.conf) cause start failures.
-    for c in $(podman ps -a --filter "name=pgcli-" --format "{{.Names}}" 2>/dev/null); do
+    # Remove leftover containers for this namespace only from previous runs
+    # (podman --filter name is OR semantics), otherwise stale volume mounts
+    # (SSH keys, pgbackrest.conf) cause start failures. Never touches
+    # containers of other namespaces/configs on the same host.
+    for c in $(podman ps -a \
+            --filter "name=pgcli-pg-$NAMESPACE-" \
+            --filter "name=pgcli-backup-$NAMESPACE$" \
+            --filter "name=pgcli-bb-$NAMESPACE-" \
+            --format "{{.Names}}" 2>/dev/null); do
         podman rm -f "$c" 2>/dev/null || true
     done
 
@@ -136,10 +152,15 @@ main() {
     mkdir -p "$CONFIG_DIR"
     mkdir -p "$TEST_DIR"
 
-    # Test 1: config init with --base-dir
+    # Test 1: config init with --base-dir, an isolated namespace and a
+    # dedicated port range so containers and ports never collide with
+    # other pgcli configs on the same host.
     run_test "config init" pg config init \
         -o "$CONFIG_FILE" \
         --base-dir "$TEST_DIR" \
+        --namespace "$NAMESPACE" \
+        --pg-start-port "$PG_START_PORT" \
+        --pg-ssh-port "$PG_SSH_PORT" \
         --add "$INSTANCE"
 
     # ---- Test 2: Create Instance ----
@@ -250,18 +271,18 @@ main() {
         sleep 3
 
         run_test "PITR restore (dry-run)" pg restore -i "$INSTANCE" --time "$PITR_TIME" --dry-run
-        run_test "PITR restore" pg restore -i "$INSTANCE" --time "$PITR_TIME" --force --tail-logs
+        run_test "PITR restore" pg restore -i "$INSTANCE" --time "$PITR_TIME" --force --promote --tail-logs
 
         # Wait for PostgreSQL to be ready after restore
         sleep 5
         for _i in $(seq 1 10); do
-            if podman exec "pgcli-pg-$INSTANCE" pg_isready -U admin 2>/dev/null | grep -q "accepting"; then
+            if podman exec "pgcli-pg-$NAMESPACE-$INSTANCE" pg_isready -U admin 2>/dev/null | grep -q "accepting"; then
                 break
             fi
             sleep 2
         done
 
-        # After restore with pause, verify data then resume
+        # After restore with promote, verify data
         RESTORE_COUNT=$(sqlval "$INSTANCE" "SELECT count(*) FROM e2e_test")
         if [ "$RESTORE_COUNT" = "3" ]; then
             pass "PITR restored count = 3 (post-snapshot row gone)"
@@ -447,7 +468,7 @@ main() {
     # ---- Test 17: Backup Container ----
     section "Test: Backup Container"
     run_test "Backup setup" pg backup setup --base-dir "$TEST_DIR"
-    run_test "Backup status shows container" bash -c "'$BINARY' -c '$CONFIG_FILE' backup status 2>&1 | grep -q pgcli-backup"
+    run_test "Backup status shows container" bash -c "'$BINARY' -c '$CONFIG_FILE' backup status 2>&1 | grep -q 'pgcli-backup-$NAMESPACE'"
     run_test "Backup stop" pg backup stop
     run_test "Backup start" pg backup start
     run_test "Backup status running" bash -c "'$BINARY' -c '$CONFIG_FILE' backup status 2>&1 | grep -qE 'Status:.*Up'"
