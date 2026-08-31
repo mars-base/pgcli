@@ -76,13 +76,22 @@ The installer automatically detects available privileges and adapts accordingly.
 
 ## Features
 
-- **Containerized PostgreSQL** — Each instance runs in an isolated Podman container
-- **PITR (Point-In-Time Recovery)** — Full backup and time-travel recovery via pgBackRest
-- **Snapshot Management** — Create, list, and delete database snapshots
-- **Read-only Replicas** — Physical standby instances streaming WAL from a primary, for read/write split
-- **Multi-Instance Support** — Run multiple isolated PostgreSQL instances on different ports
+- **Containerized PostgreSQL** — Each instance runs in an isolated Podman container with separate data directories
+- **Extension Management** — Install, remove, and manage 440+ PostgreSQL extensions from the [Pigsty DEB repository](https://pigsty.cc/ext/)
+  - Smart image ID-based change detection for container replacement (detects content changes even when tags stay the same)
+  - Automatic `shared_preload_libraries` configuration with restart confirmation prompts
+  - Intelligent `pg_cron` setup with automatic `cron.database_name` configuration
+  - Extensions baked into container images for persistence across rebuilds
+- **PITR (Point-In-Time Recovery)** — Full backup and time-travel recovery via pgBackRest with differential/incremental snapshots
+- **Snapshot Management** — Create, list, and delete database snapshots for quick rollback
+- **Read-only Replicas** — Physical standby instances streaming WAL from a primary, supporting read/write split and failover scenarios
+- **Multi-Instance Support** — Run multiple isolated PostgreSQL instances on different ports with independent configurations
 - **Multi-Config Isolation** — Multiple config files on one host with namespaced containers and disjoint port ranges (`--namespace`, `--pg-start-port`, `--pg-ssh-port`)
-- **Linux + macOS** — Native Podman on Linux, podman machine on macOS
+- **Data Import/Export** — Export/import in custom or SQL format with gzip compression, stream piping between instances, and cross-host support via SSH or `--dsn`
+- **Instance Cloning** — Copy an instance into a new one via logical dump pipe with live progress and pre-flight connectivity checks
+- **PostgreSQL Parameter Tuning** — Adjust runtime parameters via `pg config set` with automatic reload
+- **Interactive Shell** — Open psql or bash sessions directly in containers, or connect to remote databases via `--dsn`
+- **Linux + macOS** — Native Podman on Linux, podman machine on macOS with automatic setup
 
 ## Install
 
