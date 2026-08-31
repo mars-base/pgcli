@@ -74,8 +74,14 @@ func BaseImageTag(tag string) string {
 	return tag
 }
 
-// findExtSuffix finds the position of "-ext-" suffix in the tag.
+// findExtSuffix finds the position of "-ext" suffix in the tag.
+// Handles both "-ext" at end and "-ext-" in the middle.
 func findExtSuffix(tag string) int {
+	// Check if tag ends with "-ext"
+	if len(tag) >= 4 && tag[len(tag)-4:] == "-ext" {
+		return len(tag) - 4
+	}
+	// Check for "-ext-" in the middle
 	for i := 0; i < len(tag)-4; i++ {
 		if tag[i:i+5] == "-ext-" {
 			return i

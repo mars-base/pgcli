@@ -164,7 +164,7 @@ var PigstyExtMap = map[string]PigstyExt{
 	"pg_column_tetris": {Package: "pg_column_tetris", NeedsPreload: false, Repo: "PIGSTY"},
 	"pg_cooldown": {Package: "pg_cooldown", NeedsPreload: false, Repo: "PIGSTY"},
 	"pg_crash": {Package: "pg_crash", NeedsPreload: true, Repo: "PIGSTY"},
-	"pg_cron": {Package: "pg_cron", NeedsPreload: true, Repo: "PGDG"},
+	"pg_cron": {Package: "cron", NeedsPreload: true, Repo: "PGDG"},
 	"pg_csv": {Package: "pg_csv", NeedsPreload: false, Repo: "MIXED"},
 	"pg_curl": {Package: "pg_curl", NeedsPreload: false, Repo: "PIGSTY"},
 	"pg_datasentinel": {Package: "pg_datasentinel", NeedsPreload: true, Repo: "PIGSTY"},
