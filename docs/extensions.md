@@ -31,7 +31,26 @@ pg extension install pgmq uuid-ossp pg_stat_statements
 pg extension install pg_stat_statements -i pg01
 ```
 
-Extensions requiring `shared_preload_libraries` (e.g., `pg_stat_statements`, `pg_cron`) trigger an automatic PostgreSQL restart.
+**Restart confirmation:** Extensions requiring `shared_preload_libraries` (e.g., `pg_stat_statements`, `pg_cron`) need a PostgreSQL restart. By default, you will be prompted for confirmation:
+
+```bash
+# Interactive confirmation (default)
+pg extension install pg_stat_statements
+# Output:
+# Installing extensions that require shared_preload_libraries will cause a PostgreSQL restart.
+# Extensions to be installed: [pg_stat_statements]
+# This will cause a brief interruption to database connections.
+# Restart PostgreSQL now? [y/N]:
+
+# Skip confirmation and restart automatically
+pg extension install pg_stat_statements --auto-restart
+```
+
+If you decline the restart, you can apply the changes later:
+```bash
+pg stop -i pg01
+pg start -i pg01
+```
 
 ### List Installed Extensions
 

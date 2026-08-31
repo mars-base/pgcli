@@ -44,9 +44,13 @@ extension packages baked in. The container is then replaced (data preserved).
 For extensions requiring shared_preload_libraries (e.g., pg_stat_statements,
 pg_cron), PostgreSQL will be restarted to load the shared library.
 
+By default, you will be prompted for confirmation before restarting.
+Use --auto-restart to skip the prompt and restart automatically.
+
 Examples:
   pg extension install pg_stat_statements
-  pg extension install pgmq uuid-ossp pg_stat_statements`,
+  pg extension install pgmq uuid-ossp pg_stat_statements
+  pg extension install pg_stat_statements --auto-restart`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runExtensionInstall(args)
@@ -97,7 +101,8 @@ func init() {
 	rootCmd.AddCommand(extensionCmd)
 	extensionCmd.AddCommand(extensionInstallCmd, extensionListCmd, extensionRemoveCmd, extensionAvailableCmd)
 
-	// Add --auto-restart flag to extension remove command
+	// Add --auto-restart flag to install and remove commands
+	extensionInstallCmd.Flags().BoolVar(&autoRestart, "auto-restart", false, "Skip confirmation prompt when restart is required")
 	extensionRemoveCmd.Flags().BoolVar(&autoRestart, "auto-restart", false, "Skip confirmation prompt when restart is required")
 }
 
@@ -212,6 +217,14 @@ func runExtensionInstall(extNames []string) error {
 	}
 
 	if needsRestart {
+		fmt.Printf("\nInstalling extensions that require shared_preload_libraries will cause a PostgreSQL restart.\n")
+		fmt.Printf("Extensions to be installed: %v\n", toInstall)
+		fmt.Printf("This will cause a brief interruption to database connections.\n\n")
+		if !autoRestart && !confirmPrompt("Restart PostgreSQL now? [y/N]: ") {
+			fmt.Println("Restart skipped. Run 'pg stop' and 'pg start' to apply changes later.")
+			fmt.Printf("✓ Extensions installed (restart pending): %v\n", toInstall)
+			return nil
+		}
 		fmt.Println("-> Restarting PostgreSQL to load shared_preload_libraries...")
 		if err := pm.StopContainer(); err != nil {
 			return fmt.Errorf("stop container for restart: %w", err)
