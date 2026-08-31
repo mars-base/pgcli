@@ -139,6 +139,21 @@ func runExtensionInstall(extNames []string) error {
 		return nil
 	}
 
+	// Pre-validate: warn about extensions not in the catalog.
+	var unknown []string
+	for _, name := range toInstall {
+		if ext := podman.GetExtension(name); ext == nil {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) > 0 {
+		fmt.Printf("  [!] Extension(s) not in catalog: %v\n", unknown)
+		fmt.Println("      These will be installed as postgresql-18-<name> from Pigsty/PGDG repos.")
+		fmt.Println("      If the package does not exist, the build will fail.")
+		fmt.Println("      Run `pg extension available` to see catalog extensions.")
+		fmt.Println()
+	}
+
 	// Build new extension image with all managed extensions.
 	// Install: FROM current ImageTag (may be base or -ext), add new packages.
 	// If all extensions are builtin (contrib), BuildExtensionImage returns
