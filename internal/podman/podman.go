@@ -1575,6 +1575,32 @@ func (m *Manager) CheckDSNReachable(dsn string) error {
 	return nil
 }
 
+// CheckDSNDumpPrivilege verifies the DSN can extract the source schema with
+// pg_dump (connection + catalog privileges) before any clone side effects.
+// Runs in a throwaway container with host networking, like CheckDSNReachable.
+// --schema-only touches no table data, so this is fast even on large databases.
+func (m *Manager) CheckDSNDumpPrivilege(dsn string) error {
+	imageTag := m.cfg.Podman.ImageTag
+	containerName := fmt.Sprintf("pgcli-checkdump-%d", time.Now().UnixNano())
+	defer func() {
+		m.run("rm", "-f", containerName)
+	}()
+
+	podmanArgs := []string{
+		"run", "--rm", "--name", containerName,
+		"--network", "host",
+		imageTag,
+		"pg_dump", "--dbname=" + dsn, "--schema-only", "-f", "/dev/null",
+	}
+	cmd := podmanCommand(m.podman, podmanArgs...)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("cannot dump source database schema (connection or permission problem): %w", err)
+	}
+	return nil
+}
+
 func (m *Manager) createContainer() error {
 	// Generate per-instance pgbackrest.conf
 	confPath, err := m.writeInstancePgbackrestConf()

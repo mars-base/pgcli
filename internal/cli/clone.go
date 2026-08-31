@@ -111,6 +111,10 @@ func runClone(newName, dsn string) error {
 		if err := sourcePM.CheckDSNReachable(dsn); err != nil {
 			return err
 		}
+		fmt.Printf("Checking source dump privileges...\n")
+		if err := sourcePM.CheckDSNDumpPrivilege(dsn); err != nil {
+			return err
+		}
 		sourceDesc = dsn
 	} else {
 		if _, ok := cfg.Instances[cfgInstance]; !ok {
@@ -188,10 +192,26 @@ func runClone(newName, dsn string) error {
 	werr := <-exportErr
 	fmt.Fprintf(os.Stderr, "\r  Transferred: %s    \n", formatBytes(prog.done))
 
+	// Clone failure leaves the target instance behind (it was created and
+	// started before the transfer). Tell the user how to retry cleanly.
+	cloneFailureHint := func() {
+		fmt.Fprintf(os.Stderr, "\n!  Clone instance %q was created but is incomplete. If the failure\n", newName)
+		fmt.Fprintf(os.Stderr, "   is caused by extensions, permissions or data issues, fix the source\n")
+		fmt.Fprintf(os.Stderr, "   (e.g. install the missing extension) and run:\n")
+		fmt.Fprintf(os.Stderr, "     pg destroy -i %s --clean-data --force\n", newName)
+		if dsn != "" {
+			fmt.Fprintf(os.Stderr, "   then retry: pg clone %s --dsn \"...\"\n", newName)
+		} else {
+			fmt.Fprintf(os.Stderr, "   then retry: pg clone %s -i %s\n", newName, sourceDesc)
+		}
+	}
+
 	if importErr != nil {
+		cloneFailureHint()
 		return fmt.Errorf("clone failed while importing into %q: %w", newName, importErr)
 	}
 	if werr != nil {
+		cloneFailureHint()
 		return fmt.Errorf("clone failed while exporting from source: %w", werr)
 	}
 
