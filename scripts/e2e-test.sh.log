@@ -1,0 +1,624 @@
+==========================================
+  pgcli End-to-End Test
+==========================================
+  Binary:   ./bin/pg
+  Test dir: /home/fish/bucket/pgcli-test
+  Config:   /home/fish/.pgcli-e2e/pg.yaml
+  Namespace: e2e
+==========================================
+
+[0;33m=== Setup ===[0m
+[OK] config file generated: /home/fish/.pgcli-e2e/pg.yaml
+  base-dir:    /home/fish/bucket/pgcli-test
+  namespace:   e2e
+  pg-start-port: 35432
+  pg-ssh-port:   42201
+  instances.e2e-test: ready
+[0;32m  [PASS] config init[0m
+
+[0;33m=== Test: Create Instance ===[0m
+[OK] instance "e2e-test2" created
+  database:   e2e-test2_db
+  password:   3v4pMuizfRgZWmKD
+  container:  pgcli-pg-e2e-e2e-test2
+  data_dir:   /home/fish/bucket/pgcli-test/dbdata/e2e-test2/data
+  stanza:     pgcli_e2e-test2
+  config:     /home/fish/.pgcli-e2e/pg.yaml
+[0;32m  [PASS] Create instance (second)[0m
+
+[0;33m=== Test: Start Instance ===[0m
+=== pg start ===
+Platform: linux
+
+-> Checking dependencies...
+  [OK] podman available
+-> Image ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 already exists, skipping pull/build
+-> Data directory ensured: /home/fish/bucket/pgcli-test/dbdata/e2e-test/data
+-> Creating and starting PostgreSQL container...
+-> Generating backup container SSH key pair...
+  [OK] SSH key pair generated
+  [OK] Container created, PostgreSQL is initializing (check with: pg status)
+-> Waiting for PostgreSQL to be ready...
+-> PostgreSQL performance tuning applied
+-> Restarting PostgreSQL to apply shared_buffers / wal_buffers changes...
+  [OK] Container started (check readiness with: pg status)
+-> Waiting for PostgreSQL to be ready (after restart)...
+  [OK] PostgreSQL ready
+-> Authorizing backup key on PostgreSQL container...
+-> Ensuring backup infrastructure is ready...
+-> Backup image ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 already exists, skipping pull/build
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/data
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/log
+-> pgbackrest.conf generated: /home/fish/bucket/pgcli-test/pgbackrest.conf (2 stanzas)
+-> Creating and starting backup container...
+  [OK] Backup container started
+-> pgBackRest stanza created
+-> archive_command configured
+-> Restarting PostgreSQL to enable archive_mode...
+  [OK] Container started (check readiness with: pg status)
+-> Waiting for WAL archiver to catch up...
+  [OK] WAL archiver caught up
+
+OK started
+  PostgreSQL: postgres://admin:DwSiWIbSJOLbR0Lj@localhost:35434/e2e-test_db
+[0;32m  [PASS] Start instance[0m
+
+[0;33m=== Test: Status ===[0m
+=== pgcli status ===
+Instance: e2e-test
+
+Container: pgcli-pg-e2e-e2e-test
+  Status: Up 4 seconds
+
+PostgreSQL: [OK] accepting connections
+  Role: primary
+  Connection: postgres://admin:DwSiWIbSJOLbR0Lj@127.0.0.1:35434/e2e-test_db
+
+Recent backups: (none)
+
+[0;32m  [PASS] Status shows running[0m
+
+[0;33m=== Test: Database Connectivity ===[0m
+ ?column? 
+----------
+        1
+(1 row)
+
+[0;32m  [PASS] pg exec SQL: SELECT 1[0m
+                                                      version                                                       
+--------------------------------------------------------------------------------------------------------------------
+ PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+(1 row)
+
+[0;32m  [PASS] pg exec SQL: SELECT version()[0m
+
+[0;33m=== Test: Data Operations ===[0m
+CREATE TABLE
+[0;32m  [PASS] CREATE TABLE[0m
+INSERT 0 3
+[0;32m  [PASS] INSERT data[0m
+[0;32m  [PASS] SELECT count(*) = 3[0m
+
+[0;33m=== Test: Backup / Snapshot ===[0m
+-> Backup image ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 already exists, skipping pull/build
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/data
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/log
+-> pgbackrest.conf generated: /home/fish/bucket/pgcli-test/pgbackrest.conf (2 stanzas)
+-> Backup container already running
+-> Note: database backups may take a long time, do not interrupt the task
+-> Creating full backup...
+  [OK] Snapshot created: 20260830-101318F (full)
+
+OK Snapshot created successfully
+  Name: 20260830-101318F
+  Type: full
+  Time: 2026-08-30 18:13:22
+[0;32m  [PASS] Create snapshot: 20260830-101318F[0m
+Start Time                 Stop Time                  Name                            Type      
+-----------------------------------------------------------------------------------------
+2026-08-30 10:13:18        2026-08-30 10:13:21        20260830-101318F                full      
+[0;32m  [PASS] List snapshots[0m
+[0;32m  [PASS] Delete non-existent snapshot fails[0m
+[0;32m  [PASS] Delete only full backup fails[0m
+-> Backup image ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 already exists, skipping pull/build
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/data
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/log
+-> pgbackrest.conf generated: /home/fish/bucket/pgcli-test/pgbackrest.conf (2 stanzas)
+-> Backup container already running
+-> Note: database backups may take a long time, do not interrupt the task
+-> Creating diff backup...
+  [OK] Snapshot created: 20260830-101318F_20260830-101322D (diff)
+
+OK Snapshot created successfully
+  Name: 20260830-101318F_20260830-101322D
+  Type: diff
+  Time: 2026-08-30 18:13:25
+-> Snapshot 20260830-101318F_20260830-101322D deleted
+[OK] Snapshot deleted
+[0;32m  [PASS] Delete diff snapshot[0m
+-> Backup image ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 already exists, skipping pull/build
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/data
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/log
+-> pgbackrest.conf generated: /home/fish/bucket/pgcli-test/pgbackrest.conf (2 stanzas)
+-> Backup container already running
+-> Note: database backups may take a long time, do not interrupt the task
+-> Creating incr backup...
+  [OK] Snapshot created: 20260830-101318F_20260830-101325I (incr)
+
+OK Snapshot created successfully
+  Name: 20260830-101318F_20260830-101325I
+  Type: incr
+  Time: 2026-08-30 18:13:28
+-> Snapshot 20260830-101318F_20260830-101325I deleted
+[OK] Snapshot deleted
+[0;32m  [PASS] Delete incr snapshot[0m
+
+[0;33m=== Test: PITR Recovery ===[0m
+INSERT 0 1
+[0;32m  [PASS] Insert post-snapshot data[0m
+[0;32m  [PASS] Post-snapshot count = 4[0m
+-> [DRY RUN] Would restore to: 2026-08-30 10:13:32+00 (target-action=pause)
+[0;32m  [PASS] PITR restore (dry-run)[0m
+!  Restoring PostgreSQL to 2026-08-30 10:13:32+00 (target-action=pause)
+  1/3 Stopping PostgreSQL...
+  2/3 Running pgBackRest restore...
+2026-08-30 10:13:38.219 P00   INFO: restore command begin 2.59.1: --exec-id=1-7409afbf --log-level-console=info --pg1-path=/var/lib/postgresql/data --repo1-path=/var/lib/pgbackrest --stanza=pgcli_e2e-test --target="2026-08-30 10:13:32+00" --target-action=pause --type=time
+2026-08-30 10:13:38.224 P00   INFO: repo1: restore backup set 20260830-101318F, recovery will start at 2026-08-30 10:13:18
+2026-08-30 10:13:41.220 P00   INFO: write updated /var/lib/postgresql/data/postgresql.auto.conf
+2026-08-30 10:13:41.258 P00   INFO: restore global/pg_control (performed last to ensure aborted restores cannot be started)
+2026-08-30 10:13:41.259 P00   INFO: restore size = 30MB, file total = 1273
+2026-08-30 10:13:41.260 P00   INFO: restore command end: completed successfully (3043ms)
+  3/3 Starting PostgreSQL...
+  [OK] Container started (check readiness with: pg status)
+-> Backup image ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 already exists, skipping pull/build
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/data
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/log
+-> pgbackrest.conf generated: /home/fish/bucket/pgcli-test/pgbackrest.conf (2 stanzas)
+-> Backup container already running
+[OK] Restore complete
+[0;32m  [PASS] PITR restore[0m
+[0;32m  [PASS] PITR restored count = 3 (post-snapshot row gone)[0m
+=== pg start ===
+Platform: linux
+
+-> Checking dependencies...
+  [OK] podman available
+-> Image ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 already exists, skipping pull/build
+-> Data directory ensured: /home/fish/bucket/pgcli-test/dbdata/e2e-test/data
+-> Container pgcli-pg-e2e-e2e-test is already running
+-> Waiting for PostgreSQL to be ready...
+-> Authorizing backup key on PostgreSQL container...
+-> Ensuring backup infrastructure is ready...
+-> Backup image ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 already exists, skipping pull/build
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/data
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/log
+-> pgbackrest.conf generated: /home/fish/bucket/pgcli-test/pgbackrest.conf (2 stanzas)
+-> Backup container already running
+  [!] stanza create warning: creating pgBackRest stanza: podman exec -i=false pgcli-backup-e2e pgbackrest --stanza=pgcli_e2e-test stanza-create --log-level-console=info: 2026-08-30 10:13:47.295 P00   INFO: stanza-create command begin 2.59.1: --exec-id=29-84a56d16 --log-level-console=info --pg1-host=pgcli-pg-e2e-e2e-test --pg1-path=/var/lib/postgresql/data --pg1-user=postgres --repo1-path=/var/lib/pgbackrest --stanza=pgcli_e2e-test
+2026-08-30 10:13:47.396 P00  ERROR: [056]: unable to find primary cluster - cannot proceed
+                                    HINT: are all available clusters in recovery?
+2026-08-30 10:13:47.396 P00   INFO: stanza-create command end: aborted with exception [056]
+
+
+-> archive_command configured
+  [!] stanza check warning: pgBackRest stanza check failed: podman exec -i=false pgcli-backup-e2e pgbackrest --stanza=pgcli_e2e-test check --log-level-console=info: 2026-08-30 10:13:48.140 P00   INFO: check command begin 2.59.1: --exec-id=31-2bc5539f --log-level-console=info --pg1-host=pgcli-pg-e2e-e2e-test --pg1-path=/var/lib/postgresql/data --pg1-user=postgres --repo1-path=/var/lib/pgbackrest --stanza=pgcli_e2e-test
+2026-08-30 10:13:48.257 P00  ERROR: [027]: primary database not found
+                                    HINT: check indexed pg-path/pg-host configurations
+2026-08-30 10:13:48.257 P00   INFO: check command end: aborted with exception [027]
+
+
+-> Waiting for WAL archiver to catch up...
+  [OK] WAL archiver caught up
+
+OK started
+  PostgreSQL: postgres://admin:DwSiWIbSJOLbR0Lj@localhost:35434/e2e-test_db
+[0;32m  [PASS] Start after PITR[0m
+
+[0;33m=== Test: List Instances ===[0m
+NAME         ROLE      PRIMARY      STATUS                        
+----------------------------------------------------------------
+e2e-test     primary   -            Up 12 seconds                 
+e2e-test2    primary   -            not created                   
+[0;32m  [PASS] List instances[0m
+
+[0;33m=== Test: Stop Instance ===[0m
+-> Stopping pg services...
+[OK] pg stopped
+[0;32m  [PASS] Stop instance[0m
+
+[0;33m=== Test: Multi-Instance Isolation ===[0m
+=== pg start ===
+Platform: linux
+
+-> Checking dependencies...
+  [OK] podman available
+-> Image ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 already exists, skipping pull/build
+-> Data directory ensured: /home/fish/bucket/pgcli-test/dbdata/e2e-test2/data
+-> Creating and starting PostgreSQL container...
+  [OK] Container created, PostgreSQL is initializing (check with: pg status)
+-> Waiting for PostgreSQL to be ready...
+-> PostgreSQL performance tuning applied
+-> Restarting PostgreSQL to apply shared_buffers / wal_buffers changes...
+  [OK] Container started (check readiness with: pg status)
+-> Waiting for PostgreSQL to be ready (after restart)...
+  [OK] PostgreSQL ready
+-> Authorizing backup key on PostgreSQL container...
+-> Ensuring backup infrastructure is ready...
+-> Backup image ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 already exists, skipping pull/build
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/data
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/log
+-> pgbackrest.conf generated: /home/fish/bucket/pgcli-test/pgbackrest.conf (2 stanzas)
+-> Backup container already running
+-> pgBackRest stanza created
+-> archive_command configured
+-> Waiting for WAL archiver to catch up...
+  [OK] WAL archiver caught up
+
+OK started
+  PostgreSQL: postgres://admin:3v4pMuizfRgZWmKD@localhost:35435/e2e-test2_db
+[0;32m  [PASS] Start second instance[0m
+ ?column? 
+----------
+        1
+(1 row)
+
+[0;32m  [PASS] Second instance SQL[0m
+[0;32m  [PASS] Instance isolation: e2e_test table not present in instance2[0m
+-> Stopping pg services...
+[OK] pg stopped
+[0;32m  [PASS] Stop second instance[0m
+
+[0;33m=== Test: Export to Files ===[0m
+=== pg start ===
+Platform: linux
+
+-> Checking dependencies...
+  [OK] podman available
+-> Image ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 already exists, skipping pull/build
+-> Data directory ensured: /home/fish/bucket/pgcli-test/dbdata/e2e-test/data
+-> Starting PostgreSQL container...
+  [OK] Container started (check readiness with: pg status)
+-> Waiting for PostgreSQL to be ready...
+-> Authorizing backup key on PostgreSQL container...
+-> Ensuring backup infrastructure is ready...
+-> Backup image ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 already exists, skipping pull/build
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/data
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/log
+-> pgbackrest.conf generated: /home/fish/bucket/pgcli-test/pgbackrest.conf (2 stanzas)
+-> Backup container already running
+  [!] stanza create warning: creating pgBackRest stanza: podman exec -i=false pgcli-backup-e2e pgbackrest --stanza=pgcli_e2e-test stanza-create --log-level-console=info: 2026-08-30 10:14:08.612 P00   INFO: stanza-create command begin 2.59.1: --exec-id=37-9adad6f8 --log-level-console=info --pg1-host=pgcli-pg-e2e-e2e-test --pg1-path=/var/lib/postgresql/data --pg1-user=postgres --repo1-path=/var/lib/pgbackrest --stanza=pgcli_e2e-test
+2026-08-30 10:14:08.728 P00  ERROR: [056]: unable to find primary cluster - cannot proceed
+                                    HINT: are all available clusters in recovery?
+2026-08-30 10:14:08.728 P00   INFO: stanza-create command end: aborted with exception [056]
+
+
+-> archive_command configured
+  [!] stanza check warning: pgBackRest stanza check failed: podman exec -i=false pgcli-backup-e2e pgbackrest --stanza=pgcli_e2e-test check --log-level-console=info: 2026-08-30 10:14:09.450 P00   INFO: check command begin 2.59.1: --exec-id=39-ff755cc2 --log-level-console=info --pg1-host=pgcli-pg-e2e-e2e-test --pg1-path=/var/lib/postgresql/data --pg1-user=postgres --repo1-path=/var/lib/pgbackrest --stanza=pgcli_e2e-test
+2026-08-30 10:14:09.558 P00  ERROR: [027]: primary database not found
+                                    HINT: check indexed pg-path/pg-host configurations
+2026-08-30 10:14:09.559 P00   INFO: check command end: aborted with exception [027]
+
+
+-> Waiting for WAL archiver to catch up...
+  [OK] WAL archiver caught up
+
+OK started
+  PostgreSQL: postgres://admin:DwSiWIbSJOLbR0Lj@localhost:35434/e2e-test_db
+[0;32m  [PASS] Start instance for export[0m
+[0;32m  [PASS] Export custom format[0m
+[0;32m  [PASS] Export file has pg_dump magic bytes[0m
+[0;32m  [PASS] Export SQL format[0m
+[0;32m  [PASS] SQL dump contains CREATE TABLE[0m
+[0;32m  [PASS] Export gzip format[0m
+[0;32m  [PASS] Gzip file is valid[0m
+
+[0;33m=== Test: Import from Files ===[0m
+=== pg start ===
+Platform: linux
+
+-> Checking dependencies...
+  [OK] podman available
+-> Image ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 already exists, skipping pull/build
+-> Data directory ensured: /home/fish/bucket/pgcli-test/dbdata/e2e-test2/data
+-> Starting PostgreSQL container...
+  [OK] Container started (check readiness with: pg status)
+-> Waiting for PostgreSQL to be ready...
+-> Authorizing backup key on PostgreSQL container...
+-> Ensuring backup infrastructure is ready...
+-> Backup image ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 already exists, skipping pull/build
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/data
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/log
+-> pgbackrest.conf generated: /home/fish/bucket/pgcli-test/pgbackrest.conf (2 stanzas)
+-> Backup container already running
+-> pgBackRest stanza created
+-> archive_command configured
+-> Waiting for WAL archiver to catch up...
+  [OK] WAL archiver caught up
+
+OK started
+  PostgreSQL: postgres://admin:3v4pMuizfRgZWmKD@localhost:35435/e2e-test2_db
+[0;32m  [PASS] Start second instance for import[0m
+Importing from /home/fish/bucket/pgcli-test/export.dump to e2e-test2_db...
+✓ Import complete
+[0;32m  [PASS] Import custom format[0m
+[0;32m  [PASS] Imported custom count = 3[0m
+DROP TABLE
+Importing from /home/fish/bucket/pgcli-test/export.sql to e2e-test2_db...
+SET
+SET
+SET
+SET
+SET
+SET
+ set_config 
+------------
+ 
+(1 row)
+
+SET
+SET
+SET
+SET
+SET
+SET
+CREATE TABLE
+ALTER TABLE
+CREATE SEQUENCE
+ALTER SEQUENCE
+ALTER SEQUENCE
+ALTER TABLE
+COPY 3
+ setval 
+--------
+     36
+(1 row)
+
+ALTER TABLE
+✓ Import complete
+[0;32m  [PASS] Import SQL format[0m
+[0;32m  [PASS] Imported SQL count = 3[0m
+DROP TABLE
+Importing from /home/fish/bucket/pgcli-test/export.dump.gz to e2e-test2_db...
+✓ Import complete
+[0;32m  [PASS] Import gzip format[0m
+[0;32m  [PASS] Imported gzip count = 3[0m
+
+[0;33m=== Test: Pipe Streaming ===[0m
+[0;32m  [PASS] Pipe export to import[0m
+[0;32m  [PASS] Pipe transfer count = 3[0m
+[0;32m  [PASS] Pipe export --dsn to import --dsn[0m
+[0;32m  [PASS] DSN pipe transfer count = 3[0m
+
+[0;33m=== Test: Clone ===[0m
+[0;32m  [PASS] Clone target already exists fails[0m
+-> Stopping pg services...
+[OK] pg stopped
+[0;32m  [PASS] Stop second instance for clone test[0m
+[0;32m  [PASS] Clone stopped source fails[0m
+[0;32m  [PASS] Clone unknown source fails[0m
+Checking source connectivity...
+Created instance "e2e-clone"
+=== pg start ===
+Platform: linux
+
+-> Checking dependencies...
+  [OK] podman available
+-> Image ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 already exists, skipping pull/build
+-> Data directory ensured: /home/fish/bucket/pgcli-test/dbdata/e2e-clone/data
+-> Creating and starting PostgreSQL container...
+  [OK] Container created, PostgreSQL is initializing (check with: pg status)
+-> Waiting for PostgreSQL to be ready...
+-> PostgreSQL performance tuning applied
+-> Restarting PostgreSQL to apply shared_buffers / wal_buffers changes...
+  [OK] Container started (check readiness with: pg status)
+-> Waiting for PostgreSQL to be ready (after restart)...
+  [OK] PostgreSQL ready
+-> Authorizing backup key on PostgreSQL container...
+-> Ensuring backup infrastructure is ready...
+-> Backup image ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 already exists, skipping pull/build
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/data
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/log
+-> pgbackrest.conf generated: /home/fish/bucket/pgcli-test/pgbackrest.conf (3 stanzas)
+-> Backup container already running
+-> pgBackRest stanza created
+-> archive_command configured
+-> Restarting PostgreSQL to enable archive_mode...
+  [OK] Container started (check readiness with: pg status)
+-> Waiting for WAL archiver to catch up...
+  [OK] WAL archiver caught up
+
+OK started
+  PostgreSQL: postgres://admin:Ggz7YtlpMzOrb4Rh@localhost:35436/e2e-clone_db
+Cloning e2e-test -> e2e-clone...
+✓ Clone complete: e2e-test -> e2e-clone
+  database:   e2e-clone_db
+  password:   Ggz7YtlpMzOrb4Rh
+  container:  pgcli-pg-e2e-e2e-clone
+  port:       35436
+[0;32m  [PASS] Clone instance[0m
+[0;32m  [PASS] Clone data count = 3[0m
+Checking source connectivity...
+Created instance "e2e-dsnclone"
+=== pg start ===
+Platform: linux
+
+-> Checking dependencies...
+  [OK] podman available
+-> Image ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 already exists, skipping pull/build
+-> Data directory ensured: /home/fish/bucket/pgcli-test/dbdata/e2e-dsnclone/data
+-> Creating and starting PostgreSQL container...
+  [OK] Container created, PostgreSQL is initializing (check with: pg status)
+-> Waiting for PostgreSQL to be ready...
+-> PostgreSQL performance tuning applied
+-> Restarting PostgreSQL to apply shared_buffers / wal_buffers changes...
+  [OK] Container started (check readiness with: pg status)
+-> Waiting for PostgreSQL to be ready (after restart)...
+  [OK] PostgreSQL ready
+-> Authorizing backup key on PostgreSQL container...
+-> Ensuring backup infrastructure is ready...
+-> Backup image ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 already exists, skipping pull/build
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/data
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/log
+-> pgbackrest.conf generated: /home/fish/bucket/pgcli-test/pgbackrest.conf (4 stanzas)
+-> Backup container already running
+-> pgBackRest stanza created
+-> archive_command configured
+-> Waiting for WAL archiver to catch up...
+  [OK] WAL archiver caught up
+
+OK started
+  PostgreSQL: postgres://admin:tnwp7TKt4exlB36j@localhost:35437/e2e-dsnclone_db
+Cloning postgres://admin:DwSiWIbSJOLbR0Lj@127.0.0.1:35434/e2e-test_db?sslmode=disable -> e2e-dsnclone...
+✓ Clone complete: postgres://admin:DwSiWIbSJOLbR0Lj@127.0.0.1:35434/e2e-test_db?sslmode=disable -> e2e-dsnclone
+  database:   e2e-dsnclone_db
+  password:   tnwp7TKt4exlB36j
+  container:  pgcli-pg-e2e-e2e-dsnclone
+  port:       35437
+[0;32m  [PASS] Clone via --dsn[0m
+[0;32m  [PASS] Clone --dsn data count = 3[0m
+[0;32m  [PASS] Clone --dsn with -i fails[0m
+
+[0;33m=== Test: --dsn Mode ===[0m
+ ?column? 
+----------
+        1
+(1 row)
+
+[0;32m  [PASS] exec --dsn SQL[0m
+ ?column? 
+----------
+        1
+(1 row)
+
+[0;32m  [PASS] psql --dsn one-shot[0m
+[0;32m  [PASS] exec --dsn with -i fails[0m
+[0;32m  [PASS] psql --dsn with -i fails[0m
+[0;32m  [PASS] export --dsn with -i fails[0m
+[0;32m  [PASS] import --dsn with -i fails[0m
+[0;32m  [PASS] exec --dsn container command fails[0m
+[0;32m  [PASS] export --dsn to file[0m
+[0;32m  [PASS] DSN export file has pg_dump magic bytes[0m
+=== pg start ===
+Platform: linux
+
+-> Checking dependencies...
+  [OK] podman available
+-> Image ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 already exists, skipping pull/build
+-> Data directory ensured: /home/fish/bucket/pgcli-test/dbdata/e2e-test2/data
+-> Starting PostgreSQL container...
+  [OK] Container started (check readiness with: pg status)
+-> Waiting for PostgreSQL to be ready...
+-> Authorizing backup key on PostgreSQL container...
+-> Ensuring backup infrastructure is ready...
+-> Backup image ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 already exists, skipping pull/build
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/data
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/log
+-> pgbackrest.conf generated: /home/fish/bucket/pgcli-test/pgbackrest.conf (4 stanzas)
+-> Backup container already running
+-> pgBackRest stanza created
+-> archive_command configured
+-> Waiting for WAL archiver to catch up...
+  [OK] WAL archiver caught up
+
+OK started
+  PostgreSQL: postgres://admin:3v4pMuizfRgZWmKD@localhost:35435/e2e-test2_db
+[0;32m  [PASS] Start second instance for import --dsn[0m
+Importing from /home/fish/bucket/pgcli-test/dsn-export.dump to postgres://admin:3v4pMuizfRgZWmKD@127.0.0.1:35435/e2e-test2_db?sslmode=disable...
+✓ Import complete
+[0;32m  [PASS] import --dsn from file[0m
+[0;32m  [PASS] DSN import count = 3[0m
+
+[0;33m=== Test: Backup Container ===[0m
+=== pg backup setup ===
+
+-> Ensuring shared network...
+    e2e-dsnclone stanza=pgcli_e2e-dsnclone   container=pgcli-pg-e2e-e2e-dsnclone [running]
+    e2e-test     stanza=pgcli_e2e-test       container=pgcli-pg-e2e-e2e-test [stopped]
+    e2e-test2    stanza=pgcli_e2e-test2      container=pgcli-pg-e2e-e2e-test2 [running]
+    e2e-clone    stanza=pgcli_e2e-clone      container=pgcli-pg-e2e-e2e-clone [running]
+
+-> Step 1/4: Building backup image...
+-> Backup image ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 already exists, skipping pull/build
+
+-> Step 2/4: Creating backup directories...
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/data
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/log
+
+-> Step 3/4: Generating pgbackrest.conf...
+-> pgbackrest.conf generated: /home/fish/bucket/pgcli-test/pgbackrest.conf (4 stanzas)
+
+-> Step 4/4: Starting backup container...
+-> Backup container already running
+
+OK backup setup complete!
+  Container: pgcli-backup-e2e
+  Image:     ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0
+  Config:    /home/fish/bucket/pgcli-test/pgbackrest.conf
+  Stanzas:   4
+[0;32m  [PASS] Backup setup[0m
+[0;32m  [PASS] Backup status shows container[0m
+-> Stopping backup container pgcli-backup-e2e...
+[OK] Backup container stopped
+[0;32m  [PASS] Backup stop[0m
+-> Starting backup container pgcli-backup-e2e...
+[OK] Backup container started
+[0;32m  [PASS] Backup start[0m
+[0;32m  [PASS] Backup status running[0m
+
+[0;33m=== Test: Destroy Instances ===[0m
+-> Stopping and removing container pgcli-pg-e2e-e2e-clone...
+!  Removing container (host data directories are preserved)
+  [OK] config removed: /home/fish/bucket/pgcli-test/pgbackrest-pgcli-pg-e2e-e2e-clone.conf
+  Data preserved at: /home/fish/bucket/pgcli-test/dbdata/e2e-clone/data
+-> Backup image ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 already exists, skipping pull/build
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/data
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/log
+-> pgbackrest.conf generated: /home/fish/bucket/pgcli-test/pgbackrest.conf (3 stanzas)
+-> Backup container already running
+[OK] instance "e2e-clone" destroyed
+[0;32m  [PASS] Destroy clone instance[0m
+-> Stopping and removing container pgcli-pg-e2e-e2e-dsnclone...
+!  Removing container (host data directories are preserved)
+  [OK] config removed: /home/fish/bucket/pgcli-test/pgbackrest-pgcli-pg-e2e-e2e-dsnclone.conf
+  Data preserved at: /home/fish/bucket/pgcli-test/dbdata/e2e-dsnclone/data
+-> Backup image ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 already exists, skipping pull/build
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/data
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/log
+-> pgbackrest.conf generated: /home/fish/bucket/pgcli-test/pgbackrest.conf (2 stanzas)
+-> Backup container already running
+[OK] instance "e2e-dsnclone" destroyed
+[0;32m  [PASS] Destroy dsn clone instance[0m
+-> Stopping and removing container pgcli-pg-e2e-e2e-test2...
+!  Removing container (host data directories are preserved)
+  [OK] config removed: /home/fish/bucket/pgcli-test/pgbackrest-pgcli-pg-e2e-e2e-test2.conf
+  Data preserved at: /home/fish/bucket/pgcli-test/dbdata/e2e-test2/data
+-> Backup image ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 already exists, skipping pull/build
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/data
+-> Backup directory ensured: /home/fish/bucket/pgcli-test/backup/log
+-> pgbackrest.conf generated: /home/fish/bucket/pgcli-test/pgbackrest.conf (1 stanzas)
+-> Backup container already running
+[OK] instance "e2e-test2" destroyed
+[0;32m  [PASS] Destroy instance 2[0m
+-> Stopping and removing container pgcli-pg-e2e-e2e-test...
+!  Removing container and all host data
+  [OK] config removed: /home/fish/bucket/pgcli-test/pgbackrest-pgcli-pg-e2e-e2e-test.conf
+  [OK] data directory removed: /home/fish/bucket/pgcli-test/dbdata/e2e-test/data
+  [OK] empty parent directory removed: /home/fish/bucket/pgcli-test/dbdata/e2e-test
+  [OK] backup stanza removed: pgcli_e2e-test
+  [OK] backup container removed (no instances remaining)
+  [OK] removed: /home/fish/bucket/pgcli-test/pgbackrest.conf
+  [OK] removed: /home/fish/bucket/pgcli-test/backup/ssh_config
+  [OK] removed: /home/fish/bucket/pgcli-test/backup/id_rsa
+  [OK] removed: /home/fish/bucket/pgcli-test/backup/id_rsa.pub
+  [OK] removed: /home/fish/bucket/pgcli-test/backup/log
+  [OK] removed: /home/fish/bucket/pgcli-test/backup/data
+  [OK] removed: /home/fish/bucket/pgcli-test/backup
+[OK] instance "e2e-test" destroyed
+[0;32m  [PASS] Destroy instance 1 with data[0m
+
+==========================================
+[0;32m  ALL 59 TESTS PASSED[0m
+==========================================
+
+[0;33m=== Cleanup ===[0m
+[0;32m  Cleanup done[0m

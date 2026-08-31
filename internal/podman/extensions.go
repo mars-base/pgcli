@@ -312,9 +312,32 @@ func (m *Manager) GetInstalledExtensions() ([]string, error) {
 
 // RunCreateExtensions runs CREATE EXTENSION IF NOT EXISTS for each extension.
 // Uses the resolved SQL name (e.g., "vector" for pgvector).
+// For pg_cron, automatically sets cron.database_name to the configured database
+// before creating the extension, since pg_cron requires CREATE EXTENSION to run
+// in the database specified by cron.database_name.
 func (m *Manager) RunCreateExtensions(extNames []string) error {
 	for _, name := range extNames {
 		resolved := ResolveExtName(name)
+
+		// pg_cron requires cron.database_name to match the target database.
+		// Set it via ALTER SYSTEM + reload before CREATE EXTENSION.
+		if resolved == "cron" {
+			setDB := fmt.Sprintf("ALTER SYSTEM SET cron.database_name = '%s'", m.cfg.Postgres.Database)
+			fmt.Printf("-> Running: %s\n", setDB)
+			if out, err := m.ExecLong("psql", "-U", m.cfg.Postgres.User, "-d", "postgres", "-c", setDB); err != nil {
+				fmt.Printf("  [!] Warning: set cron.database_name: %v\n", err)
+				if out != "" {
+					fmt.Printf("  Output: %s\n", out)
+				}
+			}
+			if out, err := m.ExecLong("psql", "-U", m.cfg.Postgres.User, "-d", "postgres", "-c", "SELECT pg_reload_conf()"); err != nil {
+				fmt.Printf("  [!] Warning: reload conf: %v\n", err)
+				if out != "" {
+					fmt.Printf("  Output: %s\n", out)
+				}
+			}
+		}
+
 		sql := fmt.Sprintf("CREATE EXTENSION IF NOT EXISTS \"%s\"", resolved)
 		fmt.Printf("-> Running: %s\n", sql)
 		out, err := m.ExecLong("psql", "-U", m.cfg.Postgres.User, "-d", m.cfg.Postgres.Database, "-c", sql)
