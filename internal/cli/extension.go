@@ -188,7 +188,38 @@ func runExtensionInstall(extNames []string) error {
 	// Compare image IDs instead of tags (tag can stay same when content changes)
 	newImageID, _ := pm.GetImageID(newTag)
 	imageChanged := newImageID != oldImageID
+
+	// Check if any new extensions need preload (requires restart)
+	var needsPreloadExts []string
+	for _, ext := range toInstall {
+		if podman.ExtNeedsPreload(ext) {
+			needsPreloadExts = append(needsPreloadExts, ext)
+		}
+	}
+
 	if imageChanged {
+		// If container replacement is needed and there are preload extensions, prompt first
+		if len(needsPreloadExts) > 0 {
+			fmt.Printf("\nInstalling extensions that require shared_preload_libraries will cause a PostgreSQL restart.\n")
+			fmt.Printf("Extensions to be installed: %v\n", toInstall)
+			fmt.Printf("This will cause a brief interruption to database connections.\n\n")
+			if !autoRestart && !confirmPrompt("Restart PostgreSQL now? [y/N]: ") {
+				fmt.Println("Restart skipped. Run 'pg stop' and 'pg start' to apply changes later.")
+				fmt.Println("After restart, run: CREATE EXTENSION IF NOT EXISTS <extension>")
+
+				// Save config but don't replace container
+				inst.Extensions = allExts
+				inst.Podman.ImageTag = newTag
+				cfg.Instances[cfgInstance] = inst
+				if err := cfg.Save(path); err != nil {
+					return fmt.Errorf("failed to save config: %w", err)
+				}
+
+				fmt.Printf("✓ Extensions installed (restart pending): %v\n", toInstall)
+				return nil
+			}
+		}
+
 		// Replace container with new image (stop → rm → run with new image)
 		if err := pm.ReplaceContainer(newTag); err != nil {
 			return fmt.Errorf("replacing container: %w", err)
