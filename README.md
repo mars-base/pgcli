@@ -154,4 +154,4 @@ See the full [Quick Start](docs/quickstart.md) guide for multi-instance setup, i
 
 ## License
 
-MIT
+Apache 2.0
