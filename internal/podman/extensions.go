@@ -223,6 +223,21 @@ func (m *Manager) extImageHasPackages(imageTag string, packages []string) bool {
 	return strings.Contains(string(output), "all-installed")
 }
 
+// EnsurePgpass creates or updates the .pgpass file for the postgres OS user.
+// This is needed by pg_cron and other background workers that connect via TCP.
+func (m *Manager) EnsurePgpass() error {
+	// Write .pgpass with current credentials
+	pgpassContent := fmt.Sprintf("*:*:*:%s:%s\n", m.cfg.Postgres.User, m.cfg.Postgres.Password)
+	cmd := exec.Command(m.podman, "exec", m.cfg.Podman.ContainerName,
+		"sh", "-c",
+		fmt.Sprintf("echo '%s' > /var/lib/postgresql/.pgpass && chmod 600 /var/lib/postgresql/.pgpass && chown postgres:postgres /var/lib/postgresql/.pgpass",
+			pgpassContent))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("creating .pgpass: %w (output: %s)", err, string(out))
+	}
+	return nil
+}
+
 // NeedsRebuild returns true if the current image tag does not include all
 // requested extensions (i.e. it doesn't match the expected extension tag).
 func (m *Manager) NeedsRebuild(extNames []string) bool {

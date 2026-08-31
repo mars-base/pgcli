@@ -163,6 +163,13 @@ func doStart(c *config.Config) error {
 		time.Sleep(time.Second)
 	}
 
+	// 7a. Ensure .pgpass exists for the postgres OS user inside the container.
+	// This is needed by pg_cron and other background workers that connect via
+	// TCP as localhost. The file is idempotent — overwrites with current creds.
+	if err := pm.EnsurePgpass(); err != nil {
+		fmt.Printf("  [!] .pgpass warning: %v\n", err)
+	}
+
 	// 7b. Apply performance tuning to postgresql.conf inside the running
 	// container.  Done here (after PG is ready) so podman exec works.
 	// If restart-required params changed, restart the container once more and
