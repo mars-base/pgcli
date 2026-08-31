@@ -69,9 +69,14 @@ var extensionRemoveCmd = &cobra.Command{
 The container is replaced with a new image that excludes the removed extensions.
 Data volumes on the host are preserved.
 
+If removing an extension that requires shared_preload_libraries (e.g., pg_stat_statements),
+a restart will be required. By default, you will be prompted for confirmation.
+Use --auto-restart to skip the prompt and restart automatically.
+
 Examples:
   pg extension remove pgmq
-  pg extension remove pg_stat_statements pg_cron`,
+  pg extension remove pg_stat_statements pg_cron
+  pg extension remove pg_stat_statements --auto-restart`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runExtensionRemove(args)
@@ -86,9 +91,14 @@ var extensionAvailableCmd = &cobra.Command{
 	},
 }
 
+var autoRestart bool
+
 func init() {
 	rootCmd.AddCommand(extensionCmd)
 	extensionCmd.AddCommand(extensionInstallCmd, extensionListCmd, extensionRemoveCmd, extensionAvailableCmd)
+
+	// Add --auto-restart flag to extension remove command
+	extensionRemoveCmd.Flags().BoolVar(&autoRestart, "auto-restart", false, "Skip confirmation prompt when restart is required")
 }
 
 func runExtensionInstall(extNames []string) error {
@@ -369,6 +379,13 @@ func runExtensionRemove(extNames []string) error {
 	}
 
 	if needsRestart {
+		fmt.Printf("\nRemoving extensions that require shared_preload_libraries will cause a PostgreSQL restart.\n")
+		fmt.Printf("Extensions to be removed: %v\n", extNames)
+		fmt.Printf("This will cause a brief interruption to database connections.\n\n")
+		if !autoRestart && !confirmPrompt("Restart PostgreSQL now? [y/N]: ") {
+			fmt.Println("Restart skipped. Run 'pg stop' and 'pg start' to apply changes later.")
+			return nil
+		}
 		fmt.Println("-> Restarting PostgreSQL to unload shared_preload_libraries...")
 		if err := pm.StopContainer(); err != nil {
 			return fmt.Errorf("stop container for restart: %w", err)
