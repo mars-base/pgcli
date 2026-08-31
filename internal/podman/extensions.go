@@ -8,91 +8,43 @@ import (
 	"time"
 )
 
-// Extension represents a PostgreSQL extension managed by pgcli.
-type Extension struct {
-	Name         string // extension name (e.g., pg_stat_statements)
-	Package      string // apt package suffix (e.g., pg-stat-statements)
-	NeedsPreload bool   // must be in shared_preload_libraries
-	CreateInDB   bool   // run CREATE EXTENSION IF NOT EXISTS by default
-	Builtin      bool   // already in the base image (contrib), no apt install needed
-	CreateName   string // SQL extension name if different from Name (e.g., "vector" for pgvector)
+// createNameAlias maps alternative user-facing extension names to the
+// canonical SQL extension name used in Pigsty's catalog and CREATE EXTENSION.
+// Only entries where the user-typed name differs from the SQL name are needed.
+var createNameAlias = map[string]string{
+	"pgvector": "vector", // user types "pgvector", SQL extension is "vector"
 }
 
-// ExtensionCatalog contains well-known extensions available from the Pigsty DEB repo
-// or already included in the base PostgreSQL image (contrib modules).
-var ExtensionCatalog = []Extension{
-	// --- Builtin (contrib, already in postgres:18 image) ---
-	{Name: "pg_stat_statements", Package: "", NeedsPreload: true, CreateInDB: true, Builtin: true},
-	{Name: "uuid-ossp", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "hstore", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "pgcrypto", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "tablefunc", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "btree_gist", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "btree_gin", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "pg_trgm", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "unaccent", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "fuzzystrmatch", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "intarray", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "isn", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "citext", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "ltree", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "cube", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "earthdistance", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "pg_buffercache", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "pg_freespacemap", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "pg_visibility", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "pgstattuple", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "pageinspect", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "pg_prewarm", Package: "", NeedsPreload: true, CreateInDB: true, Builtin: true},
-	{Name: "pgrowlocks", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "bloom", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "amcheck", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "file_fdw", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "postgres_fdw", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "dblink", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "sslinfo", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "xml2", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "seg", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "dict_int", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "dict_xsyn", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "intagg", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "lo", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "autoinc", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "insert_username", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "moddatetime", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "refint", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "tsm_system_rows", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "tsm_system_time", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "pg_walinspect", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "pg_surgery", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "pg_logicalinspect", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-	{Name: "tcn", Package: "", NeedsPreload: false, CreateInDB: true, Builtin: true},
-
-	// --- Non-builtin (requires apt install from Pigsty/PGDG) ---
-	{Name: "pg_hint_plan", Package: "pg-hint-plan", NeedsPreload: true, CreateInDB: true},
-	{Name: "pg_cron", Package: "pg-cron", NeedsPreload: true, CreateInDB: true},
-	{Name: "pg_stat_monitor", Package: "pg-stat-monitor", NeedsPreload: true, CreateInDB: true},
-	{Name: "pg_qualstats", Package: "pg-qualstats", NeedsPreload: true, CreateInDB: true},
-	{Name: "pg_stat_kcache", Package: "pg-stat-kcache", NeedsPreload: true, CreateInDB: true},
-	{Name: "pg_wait_sampling", Package: "pg-wait-sampling", NeedsPreload: true, CreateInDB: true},
-	{Name: "pg_track_settings", Package: "pg-track-settings", NeedsPreload: true, CreateInDB: true},
-	{Name: "pg_repack", Package: "pg-repack", NeedsPreload: false, CreateInDB: true},
-	{Name: "pg_squeeze", Package: "pg-squeeze", NeedsPreload: false, CreateInDB: true},
-	{Name: "pg_partman", Package: "pg-partman", NeedsPreload: false, CreateInDB: true},
-	{Name: "pgmq", Package: "pgmq", NeedsPreload: false, CreateInDB: true},
-	{Name: "pgvector", Package: "pgvector", NeedsPreload: false, CreateInDB: true, CreateName: "vector"},
-	{Name: "postgis", Package: "postgis-3", NeedsPreload: false, CreateInDB: true},
-	{Name: "timescaledb", Package: "timescaledb", NeedsPreload: true, CreateInDB: true},
-}
-
-// GetExtension returns catalog entry for extName, or nil if not found.
-func GetExtension(extName string) *Extension {
-	for i := range ExtensionCatalog {
-		if ExtensionCatalog[i].Name == extName {
-			return &ExtensionCatalog[i]
-		}
+// ResolveExtName resolves a user-supplied extension name to the canonical
+// SQL extension name used by Pigsty.  For example "pgvector" → "vector".
+// Returns the resolved name.
+func ResolveExtName(name string) string {
+	if resolved, ok := createNameAlias[name]; ok {
+		return resolved
 	}
-	return nil
+	return name
+}
+
+// IsExtensionKnown returns true if the extension name is recognized —
+// either as a builtin (contrib) or in the Pigsty catalog.
+func IsExtensionKnown(name string) bool {
+	resolved := ResolveExtName(name)
+	_, _, _, found := LookupExtension(resolved)
+	return found
+}
+
+// ExtNeedsPreload returns true if the extension requires shared_preload_libraries.
+func ExtNeedsPreload(name string) bool {
+	resolved := ResolveExtName(name)
+	_, needsPreload, _, found := LookupExtension(resolved)
+	return found && needsPreload
+}
+
+// ExtIsBuiltin returns true if the extension is already in the base image.
+func ExtIsBuiltin(name string) bool {
+	resolved := ResolveExtName(name)
+	_, _, builtin, found := LookupExtension(resolved)
+	return found && builtin
 }
 
 const (
@@ -135,8 +87,7 @@ func findExtSuffix(tag string) int {
 // require an apt package (not already in the base image).
 func HasNonBuiltinExtensions(extNames []string) bool {
 	for _, name := range extNames {
-		ext := GetExtension(name)
-		if ext == nil || !ext.Builtin {
+		if !ExtIsBuiltin(name) {
 			return true
 		}
 	}
@@ -162,18 +113,20 @@ func (m *Manager) BuildExtensionImage(fromTag string, pkgList []string) (string,
 		return newTag, nil
 	}
 
-	// Filter to non-builtin extensions only
+	// Filter to non-builtin extensions only, resolve apt package names
 	var aptPkgs []string
 	for _, name := range pkgList {
-		ext := GetExtension(name)
-		if ext != nil && ext.Builtin {
+		if ExtIsBuiltin(name) {
 			continue // already in base image
 		}
-		pkg := name
-		if ext != nil && ext.Package != "" {
-			pkg = ext.Package
+		resolved := ResolveExtName(name)
+		pkg, _, _, found := LookupExtension(resolved)
+		if found && pkg != "" {
+			aptPkgs = append(aptPkgs, "postgresql-18-"+pkg)
+		} else {
+			// Fallback: use the resolved name as package suffix
+			aptPkgs = append(aptPkgs, "postgresql-18-"+resolved)
 		}
-		aptPkgs = append(aptPkgs, "postgresql-18-"+pkg)
 	}
 
 	if len(aptPkgs) == 0 {
@@ -307,18 +260,11 @@ func (m *Manager) GetInstalledExtensions() ([]string, error) {
 }
 
 // RunCreateExtensions runs CREATE EXTENSION IF NOT EXISTS for each extension.
+// Uses the resolved SQL name (e.g., "vector" for pgvector).
 func (m *Manager) RunCreateExtensions(extNames []string) error {
 	for _, name := range extNames {
-		ext := GetExtension(name)
-		if ext != nil && !ext.CreateInDB {
-			continue
-		}
-		// Use CreateName if specified (e.g., "vector" for pgvector)
-		sqlName := name
-		if ext != nil && ext.CreateName != "" {
-			sqlName = ext.CreateName
-		}
-		sql := fmt.Sprintf("CREATE EXTENSION IF NOT EXISTS \"%s\"", sqlName)
+		resolved := ResolveExtName(name)
+		sql := fmt.Sprintf("CREATE EXTENSION IF NOT EXISTS \"%s\"", resolved)
 		fmt.Printf("-> Running: %s\n", sql)
 		out, err := m.ExecLong("psql", "-U", m.cfg.Postgres.User, "-d", m.cfg.Postgres.Database, "-c", sql)
 		if err != nil {
@@ -338,9 +284,10 @@ func (m *Manager) ApplyExtensions(extNames []string) (needsRestart bool, err err
 	// Collect extensions that need preloading
 	var preload []string
 	for _, name := range extNames {
-		ext := GetExtension(name)
-		if ext != nil && ext.NeedsPreload {
-			preload = append(preload, name)
+		if ExtNeedsPreload(name) {
+			// Use the resolved SQL name for shared_preload_libraries
+			resolved := ResolveExtName(name)
+			preload = append(preload, resolved)
 		}
 	}
 

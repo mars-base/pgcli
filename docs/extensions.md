@@ -68,7 +68,9 @@ Workflow:
 pg extension available
 ```
 
-Lists the 26 common extensions in the pgcli catalog.
+Lists all 440 known extensions:
+- **45 builtin** (contrib, already in the base image — no image build needed)
+- **395 Pigsty catalog** (from Pigsty DEB repo, requires image build)
 
 ## Built-in Extension Catalog
 
@@ -110,15 +112,17 @@ Lists the 26 common extensions in the pgcli catalog.
 
 ## Extensions Outside the Catalog
 
-Extensions not in the catalog can be installed by name directly:
+Only extensions in the catalog (builtin + Pigsty) can be installed via `pg extension install`. Unknown extension names are rejected before the build starts:
 
-```bash
-pg extension install <name> -i pg01
+```
+  [X] Unknown extension(s): [nonexistent_ext]
+
+      These extensions are not in the Pigsty catalog or builtin contrib list.
+      Check available extensions: pg extension available
+      Full Pigsty catalog: https://pigsty.cc/ext/list/
 ```
 
-pgcli will attempt to install the `postgresql-18-<name>` package. If the package is not available in the Pigsty repo, an error is returned.
-
-Full catalog: https://pigsty.io/ext/
+Full catalog: https://pigsty.cc/ext/list/
 
 ## Configuration
 
@@ -154,15 +158,15 @@ This is a postmaster-level parameter; PostgreSQL must be restarted after changes
 ### Extension Install Failure
 
 ```
-install pgmq: install postgresql-18-pgmq: exit status 100
+  [X] Unknown extension(s): [nonexistent_ext]
 ```
 
-Cause: Package not found in the Pigsty repository.
+Cause: Extension name is not in the builtin contrib list or Pigsty catalog.
 
 Resolution:
 - Verify the extension name: `pg extension available`
-- Check the Pigsty catalog: https://pigsty.io/ext/
-- Install manually: `pg exec bash -c "apt-get install -y postgresql-18-<pkg>"`
+- Check the Pigsty catalog: https://pigsty.cc/ext/list/
+- Note the exact SQL extension name (e.g., `vector` not `pgvector`)
 
 ### CREATE EXTENSION Failure
 
@@ -185,7 +189,8 @@ Resolution: Remove the manual configuration and let pgcli manage it.
 
 ## Notes
 
+- **Extension count**: 45 builtin (contrib) + 395 Pigsty catalog = 440 total known extensions
 - **Image size**: Each extension adds 10-50MB to the image, but Pigsty packages are optimized
-- **Build time**: First extension install takes 1-3 minutes (download + build); subsequent installs are near-instant (cache hits)
+- **Build time**: First extension install takes 1-3 minutes (download + build); subsequent installs are faster (cache hits)
 - **Replica behavior**: Replicas can install extensions, but `CREATE EXTENSION` will be rejected (read-only). Install on the primary; replicas sync via physical replication
 - **Extension upgrades**: `ALTER EXTENSION ... UPDATE TO ...` is not yet supported; run manually via `pg exec`

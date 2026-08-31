@@ -97,7 +97,7 @@ func runExtensionInstall(extNames []string) error {
 		path = platform.DefaultConfigPath()
 	}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+		return fmt.Errorf("Config file not found: %s -- run \"pg config init\" first", path)
 	}
 
 	cfg, err := config.Load(path)
@@ -139,19 +139,20 @@ func runExtensionInstall(extNames []string) error {
 		return nil
 	}
 
-	// Pre-validate: warn about extensions not in the catalog.
+	// Pre-validate: block unknown extensions before starting the build.
 	var unknown []string
 	for _, name := range toInstall {
-		if ext := podman.GetExtension(name); ext == nil {
+		if !podman.IsExtensionKnown(name) {
 			unknown = append(unknown, name)
 		}
 	}
 	if len(unknown) > 0 {
-		fmt.Printf("  [!] Extension(s) not in catalog: %v\n", unknown)
-		fmt.Println("      These will be installed as postgresql-18-<name> from Pigsty/PGDG repos.")
-		fmt.Println("      If the package does not exist, the build will fail.")
-		fmt.Println("      Run `pg extension available` to see catalog extensions.")
+		fmt.Printf("  [X] Unknown extension(s): %v\n", unknown)
 		fmt.Println()
+		fmt.Println("      These extensions are not in the Pigsty catalog or builtin contrib list.")
+		fmt.Println("      Check available extensions: pg extension available")
+		fmt.Println("      Full Pigsty catalog: https://pigsty.cc/ext/list/")
+		return fmt.Errorf("unknown extensions: %v", unknown)
 	}
 
 	// Build new extension image with all managed extensions.
@@ -232,7 +233,7 @@ func runExtensionList() error {
 		path = platform.DefaultConfigPath()
 	}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return fmt.Errorf("config file not found: %s", path)
+		return fmt.Errorf("Config file not found: %s", path)
 	}
 
 	cfg, err := config.Load(path)
@@ -266,9 +267,10 @@ func runExtensionList() error {
 	managedSet := make(map[string]bool)
 	for _, e := range managed {
 		managedSet[e] = true
-		// Also map CreateName → managed (e.g., "vector" → managed for pgvector)
-		if ext := podman.GetExtension(e); ext != nil && ext.CreateName != "" {
-			managedSet[ext.CreateName] = true
+		// Also map resolved SQL name → managed (e.g., "vector" → managed for pgvector)
+		resolved := podman.ResolveExtName(e)
+		if resolved != e {
+			managedSet[resolved] = true
 		}
 	}
 
@@ -295,7 +297,7 @@ func runExtensionRemove(extNames []string) error {
 		path = platform.DefaultConfigPath()
 	}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return fmt.Errorf("config file not found: %s", path)
+		return fmt.Errorf("Config file not found: %s", path)
 	}
 
 	cfg, err := config.Load(path)
@@ -328,10 +330,7 @@ func runExtensionRemove(extNames []string) error {
 
 	// DROP EXTENSION (before removing from image, so we can still access the files)
 	for _, name := range extNames {
-		sqlName := name
-		if ext := podman.GetExtension(name); ext != nil && ext.CreateName != "" {
-			sqlName = ext.CreateName
-		}
+		sqlName := podman.ResolveExtName(name)
 		sql := fmt.Sprintf("DROP EXTENSION IF EXISTS \"%s\"", sqlName)
 		fmt.Printf("-> Running: %s\n", sql)
 		out, err := pm.Exec("psql", "-U", cfg.Postgres.User, "-d", cfg.Postgres.Database, "-c", sql)
@@ -424,44 +423,54 @@ func runExtensionRemove(extNames []string) error {
 }
 
 func runExtensionAvailable() error {
-	fmt.Println("Available extensions in pgcli catalog:")
+	fmt.Println("Available PostgreSQL extensions:")
 	fmt.Println()
 
-	// Sort by category
-	var needsPreload []podman.Extension
-	var noPreload []podman.Extension
-	for _, ext := range podman.ExtensionCatalog {
+	// Collect builtin extensions
+	var builtinList []string
+	for name := range podman.BuiltinNames {
+		builtinList = append(builtinList, name)
+	}
+	sort.Strings(builtinList)
+
+	// Collect Pigsty extensions, split by preload requirement
+	var pigstyPreload []string
+	var pigstyNoPreload []string
+	for name, ext := range podman.PigstyExtMap {
 		if ext.NeedsPreload {
-			needsPreload = append(needsPreload, ext)
+			pigstyPreload = append(pigstyPreload, name)
 		} else {
-			noPreload = append(noPreload, ext)
+			pigstyNoPreload = append(pigstyNoPreload, name)
 		}
 	}
+	sort.Strings(pigstyPreload)
+	sort.Strings(pigstyNoPreload)
 
-	sort.Slice(needsPreload, func(i, j int) bool {
-		return needsPreload[i].Name < needsPreload[j].Name
-	})
-	sort.Slice(noPreload, func(i, j int) bool {
-		return noPreload[i].Name < noPreload[j].Name
-	})
-
-	fmt.Println("Extensions requiring shared_preload_libraries (container restart on install):")
-	for _, ext := range needsPreload {
-		fmt.Printf("  %s\n", ext.Name)
+	fmt.Printf("Builtin (contrib, already in base image — %d):\n", len(builtinList))
+	for _, name := range builtinList {
+		fmt.Printf("  %s\n", name)
 	}
 
 	fmt.Println()
-	fmt.Println("Extensions without preloading (no restart needed):")
-	for _, ext := range noPreload {
-		fmt.Printf("  %s\n", ext.Name)
+	fmt.Printf("Pigsty catalog — requires shared_preload_libraries (%d):\n", len(pigstyPreload))
+	for _, name := range pigstyPreload {
+		ext := podman.PigstyExtMap[name]
+		fmt.Printf("  %s (pkg: %s, repo: %s)\n", name, ext.Package, ext.Repo)
 	}
 
 	fmt.Println()
-	fmt.Println("Extensions not in the catalog can be installed by name:")
-	fmt.Println("  pg extension install <name>")
-	fmt.Println("  (attempts to install postgresql-18-<name> from Pigsty DEB repo)")
+	fmt.Printf("Pigsty catalog — no preloading needed (%d):\n", len(pigstyNoPreload))
+	for _, name := range pigstyNoPreload {
+		ext := podman.PigstyExtMap[name]
+		fmt.Printf("  %s (pkg: %s, repo: %s)\n", name, ext.Package, ext.Repo)
+	}
+
 	fmt.Println()
-	fmt.Println("Full catalog: https://pigsty.cc/ext/")
+	fmt.Printf("Total: %d builtin + %d Pigsty = %d extensions\n",
+		len(builtinList), len(pigstyPreload)+len(pigstyNoPreload),
+		len(builtinList)+len(pigstyPreload)+len(pigstyNoPreload))
+	fmt.Println()
+	fmt.Println("Only catalog extensions can be installed. Full Pigsty catalog: https://pigsty.cc/ext/list/")
 
 	return nil
 }
