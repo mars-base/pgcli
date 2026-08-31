@@ -410,61 +410,66 @@ var PigstyExtMap = map[string]PigstyExt{
 	"zstd": {Package: "pg_zstd", NeedsPreload: false, Repo: "PIGSTY"},
 }
 
-// BuiltinNames contains 52 contrib extensions already in the postgres:18 base image.
+// BuiltinExt contains metadata for a contrib extension in the base image.
+type BuiltinExt struct {
+	NeedsPreload bool // must be in shared_preload_libraries
+}
+
+// BuiltinExts contains contrib extensions already in the postgres:18 base image.
 // These require no apt install — they ship in /usr/share/postgresql/18/extension/.
-var BuiltinNames = map[string]bool{
-	"amcheck": true,
-	"autoinc": true,
-	"bloom": true,
-	"btree_gin": true,
-	"btree_gist": true,
-	"citext": true,
-	"cube": true,
-	"dblink": true,
-	"dict_int": true,
-	"dict_xsyn": true,
-	"earthdistance": true,
-	"file_fdw": true,
-	"fuzzystrmatch": true,
-	"hstore": true,
-	"insert_username": true,
-	"intagg": true,
-	"intarray": true,
-	"isn": true,
-	"lo": true,
-	"ltree": true,
-	"moddatetime": true,
-	"pageinspect": true,
-	"pg_buffercache": true,
-	"pg_freespacemap": true,
-	"pg_logicalinspect": true,
-	"pg_prewarm": true,
-	"pg_stat_statements": true,
-	"pg_surgery": true,
-	"pg_trgm": true,
-	"pg_visibility": true,
-	"pg_walinspect": true,
-	"pgcrypto": true,
-	"pgrowlocks": true,
-	"pgstattuple": true,
-	"postgres_fdw": true,
-	"refint": true,
-	"seg": true,
-	"sslinfo": true,
-	"tablefunc": true,
-	"tcn": true,
-	"tsm_system_rows": true,
-	"tsm_system_time": true,
-	"unaccent": true,
-	"uuid-ossp": true,
-	"xml2": true,
+var BuiltinExts = map[string]BuiltinExt{
+	"amcheck":            {},
+	"autoinc":            {},
+	"bloom":              {},
+	"btree_gin":          {},
+	"btree_gist":         {},
+	"citext":             {},
+	"cube":               {},
+	"dblink":             {},
+	"dict_int":           {},
+	"dict_xsyn":          {},
+	"earthdistance":      {},
+	"file_fdw":           {},
+	"fuzzystrmatch":      {},
+	"hstore":             {},
+	"insert_username":    {},
+	"intagg":             {},
+	"intarray":           {},
+	"isn":                {},
+	"lo":                 {},
+	"ltree":              {},
+	"moddatetime":        {},
+	"pageinspect":        {},
+	"pg_buffercache":     {},
+	"pg_freespacemap":    {},
+	"pg_logicalinspect":  {},
+	"pg_prewarm":         {NeedsPreload: true},
+	"pg_stat_statements": {NeedsPreload: true},
+	"pg_surgery":         {},
+	"pg_trgm":            {},
+	"pg_visibility":      {},
+	"pg_walinspect":      {},
+	"pgcrypto":           {},
+	"pgrowlocks":         {},
+	"pgstattuple":        {},
+	"postgres_fdw":       {},
+	"refint":             {},
+	"seg":                {},
+	"sslinfo":            {},
+	"tablefunc":          {},
+	"tcn":                {},
+	"tsm_system_rows":    {},
+	"tsm_system_time":    {},
+	"unaccent":           {},
+	"uuid-ossp":          {},
+	"xml2":               {},
 }
 
 // LookupExtension returns (Package, NeedsPreload, Builtin, found) for an extension name.
-// Checks BuiltinNames first (always available), then PigstyExtMap.
+// Checks BuiltinExts first (always available), then PigstyExtMap.
 func LookupExtension(name string) (pkg string, needsPreload bool, builtin bool, found bool) {
-	if BuiltinNames[name] {
-		return "", false, true, true
+	if ext, ok := BuiltinExts[name]; ok {
+		return "", ext.NeedsPreload, true, true
 	}
 	if ext, ok := PigstyExtMap[name]; ok {
 		return ext.Package, ext.NeedsPreload, false, true

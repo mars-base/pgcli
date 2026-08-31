@@ -427,11 +427,28 @@ func runExtensionAvailable() error {
 	fmt.Println()
 
 	// Collect builtin extensions
-	var builtinList []string
-	for name := range podman.BuiltinNames {
-		builtinList = append(builtinList, name)
+	var builtinPreload []string
+	var builtinNoPreload []string
+	for name, ext := range podman.BuiltinExts {
+		if ext.NeedsPreload {
+			builtinPreload = append(builtinPreload, name)
+		} else {
+			builtinNoPreload = append(builtinNoPreload, name)
+		}
 	}
-	sort.Strings(builtinList)
+	sort.Strings(builtinPreload)
+	sort.Strings(builtinNoPreload)
+
+	fmt.Printf("Builtin — requires shared_preload_libraries (%d):\n", len(builtinPreload))
+	for _, name := range builtinPreload {
+		fmt.Printf("  %s\n", name)
+	}
+
+	fmt.Println()
+	fmt.Printf("Builtin — no preloading needed (%d):\n", len(builtinNoPreload))
+	for _, name := range builtinNoPreload {
+		fmt.Printf("  %s\n", name)
+	}
 
 	// Collect Pigsty extensions, split by preload requirement
 	var pigstyPreload []string
@@ -445,11 +462,6 @@ func runExtensionAvailable() error {
 	}
 	sort.Strings(pigstyPreload)
 	sort.Strings(pigstyNoPreload)
-
-	fmt.Printf("Builtin (contrib, already in base image — %d):\n", len(builtinList))
-	for _, name := range builtinList {
-		fmt.Printf("  %s\n", name)
-	}
 
 	fmt.Println()
 	fmt.Printf("Pigsty catalog — requires shared_preload_libraries (%d):\n", len(pigstyPreload))
@@ -465,10 +477,11 @@ func runExtensionAvailable() error {
 		fmt.Printf("  %s (pkg: %s, repo: %s)\n", name, ext.Package, ext.Repo)
 	}
 
+	builtinTotal := len(builtinPreload) + len(builtinNoPreload)
+	pigstyTotal := len(pigstyPreload) + len(pigstyNoPreload)
 	fmt.Println()
 	fmt.Printf("Total: %d builtin + %d Pigsty = %d extensions\n",
-		len(builtinList), len(pigstyPreload)+len(pigstyNoPreload),
-		len(builtinList)+len(pigstyPreload)+len(pigstyNoPreload))
+		builtinTotal, pigstyTotal, builtinTotal+pigstyTotal)
 	fmt.Println()
 	fmt.Println("Only catalog extensions can be installed. Full Pigsty catalog: https://pigsty.cc/ext/list/")
 
