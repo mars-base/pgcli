@@ -33,4 +33,13 @@ archive_timeout = 60
 max_wal_senders = 10
 EOF
 
+# Create .pgpass for the postgres OS user so that pg_cron (and other
+# background workers that connect via TCP as localhost) can authenticate
+# without a password prompt. pg_cron uses libpq TCP connections to
+# nodename:nodeport, which may bypass pg_hba trust rules depending on
+# the libpq version and connection behavior.
+echo "*:*:*:${POSTGRES_USER}:${POSTGRES_PASSWORD}" > /var/lib/postgresql/.pgpass
+chmod 600 /var/lib/postgresql/.pgpass
+chown postgres:postgres /var/lib/postgresql/.pgpass
+
 echo "pgcli: WAL archive configuration written (stanza=${STANZA})"
