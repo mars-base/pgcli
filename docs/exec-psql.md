@@ -53,6 +53,28 @@ pg psql -- -d other_db                    # connect to different database
 pg psql -- -U other_user                  # connect as different user
 ```
 
+### Switch to postgres superuser
+
+Some administrative tasks (e.g., creating certain extensions, modifying system-level settings) require postgres superuser privileges. Use `--` to pass psql arguments and switch user:
+
+```bash
+pg psql -i pg01 -- -U postgres -d postgres
+```
+
+**Recommended approach**: Use the instance default user (admin) for daily operations, and switch to postgres only when superuser privileges are needed. This is safer and more convenient than modifying config files or restarting containers.
+
+Example scenarios:
+```bash
+# Create an extension that requires superuser privileges
+pg psql -i pg01 -- -U postgres -d postgres -c "CREATE EXTENSION pg_cron"
+
+# Configure cron.database_name (pg_cron specific parameter)
+pg psql -i pg01 -- -U postgres -d postgres -c "ALTER SYSTEM SET cron.database_name = 'pg01_db'"
+
+# View system-level configuration
+pg psql -i pg01 -- -U postgres -d postgres -c "SHOW shared_preload_libraries"
+```
+
 ### Remote database (--dsn)
 
 ```bash
