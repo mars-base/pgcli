@@ -26,6 +26,7 @@ Whether you're running multiple dev databases, managing staging environments, or
 | [Clone](docs/clone.md) | Copy an instance into a new one via logical dump pipe, remote `--dsn` source, pre-flight connectivity check, live progress |
 | [Backup and Restore](docs/backup-restore.md) | Full/differential snapshots, snapshot list/delete, point-in-time recovery (PITR) with read-only inspection before promoting |
 | [Replica](docs/replica.md) | Read-only physical standby of an instance: create/list, live WAL streaming, lag, slot lifecycle |
+| [Extensions](docs/extensions.md) | Install PostgreSQL extensions from Pigsty DEB repo, baked into container image, shared_preload_libraries management |
 | [Administration](docs/administration.md) | Shell completion (bash/zsh/fish/PowerShell), PostgreSQL parameter tuning, instance destroy/rebuild |
 | [Test Report](docs/full-test-step.md) | Core functionality test report: DSN piping, PITR verification, known issues, install script test |
 

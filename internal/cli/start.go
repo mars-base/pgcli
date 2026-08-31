@@ -187,6 +187,15 @@ func doStart(c *config.Config) error {
 		}
 	}
 
+	// 7c. Apply extensions: install packages, manage shared_preload_libraries,
+	// CREATE EXTENSION if needed. If shared_preload_libraries changed, restart
+	// the container and wait for PG to come back up.
+	if len(c.Instances[c.Instance].Extensions) > 0 {
+		if err := applyExtensions(pm, c); err != nil {
+			fmt.Printf("  [!] extensions warning: %v\n", err)
+		}
+	}
+
 	// 8. Initialize pgBackRest stanza (via backup container)
 	if c.PITR.Enabled {
 		bm, err := podman.NewBackupManager(c)
@@ -272,5 +281,47 @@ func doStart(c *config.Config) error {
 	fmt.Printf("  PostgreSQL: postgres://%s:%s@localhost:%d/%s\n",
 		c.Postgres.User, c.Postgres.Password,
 		c.Postgres.Port, c.Postgres.Database)
+	return nil
+}
+
+// applyExtensions manages shared_preload_libraries and runs CREATE EXTENSION
+// for managed extensions. Extension packages are baked into the image by
+// `pg extension install` (BuildExtensionImage), so start only needs to keep
+// postgresql.conf and pg_extension in sync.
+func applyExtensions(pm *podman.Manager, c *config.Config) error {
+	inst := c.Instances[c.Instance]
+	if len(inst.Extensions) == 0 {
+		return nil
+	}
+
+	// Apply shared_preload_libraries (idempotent: no-op if already set)
+	needsRestart, err := pm.ApplyExtensions(inst.Extensions)
+	if err != nil {
+		return fmt.Errorf("apply extensions: %w", err)
+	}
+
+	if needsRestart {
+		fmt.Println("-> Restarting PostgreSQL to apply shared_preload_libraries changes...")
+		if err := pm.StopContainer(); err != nil {
+			return fmt.Errorf("stop container for restart: %w", err)
+		}
+		if err := pm.StartContainer(); err != nil {
+			return fmt.Errorf("start container after restart: %w", err)
+		}
+		fmt.Println("-> Waiting for PostgreSQL to be ready (after restart)...")
+		for i := 0; i < 60; i++ {
+			if ready, _ := pm.PGIsReady(); ready {
+				fmt.Println("  [OK] PostgreSQL ready")
+				break
+			}
+			time.Sleep(time.Second)
+		}
+	}
+
+	// CREATE EXTENSION IF NOT EXISTS for each managed extension
+	if err := pm.RunCreateExtensions(inst.Extensions); err != nil {
+		return fmt.Errorf("create extensions: %w", err)
+	}
+
 	return nil
 }

@@ -43,6 +43,12 @@ type InstanceConfig struct {
 	// is not managed locally, and replication setup must have been prepared
 	// on the primary side (pg replica create ... --replica-host).
 	PrimaryDSN string `yaml:"primary_dsn,omitempty"`
+	// Extensions lists the PostgreSQL extension names installed in this
+	// instance (managed by `pg extension install/remove`). Each start
+	// ensures the matching packages are installed and shared_preload_libraries
+	// is kept in sync; new extensions also have CREATE EXTENSION IF NOT EXISTS
+	// run automatically.
+	Extensions []string `yaml:"extensions,omitempty"`
 }
 
 // PostgresConfig holds PostgreSQL connection settings.
