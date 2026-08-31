@@ -25,6 +25,7 @@ type Config struct {
 	PITR        PITRConfig                `yaml:"pitr"`
 	Logging     LoggingConfig             `yaml:"logging"`
 	Backup      BackupConfig              `yaml:"backup"`
+	Pigsty      PigstyConfig              `yaml:"pigsty"`
 	Instances   map[string]InstanceConfig `yaml:"instances"`
 
 	Instance string `yaml:"-"` // current instance name (set at runtime, not persisted)
@@ -91,6 +92,11 @@ type BackupConfig struct {
 	RetentionFull int    `yaml:"retention_full"` // number of full backups to retain, default 7
 }
 
+// PigstyConfig holds Pigsty extension repository settings.
+type PigstyConfig struct {
+	Repo string `yaml:"repo"` // Pigsty DEB repo base URL, default https://repo.pigsty.io
+}
+
 // Default returns a Config populated with default values.
 func Default() *Config {
 	return &Config{
@@ -123,6 +129,9 @@ func Default() *Config {
 			DataDir:       filepath.Join(platform.DefaultConfigDir(), "backup", "data"),
 			LogDir:        filepath.Join(platform.DefaultConfigDir(), "backup", "log"),
 			RetentionFull: 7,
+		},
+		Pigsty: PigstyConfig{
+			Repo: "https://repo.pigsty.io",
 		},
 		Instances: make(map[string]InstanceConfig),
 	}
@@ -270,6 +279,7 @@ type displayConfig struct {
 	PGSSHPort   int                       `yaml:"pg_ssh_port,omitempty"`
 	Logging     LoggingConfig             `yaml:"logging"`
 	Backup      BackupConfig              `yaml:"backup"`
+	Pigsty      PigstyConfig              `yaml:"pigsty"`
 	Instances   map[string]InstanceConfig `yaml:"instances"`
 }
 
@@ -283,6 +293,7 @@ func (c *Config) Display() displayConfig {
 		PGSSHPort:   c.PGSSHPort,
 		Logging:     c.Logging,
 		Backup:      c.Backup,
+		Pigsty:      c.Pigsty,
 		Instances:   c.Instances,
 	}
 }
@@ -414,6 +425,11 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Backup.RetentionFull == 0 {
 		c.Backup.RetentionFull = d.Backup.RetentionFull
+	}
+
+	// Pigsty
+	if c.Pigsty.Repo == "" {
+		c.Pigsty.Repo = d.Pigsty.Repo
 	}
 
 	// Instances: apply per-instance defaults

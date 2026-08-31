@@ -163,7 +163,7 @@ func runExtensionInstall(extNames []string) error {
 	// run CREATE EXTENSION.
 	allExts := append(inst.Extensions, toInstall...)
 	oldTag := cfg.Podman.ImageTag
-	newTag, err := pm.BuildExtensionImage(cfg.Podman.ImageTag, allExts)
+	newTag, err := pm.BuildExtensionImage(cfg.Podman.ImageTag, allExts, cfg.Pigsty.Repo)
 	if err != nil {
 		return fmt.Errorf("building extension image: %w", err)
 	}
@@ -361,7 +361,7 @@ func runExtensionRemove(extNames []string) error {
 		newTag = baseTag
 	} else if podman.HasNonBuiltinExtensions(remaining) {
 		var err error
-		newTag, err = pm.BuildExtensionImage(baseTag, remaining)
+		newTag, err = pm.BuildExtensionImage(baseTag, remaining, cfg.Pigsty.Repo)
 		if err != nil {
 			return fmt.Errorf("building extension image: %w", err)
 		}

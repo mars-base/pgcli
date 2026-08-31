@@ -106,7 +106,7 @@ func HasNonBuiltinExtensions(extNames []string) bool {
 // For remove:  fromTag is the base image tag (BaseImageTag),
 //
 //	pkgList contains the REMAINING extensions.
-func (m *Manager) BuildExtensionImage(fromTag string, pkgList []string) (string, error) {
+func (m *Manager) BuildExtensionImage(fromTag string, pkgList []string, pigstyRepo string) (string, error) {
 	newTag := ExtensionImageTag(BaseImageTag(fromTag), pkgList)
 
 	// Filter to non-builtin extensions only, resolve apt package names
@@ -167,15 +167,15 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Pigsty DEB repository (https://pigsty.io/ext/) — 576+ PG extensions
 RUN apt-get update && apt-get install -y curl gnupg2 lsb-release \
-    && curl -fsSL https://repo.pigsty.io/key | gpg --dearmor -o /etc/apt/keyrings/pigsty.gpg \
+    && curl -fsSL %s/key | gpg --dearmor -o /etc/apt/keyrings/pigsty.gpg \
     && . /etc/os-release \
-    && echo "deb [signed-by=/etc/apt/keyrings/pigsty.gpg] https://repo.pigsty.io/apt/infra generic main" > /etc/apt/sources.list.d/pigsty.list \
-    && echo "deb [signed-by=/etc/apt/keyrings/pigsty.gpg] https://repo.pigsty.io/apt/pgsql/${VERSION_CODENAME} ${VERSION_CODENAME} main" >> /etc/apt/sources.list.d/pigsty.list \
+    && echo "deb [signed-by=/etc/apt/keyrings/pigsty.gpg] %s/apt/infra generic main" > /etc/apt/sources.list.d/pigsty.list \
+    && echo "deb [signed-by=/etc/apt/keyrings/pigsty.gpg] %s/apt/pgsql/${VERSION_CODENAME} ${VERSION_CODENAME} main" >> /etc/apt/sources.list.d/pigsty.list \
     && apt-get update \
     && apt-get install -y %s \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get purge -y --auto-remove curl gnupg2 lsb-release
-`, fromTag, strings.Join(aptPkgs, " "))
+`, fromTag, pigstyRepo, pigstyRepo, pigstyRepo, strings.Join(aptPkgs, " "))
 	}
 
 	buildDir := filepath.Join(m.dataDir, "ext-build")
