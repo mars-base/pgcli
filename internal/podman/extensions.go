@@ -3,6 +3,7 @@ package podman
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -108,11 +109,6 @@ func HasNonBuiltinExtensions(extNames []string) bool {
 func (m *Manager) BuildExtensionImage(fromTag string, pkgList []string) (string, error) {
 	newTag := ExtensionImageTag(BaseImageTag(fromTag), pkgList)
 
-	if exists, _ := m.imageExists(newTag); exists {
-		fmt.Printf("-> Extension image %s already exists\n", newTag)
-		return newTag, nil
-	}
-
 	// Filter to non-builtin extensions only, resolve apt package names
 	var aptPkgs []string
 	for _, name := range pkgList {
@@ -134,7 +130,20 @@ func (m *Manager) BuildExtensionImage(fromTag string, pkgList []string) (string,
 		return fromTag, nil
 	}
 
-	fmt.Printf("-> Building extension image with %d package(s) (from %s)...\n", len(aptPkgs), fromTag)
+	// Check if the -ext image already exists with all required packages.
+	// Uses a temporary container to inspect installed packages — avoids
+	// rebuilding when the image already contains everything we need.
+	if exists, _ := m.imageExists(newTag); exists {
+		if m.extImageHasPackages(newTag, aptPkgs) {
+			fmt.Printf("-> Extension image %s already has all required packages\n", newTag)
+			return newTag, nil
+		}
+		// Image exists but is missing packages — will rebuild below.
+		fmt.Printf("-> Extension image %s is missing packages, rebuilding...\n", newTag)
+	}
+
+	baseTag := BaseImageTag(fromTag)
+	fmt.Printf("-> Building extension image with %d package(s) (from %s)...\n", len(aptPkgs), baseTag)
 
 	var dockerfile string
 	// If building from an existing -ext image, Pigsty repo is already configured.
@@ -185,6 +194,27 @@ RUN apt-get update && apt-get install -y curl gnupg2 lsb-release \
 
 	fmt.Printf("  [OK] Extension image built: %s\n", newTag)
 	return newTag, nil
+}
+
+// extImageHasPackages checks if the given image already contains all the
+// specified apt packages by running a temporary container and checking
+// with dpkg -s.
+func (m *Manager) extImageHasPackages(imageTag string, packages []string) bool {
+	var checkCmd strings.Builder
+	checkCmd.WriteString("set -e; ")
+	for _, pkg := range packages {
+		fmt.Fprintf(&checkCmd, "dpkg -s %s >/dev/null 2>&1 || exit 1; ", pkg)
+	}
+	checkCmd.WriteString("echo all-installed")
+
+	// Run a temporary container to check packages
+	cmd := exec.Command(m.podman, "run", "--rm", imageTag, "sh", "-c", checkCmd.String())
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return false
+	}
+
+	return strings.Contains(string(output), "all-installed")
 }
 
 // NeedsRebuild returns true if the current image tag does not include all
@@ -250,7 +280,7 @@ func (m *Manager) GetInstalledExtensions() ([]string, error) {
 		return nil, err
 	}
 	var names []string
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" {
 			names = append(names, line)
