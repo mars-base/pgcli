@@ -312,32 +312,9 @@ func (m *Manager) GetInstalledExtensions() ([]string, error) {
 
 // RunCreateExtensions runs CREATE EXTENSION IF NOT EXISTS for each extension.
 // Uses the resolved SQL name (e.g., "vector" for pgvector).
-// For pg_cron, automatically sets cron.database_name to the configured database
-// before creating the extension, since pg_cron requires CREATE EXTENSION to run
-// in the database specified by cron.database_name.
 func (m *Manager) RunCreateExtensions(extNames []string) error {
 	for _, name := range extNames {
 		resolved := ResolveExtName(name)
-
-		// pg_cron requires cron.database_name to match the target database.
-		// Set it via ALTER SYSTEM + reload before CREATE EXTENSION.
-		if resolved == "cron" {
-			setDB := fmt.Sprintf("ALTER SYSTEM SET cron.database_name = '%s'", m.cfg.Postgres.Database)
-			fmt.Printf("-> Running: %s\n", setDB)
-			if out, err := m.ExecLong("psql", "-U", m.cfg.Postgres.User, "-d", "postgres", "-c", setDB); err != nil {
-				fmt.Printf("  [!] Warning: set cron.database_name: %v\n", err)
-				if out != "" {
-					fmt.Printf("  Output: %s\n", out)
-				}
-			}
-			if out, err := m.ExecLong("psql", "-U", m.cfg.Postgres.User, "-d", "postgres", "-c", "SELECT pg_reload_conf()"); err != nil {
-				fmt.Printf("  [!] Warning: reload conf: %v\n", err)
-				if out != "" {
-					fmt.Printf("  Output: %s\n", out)
-				}
-			}
-		}
-
 		sql := fmt.Sprintf("CREATE EXTENSION IF NOT EXISTS \"%s\"", resolved)
 		fmt.Printf("-> Running: %s\n", sql)
 		out, err := m.ExecLong("psql", "-U", m.cfg.Postgres.User, "-d", m.cfg.Postgres.Database, "-c", sql)
@@ -353,15 +330,22 @@ func (m *Manager) RunCreateExtensions(extNames []string) error {
 
 // ApplyExtensions manages shared_preload_libraries for extensions that need
 // preloading.  It replaces (or appends) a sentinel block in postgresql.conf.
-// Returns needsRestart=true if shared_preload_libraries changed.
+// For pg_cron, also sets cron.database_name to the configured database
+// (postmaster-level, requires restart).
+// Returns needsRestart=true if any postmaster-level parameter changed.
 func (m *Manager) ApplyExtensions(extNames []string) (needsRestart bool, err error) {
 	// Collect extensions that need preloading
 	var preload []string
+	hasCron := false
 	for _, name := range extNames {
 		if ExtNeedsPreload(name) {
 			// Use the resolved SQL name for shared_preload_libraries
 			resolved := ResolveExtName(name)
 			preload = append(preload, resolved)
+			// Check by catalog key (pg_cron) or alias (cron)
+			if name == "pg_cron" || resolved == "pg_cron" {
+				hasCron = true
+			}
 		}
 	}
 
@@ -378,6 +362,11 @@ func (m *Manager) ApplyExtensions(extNames []string) (needsRestart bool, err err
 		spl := fmt.Sprintf("shared_preload_libraries = '%s'", strings.Join(preload, ","))
 		lines = append(lines, spl)
 	}
+	// pg_cron: set cron.database_name so CREATE EXTENSION works in the user database.
+	// cron.database_name is a postmaster-level parameter, so it takes effect on restart.
+	if hasCron {
+		lines = append(lines, fmt.Sprintf("cron.database_name = '%s'", m.cfg.Postgres.Database))
+	}
 	lines = append(lines, pgExtEnd)
 	newBlock := "\n" + strings.Join(lines, "\n") + "\n"
 
@@ -393,7 +382,7 @@ func (m *Manager) ApplyExtensions(extNames []string) (needsRestart bool, err err
 		}
 	}
 
-	// Detect if shared_preload_libraries is changing
+	// Detect if shared_preload_libraries or cron.database_name is changing
 	oldSPL := ""
 	if idx := strings.Index(current, "shared_preload_libraries"); idx >= 0 {
 		lineEnd := strings.Index(current[idx:], "\n")
@@ -407,6 +396,21 @@ func (m *Manager) ApplyExtensions(extNames []string) (needsRestart bool, err err
 	}
 	if oldSPL != newSPL {
 		needsRestart = true
+	}
+
+	// Check if cron.database_name changed
+	if hasCron {
+		oldCronDB := ""
+		if idx := strings.Index(current, "cron.database_name"); idx >= 0 {
+			lineEnd := strings.Index(current[idx:], "\n")
+			if lineEnd >= 0 {
+				oldCronDB = current[idx : idx+lineEnd]
+			}
+		}
+		newCronDB := fmt.Sprintf("cron.database_name = '%s'", m.cfg.Postgres.Database)
+		if oldCronDB != newCronDB {
+			needsRestart = true
+		}
 	}
 
 	// Build merged content: replace existing block or append
