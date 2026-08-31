@@ -220,7 +220,9 @@ func runExtensionInstall(extNames []string) error {
 		return fmt.Errorf("apply extensions: %w", err)
 	}
 
-	if needsRestart {
+	// If container was already replaced (imageChanged=true), it already restarted
+	// with the new image. Skip the restart prompt to avoid double interruption.
+	if needsRestart && !imageChanged {
 		fmt.Printf("\nInstalling extensions that require shared_preload_libraries will cause a PostgreSQL restart.\n")
 		fmt.Printf("Extensions to be installed: %v\n", toInstall)
 		fmt.Printf("This will cause a brief interruption to database connections.\n\n")
