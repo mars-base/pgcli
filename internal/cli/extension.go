@@ -251,31 +251,50 @@ func runExtensionInstall(extNames []string) error {
 		return fmt.Errorf("apply extensions: %w", err)
 	}
 
-	// If container was already replaced (imageChanged=true), it already restarted
-	// with the new image. Skip the restart prompt to avoid double interruption.
-	if needsRestart && !imageChanged {
-		fmt.Printf("\nInstalling extensions that require shared_preload_libraries will cause a PostgreSQL restart.\n")
-		fmt.Printf("Extensions to be installed: %v\n", toInstall)
-		fmt.Printf("This will cause a brief interruption to database connections.\n\n")
-		if !autoRestart && !confirmPrompt("Restart PostgreSQL now? [y/N]: ") {
-			fmt.Println("Restart skipped. Run 'pg stop' and 'pg start' to apply changes later.")
-			fmt.Println("After restart, run: CREATE EXTENSION IF NOT EXISTS <extension>")
-			fmt.Printf("✓ Extensions installed (restart pending): %v\n", toInstall)
-			return nil
-		}
-		fmt.Println("-> Restarting PostgreSQL to load shared_preload_libraries...")
-		if err := pm.StopContainer(); err != nil {
-			return fmt.Errorf("stop container for restart: %w", err)
-		}
-		if err := pm.StartContainer(); err != nil {
-			return fmt.Errorf("start container after restart: %w", err)
-		}
-		fmt.Println("-> Waiting for PostgreSQL to be ready (after restart)...")
-		for i := 0; i < 60; i++ {
-			if ready, _ := pm.PGIsReady(); ready {
-				break
+	// If container was replaced (imageChanged=true), PG started with the old config.
+	// ApplyExtensions writes new shared_preload_libraries — a restart is needed to load them.
+	if needsRestart {
+		if imageChanged {
+			// Container already replaced, no confirmation needed — just restart
+			fmt.Println("-> Restarting PostgreSQL to load shared_preload_libraries...")
+			if err := pm.StopContainer(); err != nil {
+				return fmt.Errorf("stop container for restart: %w", err)
 			}
-			time.Sleep(time.Second)
+			if err := pm.StartContainer(); err != nil {
+				return fmt.Errorf("start container after restart: %w", err)
+			}
+			fmt.Println("-> Waiting for PostgreSQL to be ready (after restart)...")
+			for i := 0; i < 60; i++ {
+				if ready, _ := pm.PGIsReady(); ready {
+					break
+				}
+				time.Sleep(time.Second)
+			}
+		} else {
+			// Builtin extensions only (no container replacement) — prompt for confirmation
+			fmt.Printf("\nInstalling extensions that require shared_preload_libraries will cause a PostgreSQL restart.\n")
+			fmt.Printf("Extensions to be installed: %v\n", toInstall)
+			fmt.Printf("This will cause a brief interruption to database connections.\n\n")
+			if !autoRestart && !confirmPrompt("Restart PostgreSQL now? [y/N]: ") {
+				fmt.Println("Restart skipped. Run 'pg stop' and 'pg start' to apply changes later.")
+				fmt.Println("After restart, run: CREATE EXTENSION IF NOT EXISTS <extension>")
+				fmt.Printf("✓ Extensions installed (restart pending): %v\n", toInstall)
+				return nil
+			}
+			fmt.Println("-> Restarting PostgreSQL to load shared_preload_libraries...")
+			if err := pm.StopContainer(); err != nil {
+				return fmt.Errorf("stop container for restart: %w", err)
+			}
+			if err := pm.StartContainer(); err != nil {
+				return fmt.Errorf("start container after restart: %w", err)
+			}
+			fmt.Println("-> Waiting for PostgreSQL to be ready (after restart)...")
+			for i := 0; i < 60; i++ {
+				if ready, _ := pm.PGIsReady(); ready {
+					break
+				}
+				time.Sleep(time.Second)
+			}
 		}
 	}
 
