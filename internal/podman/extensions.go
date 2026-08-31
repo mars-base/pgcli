@@ -238,6 +238,26 @@ func (m *Manager) EnsurePgpass() error {
 	return nil
 }
 
+// GetContainerImageID returns the image ID of the current container.
+func (m *Manager) GetContainerImageID() (string, error) {
+	cmd := exec.Command(m.podman, "inspect", m.cfg.Podman.ContainerName, "--format", "{{.Image}}")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// GetImageID returns the image ID for a given tag.
+func (m *Manager) GetImageID(tag string) (string, error) {
+	cmd := exec.Command(m.podman, "inspect", tag, "--format", "{{.Id}}")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // NeedsRebuild returns true if the current image tag does not include all
 // requested extensions (i.e. it doesn't match the expected extension tag).
 func (m *Manager) NeedsRebuild(extNames []string) bool {

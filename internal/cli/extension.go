@@ -177,13 +177,17 @@ func runExtensionInstall(extNames []string) error {
 	// is needed — we only need to configure shared_preload_libraries and
 	// run CREATE EXTENSION.
 	allExts := append(inst.Extensions, toInstall...)
-	oldTag := cfg.Podman.ImageTag
+	// Get container's current image ID before building
+	oldImageID, _ := pm.GetContainerImageID()
+
 	newTag, err := pm.BuildExtensionImage(cfg.Podman.ImageTag, allExts, cfg.Pigsty.Repo)
 	if err != nil {
 		return fmt.Errorf("building extension image: %w", err)
 	}
 
-	imageChanged := newTag != oldTag
+	// Compare image IDs instead of tags (tag can stay same when content changes)
+	newImageID, _ := pm.GetImageID(newTag)
+	imageChanged := newImageID != oldImageID
 	if imageChanged {
 		// Replace container with new image (stop → rm → run with new image)
 		if err := pm.ReplaceContainer(newTag); err != nil {
@@ -222,6 +226,7 @@ func runExtensionInstall(extNames []string) error {
 		fmt.Printf("This will cause a brief interruption to database connections.\n\n")
 		if !autoRestart && !confirmPrompt("Restart PostgreSQL now? [y/N]: ") {
 			fmt.Println("Restart skipped. Run 'pg stop' and 'pg start' to apply changes later.")
+			fmt.Println("After restart, run: CREATE EXTENSION IF NOT EXISTS <extension>")
 			fmt.Printf("✓ Extensions installed (restart pending): %v\n", toInstall)
 			return nil
 		}
