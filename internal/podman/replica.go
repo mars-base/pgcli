@@ -2,6 +2,7 @@ package podman
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,7 +15,10 @@ import (
 // created on the primary for each replica.
 const replicaSlotPrefix = "pgcli_r_"
 
-func replicaSlotName(name string) string {
+// ReplicaSlotName returns the replication slot name for a replica. The same
+// name is derived on both the primary and replica hosts, so both sides of a
+// cross-network replica agree on the slot.
+func ReplicaSlotName(name string) string {
 	return replicaSlotPrefix + name
 }
 
@@ -56,6 +60,13 @@ func (m *Manager) EnsureReplica() error {
 		return nil
 	}
 
+	// Cross-network replica: the primary lives on another host and was
+	// prepared with `pg replica create ... --replica-host`. Check the slot,
+	// then pg_basebackup straight from the DSN.
+	if m.cfg.Instances[m.cfg.Instance].PrimaryDSN != "" {
+		return m.ensureRemoteReplica()
+	}
+
 	primaryPM, err := m.primaryManager()
 	if err != nil {
 		return err
@@ -71,13 +82,66 @@ func (m *Manager) EnsureReplica() error {
 
 	// Reserve WAL on the primary with a physical slot so the replica can
 	// never be left behind by WAL recycling (idempotent).
-	slot := replicaSlotName(m.cfg.Instance)
+	slot := ReplicaSlotName(m.cfg.Instance)
 	if err := primaryPM.EnsureReplicationSlot(slot); err != nil {
 		return fmt.Errorf("creating replication slot on primary: %w", err)
 	}
 
+	// Reach the primary: Linux host networking shares loopback, macOS bridge
+	// networking resolves container names.
+	host, port := "127.0.0.1", primaryPM.cfg.Podman.HostPort
+	if platform.Detect() == platform.MacOS {
+		host = primaryPM.cfg.Podman.ContainerName
+	}
+
 	fmt.Println("-> Initializing replica data directory via pg_basebackup...")
-	if err := m.runBasebackup(primaryPM); err != nil {
+	if err := m.runBasebackup(host, port, primaryPM.cfg.Postgres.User, primaryPM.cfg.Postgres.Password, false); err != nil {
+		// Remove the half-initialized data dir so a retry re-runs
+		// pg_basebackup instead of booting a broken standby.
+		if rmErr := removeHostDir(m.podman, m.cfg.Podman.ImageTag, m.PGHostDataDir()); rmErr != nil {
+			fmt.Printf("  [!] warning: removing half-initialized replica data dir %s: %v\n", m.PGHostDataDir(), rmErr)
+		}
+		return err
+	}
+	return nil
+}
+
+// CheckPrimarySlotReady verifies the primary side of a cross-network replica
+// has been prepared: the replication slot for <replicaName> exists and is
+// reachable via <dsn>. A single query validates both connectivity and
+// ordering, so running the replica side before the primary side fails with an
+// actionable message instead of a pg_basebackup connection error.
+func (m *Manager) CheckPrimarySlotReady(dsn, replicaName, primaryName string) error {
+	slot := ReplicaSlotName(replicaName)
+	esc := strings.ReplaceAll(slot, "'", "''")
+	out, err := m.ExecDSNQuery(dsn, fmt.Sprintf("SELECT slot_name FROM pg_replication_slots WHERE slot_name = '%s'", esc))
+	if err != nil {
+		return fmt.Errorf("cannot verify replication slot %q on the primary: %w", slot, err)
+	}
+	if strings.TrimSpace(out) != slot {
+		return fmt.Errorf("replication slot %q not found on the primary. Run on the primary host first:\n  pg replica create %s -i %s --replica-host <replica host ip>", slot, replicaName, primaryName)
+	}
+	return nil
+}
+
+// ensureRemoteReplica initializes a cross-network replica from a remote
+// primary. The primary side must already have been prepared (pg_hba entry
+// and replication slot) with `pg replica create ... --replica-host`.
+func (m *Manager) ensureRemoteReplica() error {
+	dsn := m.cfg.Instances[m.cfg.Instance].PrimaryDSN
+	host, port, user, password, _, err := ParseDSN(dsn)
+	if err != nil {
+		return err
+	}
+
+	// Verify the primary side was prepared (also covers later starts after a
+	// re-prepared primary, e.g. after the slot was dropped on the other side).
+	if err := m.CheckPrimarySlotReady(dsn, m.cfg.Instance, m.replicaOf()); err != nil {
+		return err
+	}
+
+	fmt.Println("-> Initializing replica data directory via pg_basebackup...")
+	if err := m.runBasebackup(host, port, user, password, true); err != nil {
 		// Remove the half-initialized data dir so a retry re-runs
 		// pg_basebackup instead of booting a broken standby.
 		if rmErr := removeHostDir(m.podman, m.cfg.Podman.ImageTag, m.PGHostDataDir()); rmErr != nil {
@@ -110,8 +174,10 @@ func (m *Manager) dataDirInitialized(hostDir string) bool {
 // dir with -R, which writes primary_conninfo and standby.signal so the replica
 // starts in read-only standby mode. Runs in a throwaway sleep container
 // because the official image entrypoint would run initdb on an empty PGDATA.
-func (m *Manager) runBasebackup(primaryPM *Manager) error {
-	slot := replicaSlotName(m.cfg.Instance)
+// hostNetwork forces host networking (used for cross-network replicas, where
+// the primary is not reachable by container name).
+func (m *Manager) runBasebackup(host string, port int, user, password string, hostNetwork bool) error {
+	slot := ReplicaSlotName(m.cfg.Instance)
 
 	tmpName := "pgcli-bb-" + m.cfg.Instance
 	if m.cfg.Namespace != "" {
@@ -122,7 +188,7 @@ func (m *Manager) runBasebackup(primaryPM *Manager) error {
 	}()
 
 	networkMode := "host"
-	if platform.Detect() == platform.MacOS {
+	if platform.Detect() == platform.MacOS && !hostNetwork {
 		networkMode = m.cfg.Podman.Network
 	}
 	args := []string{
@@ -138,19 +204,12 @@ func (m *Manager) runBasebackup(primaryPM *Manager) error {
 		return fmt.Errorf("creating basebackup container: %w", err)
 	}
 
-	// Reach the primary: Linux host networking shares loopback, macOS bridge
-	// networking resolves container names.
-	host, port := "127.0.0.1", strconv.Itoa(primaryPM.cfg.Podman.HostPort)
-	if platform.Detect() == platform.MacOS {
-		host = primaryPM.cfg.Podman.ContainerName
-	}
-
 	if _, err := m.run(
-		"exec", "-e", "PGPASSWORD="+primaryPM.cfg.Postgres.Password,
+		"exec", "-e", "PGPASSWORD="+password,
 		tmpName,
 		"pg_basebackup",
-		"-h", host, "-p", port,
-		"-U", primaryPM.cfg.Postgres.User,
+		"-h", host, "-p", strconv.Itoa(port),
+		"-U", user,
 		"-D", "/var/lib/postgresql/data",
 		"-S", slot, // reuse the pre-created slot
 		"-R", // write primary_conninfo + standby.signal
@@ -163,7 +222,7 @@ func (m *Manager) runBasebackup(primaryPM *Manager) error {
 	// -R writes primary_conninfo without a password; also drop the archive
 	// settings copied from the primary (a standby archives nothing, and
 	// after a future promote the primary's stanza path would be stale).
-	return m.fixupReplicaConfig(tmpName, primaryPM.cfg.Postgres.Password)
+	return m.fixupReplicaConfig(tmpName, password)
 }
 
 // fixupReplicaConfig adjusts postgresql.auto.conf in the freshly-restored
@@ -242,7 +301,11 @@ func addPasswordToPrimaryConnInfo(content, password string) string {
 // appending the managed host replication entries to pg_hba.conf, then reloads
 // the configuration. Each managed line is added only if absent, so repeated
 // runs (and upgrades that add new lines) stay idempotent.
-func (m *Manager) EnsureReplicationHBA() error {
+//
+// extraHosts are additional source addresses (IPs or hostnames) to allow for
+// cross-network replicas. IPs get a /32 mask (/128 for IPv6), hostnames are
+// written as-is.
+func (m *Manager) EnsureReplicationHBA(extraHosts ...string) error {
 	const hbaPath = "/var/lib/postgresql/data/pg_hba.conf"
 	out, err := m.Exec("cat", hbaPath)
 	if err != nil {
@@ -261,6 +324,14 @@ func (m *Manager) EnsureReplicationHBA() error {
 		"host replication all 10.0.0.0/8 scram-sha-256",
 		"host replication all 172.16.0.0/12 scram-sha-256",
 		"host replication all 192.168.0.0/16 scram-sha-256",
+	}
+	for _, h := range extraHosts {
+		// An IP already covered by a managed CIDR (e.g. 10.241.20.x inside
+		// 10.0.0.0/8) needs no extra line; hostnames and public IPs do.
+		if ip := net.ParseIP(h); ip != nil && ipCoveredByCIDR(ip, managed) {
+			continue
+		}
+		managed = append(managed, replicationHBALine(h))
 	}
 	var missing []string
 	for _, want := range managed {
@@ -325,6 +396,39 @@ func pgHbaHasLine(content, want string) bool {
 	return false
 }
 
+// replicationHBALine builds a managed pg_hba replication line for a source
+// address: IPs get a /32 (/128 for IPv6) mask, hostnames are written as-is.
+func replicationHBALine(host string) string {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return "host replication all " + host + " scram-sha-256"
+	}
+	mask := "/32"
+	if ip.To4() == nil {
+		mask = "/128"
+	}
+	return "host replication all " + host + mask + " scram-sha-256"
+}
+
+// ipCoveredByCIDR reports whether ip falls inside any CIDR-scoped managed hba
+// line (e.g. 10.241.20.147 is inside 10.0.0.0/8). Hostname lines are skipped.
+func ipCoveredByCIDR(ip net.IP, hbaLines []string) bool {
+	for _, line := range hbaLines {
+		fields := strings.Fields(line)
+		if len(fields) != 5 {
+			continue
+		}
+		_, cidr, err := net.ParseCIDR(fields[3])
+		if err != nil {
+			continue
+		}
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // chownDataFile restores postgres ownership on a file inside a container's
 // data directory after podman cp, which writes the file as container root.
 // Without this the postmaster cannot read it (e.g. pg_hba.conf on reload),
@@ -374,7 +478,7 @@ func (m *Manager) DropReplicationSlot(slot string) error {
 // DropReplicaSlot removes the replication slot for replica <replicaName>
 // from this (primary) instance. No-op when the slot does not exist.
 func (m *Manager) DropReplicaSlot(replicaName string) error {
-	return m.DropReplicationSlot(replicaSlotName(replicaName))
+	return m.DropReplicationSlot(ReplicaSlotName(replicaName))
 }
 
 // execOn runs a command inside the named container (not necessarily the

@@ -102,8 +102,10 @@ Examples:
 
 		// 2. Replicas: drop the physical replication slot on the primary so
 		// WAL is not held forever on its behalf (best-effort — a stopped
-		// primary just leaves the slot for manual cleanup).
-		if primary := cfg.ReplicaOf(cfgInstance); primary != "" {
+		// primary just leaves the slot for manual cleanup). Cross-network
+		// replicas skip this: their primary lives on another host, and the
+		// slot is dropped there with `pg replica drop`.
+		if primary := cfg.ReplicaOf(cfgInstance); primary != "" && inst.PrimaryDSN == "" {
 			pc := *cfg
 			if err := pc.SetInstance(primary); err == nil {
 				ppm, perr := podman.New(&pc)

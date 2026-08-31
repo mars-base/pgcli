@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1599,6 +1601,67 @@ func (m *Manager) CheckDSNDumpPrivilege(dsn string) error {
 		return fmt.Errorf("cannot dump source database schema (connection or permission problem): %w", err)
 	}
 	return nil
+}
+
+// ExecDSNQuery runs a SQL query against a remote database (via a temporary
+// container with host networking) and returns the unadorned result, like
+// psql -t -A. Used by cross-network replica creation to verify the
+// replication slot prepared on the primary side.
+func (m *Manager) ExecDSNQuery(dsn, sql string) (string, error) {
+	imageTag := m.cfg.Podman.ImageTag
+	containerName := fmt.Sprintf("pgcli-query-%d", time.Now().UnixNano())
+	defer func() {
+		m.run("rm", "-f", containerName)
+	}()
+
+	podmanArgs := []string{
+		"run", "--rm", "--name", containerName,
+		"--network", "host",
+		imageTag,
+		"psql", "--dbname=" + dsn, "-t", "-A", "-c", sql,
+	}
+	cmd := podmanCommand(m.podman, podmanArgs...)
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("querying source database: %w", err)
+	}
+	return string(out), nil
+}
+
+// ParseDSN extracts connection parameters from a postgres:// connection
+// string. Port defaults to 5432; an empty password is rejected because
+// physical replication always authenticates with scram. IPv6 hosts in
+// brackets are handled by net/url.
+func ParseDSN(dsn string) (host string, port int, user, password, database string, err error) {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "", 0, "", "", "", fmt.Errorf("invalid DSN: %w", err)
+	}
+	if u.Scheme != "postgres" && u.Scheme != "postgresql" {
+		return "", 0, "", "", "", fmt.Errorf("invalid DSN: scheme must be postgres://, got %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return "", 0, "", "", "", fmt.Errorf("invalid DSN: missing host")
+	}
+	host = u.Hostname()
+	port = 5432
+	if p := u.Port(); p != "" {
+		port, err = strconv.Atoi(p)
+		if err != nil {
+			return "", 0, "", "", "", fmt.Errorf("invalid DSN: bad port %q", p)
+		}
+	}
+	user = u.User.Username()
+	password, _ = u.User.Password()
+	if password == "" {
+		return "", 0, "", "", "", fmt.Errorf("invalid DSN: password is required (physical replication uses scram authentication)")
+	}
+	database = strings.TrimPrefix(u.Path, "/")
+	if database == "" {
+		return "", 0, "", "", "", fmt.Errorf("invalid DSN: missing database")
+	}
+	return host, port, user, password, database, nil
 }
 
 func (m *Manager) createContainer() error {

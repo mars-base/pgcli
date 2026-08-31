@@ -38,6 +38,11 @@ type InstanceConfig struct {
 	// ReplicaOf names the primary instance this instance streams from via
 	// physical replication. Empty means the instance is a primary.
 	ReplicaOf string `yaml:"replica_of,omitempty"`
+	// PrimaryDSN is the connection string of a remote primary on another
+	// host. When set, the instance is a cross-network replica: the primary
+	// is not managed locally, and replication setup must have been prepared
+	// on the primary side (pg replica create ... --replica-host).
+	PrimaryDSN string `yaml:"primary_dsn,omitempty"`
 }
 
 // PostgresConfig holds PostgreSQL connection settings.
@@ -213,10 +218,10 @@ func (c *Config) SetInstance(name string) error {
 }
 
 // IsReplica reports whether the currently-selected instance is a physical
-// replica (ReplicaOf set) of another instance.
+// replica (ReplicaOf or PrimaryDSN set) of another instance.
 func (c *Config) IsReplica() bool {
 	inst, ok := c.Instances[c.Instance]
-	return ok && inst.ReplicaOf != ""
+	return ok && (inst.ReplicaOf != "" || inst.PrimaryDSN != "")
 }
 
 // ReplicaOf returns the primary instance name for a replica, or "" if the
