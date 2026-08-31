@@ -58,9 +58,29 @@ pg extension remove pgmq -i pg01
 
 Workflow:
 1. `DROP EXTENSION IF EXISTS pgmq`
-2. Build a new image without the removed extension
-3. Replace the container (data preserved)
-4. Update config
+2. Update config and `shared_preload_libraries`
+3. **No image rebuild** — the `-ext` image is shared across instances and packages are never uninstalled
+
+**Restart confirmation:** If removing extensions that require `shared_preload_libraries` (e.g., `pg_stat_statements`, `pg_cron`), you will be prompted for confirmation before restarting:
+
+```bash
+# Interactive confirmation (default)
+pg extension remove pg_stat_statements -i pg01
+# Output:
+# Removing extensions that require shared_preload_libraries will cause a PostgreSQL restart.
+# Extensions to be removed: [pg_stat_statements]
+# This will cause a brief interruption to database connections.
+# Restart PostgreSQL now? [y/N]:
+
+# Skip confirmation and restart automatically
+pg extension remove pg_stat_statements -i pg01 --auto-restart
+```
+
+If you decline the restart, you can apply the changes later:
+```bash
+pg stop -i pg01
+pg start -i pg01
+```
 
 ### View Available Extensions
 
