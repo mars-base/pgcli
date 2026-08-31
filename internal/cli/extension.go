@@ -350,46 +350,13 @@ func runExtensionRemove(extNames []string) error {
 		}
 	}
 
-	// Determine new image tag based on remaining extensions.
-	// If all remaining are builtin (or none remain), we can use the base image.
-	// Otherwise, rebuild with only the non-builtin packages.
-	oldTag := cfg.Podman.ImageTag
-	baseTag := podman.BaseImageTag(oldTag)
-
-	var newTag string
-	if len(remaining) == 0 {
-		newTag = baseTag
-	} else if podman.HasNonBuiltinExtensions(remaining) {
-		var err error
-		newTag, err = pm.BuildExtensionImage(baseTag, remaining, cfg.Pigsty.Repo)
-		if err != nil {
-			return fmt.Errorf("building extension image: %w", err)
-		}
-	} else {
-		// All remaining are builtin — use base image
-		newTag = baseTag
-	}
-
-	if newTag != oldTag {
-		if err := pm.ReplaceContainer(newTag); err != nil {
-			return fmt.Errorf("replacing container: %w", err)
-		}
-
-		// Wait for PG to be ready
-		fmt.Println("-> Waiting for PostgreSQL to be ready...")
-		for i := 0; i < 60; i++ {
-			if ready, _ := pm.PGIsReady(); ready {
-				break
-			}
-			time.Sleep(time.Second)
-		}
-	}
+	// No image rebuild or container replacement — the -ext image is shared
+	// across instances and only grows (packages are never uninstalled).
+	// Extra packages in the image waste a small amount of disk but allow
+	// other instances to reuse them.
 
 	// Update config
 	inst.Extensions = remaining
-	if newTag != oldTag {
-		inst.Podman.ImageTag = newTag
-	}
 	cfg.Instances[cfgInstance] = inst
 	if err := cfg.Save(path); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
