@@ -149,7 +149,6 @@ See the full [Quick Start](docs/quickstart.md) guide for multi-instance setup, i
 | `pg restore` | PITR point-in-time recovery |
 | `pg replica` | Create/list read-only physical replicas (standbys) of an instance |
 | `pg destroy` | Destroy instance |
-| `pg backup` | Manage the shared backup container (setup/start/stop/status) |
 | `pg completion` | Generate shell completion scripts |
 
 ## License
