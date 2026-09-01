@@ -216,6 +216,37 @@ setup_linux_deps() {
     fi
 }
 
+# ─── SELinux (RHEL family) ──────────────────────────────────────────
+
+setup_selinux() {
+    [ "$(detect_linux_distro)" = "rhel" ] || return 0
+    command -v getenforce >/dev/null 2>&1 || return 0
+
+    local status
+    status="$(getenforce 2>/dev/null)" || return 0
+    if [ "$status" = "Disabled" ]; then
+        green "  [OK] SELinux disabled"
+        return 0
+    fi
+
+    yellow "  [!] SELinux is $status — rootless podman containers may fail to run"
+    yellow "      Attempting to disable via sudo..."
+    if as_root setenforce 0; then
+        if [ -f /etc/selinux/config ] && as_root sed -i 's/^SELINUX=.*/SELINUX=disabled/' /etc/selinux/config; then
+            green "  [OK] SELinux disabled and persisted in /etc/selinux/config"
+        else
+            yellow "  [!] SELinux set to permissive for this session; /etc/selinux/config not updated"
+        fi
+    else
+        red "  [X] Cannot disable SELinux: sudo permission denied"
+        red "      Rootless podman cannot run containers while SELinux is $status."
+        red "      Run the following as root, then re-run this script:"
+        red "        setenforce 0"
+        red "        sed -i 's/^SELINUX=.*/SELINUX=disabled/' /etc/selinux/config"
+        die "SELinux is $status and cannot be disabled without sudo"
+    fi
+}
+
 # ─── macOS: podman machine ──────────────────────────────────────────
 
 setup_macos_deps() {
@@ -406,6 +437,7 @@ main() {
     if $IS_LINUX; then
         install_podman_launcher
         setup_linux_deps
+        setup_selinux
     elif $IS_MACOS; then
         setup_macos_deps
     fi
