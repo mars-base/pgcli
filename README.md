@@ -48,8 +48,24 @@ Tested and verified on:
 - **Ubuntu 24.04 (noble)** - LTS
 - **Ubuntu 26.04 (resolute)** - LTS
 - **Fedora 44** - SELinux Enforcing mode supported
+- **Rocky Linux 10** - SELinux auto-disabled by installer
 - RHEL/CentOS 8+
 - Other distributions with podman 4.0+ should work
+
+### SELinux (RHEL-family systems)
+
+On RHEL/CentOS/Rocky/AlmaLinux with SELinux **Enforcing**, rootless podman-static cannot run containers. The installer automatically detects SELinux status and:
+
+1. Disables it via `sudo setenforce 0` and persists the change in `/etc/selinux/config`
+2. Errors out with clear instructions if sudo permissions are insufficient:
+
+```
+[X] Cannot disable SELinux: sudo permission denied
+    Rootless podman cannot run containers while SELinux is Enforcing.
+    Run the following as root, then re-run this script:
+      setenforce 0
+      sed -i 's/^SELINUX=.*/SELINUX=disabled/' /etc/selinux/config
+```
 
 ### Prerequisites
 
