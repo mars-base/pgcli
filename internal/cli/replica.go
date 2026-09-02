@@ -610,9 +610,8 @@ func runReplicaRepoint(replicaName, primaryDSN, primaryName string) error {
 	if !ok {
 		return fmt.Errorf("instance %q not found in config", replicaName)
 	}
-	if inst.ReplicaOf == "" {
-		return fmt.Errorf("instance %q is not a replica (no replica_of set)", replicaName)
-	}
+	// Allow both existing replicas (replica_of already set) and old primaries
+	// being demoted to replicas after failover (replica_of is empty).
 
 	_, _, user, password, _, err := podman.ParseDSN(primaryDSN)
 	if err != nil {
