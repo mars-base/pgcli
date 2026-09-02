@@ -25,6 +25,7 @@ Whether you're running multiple dev databases, managing staging environments, or
 | [Clone](docs/clone.md) | Copy an instance into a new one via logical dump pipe, remote `--dsn` source, pre-flight connectivity check, live progress |
 | [Backup and Restore](docs/backup-restore.md) | Full/differential snapshots, snapshot list/delete, point-in-time recovery (PITR) with read-only inspection before promoting |
 | [Replica](docs/replica.md) | Read-only physical standby of an instance: create/list, live WAL streaming, lag, slot lifecycle |
+| [Failover](docs/failover.md) | 3-step manual failover: promote replica to primary, re-point other replicas, demote old primary |
 | [Extensions](docs/extensions.md) | Install PostgreSQL extensions from Pigsty DEB repo, baked into container image, shared_preload_libraries management |
 | [Administration](docs/administration.md) | Shell completion (bash/zsh/fish/PowerShell), PostgreSQL parameter tuning, instance destroy/rebuild |
 | [Test Report](docs/full-test-step.md) | Core functionality test report: DSN piping, PITR verification, known issues, install script test |
@@ -78,6 +79,7 @@ The installer automatically detects available privileges and adapts accordingly.
 - **PITR (Point-In-Time Recovery)** — Full backup and time-travel recovery via pgBackRest with differential/incremental snapshots
 - **Snapshot Management** — Create, list, and delete database snapshots for quick rollback
 - **Read-only Replicas** — Physical standby instances streaming WAL from a primary, supporting read/write split and failover scenarios
+- **Failover** — 3-step manual failover: promote replica to primary, re-point remaining replicas, demote old primary back to replica. Same-host and cross-host supported
 - **Multi-Instance Support** — Run multiple isolated PostgreSQL instances on different ports with independent configurations
 - **Multi-Config Isolation** — Multiple config files on one host with namespaced containers and disjoint port ranges (use pg config init -h for details)
 - **Data Import/Export** — Export/import in custom or SQL format with gzip compression, stream piping between instances, and cross-host support via SSH or `--dsn`
