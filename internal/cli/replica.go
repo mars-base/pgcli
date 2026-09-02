@@ -30,8 +30,17 @@ Cross-network replicas (two hosts, run one command on each side):
   pg replica create <name> -i <primary> --primary-dsn <dsn>            on the replica host
   pg replica drop <name> -i <primary>     remove the slot on the primary host
 
+Failover (3-step, run each on the respective host):
+  pg replica promote <name>               promote a replica to primary
+  pg replica drop <name> -i <old-primary> clean up old primary (step 2)
+  pg replica repoint <other> --primary-dsn <dsn> --primary-name <name>
+                                           re-point other replicas (step 3)
+
 Commands:
   pg replica create <name> -i <primary>   create a read-only replica
+  pg replica promote <name>               promote a replica to primary
+  pg replica repoint <name> --primary-dsn <dsn> --primary-name <name>
+                                           re-point replica to new primary
   pg replica list                          list replicas and replication lag
   pg replica drop <name> -i <primary>     drop a replica's slot on the primary`,
 }
@@ -78,6 +87,37 @@ var replicaListCmd = &cobra.Command{
 	},
 }
 
+var replicaPromoteCmd = &cobra.Command{
+	Use:   "promote <replica-name>",
+	Short: "Promote a replica to a standalone read-write primary",
+	Long: `Promote a physical standby replica to a read-write primary.
+
+The replica is promoted in-place using pg_promote() (PostgreSQL 12+).
+No container restart is needed — the instance exits recovery and becomes
+read-write immediately.
+
+After promotion:
+  - primary_conninfo is removed from postgresql.auto.conf
+  - The instance config is updated (ReplicaOf/PrimaryDSN cleared, PITR re-enabled)
+
+This is step 1 of a 3-step failover. After promoting, run the remaining
+steps on their respective hosts:
+  2. pg replica drop <name> -i <old-primary>       (on the old primary host)
+  3. pg replica repoint <other> --primary-dsn <dsn> --primary-name <name>
+                                                    (on each other replica host)
+
+Run "pg start -i <name>" afterward to initialize the backup stanza and
+apply archive_mode (requires a restart).
+
+Examples:
+  pg replica promote ro1
+  pg replica promote ro1 -i ro1`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runReplicaPromote(args[0])
+	},
+}
+
 var replicaDropCmd = &cobra.Command{
 	Use:   "drop <replica-name>",
 	Short: "Drop a replica's replication slot on the primary",
@@ -96,14 +136,46 @@ Examples:
 	},
 }
 
+var replicaRepointCmd = &cobra.Command{
+	Use:   "repoint <replica-name>",
+	Short: "Re-point a replica to a different primary",
+	Long: `Re-point a running replica to stream from a different primary instance.
+
+Run this on each remaining replica after a failover (step 3):
+  1. pg replica promote <new-primary>                (on the promoted replica host)
+  2. pg replica drop <new-primary> -i <old-primary>  (on the old primary host)
+  3. pg replica repoint <replica> --primary-dsn <dsn> --primary-name <name>
+                                                      (on this replica host)
+
+The command creates a replication slot on the new primary (via DSN), updates
+primary_conninfo on this replica, restarts the container, and verifies the
+replica is streaming from the new primary.
+
+--primary-dsn is the connection string of the new (promoted) primary.
+--primary-name is the name to record as replica_of in the local config.
+
+Examples:
+  pg replica repoint ro2 --primary-dsn "postgres://admin:pw@10.241.20.50:35432/ro1_db" --primary-name ro1`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		primaryDSN, _ := cmd.Flags().GetString("primary-dsn")
+		primaryName, _ := cmd.Flags().GetString("primary-name")
+		return runReplicaRepoint(args[0], primaryDSN, primaryName)
+	},
+}
+
 func init() {
 	replicaCreateCmd.Flags().String("primary-dsn", "", "primary connection string; run on the replica host (cross-network)")
 	replicaCreateCmd.Flags().String("replica-host", "", "replica host IP or hostname; run on the primary host (cross-network)")
 	replicaCreateCmd.Flags().String("primary-name", "", "primary instance name for --primary-dsn mode, recorded as replica_of")
 	replicaCreateCmd.MarkFlagsMutuallyExclusive("primary-dsn", "replica-host")
 	replicaCreateCmd.MarkFlagsMutuallyExclusive("replica-host", "primary-name")
+	replicaRepointCmd.Flags().String("primary-dsn", "", "connection string of the new primary (required)")
+	replicaRepointCmd.Flags().String("primary-name", "", "name of the new primary, recorded as replica_of (required)")
+	_ = replicaRepointCmd.MarkFlagRequired("primary-dsn")
+	_ = replicaRepointCmd.MarkFlagRequired("primary-name")
 	rootCmd.AddCommand(replicaCmd)
-	replicaCmd.AddCommand(replicaCreateCmd, replicaListCmd, replicaDropCmd)
+	replicaCmd.AddCommand(replicaCreateCmd, replicaListCmd, replicaDropCmd, replicaPromoteCmd, replicaRepointCmd)
 }
 
 func runReplicaCreate(newName, primaryDSN, replicaHost, primaryName string, iFlagSet bool) error {
@@ -183,9 +255,13 @@ func runReplicaCreateSameHost(cfg *config.Config, path, newName, primary string)
 	// primary's databases as-is, it does not create its own. PITR is disabled
 	// (a standby archives nothing and is not registered with the pgBackRest
 	// backup container; backups run on the primary).
+	// The image tag and extensions list are inherited so the replica container
+	// has the same shared libraries referenced in postgresql.auto.conf.
 	inst := cfg.InstanceDefaults(newName)
 	inst.Postgres.Database = pc.Postgres.Database
 	inst.Postgres.Password = pc.Postgres.Password
+	inst.Podman.ImageTag = pc.Podman.ImageTag
+	inst.Extensions = append([]string(nil), pc.Instances[primary].Extensions...)
 	inst.PITR.Enabled = false
 	inst.ReplicaOf = primary
 	cfg.Instances[newName] = *inst
@@ -416,5 +492,184 @@ func runReplicaList() error {
 		}
 		fmt.Printf("%-18s %-16s %-10s %s\n", name, primary, status, lag)
 	}
+	return nil
+}
+
+// runReplicaPromote promotes a replica to a standalone read-write primary.
+// This is step 1 of a 3-step failover — it only handles the promoted replica
+// itself. Slot cleanup on the old primary (step 2) and re-pointing other
+// replicas (step 3) are separate commands run on their respective hosts.
+func runReplicaPromote(replicaName string) error {
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	inst, ok := cfg.Instances[replicaName]
+	if !ok {
+		return fmt.Errorf("instance %q not found in config", replicaName)
+	}
+	if inst.ReplicaOf == "" {
+		return fmt.Errorf("instance %q is not a replica (no replica_of set)", replicaName)
+	}
+	oldPrimary := inst.ReplicaOf
+
+	rc := *cfg
+	if err := rc.SetInstance(replicaName); err != nil {
+		return fmt.Errorf("loading replica instance config: %w", err)
+	}
+	pm, err := podman.New(&rc)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("Checking replica status...")
+	if err := pm.CheckContainerRunning(); err != nil {
+		return err
+	}
+
+	// Idempotent: if already promoted (pg_is_in_recovery=false) but config
+	// still says replica, skip pg_promote() and proceed to config cleanup.
+	recOut, recErr := pm.Exec("psql", "-U", rc.Postgres.User, "-d", rc.Postgres.Database,
+		"-tAc", "SELECT pg_is_in_recovery()")
+	alreadyPromoted := recErr == nil && strings.TrimSpace(recOut) == "f"
+
+	if !alreadyPromoted {
+		fmt.Printf("Promoting replica %q to primary...\n", replicaName)
+		if err := pm.Promote(); err != nil {
+			return fmt.Errorf("promote failed: %w", err)
+		}
+	} else {
+		fmt.Println("Instance is already promoted (completing config cleanup)...")
+	}
+
+	// Update config: clear ReplicaOf/PrimaryDSN, re-enable PITR
+	inst.ReplicaOf = ""
+	inst.PrimaryDSN = ""
+	inst.PITR.Enabled = true
+	if inst.PITR.PgBackRestStanza == "" {
+		inst.PITR.PgBackRestStanza = "pgcli_" + replicaName
+	}
+	cfg.Instances[replicaName] = inst
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("promote succeeded but failed to save config: %w -- manually clear replica_of and primary_dsn for instance %q", err, replicaName)
+	}
+	fmt.Println("  [OK] config updated (ReplicaOf/PrimaryDSN cleared, PITR re-enabled)")
+
+	// Auto-initialize PITR: create stanza, enable archive_mode, restart container
+	fmt.Println("-> Initializing PITR (backup stanza + archive_mode)...")
+	cfgPath = path
+	if err := startSingle(cfg, replicaName); err != nil {
+		fmt.Printf("  [!] Warning: PITR initialization failed: %v\n", err)
+		fmt.Printf("      Run manually: pg start -i %s\n", replicaName)
+	}
+
+	fmt.Println()
+	fmt.Printf("✓ Replica %q promoted to primary\n", replicaName)
+	fmt.Println()
+	fmt.Println("Next steps:")
+	fmt.Printf("  1. pg replica drop %s -i %s\n", replicaName, oldPrimary)
+	fmt.Println("     Clean up the replication slot on the old primary host.")
+	fmt.Println()
+	fmt.Println("  2. pg replica repoint <other-replica> --primary-dsn <dsn> --primary-name " + replicaName)
+	fmt.Println("     Re-point each remaining replica on its own host.")
+
+	return nil
+}
+
+// runReplicaRepoint re-points a replica to stream from a new primary.
+// This is step 3 of a 3-step failover — run on each remaining replica host.
+//
+// After a promotion, other replicas may have diverged timelines and cannot
+// simply be re-pointed by changing primary_conninfo. The safest approach is
+// to destroy the old data and re-initialize via pg_basebackup from the new
+// primary. The replica's config entry (port, password, etc.) is preserved.
+func runReplicaRepoint(replicaName, primaryDSN, primaryName string) error {
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	inst, ok := cfg.Instances[replicaName]
+	if !ok {
+		return fmt.Errorf("instance %q not found in config", replicaName)
+	}
+	if inst.ReplicaOf == "" {
+		return fmt.Errorf("instance %q is not a replica (no replica_of set)", replicaName)
+	}
+
+	_, _, user, password, _, err := podman.ParseDSN(primaryDSN)
+	if err != nil {
+		return fmt.Errorf("invalid --primary-dsn: %w", err)
+	}
+
+	rc := *cfg
+	if err := rc.SetInstance(replicaName); err != nil {
+		return fmt.Errorf("loading replica instance config: %w", err)
+	}
+	pm, err := podman.New(&rc)
+	if err != nil {
+		return err
+	}
+
+	// Stop and remove the old replica container + data
+	fmt.Printf("-> Stopping replica %q...\n", replicaName)
+	_ = pm.StopContainer()
+	fmt.Println("-> Destroying old replica data (will re-initialize from new primary)...")
+	if err := pm.DestroyWithData(true); err != nil {
+		return fmt.Errorf("destroying old replica data: %w", err)
+	}
+
+	// Create replication slot on the new primary (via DSN)
+	slot := podman.ReplicaSlotName(replicaName)
+	esc := strings.ReplaceAll(slot, "'", "''")
+	_, slotErr := pm.ExecDSNQuery(primaryDSN,
+		fmt.Sprintf("SELECT pg_create_physical_replication_slot('%s')", esc))
+	if slotErr != nil {
+		if !strings.Contains(slotErr.Error(), "already exists") {
+			return fmt.Errorf("creating replication slot on new primary: %w", slotErr)
+		}
+		fmt.Printf("  [OK] replication slot %q already exists on new primary\n", slot)
+	} else {
+		fmt.Printf("  [OK] replication slot %q created on new primary\n", slot)
+	}
+
+	// Update config: point to new primary
+	inst.ReplicaOf = primaryName
+	inst.PrimaryDSN = primaryDSN
+	inst.Postgres.User = user
+	inst.Postgres.Password = password
+	inst.PITR.Enabled = false
+	cfg.Instances[replicaName] = inst
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	fmt.Printf("  [OK] config updated (ReplicaOf = %q)\n", primaryName)
+
+	// Re-initialize via startSingle → EnsureReplica → pg_basebackup
+	fmt.Printf("-> Re-initializing replica %q from new primary...\n", replicaName)
+	cfgPath = path
+	if err := startSingle(cfg, replicaName); err != nil {
+		return fmt.Errorf("re-initializing replica: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Printf("✓ Replica %q re-pointed to %q\n", replicaName, primaryName)
 	return nil
 }

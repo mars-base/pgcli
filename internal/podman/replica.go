@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mars-base/pgcli/internal/platform"
 )
@@ -479,6 +480,54 @@ func (m *Manager) DropReplicationSlot(slot string) error {
 // from this (primary) instance. No-op when the slot does not exist.
 func (m *Manager) DropReplicaSlot(replicaName string) error {
 	return m.DropReplicationSlot(ReplicaSlotName(replicaName))
+}
+
+// Promote promotes a standby replica to a standalone read-write primary.
+// It calls pg_promote(), waits for recovery to end, and removes
+// primary_conninfo from postgresql.auto.conf via ALTER SYSTEM RESET.
+// The container is NOT restarted — pg_promote() exits recovery in-place.
+func (m *Manager) Promote() error {
+	// Signal promotion via PG 12+ native function
+	out, err := m.Exec("psql", "-U", m.cfg.Postgres.User, "-d", m.cfg.Postgres.Database,
+		"-tAc", "SELECT pg_promote()")
+	if err != nil {
+		if strings.Contains(err.Error(), "recovery is not in progress") {
+			return fmt.Errorf("instance is not in recovery (already promoted?)")
+		}
+		return fmt.Errorf("pg_promote() failed: %w", err)
+	}
+	if strings.TrimSpace(out) != "t" {
+		return fmt.Errorf("pg_promote() returned unexpected result: %s", strings.TrimSpace(out))
+	}
+	fmt.Println("  [OK] pg_promote() signaled")
+
+	// Wait for recovery to end (normally sub-second, large WAL replay may extend)
+	fmt.Println("-> Waiting for promotion to complete...")
+	promoted := false
+	for i := 0; i < 30; i++ {
+		recOut, recErr := m.Exec("psql", "-U", m.cfg.Postgres.User, "-d", m.cfg.Postgres.Database,
+			"-tAc", "SELECT pg_is_in_recovery()")
+		if recErr == nil && strings.TrimSpace(recOut) == "f" {
+			promoted = true
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	if !promoted {
+		return fmt.Errorf("timed out waiting for promotion (30s); check manually with pg_is_in_recovery()")
+	}
+	fmt.Println("  [OK] recovery ended, instance is now read-write")
+
+	// Clean up primary_conninfo from postgresql.auto.conf.
+	// ALTER SYSTEM RESET is the native way — PG atomically rewrites the file.
+	// Best-effort: leftover primary_conninfo is harmless on a primary.
+	_, _ = m.Exec("psql", "-U", m.cfg.Postgres.User, "-d", m.cfg.Postgres.Database,
+		"-c", "ALTER SYSTEM RESET primary_conninfo")
+	_, _ = m.Exec("psql", "-U", m.cfg.Postgres.User, "-d", m.cfg.Postgres.Database,
+		"-c", "SELECT pg_reload_conf()")
+	fmt.Println("  [OK] primary_conninfo removed from postgresql.auto.conf")
+
+	return nil
 }
 
 // execOn runs a command inside the named container (not necessarily the
