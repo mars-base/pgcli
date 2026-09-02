@@ -65,24 +65,17 @@ pg replica promote ro1
 3. Waits for recovery to end (usually sub-second)
 4. Cleans up `primary_conninfo` from `postgresql.auto.conf` via `ALTER SYSTEM RESET`
 5. Updates config: clears `ReplicaOf` and `PrimaryDSN`, enables `PITR`
-6. Prints next-step instructions
-
-**After promotion, run `pg start`** to initialize the pgBackRest stanza and enable WAL archiving:
-
-```bash
-pg start -i ro1
-```
-
-This triggers:
-- pgBackRest stanza creation
-- `archive_mode` / `archive_command` configuration
-- PostgreSQL restart to apply postmaster-level parameters
+6. Automatically initializes PITR:
+   - pgBackRest stanza creation
+   - `archive_mode` / `archive_command` configuration
+   - PostgreSQL restart to apply postmaster-level parameters
+7. Prints next-step instructions
 
 **Idempotent:** If the replica is already promoted (e.g. from a manual `pg_ctl promote`), the command skips to config update.
 
 ### Step 2: `pg replica drop <name> -i <old-primary>`
 
-Run on the **old primary host** to clean up the replication slot. Skip this step if the old primary is permanently lost.
+Run on the **old primary host** to clean up the replication slot. This step is only needed in specific scenarios.
 
 ```bash
 pg replica drop ro1 -i pg01
@@ -91,9 +84,15 @@ pg replica drop ro1 -i pg01
 This drops the physical replication slot `pgcli_r_ro1` on the old primary. Without cleanup, the slot would hold WAL indefinitely until the primary runs out of disk space.
 
 **When to run:**
-- Old primary recovered and is running → run this command
-- Old primary is permanently lost → skip (slot is gone with the server)
-- Plan to demote old primary to replica → skip (Step 3 handles cleanup via destroy + rebuild)
+
+| Scenario | Action | Why |
+|----------|--------|-----|
+| Old primary is permanently lost | **Skip** | Slot is gone with the server |
+| Plan to demote old primary to replica | **Skip** | `repoint` destroys the data directory (including `pg_replslot/`), all slots are implicitly removed |
+| Old primary recovered, keep running as independent primary | **Must run** | Slot holds WAL indefinitely; without cleanup the disk will eventually fill up |
+| Old primary recovered but will be shut down | **Optional** | No harm in skipping if the instance will not run again |
+
+> **Keep the old primary as-is?** If you want to preserve the old primary with its original data (e.g. for forensic analysis or as a read-only archive), you can simply leave it alone — do not run `drop` or `repoint` on it. The old primary keeps running as an independent instance with stale data. Just be aware that the replication slot for the promoted replica still exists and will accumulate WAL; you may want to drop just that specific slot (`pg replica drop ro1 -i pg01`) while leaving everything else untouched.
 
 ### Step 3: `pg replica repoint <name> --primary-dsn <dsn> --primary-name <name>`
 
@@ -242,7 +241,10 @@ ro2     replica   ro1       Up 5 minutes
 
 # ra3 crashes. On host A, promote ra2:
 $ pg replica promote ra2
-$ pg start -i ra2
+  [OK] pg_promote() signaled
+  [OK] recovery ended
+  [OK] PITR initialized (stanza + archive_mode)
+✓ Replica "ra2" promoted to primary
 
 # On host B (10.241.20.147), re-point ro2 to new primary ra2 (host A = 10.241.21.97):
 $ pg replica repoint ro2 \
