@@ -262,6 +262,84 @@ $ pg exec -i ro2 "SELECT * FROM test ORDER BY id DESC LIMIT 1"
    msg: after failover
 ```
 
+## Cascading Replication
+
+A replica can itself serve as a primary for downstream replicas, forming a cascading chain. This reduces load on the primary and enables hierarchical topologies.
+
+```
+primary (ra3)
+  ├─→ replica (ra2) ← upstream for ra2_ro1
+  │     └─→ replica (ra2_ro1)
+  └─→ replica (pg01)
+```
+
+### How It Works
+
+1. **Create a replica of a replica**: Use the replica as the `-i` target
+   ```bash
+   # ra2 is a replica of ra3, create ra2_ro1 as a replica of ra2
+   pg replica create ra2_ro1 -i ra2
+   ```
+
+2. **WAL propagation**: 
+   - ra2 streams WAL from ra3
+   - ra2_ro1 streams WAL from ra2
+   - Data flows: ra3 → ra2 → ra2_ro1
+
+3. **Replication slots**: Each link maintains its own slot
+   - ra3 has slot `pgcli_r_ra2`
+   - ra2 has slot `pgcli_r_ra2_ro1`
+
+### Benefits
+
+- **Reduced primary load**: Only direct replicas connect to primary
+- **Geographic distribution**: Primary → regional replica → local replicas
+- **Network efficiency**: Local replicas can share a regional upstream
+
+### Limitations
+
+- **Increased latency**: Each hop adds replication delay
+- **Cascading failures**: If ra2 fails, ra2_ro1 loses its upstream
+- **Promotion complexity**: Promoting ra2_ro1 requires repointing it to a new primary
+
+### Verify Cascading
+
+```bash
+# Check ra2's downstream replicas
+pg exec -i ra2 "SELECT client_addr, state FROM pg_stat_replication"
+
+# Check ra2_ro1's upstream
+pg exec -i ra2_ro1 "SELECT conninfo FROM pg_stat_wal_receiver"
+```
+
+### Failover with Cascading
+
+If ra2 (middle node) fails:
+
+```bash
+# Option 1: Re-point ra2_ro1 to ra3 directly
+pg replica repoint ra2_ro1 \
+  --primary-dsn "postgres://admin:password@ra3-host:5432/pg01_db" \
+  --primary-name ra3
+
+# Option 2: Wait for ra2 to recover (automatic once ra2 reconnects to ra3)
+```
+
+If ra3 (primary) fails and ra2 is promoted:
+
+```bash
+# Step 1: Promote ra2
+pg replica promote ra2
+
+# Step 2: ra2_ro1 automatically follows (it's already replicating from ra2)
+# No action needed for ra2_ro1
+
+# Step 3: Re-point other replicas to the new primary
+pg replica repoint pg01 \
+  --primary-dsn "postgres://admin:password@ra2-host:5432/pg01_db" \
+  --primary-name ra2
+```
+
 ## Notes
 
 - **pg_promote()** — PostgreSQL 12+ native function, no container restart required. The instance exits recovery in-place and becomes read-write immediately
