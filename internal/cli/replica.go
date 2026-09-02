@@ -628,6 +628,47 @@ func runReplicaRepoint(replicaName, primaryDSN, primaryName string) error {
 		return err
 	}
 
+	// ── Cross-host extension sync ──────────────────────────────────────
+	// Query extensions installed on the new primary (via DSN). If non-builtin
+	// extensions exist, build a local -ext image before rebuilding the replica
+	// so the container has the required shared_preload_libraries (e.g. pg_cron).
+	// BuildExtensionImage is idempotent: if the local -ext image already exists
+	// it builds on top of it (apt install is idempotent, Pigsty repo is reused).
+	var primaryExts []string
+	extOut, extErr := pm.ExecDSNQuery(primaryDSN,
+		"SELECT extname FROM pg_extension WHERE extname != 'plpgsql' ORDER BY extname")
+	if extErr == nil {
+		for _, line := range strings.Split(extOut, "\n") {
+			if name := strings.TrimSpace(line); name != "" {
+				primaryExts = append(primaryExts, name)
+			}
+		}
+	} else {
+		fmt.Printf("  [!] warning: could not query extensions on new primary: %v\n", extErr)
+	}
+
+	// Resolve image tag: if primary has non-builtin extensions, build a local
+	// -ext image.  baseImage is the plain base tag (strip any old -ext suffix).
+	baseImage := podman.BaseImageTag(inst.Podman.ImageTag)
+	newImageTag := baseImage // default: no extensions needed
+	if len(primaryExts) > 0 {
+		var nonBuiltin []string
+		for _, ext := range primaryExts {
+			if !podman.ExtIsBuiltin(ext) {
+				nonBuiltin = append(nonBuiltin, ext)
+			}
+		}
+		if len(nonBuiltin) > 0 {
+			fmt.Printf("-> New primary has %d non-builtin extension(s): %s\n",
+				len(nonBuiltin), strings.Join(nonBuiltin, ", "))
+			builtTag, err := pm.BuildExtensionImage(baseImage, primaryExts, cfg.Pigsty.Repo)
+			if err != nil {
+				return fmt.Errorf("building extension image for repoint: %w", err)
+			}
+			newImageTag = builtTag
+		}
+	}
+
 	// Stop and remove the old replica container + data
 	fmt.Printf("-> Stopping replica %q...\n", replicaName)
 	_ = pm.StopContainer()
@@ -650,17 +691,21 @@ func runReplicaRepoint(replicaName, primaryDSN, primaryName string) error {
 		fmt.Printf("  [OK] replication slot %q created on new primary\n", slot)
 	}
 
-	// Update config: point to new primary
+	// Update config: point to new primary, inherit image tag + extensions
 	inst.ReplicaOf = primaryName
 	inst.PrimaryDSN = primaryDSN
 	inst.Postgres.User = user
 	inst.Postgres.Password = password
 	inst.PITR.Enabled = false
+	inst.Podman.ImageTag = newImageTag
+	if len(primaryExts) > 0 {
+		inst.Extensions = append([]string(nil), primaryExts...)
+	}
 	cfg.Instances[replicaName] = inst
 	if err := cfg.Save(path); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
-	fmt.Printf("  [OK] config updated (ReplicaOf = %q)\n", primaryName)
+	fmt.Printf("  [OK] config updated (ReplicaOf = %q, image = %s)\n", primaryName, newImageTag)
 
 	// Re-initialize via startSingle → EnsureReplica → pg_basebackup
 	fmt.Printf("-> Re-initializing replica %q from new primary...\n", replicaName)

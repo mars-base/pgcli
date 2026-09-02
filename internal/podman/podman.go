@@ -3,6 +3,7 @@
 package podman
 
 import (
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
@@ -1621,10 +1622,11 @@ func (m *Manager) ExecDSNQuery(dsn, sql string) (string, error) {
 		"psql", "--dbname=" + dsn, "-t", "-A", "-c", sql,
 	}
 	cmd := podmanCommand(m.podman, podmanArgs...)
-	cmd.Stderr = os.Stderr
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("querying source database: %w", err)
+		return "", fmt.Errorf("querying source database: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return string(out), nil
 }

@@ -136,25 +136,28 @@ func (m *Manager) BuildExtensionImage(fromTag string, pkgList []string, pigstyRe
 		return fromTag, nil
 	}
 
-	// Check if the -ext image already exists with all required packages.
-	// Uses a temporary container to inspect installed packages — avoids
-	// rebuilding when the image already contains everything we need.
+	// Decide the build base: if the -ext image already exists (even without
+	// all required packages), build on top of it — Pigsty repo is already
+	// configured and apt install is idempotent.  Only fall back to the plain
+	// base image when no -ext image exists at all.
+	buildFrom := newTag
 	if exists, _ := m.imageExists(newTag); exists {
 		if m.extImageHasPackages(newTag, aptPkgs) {
 			fmt.Printf("-> Extension image %s already has all required packages\n", newTag)
 			return newTag, nil
 		}
-		// Image exists but is missing packages — will rebuild below.
-		fmt.Printf("-> Extension image %s is missing packages, rebuilding...\n", newTag)
+		// -ext image exists but missing packages — rebuild on top of it.
+		fmt.Printf("-> Extension image %s exists, installing missing packages on top...\n", newTag)
+	} else {
+		// No -ext image at all — first-time build from the plain base image.
+		buildFrom = BaseImageTag(fromTag)
+		fmt.Printf("-> Building extension image with %d package(s) (from %s)...\n", len(aptPkgs), buildFrom)
 	}
 
-	baseTag := BaseImageTag(fromTag)
-	fmt.Printf("-> Building extension image with %d package(s) (from %s)...\n", len(aptPkgs), baseTag)
-
 	var dockerfile string
-	// If building from an existing -ext image, Pigsty repo is already configured.
-	// Just install additional packages.
-	if strings.HasSuffix(fromTag, "-ext") {
+	if strings.HasSuffix(buildFrom, "-ext") {
+		// Building from an existing -ext image: Pigsty repo already configured,
+		// just install additional packages (apt install is idempotent).
 		dockerfile = fmt.Sprintf(`FROM %s
 
 ENV http_proxy="" HTTP_PROXY="" https_proxy="" HTTPS_PROXY="" no_proxy="" NO_PROXY=""
@@ -163,9 +166,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y %s \
     && rm -rf /var/lib/apt/lists/*
-`, fromTag, strings.Join(aptPkgs, " "))
+`, buildFrom, strings.Join(aptPkgs, " "))
 	} else {
-		// First-time ext build: set up Pigsty repo from scratch
+		// First-time ext build from the plain base image: set up Pigsty repo
 		dockerfile = fmt.Sprintf(`FROM %s
 
 ENV http_proxy="" HTTP_PROXY="" https_proxy="" HTTPS_PROXY="" no_proxy="" NO_PROXY=""
@@ -181,7 +184,7 @@ RUN apt-get update && apt-get install -y curl gnupg2 lsb-release \
     && apt-get install -y %s \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get purge -y --auto-remove curl gnupg2 lsb-release
-`, fromTag, pigstyRepo, pigstyRepo, pigstyRepo, strings.Join(aptPkgs, " "))
+`, buildFrom, pigstyRepo, pigstyRepo, pigstyRepo, strings.Join(aptPkgs, " "))
 	}
 
 	buildDir := filepath.Join(m.dataDir, "ext-build")

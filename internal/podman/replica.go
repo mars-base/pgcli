@@ -23,9 +23,9 @@ func ReplicaSlotName(name string) string {
 	return replicaSlotPrefix + name
 }
 
-// isReplica reports whether the manager's current instance is a physical
+// IsReplica reports whether the manager's current instance is a physical
 // replica (streams WAL from a primary).
-func (m *Manager) isReplica() bool {
+func (m *Manager) IsReplica() bool {
 	return m.replicaOf() != ""
 }
 
@@ -52,7 +52,7 @@ func (m *Manager) primaryManager() (*Manager, error) {
 // container boots in standby mode instead of running initdb. On later starts
 // the data already exists and this is a no-op.
 func (m *Manager) EnsureReplica() error {
-	if !m.isReplica() {
+	if !m.IsReplica() {
 		return nil
 	}
 

@@ -325,9 +325,13 @@ func applyExtensions(pm *podman.Manager, c *config.Config) error {
 		}
 	}
 
-	// CREATE EXTENSION IF NOT EXISTS for each managed extension
-	if err := pm.RunCreateExtensions(inst.Extensions); err != nil {
-		return fmt.Errorf("create extensions: %w", err)
+	// CREATE EXTENSION IF NOT EXISTS for each managed extension.
+	// Skip for replica instances: they are read-only and extensions are
+	// replicated from the primary via pg_basebackup + WAL streaming.
+	if !pm.IsReplica() {
+		if err := pm.RunCreateExtensions(inst.Extensions); err != nil {
+			return fmt.Errorf("create extensions: %w", err)
+		}
 	}
 
 	return nil
