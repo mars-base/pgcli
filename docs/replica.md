@@ -46,11 +46,19 @@ pg status -i ro1                     # Role: standby (replica of ...)
 
 ## Destroy
 
+Destroying a replica is a 2-step process:
+
 ```bash
+# Step 1: Destroy the replica instance (removes container + data + config entry)
 pg destroy -i ro1 --clean-data --force
+
+# Step 2: Drop the replication slot on the primary (no-op if already gone)
+pg replica drop ro1 -i <primary>
 ```
 
-Destroy also drops the `pgcli_r_<name>` replication slot on the primary, so WAL is not held forever on the replica's behalf (best-effort: if the primary is stopped, the slot is left for later manual cleanup).
+Step 1 must run before step 2: PostgreSQL refuses to drop a slot that is still being streamed (`replication slot is active`), so the replica must be destroyed first to close its streaming connection.
+
+> **Note:** If the primary is a local pgcli-managed instance (same host), Step 2 can be skipped — `destroy` automatically cleans up the slot. Step 2 is required when the primary is not accessible from the replica host.
 
 ## Cross-network replicas
 
@@ -86,15 +94,18 @@ The replica side runs only on the replica host: user, database and password of t
 Destroy is symmetric, one command per host — **in this order**:
 
 ```bash
-# 1. on the REPLICA host: removes container + config, never touches the remote slot
+# 1. on the REPLICA host: removes container + config, also drops the slot
+#    on the remote primary via DSN (automatic if primary is reachable)
 pg destroy -i ro1
 
-# 2. on the PRIMARY host: drop the slot (no-op if already gone); the pg_hba
-#    entry is kept, matching same-host destroy behavior
+# 2. on the PRIMARY host (only if step 1's DSN connection failed):
+#    drop the slot manually
 pg replica drop ro1 -i pg01
 ```
 
-Step 1 must run before step 2: PostgreSQL refuses to drop a slot that is still being streamed (`replication slot is active`), so the replica must be destroyed first to close its streaming connection. `replica drop` is idempotent — re-running when the slot is already gone succeeds as a no-op.
+Step 1 must run before step 2: PostgreSQL refuses to drop a slot that is still being streamed (`replication slot is active`), so the replica must be destroyed first to close its streaming connection.
+
+**Automatic slot cleanup:** When a cross-host replica has `PrimaryDSN` set, `destroy` automatically attempts to drop the replication slot on the remote primary via DSN. If the primary is reachable, no manual step 2 is needed. `replica drop` is idempotent — re-running when the slot is already gone succeeds as a no-op.
 
 ### Non-pgcli primary
 
