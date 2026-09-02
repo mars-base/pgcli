@@ -482,6 +482,24 @@ func (m *Manager) DropReplicaSlot(replicaName string) error {
 	return m.DropReplicationSlot(ReplicaSlotName(replicaName))
 }
 
+// DropReplicationSlotViaDSN removes a physical replication slot from a remote
+// primary via DSN connection. This is used for cross-host replicas where the
+// primary is not locally accessible. No-op when the slot does not exist.
+func (m *Manager) DropReplicationSlotViaDSN(dsn string, slot string) error {
+	esc := strings.ReplaceAll(slot, "'", "''")
+	exists, err := m.ExecDSNQuery(dsn,
+		fmt.Sprintf("SELECT slot_name FROM pg_replication_slots WHERE slot_name = '%s'", esc))
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(exists) == "" {
+		return nil // slot already gone
+	}
+	_, err = m.ExecDSNQuery(dsn,
+		fmt.Sprintf("SELECT pg_drop_replication_slot('%s')", esc))
+	return err
+}
+
 // Promote promotes a standby replica to a standalone read-write primary.
 // It calls pg_promote(), waits for recovery to end, and removes
 // primary_conninfo from postgresql.auto.conf via ALTER SYSTEM RESET.

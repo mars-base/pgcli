@@ -102,19 +102,30 @@ Examples:
 
 		// 2. Replicas: drop the physical replication slot on the primary so
 		// WAL is not held forever on its behalf (best-effort — a stopped
-		// primary just leaves the slot for manual cleanup). Cross-network
-		// replicas skip this: their primary lives on another host, and the
-		// slot is dropped there with `pg replica drop`.
-		if primary := cfg.ReplicaOf(cfgInstance); primary != "" && inst.PrimaryDSN == "" {
-			pc := *cfg
-			if err := pc.SetInstance(primary); err == nil {
-				ppm, perr := podman.New(&pc)
-				if perr == nil && ppm.CheckContainerRunning() == nil {
-					if err := ppm.DropReplicaSlot(cfgInstance); err != nil {
-						fmt.Printf("  [!]  Warning: dropping replication slot on primary %q: %v\n", primary, err)
-					} else {
-						fmt.Printf("  [OK] replication slot for replica %q removed from primary %q\n", cfgInstance, primary)
+		// primary just leaves the slot for manual cleanup).
+		// - Same-host replica: connect to local primary via Manager
+		// - Cross-host replica: connect to remote primary via DSN
+		if primary := cfg.ReplicaOf(cfgInstance); primary != "" {
+			slot := podman.ReplicaSlotName(cfgInstance)
+			if inst.PrimaryDSN == "" {
+				// Same-host: primary is local
+				pc := *cfg
+				if err := pc.SetInstance(primary); err == nil {
+					ppm, perr := podman.New(&pc)
+					if perr == nil && ppm.CheckContainerRunning() == nil {
+						if err := ppm.DropReplicaSlot(cfgInstance); err != nil {
+							fmt.Printf("  [!]  Warning: dropping replication slot on primary %q: %v\n", primary, err)
+						} else {
+							fmt.Printf("  [OK] replication slot for replica %q removed from primary %q\n", cfgInstance, primary)
+						}
 					}
+				}
+			} else {
+				// Cross-host: primary is remote, use DSN
+				if err := pm.DropReplicationSlotViaDSN(inst.PrimaryDSN, slot); err != nil {
+					fmt.Printf("  [!]  Warning: dropping replication slot on remote primary: %v\n", err)
+				} else {
+					fmt.Printf("  [OK] replication slot %q removed from remote primary\n", slot)
 				}
 			}
 		}

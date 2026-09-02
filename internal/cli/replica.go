@@ -344,6 +344,20 @@ func runReplicaCreateRemote(cfg *config.Config, path, newName, primary, dsn stri
 		return err
 	}
 
+	// ── Cross-host extension sync (same logic as repoint) ──
+	var primaryExts []string
+	extOut, extErr := pm.ExecDSNQuery(dsn,
+		"SELECT extname FROM pg_extension WHERE extname != 'plpgsql' ORDER BY extname")
+	if extErr == nil {
+		for _, line := range strings.Split(extOut, "\n") {
+			if name := strings.TrimSpace(line); name != "" {
+				primaryExts = append(primaryExts, name)
+			}
+		}
+	} else {
+		fmt.Printf("  [!] warning: could not query extensions on primary: %v\n", extErr)
+	}
+
 	// Physical replication copies pg_authid: the replica's local password must
 	// match the primary's, so user/database/password are taken from the DSN
 	// (there is no local primary config to copy from).
@@ -354,6 +368,27 @@ func runReplicaCreateRemote(cfg *config.Config, path, newName, primary, dsn stri
 	inst.PITR.Enabled = false
 	inst.ReplicaOf = primary
 	inst.PrimaryDSN = dsn
+
+	// Build -ext image if primary has non-builtin extensions
+	if len(primaryExts) > 0 {
+		var nonBuiltin []string
+		for _, ext := range primaryExts {
+			if !podman.ExtIsBuiltin(ext) {
+				nonBuiltin = append(nonBuiltin, ext)
+			}
+		}
+		if len(nonBuiltin) > 0 {
+			fmt.Printf("-> Primary has %d non-builtin extension(s): %s\n",
+				len(nonBuiltin), strings.Join(nonBuiltin, ", "))
+			builtTag, err := pm.BuildExtensionImage(inst.Podman.ImageTag, primaryExts, cfg.Pigsty.Repo)
+			if err != nil {
+				return fmt.Errorf("building extension image: %w", err)
+			}
+			inst.Podman.ImageTag = builtTag
+		}
+		inst.Extensions = append([]string(nil), primaryExts...)
+	}
+
 	cfg.Instances[newName] = *inst
 	cfg.ApplyDefaults()
 	if err := cfg.Save(path); err != nil {
