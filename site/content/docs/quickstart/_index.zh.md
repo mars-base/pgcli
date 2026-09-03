@@ -19,7 +19,7 @@ menus:
 使用单条命令安装 pgcli：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mars-base/pgcli/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/mars-base/pgcli/main/scripts/install.sh | bash
 ```
 
 此脚本将：
