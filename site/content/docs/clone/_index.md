@@ -16,7 +16,7 @@ cascade:
 ---
 
 
-Create a new instance whose data is copied from an existing one, streamed as a `pg_dump | pg_restore` pipe — no temp file on disk.
+Create a new instance whose data is copied from an existing one, streamed directly — no temp file on disk.
 
 ```bash
 # Clone the default instance
@@ -39,7 +39,7 @@ pg clone test02 -i proj01 --base-dir /data/pg
    - `--dsn`: an authenticated `SELECT 1` must succeed (catches wrong password, unreachable host)
 2. **Create** — a new instance entry is added to the config with a random password, its own container name, data directory and auto-assigned port
 3. **Start** — the new instance is started (same workflow as `pg start`)
-4. **Stream** — `pg_dump` (source) is piped into `pg_restore` (target) with live transfer progress shown once per second
+4. **Stream** — source data is piped to the target with live transfer progress shown once per second
 
 ## Notes
 
@@ -47,4 +47,4 @@ pg clone test02 -i proj01 --base-dir /data/pg
 - The new instance name must not already exist in config
 - `--dsn` and `--instance` are mutually exclusive: with `--dsn` the connection string determines host, port and database
 - The new instance gets a fresh random password — find it in the clone output or `pg status -i <name>`
-- Logical copy only (schema + data via pg_dump); for large databases a physical approach may be faster
+- Logical copy only (schema + data); for large databases a physical approach may be faster
