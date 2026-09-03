@@ -79,20 +79,20 @@ pg export --dsn postgres://admin:pass@127.0.0.1:35432/mydb | pg import --dsn pos
 
 | Feature | Custom (`.dump`) | SQL (`.sql`) |
 |---------|------------------|--------------|
-| Import speed | Faster (binary COPY, parallel restore) | Slower (text INSERT) |
+| Import speed | Faster (binary format) | Slower (text format) |
 | File size | Smaller (compressed) | Larger (plain text) |
 | Human-readable | No | Yes |
 | Selective restore | Yes (specific tables) | No |
 | Best for | Migration, backup, large databases | Version control, CI seed data, manual editing |
 
 **Format detection:** Uses magic bytes (content-based) with extension fallback.
-- Files starting with `PGDMP` → custom format (uses `pg_restore`)
-- `.sql` or `.sql.gz` → plain SQL format (uses `psql`)
+- Files starting with `PGDMP` → custom format
+- `.sql` or `.sql.gz` → plain SQL format
 - `.gz` extension or gzip magic bytes (`0x1f 0x8b`) → automatic decompression
 - Extension is used as fallback if content detection fails
 
 **Remote databases (--dsn):** Connect to any PostgreSQL instance using a connection string.
-- Uses `pg_dump` and `pg_restore` from the pgcli container image (no local PostgreSQL installation needed)
+- No local PostgreSQL installation needed
 - Works with local-to-remote, remote-to-local, and remote-to-remote migrations
 - Supports all the same flags as local instances (`-o`, `-d`, `--clean`, `-v`, `--compress`)
 

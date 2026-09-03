@@ -3,8 +3,6 @@ title: 文档
 description: 了解如何使用 pgcli 管理 PostgreSQL 数据库。
 type: docs
 icon: fa-solid fa-book
-sidebar_root_for: self
-sidebar_root_link_self: true
 menus:
   main:
     identifier: docs
