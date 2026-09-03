@@ -1,0 +1,65 @@
+sections: [hero, cards, cta]
+
+hero:
+  align: center
+  eyebrow: PostgreSQL 实例管理器
+  title_lines:
+    - words: [{ text: pgcli }]
+    - words: [{ text: 简化 PostgreSQL 管理 }]
+  lead: 让使用 PostgreSQL 数据库像呼吸一样简单自然。一个命令即可创建、管理、备份、克隆和复制，使用隔离容器。
+  actions:
+    - { label: 阅读文档, url: docs/, icon: fa-solid fa-book, style: primary }
+    - { label: 快速开始, url: docs/quickstart/, icon: fa-solid fa-rocket, style: ghost }
+
+cards:
+  eyebrow: 核心功能
+  title: 你需要的一切
+  columns: 3
+  items:
+    - title: 实例管理
+      desc: 一个命令创建、启动、停止和销毁隔离的 PostgreSQL 实例。
+      icon: fa-solid fa-database
+      url: docs/quickstart/
+    - title: 备份
+      desc: 使用 pgBackRest 和共享备份容器进行全量、差异和增量快照。
+      icon: fa-solid fa-shield-halved
+      url: docs/backup/
+    - title: 恢复
+      desc: 时间点恢复（PITR），可恢复到首次备份后的任意时刻，支持试运行预览。
+      icon: fa-solid fa-clock-rotate-left
+      url: docs/restore/
+    - title: 复制
+      desc: 创建只读副本，支持 WAL 流式传输、自动槽管理和级联复制。
+      icon: fa-solid fa-arrows-turn-to-dots
+      url: docs/replica/
+    - title: 故障转移
+      desc: 三步手动故障转移——提升副本、清理旧主实例、重指向剩余副本。
+      icon: fa-solid fa-triangle-exclamation
+      url: docs/failover/
+    - title: 扩展
+      desc: 从 Pigsty 目录安装和管理 440+ PostgreSQL 扩展，烘焙到容器镜像中。
+      icon: fa-solid fa-puzzle-piece
+      url: docs/extensions/
+    - title: 克隆
+      desc: 将实例或远程数据库流式克隆为新实例，磁盘上无临时文件。
+      icon: fa-solid fa-clone
+      url: docs/clone/
+    - title: 导入与导出
+      desc: 以自定义或 SQL 格式导入导出数据库，支持 gzip 压缩和实例间管道传输。
+      icon: fa-solid fa-file-arrow-down
+      url: docs/import-export/
+    - title: Exec 与 psql
+      desc: 运行 SQL、容器命令或交互式 psql 会话——本地或通过 DSN 连接远程数据库。
+      icon: fa-solid fa-terminal
+      url: docs/exec-psql/
+    - title: 管理
+      desc: Shell 补全、配置管理、PostgreSQL 调优和实例重建，轻松全新开始。
+      icon: fa-solid fa-gear
+      url: docs/administration/
+
+cta:
+  title: 准备好开始了吗？
+  text: 安装 pgcli，几分钟内创建你的第一个 PostgreSQL 实例。
+  label: 安装指南
+  url: docs/quickstart/
+  style: primary

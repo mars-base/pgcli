@@ -1,0 +1,65 @@
+# pgcli documentation site — OINK theme
+title: &siteTitle pgcli
+baseURL: https://pgcli.dev/
+defaultContentLanguage: en
+enableGitInfo: true
+enableRobotsTXT: true
+enableEmoji: true
+timeZone: UTC
+
+languages:
+  en:
+    label: English
+    locale: en-US
+    weight: 1
+    title: *siteTitle
+    params:
+      description: Easy-to-use PostgreSQL instance manager.
+  zh:
+    label: 简体中文
+    locale: zh-CN
+    weight: 2
+    title: *siteTitle
+    hasCJKLanguage: true
+    params:
+      description: 易用的 PostgreSQL 实例管理器。
+
+markup:
+  goldmark:
+    renderer:
+      unsafe: true
+    parser:
+      attribute:
+        block: true
+      wrapStandAloneImageWithinParagraph: false
+  highlight:
+    noClasses: false
+
+outputs:
+  home: [HTML, RSS, markdown, LLMS]
+  page: [HTML, markdown]
+  section: [HTML, RSS, print, markdown]
+
+params:
+  offline_search: true
+  copyright:
+    authors: pgcli contributors
+    from_year: 2026
+  footer_center_info: ''
+  ui:
+    dark_mode: true
+    section_index: cards
+    blog_index: cards
+    sidebar_menu_foldable: true
+    sidebar_icon_policy: groups
+    backlinks: true
+
+  github_repo: https://github.com/mars-base/pgcli
+  github_branch: main
+
+module:
+  imports:
+    - path: github.com/pgsty/oink
+  hugoVersion:
+    extended: true
+    min: 0.160.1
