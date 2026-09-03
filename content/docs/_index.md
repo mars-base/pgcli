@@ -3,8 +3,6 @@ title: Documentation
 description: Learn how to use pgcli to manage PostgreSQL databases.
 type: docs
 icon: fa-solid fa-book
-sidebar_root_for: self
-sidebar_root_link_self: true
 menus:
   main:
     identifier: docs

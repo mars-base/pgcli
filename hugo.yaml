@@ -52,6 +52,7 @@ params:
     blog_index: cards
     sidebar_menu_foldable: true
     sidebar_icon_policy: groups
+    sidebar_root_menu: false
     backlinks: true
 
   github_repo: https://github.com/mars-base/pgcli
