@@ -38,7 +38,7 @@ pgcli 支持通过插件系统扩展 PostgreSQL 功能。插件是独立的容�
 - 插件与 PostgreSQL 实例解耦，可独立管理
 - 配置文件集中存储在 `<base-dir>/addon/` 目录
 - 支持动态调整参数，无需重建容器
-- 用户密码自动从 `pg_shadow` 同步
+- 用户密码通过 `auth_query` 动态获取，无需静态同步
 
 ## 命令
 
@@ -135,26 +135,22 @@ instances:
 ```
 /data/addon/pgbouncer/
 ├── pgbouncer.ini    # PgBouncer 主配置
-├── userlist.txt     # 用户密码列表（自动同步）
+├── userlist.txt     # pgbouncer_auth 凭据（自动重新生成）
 └── stats/           # 统计目录（可选）
 ```
 
-## 用户密码同步
+## 认证方式
 
-PgBouncer 插件会自动从 `pg_shadow` 同步用户密码到 `userlist.txt`：
+PgBouncer 使用 `auth_query` 方式认证：
 
-```bash
-# 查看用户列表
-cat /data/addon/pgbouncer/userlist.txt
-```
+1. 在 PostgreSQL 上创建 `pgbouncer_auth` 用户，使用随机生成的密码
+2. 安装 `SECURITY DEFINER` 函数 `pgbouncer_lookup()` 查询 `pg_authid`
+3. 客户端连接时，PgBouncer 使用 `pgbouncer_auth` 执行 auth_query，获取真实用户的密码哈希
+4. 密码缓存在 PgBouncer 内存中，后续连接直接使用
 
-输出示例：
-```
-"admin" "SCRAM-SHA-256$4096:xxx:yyy"
-"app_user" "SCRAM-SHA-256$4096:xxx:yyy"
-```
+`userlist.txt` 仅包含 `pgbouncer_auth`（明文密码）。其他用户通过 auth_query 动态认证——无需密码同步。
 
-**自动同步：** 每次运行 `pg addon install pgbouncer` 时，都会重新查询 `pg_shadow` 并更新 `userlist.txt`，确保密码与 PostgreSQL 保持一致。
+**修改 PostgreSQL 用户密码后**，重新运行 `pg addon install pgbouncer` 重置认证缓存，或连接 PgBouncer 管理控制台执行 `RECONNECT`。
 
 ## 连接方式
 
@@ -162,10 +158,10 @@ cat /data/addon/pgbouncer/userlist.txt
 
 ```bash
 # 直接连接 PostgreSQL（端口 5432）
-psql "postgres://user:pass@localhost:5432/mypg"
+pg exec -i mypg "SELECT version()"
 
 # 通过 PgBouncer 连接（端口 6432）
-psql "postgres://user:pass@localhost:6432/mypg"
+pg exec --dsn "postgres://user:pass@127.0.0.1:6432/mypg" "SELECT version()"
 ```
 
 **端口分配：** PgBouncer 默认使用端口 6432。如果端口被占用，pgcli 会自动分配下一个可用端口。
@@ -222,12 +218,12 @@ PgBouncer 提供管理控制台用于监控连接池和运行状态。
 使用管理员用户连接到 `pgbouncer` 虚拟数据库：
 
 ```bash
-psql "postgres://<管理员用户>:<密码>@127.0.0.1:<pgbouncer端口>/pgbouncer"
+pg exec --dsn "postgres://<管理员用户>:<密码>@127.0.0.1:<pgbouncer端口>/pgbouncer" "SHOW pools"
 ```
 
 示例：
 ```bash
-psql "postgres://admin:secret@127.0.0.1:6432/pgbouncer"
+pg exec --dsn "postgres://admin:secret@127.0.0.1:6432/pgbouncer" "SHOW pools"
 ```
 
 **注意：** 只有在 `admin_users` 中列出的用户才能访问管理控制台。
@@ -249,21 +245,21 @@ psql "postgres://admin:secret@127.0.0.1:6432/pgbouncer"
 
 ### 示例
 
-```sql
--- 检查连接池状态
-SHOW pools;
+```bash
+# 检查连接池状态
+pg exec --dsn "postgres://admin:secret@127.0.0.1:6432/pgbouncer" "SHOW pools"
 
--- 查看活跃的客户端连接
-SHOW clients;
+# 查看活跃的客户端连接
+pg exec --dsn "postgres://admin:secret@127.0.0.1:6432/pgbouncer" "SHOW clients"
 
--- 查看 PostgreSQL 后端连接
-SHOW servers;
+# 查看 PostgreSQL 后端连接
+pg exec --dsn "postgres://admin:secret@127.0.0.1:6432/pgbouncer" "SHOW servers"
 
--- 查看当前配置
-SHOW config;
+# 查看当前配置
+pg exec --dsn "postgres://admin:secret@127.0.0.1:6432/pgbouncer" "SHOW config"
 
--- 查看流量统计
-SHOW stats;
+# 查看流量统计
+pg exec --dsn "postgres://admin:secret@127.0.0.1:6432/pgbouncer" "SHOW stats"
 ```
 
 ### 其他管理命令
