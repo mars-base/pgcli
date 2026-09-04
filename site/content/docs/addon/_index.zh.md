@@ -213,6 +213,69 @@ pg addon install pgbouncer -i mypg-replica \
   --query-timeout 30
 ```
 
+## 监控
+
+PgBouncer 提供管理控制台用于监控连接池和运行状态。
+
+### 连接管理控制台
+
+使用管理员用户连接到 `pgbouncer` 虚拟数据库：
+
+```bash
+psql "postgres://<管理员用户>:<密码>@127.0.0.1:<pgbouncer端口>/pgbouncer"
+```
+
+示例：
+```bash
+psql "postgres://admin:secret@127.0.0.1:6432/pgbouncer"
+```
+
+**注意：** 只有在 `admin_users` 中列出的用户才能访问管理控制台。
+
+### 常用 SHOW 命令
+
+| 命令 | 说明 |
+|------|------|
+| `SHOW pools` | 连接池状态（活跃/等待的客户端和服务端连接数） |
+| `SHOW clients` | 所有当前客户端连接详情 |
+| `SHOW servers` | 所有当前服务端（PostgreSQL）连接详情 |
+| `SHOW databases` | 已配置的数据库及其连接参数 |
+| `SHOW stats` | 流量统计（事务数、查询数、收发字节数） |
+| `SHOW config` | 所有运行时的配置参数 |
+| `SHOW sockets` | 底层 TCP 套接字信息 |
+| `SHOW active_sockets` | 活跃的 TCP 套接字 |
+| `SHOW mem` | 内存使用统计 |
+| `SHOW lists` | 各类对象数量汇总 |
+
+### 示例
+
+```sql
+-- 检查连接池状态
+SHOW pools;
+
+-- 查看活跃的客户端连接
+SHOW clients;
+
+-- 查看 PostgreSQL 后端连接
+SHOW servers;
+
+-- 查看当前配置
+SHOW config;
+
+-- 查看流量统计
+SHOW stats;
+```
+
+### 其他管理命令
+
+| 命令 | 说明 |
+|------|------|
+| `RELOAD` | 重新加载配置文件 |
+| `PAUSE` | 暂停连接池（等待事务完成） |
+| `RESUME` | 恢复连接池 |
+| `RECONNECT` | 强制重新连接所有服务端连接 |
+| `SHUTDOWN` | 关闭 PgBouncer |
+
 ## 故障排除
 
 ### 连接池满

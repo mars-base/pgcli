@@ -213,6 +213,69 @@ pg addon install pgbouncer -i mypg-replica \
   --query-timeout 30
 ```
 
+## Monitoring
+
+PgBouncer provides an admin console for monitoring connection pools and runtime status.
+
+### Connecting to Admin Console
+
+Connect to the `pgbouncer` virtual database using an admin user:
+
+```bash
+psql "postgres://<admin-user>:<password>@127.0.0.1:<pgbouncer-port>/pgbouncer"
+```
+
+Example:
+```bash
+psql "postgres://admin:secret@127.0.0.1:6432/pgbouncer"
+```
+
+**Note:** Only users listed in `admin_users` can access the admin console.
+
+### Common SHOW Commands
+
+| Command | Description |
+|---------|-------------|
+| `SHOW pools` | Connection pool status (active/waiting client and server connections) |
+| `SHOW clients` | All current client connections with details |
+| `SHOW servers` | All current server (PostgreSQL) connections with details |
+| `SHOW databases` | Configured databases and their connection parameters |
+| `SHOW stats` | Traffic statistics (transactions, queries, bytes received/sent) |
+| `SHOW config` | All runtime configuration parameters |
+| `SHOW sockets` | Low-level TCP socket information |
+| `SHOW active_sockets` | Active TCP sockets |
+| `SHOW mem` | Memory usage statistics |
+| `SHOW lists` | Summary of various object counts |
+
+### Examples
+
+```sql
+-- Check pool status
+SHOW pools;
+
+-- View active client connections
+SHOW clients;
+
+-- View PostgreSQL backend connections
+SHOW servers;
+
+-- Check current configuration
+SHOW config;
+
+-- View traffic statistics
+SHOW stats;
+```
+
+### Other Admin Commands
+
+| Command | Description |
+|---------|-------------|
+| `RELOAD` | Reload configuration file |
+| `PAUSE` | Pause connection pool (wait for transactions to complete) |
+| `RESUME` | Resume connection pool |
+| `RECONNECT` | Force reconnect all server connections |
+| `SHUTDOWN` | Shutdown PgBouncer |
+
 ## Troubleshooting
 
 ### Connection Pool Full
