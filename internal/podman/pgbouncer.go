@@ -45,7 +45,7 @@ type UserEntry struct {
 // pgBouncerConfigDir returns the host directory for a given instance's
 // PgBouncer configuration files.
 func pgBouncerConfigDir(baseDir, instName string) string {
-	return filepath.Join(baseDir, "pgbouncer", instName)
+	return filepath.Join(baseDir, "addon", "pgbouncer", instName)
 }
 
 // SyncUsers queries pg_shadow on the target PG instance (via DSN) and returns
@@ -83,15 +83,12 @@ func (m *PgBouncerManager) SyncUsers(dsn string) ([]UserEntry, error) {
 }
 
 // WriteConfigs generates pgbouncer.ini and userlist.txt for the given instance
-// into <baseDir>/pgbouncer/<instName>/.
-func (m *PgBouncerManager) WriteConfigs(pbConf *config.PgBouncerConfig, users []UserEntry, dsn string) (iniPath, userListPath string, err error) {
+// into <baseDir>/addon/pgbouncer/<instName>/.
+func (m *PgBouncerManager) WriteConfigs(pbConf *config.PgBouncerConfig, users []UserEntry, dsn, instName string) (iniPath, userListPath string, err error) {
 	host, port, _, _, _, perr := ParseDSN(dsn)
 	if perr != nil {
 		return "", "", perr
 	}
-
-	// Determine instance name from DSN or container name fallback
-	instName := m.instanceNameFromContainer(pbConf.ContainerName)
 
 	dir := pgBouncerConfigDir(m.dataDir, instName)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -204,21 +201,6 @@ func (m *PgBouncerManager) Remove(pbConf *config.PgBouncerConfig, instName strin
 	return nil
 }
 
-// instanceNameFromContainer derives the instance name from a container name
-// like "pgcli-pgbouncer-ns-default" → "default".
-// Falls back to the full container name if the prefix doesn't match.
-func (m *PgBouncerManager) instanceNameFromContainer(containerName string) string {
-	prefix := "pgcli-pgbouncer"
-	ns := m.cfg.Namespace
-	if ns != "" {
-		prefix += "-" + ns
-	}
-	prefix += "-"
-	if name, ok := strings.CutPrefix(containerName, prefix); ok {
-		return name
-	}
-	return containerName
-}
 
 // ContainerRunning reports whether the named container is currently running.
 // Exported so the CLI can display status.

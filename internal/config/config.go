@@ -15,19 +15,20 @@ import (
 
 // Config is the complete pgcli configuration.
 type Config struct {
-	BaseDir     string                    `yaml:"base_dir,omitempty"`
-	Network     string                    `yaml:"network,omitempty"` // shared podman network name, persisted at top level
-	Namespace   string                    `yaml:"namespace,omitempty"` // container name namespace, empty = disabled (default)
+	BaseDir            string                    `yaml:"base_dir,omitempty"`
+	Network            string                    `yaml:"network,omitempty"`            // shared podman network name, persisted at top level
+	Namespace          string                    `yaml:"namespace,omitempty"`          // container name namespace, empty = disabled (default)
 	PGStartPort        int                       `yaml:"pg_start_port,omitempty"`        // starting PG host port, default 35432
 	PGSSHPort          int                       `yaml:"pg_ssh_port,omitempty"`          // starting SSH host port, default 42201
 	PgBouncerStartPort int                       `yaml:"pgbouncer_start_port,omitempty"` // starting PgBouncer host port, default 56432
-	Postgres    PostgresConfig            `yaml:"postgres"`
-	Podman      PodmanConfig              `yaml:"podman"`
-	PITR        PITRConfig                `yaml:"pitr"`
-	Logging     LoggingConfig             `yaml:"logging"`
-	Backup      BackupConfig              `yaml:"backup"`
-	Pigsty      PigstyConfig              `yaml:"pigsty"`
-	Instances   map[string]InstanceConfig `yaml:"instances"`
+	Postgres           PostgresConfig            `yaml:"postgres"`
+	Podman             PodmanConfig              `yaml:"podman"`
+	PITR               PITRConfig                `yaml:"pitr"`
+	Logging            LoggingConfig             `yaml:"logging"`
+	Backup             BackupConfig              `yaml:"backup"`
+	Pigsty             PigstyConfig              `yaml:"pigsty"`
+	Addons             TopAddonsConfig           `yaml:"addons,omitempty"` // top-level addon configs (e.g. remote PgBouncer)
+	Instances          map[string]InstanceConfig `yaml:"instances"`
 
 	Instance string `yaml:"-"` // current instance name (set at runtime, not persisted)
 }
@@ -61,15 +62,21 @@ type AddonsConfig struct {
 	PgBouncer *PgBouncerConfig `yaml:"pgbouncer,omitempty"`
 }
 
+// TopAddonsConfig holds top-level (cross-instance) addon configurations.
+// These are for addons targeting PG instances NOT managed locally by pgcli
+// (e.g. a PgBouncer fronting a remote database via --dsn).
+type TopAddonsConfig struct {
+	PgBouncer map[string]PgBouncerConfig `yaml:"pgbouncer,omitempty"`
+}
+
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
 type PgBouncerConfig struct {
-	ContainerName   string `yaml:"container_name"`             // e.g. pgcli-pgbouncer-ns-<instance>
-	ImageTag        string `yaml:"image_tag,omitempty"`        // edoburu/pgbouncer:latest (default)
-	HostPort        int    `yaml:"host_port,omitempty"`        // 56432+ auto-assigned
-	PoolMode        string `yaml:"pool_mode,omitempty"`        // transaction (default)
-	MaxClientConn   int    `yaml:"max_client_conn,omitempty"`  // 100 (default)
+	ContainerName   string `yaml:"container_name"`              // e.g. pgcli-pgbouncer-ns-<instance>
+	ImageTag        string `yaml:"image_tag,omitempty"`         // edoburu/pgbouncer:latest (default)
+	HostPort        int    `yaml:"host_port,omitempty"`         // 56432+ auto-assigned
+	PoolMode        string `yaml:"pool_mode,omitempty"`         // transaction (default)
+	MaxClientConn   int    `yaml:"max_client_conn,omitempty"`   // 100 (default)
 	DefaultPoolSize int    `yaml:"default_pool_size,omitempty"` // 20 (default)
-	DSN             string `yaml:"dsn,omitempty"`              // PG instance DSN this pooler fronts
 }
 
 // PostgresConfig holds PostgreSQL connection settings.
@@ -302,6 +309,7 @@ type displayConfig struct {
 	Logging            LoggingConfig             `yaml:"logging"`
 	Backup             BackupConfig              `yaml:"backup"`
 	Pigsty             PigstyConfig              `yaml:"pigsty"`
+	Addons             TopAddonsConfig           `yaml:"addons,omitempty"`
 	Instances          map[string]InstanceConfig  `yaml:"instances"`
 }
 
@@ -317,6 +325,7 @@ func (c *Config) Display() displayConfig {
 		Logging:            c.Logging,
 		Backup:             c.Backup,
 		Pigsty:             c.Pigsty,
+		Addons:             c.Addons,
 		Instances:          c.Instances,
 	}
 }
@@ -520,6 +529,26 @@ func (c *Config) ApplyDefaults() {
 		c.Instances[name] = inst
 	}
 
+	// Top-level addons defaults (remote PgBouncer pools)
+	for name, addon := range c.Addons.PgBouncer {
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-pgbouncer" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = "edoburu/pgbouncer:latest"
+		}
+		if addon.PoolMode == "" {
+			addon.PoolMode = "transaction"
+		}
+		if addon.MaxClientConn == 0 {
+			addon.MaxClientConn = 100
+		}
+		if addon.DefaultPoolSize == 0 {
+			addon.DefaultPoolSize = 20
+		}
+		c.Addons.PgBouncer[name] = addon
+	}
+
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
 	c.autoAssignPorts()
 }
@@ -575,6 +604,12 @@ func (c *Config) autoAssignPorts() {
 			assignedPB[inst.Addons.PgBouncer.HostPort] = true
 		}
 	}
+	// Collect top-level addon ports too
+	for _, addon := range c.Addons.PgBouncer {
+		if addon.HostPort != 0 {
+			assignedPB[addon.HostPort] = true
+		}
+	}
 
 	nextPG := pgBase
 	nextSSH := sshBase
@@ -618,6 +653,20 @@ func (c *Config) autoAssignPorts() {
 
 		if changed {
 			c.Instances[name] = inst
+		}
+	}
+
+	// Allocate ports for top-level addons (remote PgBouncer pools)
+	for name, addon := range c.Addons.PgBouncer {
+		if addon.HostPort == 0 && pbBase > 0 {
+			for (usedPorts != nil && usedPorts[nextPB]) || assignedPB[nextPB] {
+				nextPB++
+			}
+			addon.HostPort = nextPB
+			nextPB++
+			c.Addons.PgBouncer[name] = addon
+		} else if addon.HostPort >= nextPB && pbBase > 0 {
+			nextPB = addon.HostPort + 1
 		}
 	}
 }
