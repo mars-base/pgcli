@@ -18,8 +18,9 @@ type Config struct {
 	BaseDir     string                    `yaml:"base_dir,omitempty"`
 	Network     string                    `yaml:"network,omitempty"` // shared podman network name, persisted at top level
 	Namespace   string                    `yaml:"namespace,omitempty"` // container name namespace, empty = disabled (default)
-	PGStartPort int                       `yaml:"pg_start_port,omitempty"` // starting PG host port, default 35432
-	PGSSHPort   int                       `yaml:"pg_ssh_port,omitempty"` // starting SSH host port, default 42201
+	PGStartPort        int                       `yaml:"pg_start_port,omitempty"`        // starting PG host port, default 35432
+	PGSSHPort          int                       `yaml:"pg_ssh_port,omitempty"`          // starting SSH host port, default 42201
+	PgBouncerStartPort int                       `yaml:"pgbouncer_start_port,omitempty"` // starting PgBouncer host port, default 56432
 	Postgres    PostgresConfig            `yaml:"postgres"`
 	Podman      PodmanConfig              `yaml:"podman"`
 	PITR        PITRConfig                `yaml:"pitr"`
@@ -50,6 +51,25 @@ type InstanceConfig struct {
 	// is kept in sync; new extensions also have CREATE EXTENSION IF NOT EXISTS
 	// run automatically.
 	Extensions []string `yaml:"extensions,omitempty"`
+	// Addons tracks optional sidecar components installed for this instance
+	// (e.g. PgBouncer connection pooler). Managed by `pg addon install/remove`.
+	Addons AddonsConfig `yaml:"addons,omitempty"`
+}
+
+// AddonsConfig tracks optional sidecar components attached to an instance.
+type AddonsConfig struct {
+	PgBouncer *PgBouncerConfig `yaml:"pgbouncer,omitempty"`
+}
+
+// PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
+type PgBouncerConfig struct {
+	ContainerName   string `yaml:"container_name"`             // e.g. pgcli-pgbouncer-ns-<instance>
+	ImageTag        string `yaml:"image_tag,omitempty"`        // edoburu/pgbouncer:latest (default)
+	HostPort        int    `yaml:"host_port,omitempty"`        // 56432+ auto-assigned
+	PoolMode        string `yaml:"pool_mode,omitempty"`        // transaction (default)
+	MaxClientConn   int    `yaml:"max_client_conn,omitempty"`  // 100 (default)
+	DefaultPoolSize int    `yaml:"default_pool_size,omitempty"` // 20 (default)
+	DSN             string `yaml:"dsn,omitempty"`              // PG instance DSN this pooler fronts
 }
 
 // PostgresConfig holds PostgreSQL connection settings.
@@ -103,6 +123,7 @@ func Default() *Config {
 		BaseDir:     "", // empty means use platform default
 		PGStartPort: 35432,
 		PGSSHPort:   42201,
+		PgBouncerStartPort: 56432,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -272,29 +293,31 @@ func Load(path string) (*Config, error) {
 // displayConfig is the serializable subset of Config for save/display.
 // Global postgres/podman/pitr are excluded -- they are in-memory defaults only.
 type displayConfig struct {
-	BaseDir     string                    `yaml:"base_dir,omitempty"`
-	Network     string                    `yaml:"network,omitempty"`
-	Namespace   string                    `yaml:"namespace,omitempty"`
-	PGStartPort int                       `yaml:"pg_start_port,omitempty"`
-	PGSSHPort   int                       `yaml:"pg_ssh_port,omitempty"`
-	Logging     LoggingConfig             `yaml:"logging"`
-	Backup      BackupConfig              `yaml:"backup"`
-	Pigsty      PigstyConfig              `yaml:"pigsty"`
-	Instances   map[string]InstanceConfig `yaml:"instances"`
+	BaseDir            string                    `yaml:"base_dir,omitempty"`
+	Network            string                    `yaml:"network,omitempty"`
+	Namespace          string                    `yaml:"namespace,omitempty"`
+	PGStartPort        int                       `yaml:"pg_start_port,omitempty"`
+	PGSSHPort          int                       `yaml:"pg_ssh_port,omitempty"`
+	PgBouncerStartPort int                       `yaml:"pgbouncer_start_port,omitempty"`
+	Logging            LoggingConfig             `yaml:"logging"`
+	Backup             BackupConfig              `yaml:"backup"`
+	Pigsty             PigstyConfig              `yaml:"pigsty"`
+	Instances          map[string]InstanceConfig  `yaml:"instances"`
 }
 
 // Display returns a view of the config suitable for display or saving.
 func (c *Config) Display() displayConfig {
 	return displayConfig{
-		BaseDir:     c.BaseDir,
-		Network:     c.Podman.Network,
-		Namespace:   c.Namespace,
-		PGStartPort: c.PGStartPort,
-		PGSSHPort:   c.PGSSHPort,
-		Logging:     c.Logging,
-		Backup:      c.Backup,
-		Pigsty:      c.Pigsty,
-		Instances:   c.Instances,
+		BaseDir:            c.BaseDir,
+		Network:            c.Podman.Network,
+		Namespace:          c.Namespace,
+		PGStartPort:        c.PGStartPort,
+		PGSSHPort:          c.PGSSHPort,
+		PgBouncerStartPort: c.PgBouncerStartPort,
+		Logging:            c.Logging,
+		Backup:             c.Backup,
+		Pigsty:             c.Pigsty,
+		Instances:          c.Instances,
 	}
 }
 
@@ -357,6 +380,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.PGSSHPort == 0 {
 		c.PGSSHPort = d.PGSSHPort
+	}
+	if c.PgBouncerStartPort == 0 {
+		c.PgBouncerStartPort = d.PgBouncerStartPort
 	}
 
 	// Postgres
@@ -471,16 +497,38 @@ func (c *Config) ApplyDefaults() {
 		if inst.PITR.PgBackRestStanza == "" {
 			inst.PITR.PgBackRestStanza = def.PITR.PgBackRestStanza
 		}
+		// PgBouncer addon defaults (only when PgBouncer is present)
+		if inst.Addons.PgBouncer != nil {
+			pb := inst.Addons.PgBouncer
+			if pb.ContainerName == "" {
+				pb.ContainerName = "pgcli-pgbouncer" + nsSuffix(c.Namespace) + "-" + name
+			}
+			if pb.ImageTag == "" {
+				pb.ImageTag = "edoburu/pgbouncer:latest"
+			}
+			if pb.PoolMode == "" {
+				pb.PoolMode = "transaction"
+			}
+			if pb.MaxClientConn == 0 {
+				pb.MaxClientConn = 100
+			}
+			if pb.DefaultPoolSize == 0 {
+				pb.DefaultPoolSize = 20
+			}
+			inst.Addons.PgBouncer = pb
+		}
 		c.Instances[name] = inst
 	}
 
-	// Auto-assign host and SSH ports for instances that don't have one set.
+	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
 	c.autoAssignPorts()
 }
 
-// autoAssignPorts assigns sequential host ports (PG + SSH) to instances that
-// have HostPort=0 / SSHPort=0. PG ports start at pg_start_port (default
-// 35432), SSH ports start at pg_ssh_port (default 42201).
+// autoAssignPorts assigns sequential host ports (PG + SSH + PgBouncer) to
+// instances that have HostPort=0 / SSHPort=0 / PgBouncer.HostPort=0.
+// PG ports start at pg_start_port (default 35432), SSH ports start at
+// pg_ssh_port (default 42201), PgBouncer ports start at pgbouncer_start_port
+// (default 56432).
 //
 // Instances are processed in alphabetical order by name. Explicitly-set ports
 // are respected and skipped. The "default" instance always gets the base port.
@@ -504,6 +552,7 @@ func (c *Config) autoAssignPorts() {
 	// All platforms use host networking: PG from c.PGStartPort, SSH from c.PGSSHPort.
 	pgBase := c.PGStartPort
 	sshBase := c.PGSSHPort
+	pbBase := c.PgBouncerStartPort
 
 	// Probe already-used ports so multiple config files (or other services)
 	// on the same host don't collide.
@@ -514,6 +563,7 @@ func (c *Config) autoAssignPorts() {
 	// could steal it and break the original when it starts later.
 	assignedPG := map[int]bool{}
 	assignedSSH := map[int]bool{}
+	assignedPB := map[int]bool{}
 	for _, inst := range c.Instances {
 		if inst.Podman.HostPort != 0 {
 			assignedPG[inst.Podman.HostPort] = true
@@ -521,10 +571,14 @@ func (c *Config) autoAssignPorts() {
 		if inst.Podman.SSHPort != 0 {
 			assignedSSH[inst.Podman.SSHPort] = true
 		}
+		if inst.Addons.PgBouncer != nil && inst.Addons.PgBouncer.HostPort != 0 {
+			assignedPB[inst.Addons.PgBouncer.HostPort] = true
+		}
 	}
 
 	nextPG := pgBase
 	nextSSH := sshBase
+	nextPB := pbBase
 	for _, name := range sorted {
 		inst := c.Instances[name]
 		changed := false
@@ -549,6 +603,17 @@ func (c *Config) autoAssignPorts() {
 			changed = true
 		} else if inst.Podman.SSHPort >= nextSSH && sshBase > 0 {
 			nextSSH = inst.Podman.SSHPort + 1
+		}
+
+		if inst.Addons.PgBouncer != nil && inst.Addons.PgBouncer.HostPort == 0 && pbBase > 0 {
+			for (usedPorts != nil && usedPorts[nextPB]) || assignedPB[nextPB] {
+				nextPB++
+			}
+			inst.Addons.PgBouncer.HostPort = nextPB
+			nextPB++
+			changed = true
+		} else if inst.Addons.PgBouncer != nil && inst.Addons.PgBouncer.HostPort >= nextPB && pbBase > 0 {
+			nextPB = inst.Addons.PgBouncer.HostPort + 1
 		}
 
 		if changed {
