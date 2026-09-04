@@ -76,6 +76,7 @@ type PgBouncerConfig struct {
 	HostPort        int    `yaml:"host_port,omitempty"`         // 56432+ auto-assigned
 	PoolMode        string `yaml:"pool_mode,omitempty"`         // transaction (default)
 	DSN             string `yaml:"dsn,omitempty"`              // remote PG DSN (remote mode only)
+	BackendHost     string `yaml:"backend_host,omitempty"`     // backend PG host:port (e.g. "127.0.0.1:35435")
 	MaxClientConn   int    `yaml:"max_client_conn,omitempty"`   // 100 (default)
 	DefaultPoolSize int    `yaml:"default_pool_size,omitempty"` // 20 (default)
 
