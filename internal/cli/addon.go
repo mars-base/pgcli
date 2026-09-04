@@ -382,6 +382,19 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		cfg.Instances[instName] = inst
 	}
 
+	// Set BackendHost from DSN
+	if host, port, _, _, _, err := podman.ParseDSN(dsn); err == nil {
+		if dsn != "" && pgName != "" {
+			pbConf := cfg.Addons.PgBouncer[pgName]
+			pbConf.BackendHost = fmt.Sprintf("%s:%d", host, port)
+			cfg.Addons.PgBouncer[pgName] = pbConf
+		} else {
+			inst := cfg.Instances[instName]
+			inst.Addons.PgBouncer.BackendHost = fmt.Sprintf("%s:%d", host, port)
+			cfg.Instances[instName] = inst
+		}
+	}
+
 	// Let config auto-assign port if zero
 	cfg.ApplyDefaults()
 
@@ -475,11 +488,12 @@ func runAddonList() error {
 			}
 		}
 		fmt.Printf("  %s (instance: %s)\n", "pgbouncer", name)
-		fmt.Printf("    Status:    %s\n", status)
-		fmt.Printf("    Host:      %s:%d\n", inst.Postgres.Host, pb.HostPort)
-		fmt.Printf("    Port:      %d\n", pb.HostPort)
-		fmt.Printf("    Pool mode: %s\n", pb.PoolMode)
-		fmt.Printf("    Container: %s\n", pb.ContainerName)
+		fmt.Printf("    Status:      %s\n", status)
+		fmt.Printf("    Host:        %s:%d\n", inst.Postgres.Host, pb.HostPort)
+		fmt.Printf("    Backend:     %s\n", pb.BackendHost)
+		fmt.Printf("    Port:        %d\n", pb.HostPort)
+		fmt.Printf("    Pool mode:   %s\n", pb.PoolMode)
+		fmt.Printf("    Container:   %s\n", pb.ContainerName)
 	}
 	if !hasLocal {
 		fmt.Println("  (none)")
@@ -499,15 +513,12 @@ func runAddonList() error {
 				}
 			}
 			fmt.Printf("  %s (pg-name: %s)\n", "pgbouncer", name)
-			fmt.Printf("    Status:    %s\n", status)
-			if pb.DSN != "" {
-				if host, _, _, _, _, err := podman.ParseDSN(pb.DSN); err == nil {
-					fmt.Printf("    Host:      %s:%d\n", host, pb.HostPort)
-				}
-			}
-			fmt.Printf("    Port:      %d\n", pb.HostPort)
-			fmt.Printf("    Pool mode: %s\n", pb.PoolMode)
-			fmt.Printf("    Container: %s\n", pb.ContainerName)
+			fmt.Printf("    Status:      %s\n", status)
+			fmt.Printf("    Host:        127.0.0.1:%d\n", pb.HostPort)
+			fmt.Printf("    Backend:     %s\n", pb.BackendHost)
+			fmt.Printf("    Port:        %d\n", pb.HostPort)
+			fmt.Printf("    Pool mode:   %s\n", pb.PoolMode)
+			fmt.Printf("    Container:   %s\n", pb.ContainerName)
 		}
 	}
 	if !hasRemote {

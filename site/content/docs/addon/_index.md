@@ -21,9 +21,9 @@ pgcli supports extending PostgreSQL capabilities through an addon system. Addons
 
 The following addons are currently supported:
 
-| Addon | Description | Container Image |
-|-------|-------------|-----------------|
-| `pgbouncer` | Connection pool manager with transaction-level pooling | `edoburu/pgbouncer:latest` |
+| Addon | Description |
+|-------|-------------|
+| `pgbouncer` | Connection pool manager with transaction-level pooling |
 
 ## How It Works
 
