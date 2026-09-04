@@ -30,5 +30,12 @@ venv/
 .DS_Store
 Thumbs.db
 
+# Hugo
+.hugo_build.lock
+public/
+site/.hugo_build.lock
+site/public/
+site/resources/
+
 # Claude Code
 .claude/
