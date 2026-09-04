@@ -394,7 +394,7 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 
 	// 6. Setup auth_query user and function on PG (needs pbConf for auth user name)
 	fmt.Println("-> Setting up PgBouncer auth_query...")
-	authUser, err := pbMgr.SetupAuth(dsn, &pbConf)
+	authUser, err := pbMgr.SetupAuth(dsn, instName)
 	if err != nil {
 		return err
 	}

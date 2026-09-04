@@ -50,31 +50,30 @@ func pgBouncerConfigDir(baseDir, instName string) string {
 	return filepath.Join(baseDir, "addon", "pgbouncer", instName)
 }
 
-// authUserFromContainer derives a per-pooler PG auth user name from the
-// container name. Each pooler gets its own auth user so that multiple
-// poolers (including cross-host) targeting the same PG instance do not
-// overwrite each other's password.
+// authUserForInstance derives a per-pooler PG auth user name from the
+// namespace and instance name. Each pooler gets its own auth user so that
+// multiple poolers (including cross-host) targeting the same PG instance
+// do not overwrite each other's password.
 //
-//	containerName "pgcli-pgbouncer-default-default" → "pgb_default_default"
-//	containerName "pgcli-pgbouncer-myns-remote"     → "pgb_myns_remote"
-func authUserFromContainer(containerName string) string {
-	name := strings.TrimPrefix(containerName, "pgcli-pgbouncer-")
-	name = strings.TrimPrefix(name, "pgbouncer-")
-	return "pgb_" + name
+//	namespace "default", instName "default"  → "pgb_default_default"
+//	namespace "default", instName "my-remote" → "pgb_default_my-remote"
+//	namespace "test-ns", instName "ns-test"  → "pgb_test-ns_ns-test"
+func authUserForInstance(namespace, instName string) string {
+	return "pgb_" + namespace + "_" + instName
 }
 
 // SetupAuth creates a per-pooler auth user and the lookup function on the
 // target PostgreSQL instance, then returns the plaintext password.
-// The auth user name is derived from the PgBouncer container name so each
+// The auth user name is derived from the namespace and instance name so each
 // pooler gets its own PG user, avoiding password conflicts when multiple
 // poolers (local or cross-host) target the same PG instance.
-func (m *PgBouncerManager) SetupAuth(dsn string, pbConf *config.PgBouncerConfig) (*AuthUser, error) {
+func (m *PgBouncerManager) SetupAuth(dsn, instName string) (*AuthUser, error) {
 	pm, err := New(m.cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	authUser := authUserFromContainer(pbConf.ContainerName)
+	authUser := authUserForInstance(m.cfg.Namespace, instName)
 
 	// Generate a random password for this pooler's auth user
 	pwBytes := make([]byte, 16)
