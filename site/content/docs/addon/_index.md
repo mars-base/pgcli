@@ -38,6 +38,18 @@ Two modes:
 - **Local:** `pg addon install pgbouncer -i <instance>` — stored in `instances.<name>.addons`
 - **Remote:** `pg addon install pgbouncer --dsn <dsn> --pg-name <name>` — stored in top-level `addons.pgbouncer`
 
+**Namespace isolation:** Addons respect the config's `namespace` setting. Container names and auth users include the namespace prefix (e.g., `pgb_<namespace>_<instance>`). This means different config files with different namespaces can create independent PgBouncer poolers for the same PostgreSQL instance without conflicting.
+
+```bash
+# Config with namespace "prod"
+pg -c prod-pg.yaml addon install pgbouncer -i mypg
+# → container: pgcli-pgbouncer-prod-mypg, auth user: pgb_prod_mypg
+
+# Config with namespace "staging"
+pg -c staging-pg.yaml addon install pgbouncer -i mypg
+# → container: pgcli-pgbouncer-staging-mypg, auth user: pgb_staging_mypg
+```
+
 Benefits:
 - Addons are decoupled from PostgreSQL instances and can be managed independently
 - Configuration files are centrally stored in `<base-dir>/addon/` directory

@@ -38,6 +38,18 @@ pgcli 支持通过插件系统扩展 PostgreSQL 功能。插件是独立的容�
 - **本地模式：** `pg addon install pgbouncer -i <instance>` — 存储在 `instances.<name>.addons`
 - **远程模式：** `pg addon install pgbouncer --dsn <dsn> --pg-name <name>` — 存储在顶层 `addons.pgbouncer`
 
+**命名空间隔离：** 插件遵循配置的 `namespace` 设置。容器名和认证用户包含命名空间前缀（例如 `pgb_<namespace>_<instance>`）。这意味着使用不同命名空间的不同配置文件可以为同一个 PostgreSQL 实例创建独立的 PgBouncer 连接池，而不会相互冲突。
+
+```bash
+# 使用命名空间 "prod" 的配置
+pg -c prod-pg.yaml addon install pgbouncer -i mypg
+# → 容器: pgcli-pgbouncer-prod-mypg, 认证用户: pgb_prod_mypg
+
+# 使用命名空间 "staging" 的配置
+pg -c staging-pg.yaml addon install pgbouncer -i mypg
+# → 容器: pgcli-pgbouncer-staging-mypg, 认证用户: pgb_staging_mypg
+```
+
 优势：
 - 插件与 PostgreSQL 实例解耦，可独立管理
 - 配置文件集中存储在 `<base-dir>/addon/` 目录
