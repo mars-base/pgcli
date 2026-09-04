@@ -75,6 +75,7 @@ type PgBouncerConfig struct {
 	ImageTag        string `yaml:"image_tag,omitempty"`         // edoburu/pgbouncer:latest (default)
 	HostPort        int    `yaml:"host_port,omitempty"`         // 56432+ auto-assigned
 	PoolMode        string `yaml:"pool_mode,omitempty"`         // transaction (default)
+	DSN             string `yaml:"dsn,omitempty"`              // remote PG DSN (remote mode only)
 	MaxClientConn   int    `yaml:"max_client_conn,omitempty"`   // 100 (default)
 	DefaultPoolSize int    `yaml:"default_pool_size,omitempty"` // 20 (default)
 

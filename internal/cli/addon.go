@@ -257,6 +257,7 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 				ContainerName:   "pgcli-pgbouncer" + nsSuffixCLI(cfg.Namespace) + "-" + pgName,
 				ImageTag:        "edoburu/pgbouncer:latest",
 				PoolMode:        "transaction",
+				DSN:             dsn,
 				MaxClientConn:   100,
 				DefaultPoolSize: 20,
 			}
@@ -473,6 +474,7 @@ func runAddonList() error {
 		}
 		fmt.Printf("  %s (instance: %s)\n", "pgbouncer", name)
 		fmt.Printf("    Status:    %s\n", status)
+		fmt.Printf("    Host:      %s:%d\n", inst.Postgres.Host, pb.HostPort)
 		fmt.Printf("    Port:      %d\n", pb.HostPort)
 		fmt.Printf("    Pool mode: %s\n", pb.PoolMode)
 		fmt.Printf("    Container: %s\n", pb.ContainerName)
@@ -496,6 +498,11 @@ func runAddonList() error {
 			}
 			fmt.Printf("  %s (pg-name: %s)\n", "pgbouncer", name)
 			fmt.Printf("    Status:    %s\n", status)
+			if pb.DSN != "" {
+				if host, _, _, _, _, err := podman.ParseDSN(pb.DSN); err == nil {
+					fmt.Printf("    Host:      %s:%d\n", host, pb.HostPort)
+				}
+			}
 			fmt.Printf("    Port:      %d\n", pb.HostPort)
 			fmt.Printf("    Pool mode: %s\n", pb.PoolMode)
 			fmt.Printf("    Container: %s\n", pb.ContainerName)
