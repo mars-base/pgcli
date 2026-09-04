@@ -52,22 +52,25 @@ func pgBouncerConfigDir(baseDir, instName string) string {
 
 // SetupAuth creates the pgbouncer_auth user and lookup function on the
 // target PostgreSQL instance, then returns the plaintext password.
-// The plaintext password is stored in userlist.txt so PgBouncer can
-// authenticate to PostgreSQL to run the auth_query.
+// When pgbouncer_auth already exists, the password is always reset (ALTER ROLE)
+// and all existing userlist.txt files for this PG instance are updated
+// to keep them in sync.
 func (m *PgBouncerManager) SetupAuth(dsn string) (*AuthUser, error) {
 	pm, err := New(m.cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	// Generate a random password for pgbouncer_auth
+	// Generate a new password
 	pwBytes := make([]byte, 16)
 	if _, err := rand.Read(pwBytes); err != nil {
 		return nil, fmt.Errorf("generating random password: %w", err)
 	}
 	authPassword := "pgb_" + hex.EncodeToString(pwBytes)
 
-	// Create user and lookup function (idempotent via IF NOT EXISTS / CREATE OR REPLACE)
+	// Create user if not exists, or reset password if it does.
+	// We always set the password because multiple poolers for the same PG
+	// must share the same password, and we update all existing configs.
 	setupSQL := fmt.Sprintf(`
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pgbouncer_auth') THEN
@@ -90,7 +93,49 @@ GRANT EXECUTE ON FUNCTION pgbouncer_lookup(text) TO pgbouncer_auth;
 		return nil, fmt.Errorf("setting up pgbouncer_auth: %w", err)
 	}
 
+	// Sync password in all existing userlist.txt files for this PG instance
+	m.syncAuthPassword(dsn, authPassword)
+
 	return &AuthUser{User: "pgbouncer_auth", Passwd: authPassword}, nil
+}
+
+// syncAuthPassword updates pgbouncer_auth password in all existing
+// userlist.txt files under addon/pgbouncer/ that target the same PG host:port.
+func (m *PgBouncerManager) syncAuthPassword(dsn, newPassword string) {
+	host, port, _, _, _, err := ParseDSN(dsn)
+	if err != nil {
+		return
+	}
+
+	baseDir := filepath.Join(m.dataDir, "addon", "pgbouncer")
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		return
+	}
+
+	newLine := fmt.Sprintf("%q %q\n", "pgbouncer_auth", newPassword)
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dir := filepath.Join(baseDir, entry.Name())
+		iniPath := filepath.Join(dir, "pgbouncer.ini")
+		userListPath := filepath.Join(dir, "userlist.txt")
+
+		// Only update configs that point to the same PG host:port
+		iniData, err := os.ReadFile(iniPath)
+		if err != nil {
+			continue
+		}
+		target := fmt.Sprintf("host=%s port=%d", host, port)
+		if !strings.Contains(string(iniData), target) {
+			continue
+		}
+
+		// Rewrite userlist.txt with the new password
+		_ = os.WriteFile(userListPath, []byte(newLine), 0644)
+	}
 }
 
 // WriteConfigs generates pgbouncer.ini and userlist.txt for the given instance
