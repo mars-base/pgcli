@@ -96,21 +96,73 @@ func (m *PgBouncerManager) WriteConfigs(pbConf *config.PgBouncerConfig, users []
 	}
 
 	// pgbouncer.ini
-	ini := fmt.Sprintf(`[databases]
-* = host=%s port=%d
+	var ini strings.Builder
+	ini.WriteString("[databases]\n")
+	fmt.Fprintf(&ini, "* = host=%s port=%d\n\n", host, port)
+	ini.WriteString("[pgbouncer]\n")
+	ini.WriteString("listen_addr = 0.0.0.0\n")
+	fmt.Fprintf(&ini, "listen_port = %d\n", pbConf.HostPort)
+	ini.WriteString("auth_type = scram-sha-256\n")
+	ini.WriteString("auth_file = /etc/pgbouncer/userlist.txt\n")
+	fmt.Fprintf(&ini, "pool_mode = %s\n", pbConf.PoolMode)
+	fmt.Fprintf(&ini, "max_client_conn = %d\n", pbConf.MaxClientConn)
+	fmt.Fprintf(&ini, "default_pool_size = %d\n", pbConf.DefaultPoolSize)
 
-[pgbouncer]
-listen_addr = 0.0.0.0
-listen_port = %d
-auth_type = scram-sha-256
-auth_file = /etc/pgbouncer/userlist.txt
-pool_mode = %s
-max_client_conn = %d
-default_pool_size = %d
-`, host, port, pbConf.HostPort, pbConf.PoolMode, pbConf.MaxClientConn, pbConf.DefaultPoolSize)
+	// Optional pool sizing (0 = PgBouncer default)
+	if pbConf.MinPoolSize > 0 {
+		fmt.Fprintf(&ini, "min_pool_size = %d\n", pbConf.MinPoolSize)
+	}
+	if pbConf.ReservePoolSize > 0 {
+		fmt.Fprintf(&ini, "reserve_pool_size = %d\n", pbConf.ReservePoolSize)
+	}
+	if pbConf.MaxDBConnections > 0 {
+		fmt.Fprintf(&ini, "max_db_connections = %d\n", pbConf.MaxDBConnections)
+	}
+	if pbConf.MaxUserConnections > 0 {
+		fmt.Fprintf(&ini, "max_user_connections = %d\n", pbConf.MaxUserConnections)
+	}
+
+	// Optional timeouts (0 = PgBouncer default)
+	if pbConf.ServerIdleTimeout > 0 {
+		fmt.Fprintf(&ini, "server_idle_timeout = %d\n", pbConf.ServerIdleTimeout)
+	}
+	if pbConf.ServerLifetime > 0 {
+		fmt.Fprintf(&ini, "server_lifetime = %d\n", pbConf.ServerLifetime)
+	}
+	if pbConf.ServerConnectTimeout > 0 {
+		fmt.Fprintf(&ini, "server_connect_timeout = %d\n", pbConf.ServerConnectTimeout)
+	}
+	if pbConf.QueryTimeout > 0 {
+		fmt.Fprintf(&ini, "query_timeout = %d\n", pbConf.QueryTimeout)
+	}
+	if pbConf.QueryWaitTimeout > 0 {
+		fmt.Fprintf(&ini, "query_wait_timeout = %d\n", pbConf.QueryWaitTimeout)
+	}
+	if pbConf.IdleTransactionTimeout > 0 {
+		fmt.Fprintf(&ini, "idle_transaction_timeout = %d\n", pbConf.IdleTransactionTimeout)
+	}
+	if pbConf.TransactionTimeout > 0 {
+		fmt.Fprintf(&ini, "transaction_timeout = %d\n", pbConf.TransactionTimeout)
+	}
+
+	// Admin access
+	if pbConf.AdminUsers != "" {
+		fmt.Fprintf(&ini, "admin_users = %s\n", pbConf.AdminUsers)
+	}
+	if pbConf.StatsUsers != "" {
+		fmt.Fprintf(&ini, "stats_users = %s\n", pbConf.StatsUsers)
+	}
+
+	// Logging (default 1 = enabled)
+	if pbConf.LogConnections != 0 {
+		fmt.Fprintf(&ini, "log_connections = %d\n", pbConf.LogConnections)
+	}
+	if pbConf.LogDisconnections != 0 {
+		fmt.Fprintf(&ini, "log_disconnections = %d\n", pbConf.LogDisconnections)
+	}
 
 	iniPath = filepath.Join(dir, "pgbouncer.ini")
-	if err := os.WriteFile(iniPath, []byte(ini), 0644); err != nil {
+	if err := os.WriteFile(iniPath, []byte(ini.String()), 0644); err != nil {
 		return "", "", fmt.Errorf("writing pgbouncer.ini: %w", err)
 	}
 

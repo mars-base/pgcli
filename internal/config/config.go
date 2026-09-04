@@ -77,6 +77,29 @@ type PgBouncerConfig struct {
 	PoolMode        string `yaml:"pool_mode,omitempty"`         // transaction (default)
 	MaxClientConn   int    `yaml:"max_client_conn,omitempty"`   // 100 (default)
 	DefaultPoolSize int    `yaml:"default_pool_size,omitempty"` // 20 (default)
+
+	// Pool sizing
+	MinPoolSize        int `yaml:"min_pool_size,omitempty"`        // 0 (default, disabled)
+	ReservePoolSize    int `yaml:"reserve_pool_size,omitempty"`    // 0 (default, disabled)
+	MaxDBConnections   int `yaml:"max_db_connections,omitempty"`   // 0 (unlimited)
+	MaxUserConnections int `yaml:"max_user_connections,omitempty"` // 0 (unlimited)
+
+	// Timeouts (in seconds, 0 = disabled/use default)
+	ServerIdleTimeout     int `yaml:"server_idle_timeout,omitempty"`      // 600 (default)
+	ServerLifetime        int `yaml:"server_lifetime,omitempty"`          // 3600 (default)
+	ServerConnectTimeout  int `yaml:"server_connect_timeout,omitempty"`   // 15 (default)
+	QueryTimeout          int `yaml:"query_timeout,omitempty"`            // 0 (disabled, default)
+	QueryWaitTimeout      int `yaml:"query_wait_timeout,omitempty"`       // 120 (default)
+	IdleTransactionTimeout int `yaml:"idle_transaction_timeout,omitempty"` // 0 (disabled, default)
+	TransactionTimeout    int `yaml:"transaction_timeout,omitempty"`      // 0 (disabled, default)
+
+	// Admin access
+	AdminUsers string `yaml:"admin_users,omitempty"` // comma-separated list
+	StatsUsers string `yaml:"stats_users,omitempty"` // comma-separated list
+
+	// Logging
+	LogConnections    int `yaml:"log_connections,omitempty"`    // 1 (default, enabled)
+	LogDisconnections int `yaml:"log_disconnections,omitempty"` // 1 (default, enabled)
 }
 
 // PostgresConfig holds PostgreSQL connection settings.
@@ -379,7 +402,7 @@ func (c *Config) GetPostgresURL() string {
 		c.Postgres.Database)
 }
 
-// applyDefaults fills zero-value fields with their defaults.
+// ApplyDefaults fills zero-value fields with their defaults.
 func (c *Config) ApplyDefaults() {
 	d := Default()
 
@@ -524,6 +547,8 @@ func (c *Config) ApplyDefaults() {
 			if pb.DefaultPoolSize == 0 {
 				pb.DefaultPoolSize = 20
 			}
+			// New optional fields: 0 means "use PgBouncer's own default"
+			// so we don't need to fill them — pgbouncer.ini will omit them.
 			inst.Addons.PgBouncer = pb
 		}
 		c.Instances[name] = inst

@@ -107,10 +107,36 @@ func init() {
 	rootCmd.AddCommand(addonCmd)
 	addonCmd.AddCommand(addonInstallCmd, addonListCmd, addonRemoveCmd)
 
+	// Basic flags
 	addonInstallCmd.Flags().String("dsn", "", "PG instance connection string for remote mode (postgres://user:pass@host:port/db)")
 	addonInstallCmd.Flags().String("pg-name", "", "name to identify a remote PgBouncer (required with --dsn)")
 	addonInstallCmd.Flags().Int("max-client-conn", 0, "maximum number of client connections allowed (default 100)")
 	addonInstallCmd.Flags().Int("default-pool-size", 0, "number of server connections per user/database pair (default 20)")
+
+	// Pool sizing
+	addonInstallCmd.Flags().Int("min-pool-size", 0, "minimum number of server connections to maintain (default 0)")
+	addonInstallCmd.Flags().Int("reserve-pool-size", 0, "extra connections for burst traffic (default 0)")
+	addonInstallCmd.Flags().Int("reserve-pool-timeout", 0, "seconds before using reserve pool (default 5)")
+	addonInstallCmd.Flags().Int("max-db-connections", 0, "max server connections per database (0=unlimited)")
+	addonInstallCmd.Flags().Int("max-user-connections", 0, "max server connections per user (0=unlimited)")
+
+	// Timeouts (in seconds)
+	addonInstallCmd.Flags().Int("server-idle-timeout", 0, "close idle server connections after N seconds (default 600)")
+	addonInstallCmd.Flags().Int("server-lifetime", 0, "max lifetime for server connections in seconds (default 3600)")
+	addonInstallCmd.Flags().Int("server-connect-timeout", 0, "timeout for connecting to PG in seconds (default 15)")
+	addonInstallCmd.Flags().Int("query-timeout", 0, "max query execution time in seconds (default 0=disabled)")
+	addonInstallCmd.Flags().Int("query-wait-timeout", 0, "max time to wait for server connection in seconds (default 120)")
+	addonInstallCmd.Flags().Int("idle-transaction-timeout", 0, "close idle transactions after N seconds (default 0=disabled)")
+	addonInstallCmd.Flags().Int("transaction-timeout", 0, "max transaction duration in seconds (default 0=disabled)")
+
+	// Admin access
+	addonInstallCmd.Flags().String("admin-users", "", "comma-separated list of admin users for console access")
+	addonInstallCmd.Flags().String("stats-users", "", "comma-separated list of users for read-only stats access")
+
+	// Logging
+	addonInstallCmd.Flags().Int("log-connections", 0, "log client connections (default 1=enabled)")
+	addonInstallCmd.Flags().Int("log-disconnections", 0, "log client disconnections (default 1=enabled)")
+
 	addonRemoveCmd.Flags().String("pg-name", "", "name of a remote PgBouncer to remove")
 }
 
@@ -196,6 +222,27 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 	maxClientConnChanged := cmd.Flags().Changed("max-client-conn")
 	defaultPoolSizeChanged := cmd.Flags().Changed("default-pool-size")
 
+	// Pool sizing flags
+	minPoolSize, _ := cmd.Flags().GetInt("min-pool-size")
+	reservePoolSize, _ := cmd.Flags().GetInt("reserve-pool-size")
+	maxDBConnections, _ := cmd.Flags().GetInt("max-db-connections")
+	maxUserConnections, _ := cmd.Flags().GetInt("max-user-connections")
+
+	// Timeout flags
+	serverIdleTimeout, _ := cmd.Flags().GetInt("server-idle-timeout")
+	serverLifetime, _ := cmd.Flags().GetInt("server-lifetime")
+	serverConnectTimeout, _ := cmd.Flags().GetInt("server-connect-timeout")
+	queryTimeout, _ := cmd.Flags().GetInt("query-timeout")
+	queryWaitTimeout, _ := cmd.Flags().GetInt("query-wait-timeout")
+	idleTransactionTimeout, _ := cmd.Flags().GetInt("idle-transaction-timeout")
+	transactionTimeout, _ := cmd.Flags().GetInt("transaction-timeout")
+
+	// Admin and logging flags
+	adminUsers, _ := cmd.Flags().GetString("admin-users")
+	statsUsers, _ := cmd.Flags().GetString("stats-users")
+	logConnections, _ := cmd.Flags().GetInt("log-connections")
+	logDisconnections, _ := cmd.Flags().GetInt("log-disconnections")
+
 	var pbConf config.PgBouncerConfig
 	if dsn != "" && pgName != "" {
 		// Remote mode: store in top-level addons.pgbouncer.<pgName>
@@ -221,6 +268,54 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		if defaultPoolSizeChanged {
 			pbConf.DefaultPoolSize = defaultPoolSize
 		}
+		// Pool sizing
+		if cmd.Flags().Changed("min-pool-size") {
+			pbConf.MinPoolSize = minPoolSize
+		}
+		if cmd.Flags().Changed("reserve-pool-size") {
+			pbConf.ReservePoolSize = reservePoolSize
+		}
+		if cmd.Flags().Changed("max-db-connections") {
+			pbConf.MaxDBConnections = maxDBConnections
+		}
+		if cmd.Flags().Changed("max-user-connections") {
+			pbConf.MaxUserConnections = maxUserConnections
+		}
+		// Timeouts
+		if cmd.Flags().Changed("server-idle-timeout") {
+			pbConf.ServerIdleTimeout = serverIdleTimeout
+		}
+		if cmd.Flags().Changed("server-lifetime") {
+			pbConf.ServerLifetime = serverLifetime
+		}
+		if cmd.Flags().Changed("server-connect-timeout") {
+			pbConf.ServerConnectTimeout = serverConnectTimeout
+		}
+		if cmd.Flags().Changed("query-timeout") {
+			pbConf.QueryTimeout = queryTimeout
+		}
+		if cmd.Flags().Changed("query-wait-timeout") {
+			pbConf.QueryWaitTimeout = queryWaitTimeout
+		}
+		if cmd.Flags().Changed("idle-transaction-timeout") {
+			pbConf.IdleTransactionTimeout = idleTransactionTimeout
+		}
+		if cmd.Flags().Changed("transaction-timeout") {
+			pbConf.TransactionTimeout = transactionTimeout
+		}
+		// Admin and logging
+		if cmd.Flags().Changed("admin-users") {
+			pbConf.AdminUsers = adminUsers
+		}
+		if cmd.Flags().Changed("stats-users") {
+			pbConf.StatsUsers = statsUsers
+		}
+		if cmd.Flags().Changed("log-connections") {
+			pbConf.LogConnections = logConnections
+		}
+		if cmd.Flags().Changed("log-disconnections") {
+			pbConf.LogDisconnections = logDisconnections
+		}
 		cfg.Addons.PgBouncer[pgName] = pbConf
 	} else {
 		// Local mode: store in instances.<name>.addons.pgbouncer
@@ -240,6 +335,54 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		}
 		if defaultPoolSizeChanged {
 			inst.Addons.PgBouncer.DefaultPoolSize = defaultPoolSize
+		}
+		// Pool sizing
+		if cmd.Flags().Changed("min-pool-size") {
+			inst.Addons.PgBouncer.MinPoolSize = minPoolSize
+		}
+		if cmd.Flags().Changed("reserve-pool-size") {
+			inst.Addons.PgBouncer.ReservePoolSize = reservePoolSize
+		}
+		if cmd.Flags().Changed("max-db-connections") {
+			inst.Addons.PgBouncer.MaxDBConnections = maxDBConnections
+		}
+		if cmd.Flags().Changed("max-user-connections") {
+			inst.Addons.PgBouncer.MaxUserConnections = maxUserConnections
+		}
+		// Timeouts
+		if cmd.Flags().Changed("server-idle-timeout") {
+			inst.Addons.PgBouncer.ServerIdleTimeout = serverIdleTimeout
+		}
+		if cmd.Flags().Changed("server-lifetime") {
+			inst.Addons.PgBouncer.ServerLifetime = serverLifetime
+		}
+		if cmd.Flags().Changed("server-connect-timeout") {
+			inst.Addons.PgBouncer.ServerConnectTimeout = serverConnectTimeout
+		}
+		if cmd.Flags().Changed("query-timeout") {
+			inst.Addons.PgBouncer.QueryTimeout = queryTimeout
+		}
+		if cmd.Flags().Changed("query-wait-timeout") {
+			inst.Addons.PgBouncer.QueryWaitTimeout = queryWaitTimeout
+		}
+		if cmd.Flags().Changed("idle-transaction-timeout") {
+			inst.Addons.PgBouncer.IdleTransactionTimeout = idleTransactionTimeout
+		}
+		if cmd.Flags().Changed("transaction-timeout") {
+			inst.Addons.PgBouncer.TransactionTimeout = transactionTimeout
+		}
+		// Admin and logging
+		if cmd.Flags().Changed("admin-users") {
+			inst.Addons.PgBouncer.AdminUsers = adminUsers
+		}
+		if cmd.Flags().Changed("stats-users") {
+			inst.Addons.PgBouncer.StatsUsers = statsUsers
+		}
+		if cmd.Flags().Changed("log-connections") {
+			inst.Addons.PgBouncer.LogConnections = logConnections
+		}
+		if cmd.Flags().Changed("log-disconnections") {
+			inst.Addons.PgBouncer.LogDisconnections = logDisconnections
 		}
 		cfg.Instances[instName] = inst
 	}
