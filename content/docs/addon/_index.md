@@ -30,9 +30,13 @@ The following addons are currently supported:
 Addons run as sidecar containers, coordinating with PostgreSQL instances through mounted configuration files:
 
 1. **`pg addon install`** generates configuration files and starts the addon container
-2. Configuration files are mounted to the `<base-dir>/addon/<addon-name>/` directory
+2. Configuration files are stored in `<base-dir>/addon/<addon-name>/<instance>/`
 3. Addon containers communicate with PostgreSQL instances via host network
 4. Containers automatically restart when configuration files are updated
+
+Two modes:
+- **Local:** `pg addon install pgbouncer -i <instance>` — stored in `instances.<name>.addons`
+- **Remote:** `pg addon install pgbouncer --dsn <dsn> --pg-name <name>` — stored in top-level `addons.pgbouncer`
 
 Benefits:
 - Addons are decoupled from PostgreSQL instances and can be managed independently
@@ -45,8 +49,13 @@ Benefits:
 ### Install Addon
 
 ```bash
-# Install PgBouncer connection pooler
+# Local mode: install PgBouncer for a managed instance
 pg addon install pgbouncer -i mypg
+
+# Remote mode: install PgBouncer for a remote PG instance
+pg addon install pgbouncer \
+  --dsn "postgres://admin:pass@10.241.20.50:35432/mypg_db" \
+  --pg-name my-remote-pool
 
 # Specify connection pool parameters
 pg addon install pgbouncer -i mypg \
@@ -64,6 +73,8 @@ pg addon install pgbouncer -i mypg \
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
+| `--dsn` | PG instance connection string (remote mode) | — |
+| `--pg-name` | Name to identify a remote PgBouncer (required with --dsn) | — |
 | `--max-client-conn` | Maximum client connections | 100 |
 | `--default-pool-size` | Default pool size | 20 |
 | `--min-pool-size` | Minimum pool size (warmup) | 0 |
@@ -90,19 +101,31 @@ pg addon list
 
 Example output:
 ```
-Add-ons:
-  pgbouncer (container: pgcli-addon-pgbouncer-mypg)
-    Status: running
-    Port: 6432
+Local add-ons:
+  pgbouncer (instance: mypg)
+    Status:    running
+    Host:      127.0.0.1:56432
+    Port:      56432
     Pool mode: transaction
-    Config: /data/addon/pgbouncer/pgbouncer.ini
+    Container: pgcli-pgbouncer-default-mypg
+
+Remote add-ons:
+  pgbouncer (pg-name: my-remote-pool)
+    Status:    running
+    Host:      10.241.20.50:56433
+    Port:      56433
+    Pool mode: transaction
+    Container: pgcli-pgbouncer-default-my-remote-pool
 ```
 
 ### Remove Addon
 
 ```bash
-# Remove PgBouncer
+# Remove local PgBouncer
 pg addon remove pgbouncer -i mypg
+
+# Remove remote PgBouncer
+pg addon remove pgbouncer --pg-name my-remote-pool
 ```
 
 Workflow:
@@ -114,6 +137,7 @@ Workflow:
 
 After installing an addon, `pg.yaml` is updated with addon configuration:
 
+**Local mode** (stored under `instances.<name>.addons`):
 ```yaml
 instances:
   mypg:
@@ -130,25 +154,43 @@ instances:
         log_connections: 1
 ```
 
-Configuration files are stored in `<base-dir>/addon/pgbouncer/`:
+**Remote mode** (stored under top-level `addons`):
+```yaml
+addons:
+  pgbouncer:
+    my-remote-pool:
+      container_name: pgcli-pgbouncer-default-my-remote-pool
+      host_port: 56433
+      pool_mode: transaction
+      dsn: "postgres://admin:pass@10.241.20.50:35432/mypg_db"
+      max_client_conn: 200
+      default_pool_size: 30
+```
+
+Configuration files are stored per instance in `<base-dir>/addon/pgbouncer/<instance>/`:
 
 ```
-/data/addon/pgbouncer/
-├── pgbouncer.ini    # PgBouncer main configuration
-├── userlist.txt     # pgbouncer_auth credentials (auto-regenerated)
-└── stats/           # Statistics directory (optional)
+<base-dir>/addon/pgbouncer/
+├── mypg/
+│   ├── pgbouncer.ini    # PgBouncer main configuration
+│   └── userlist.txt     # auth user credentials (auto-regenerated)
+└── my-remote-pool/
+    ├── pgbouncer.ini
+    └── userlist.txt
 ```
 
 ## Authentication
 
-PgBouncer uses the `auth_query` method for authentication:
+PgBouncer uses the `auth_query` method for dynamic password lookup:
 
-1. A `pgbouncer_auth` user is created on PostgreSQL with a random password
-2. A `SECURITY DEFINER` function `pgbouncer_lookup()` is installed to query `pg_authid`
-3. When a client connects, PgBouncer uses `pgbouncer_auth` to run the auth_query and fetch the real user's password hash
+1. A per-pooler auth user is created on PostgreSQL with a random password, named `pgb_<namespace>_<instance>` (e.g., `pgb_default_mypg`, `pgb_test-ns_my-remote`)
+2. A shared `SECURITY DEFINER` function `pgbouncer_lookup()` is installed to query `pg_authid`
+3. When a client connects, PgBouncer uses its own auth user to run the auth_query and fetch the real user's password hash
 4. The password is cached in PgBouncer's memory for subsequent connections
 
-The `userlist.txt` only contains `pgbouncer_auth` (plaintext password). All other users are authenticated dynamically via auth_query — no password sync needed.
+The `userlist.txt` only contains the pooler's auth user (plaintext password). All other users are authenticated dynamically via auth_query — no password sync needed.
+
+Each PgBouncer pooler gets its own PG auth user, so multiple poolers (local or cross-host) targeting the same PG instance do not conflict with each other.
 
 **After changing a PostgreSQL user's password**, re-run `pg addon install pgbouncer` to reset the auth cache, or connect to the PgBouncer admin console and run `RECONNECT`.
 
@@ -157,14 +199,14 @@ The `userlist.txt` only contains `pgbouncer_auth` (plaintext password). All othe
 After installing PgBouncer, clients connect through the addon port:
 
 ```bash
-# Direct connection to PostgreSQL (port 5432)
+# Direct connection to PostgreSQL
 pg exec -i mypg "SELECT version()"
 
-# Connection through PgBouncer (port 6432)
-pg exec --dsn "postgres://user:pass@127.0.0.1:6432/mypg" "SELECT version()"
+# Connection through PgBouncer
+pg exec --dsn "postgres://user:pass@127.0.0.1:56432/mypg_db" "SELECT version()"
 ```
 
-**Port Allocation:** PgBouncer defaults to port 6432. If the port is occupied, pgcli automatically allocates the next available port.
+**Port Allocation:** PgBouncer defaults to port 56432. If the port is occupied, pgcli automatically allocates the next available port.
 
 View current port:
 ```bash
@@ -223,7 +265,7 @@ pg exec --dsn "postgres://<admin-user>:<password>@127.0.0.1:<pgbouncer-port>/pgb
 
 Example:
 ```bash
-pg exec --dsn "postgres://admin:secret@127.0.0.1:6432/pgbouncer" "SHOW pools"
+pg exec --dsn "postgres://admin:secret@127.0.0.1:56432/pgbouncer" "SHOW pools"
 ```
 
 **Note:** Only users listed in `admin_users` can access the admin console.
@@ -247,19 +289,19 @@ pg exec --dsn "postgres://admin:secret@127.0.0.1:6432/pgbouncer" "SHOW pools"
 
 ```bash
 # Check pool status
-pg exec --dsn "postgres://admin:secret@127.0.0.1:6432/pgbouncer" "SHOW pools"
+pg exec --dsn "postgres://admin:secret@127.0.0.1:56432/pgbouncer" "SHOW pools"
 
 # View active client connections
-pg exec --dsn "postgres://admin:secret@127.0.0.1:6432/pgbouncer" "SHOW clients"
+pg exec --dsn "postgres://admin:secret@127.0.0.1:56432/pgbouncer" "SHOW clients"
 
 # View PostgreSQL backend connections
-pg exec --dsn "postgres://admin:secret@127.0.0.1:6432/pgbouncer" "SHOW servers"
+pg exec --dsn "postgres://admin:secret@127.0.0.1:56432/pgbouncer" "SHOW servers"
 
 # Check current configuration
-pg exec --dsn "postgres://admin:secret@127.0.0.1:6432/pgbouncer" "SHOW config"
+pg exec --dsn "postgres://admin:secret@127.0.0.1:56432/pgbouncer" "SHOW config"
 
 # View traffic statistics
-pg exec --dsn "postgres://admin:secret@127.0.0.1:6432/pgbouncer" "SHOW stats"
+pg exec --dsn "postgres://admin:secret@127.0.0.1:56432/pgbouncer" "SHOW stats"
 ```
 
 ### Other Admin Commands
@@ -297,11 +339,11 @@ pg addon install pgbouncer -i mypg --default-pool-size 10
 FATAL: password authentication failed
 ```
 
-Cause: Passwords in `userlist.txt` are inconsistent with PostgreSQL.
+Cause: Auth cache contains stale password hash.
 
 Solution:
 ```bash
-# Re-sync user passwords
+# Re-run install to reset auth cache
 pg addon install pgbouncer -i mypg
 ```
 
@@ -309,10 +351,10 @@ pg addon install pgbouncer -i mypg
 
 ```bash
 # View container logs
-podman logs pgcli-addon-pgbouncer-mypg
+podman logs pgcli-pgbouncer-default-mypg
 
 # Check configuration file
-cat /data/addon/pgbouncer/pgbouncer.ini
+cat <base-dir>/addon/pgbouncer/mypg/pgbouncer.ini
 ```
 
 Common causes:
@@ -338,11 +380,11 @@ pg addon install pgbouncer -i mypg --query-timeout 0
 
 ## Notes
 
-- **Addon Port:** PgBouncer defaults to port 6432; ensure firewall rules allow access
+- **Addon Port:** PgBouncer defaults to port 56432; ensure firewall rules allow access
 - **User Passwords:** After modifying PostgreSQL user passwords, re-run `pg addon install` to reset the auth cache
 - **Configuration Files:** After manually editing configuration files, restart the container to apply changes:
   ```bash
-  podman restart pgcli-addon-pgbouncer-mypg
+  podman restart pgcli-pgbouncer-default-mypg
   ```
 - **Monitoring:** PgBouncer provides an admin console accessible via `admin_users`
 - **Performance:** Connection pooling introduces minimal latency (typically < 1ms) but significantly improves concurrency
