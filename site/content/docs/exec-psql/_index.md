@@ -1,6 +1,6 @@
 ---
-title: "Exec and psql"
-description: "exec and psql guide for pgcli"
+title: "Exec, psql, and shell"
+description: "exec, psql, and shell guide for pgcli"
 weight: 90
 icon: fa-solid fa-terminal
 menus:
@@ -16,7 +16,7 @@ cascade:
 ---
 
 
-Two ways to run SQL against an instance: `pg exec` for one-shot SQL or container commands, `pg psql` for interactive sessions.
+Two ways to run SQL against an instance: `pg exec` for one-shot SQL or container commands, `pg psql` for interactive sessions, `pg shell` for an interactive bash shell inside the container.
 
 ## pg exec
 
@@ -96,6 +96,22 @@ pg psql -i pg01 -- -U postgres -d postgres -c "SHOW shared_preload_libraries"
 ```bash
 pg psql --dsn postgres://user:pass@host:5432/db
 ```
+
+## pg shell
+
+Open an interactive bash shell inside the PostgreSQL container.
+
+```bash
+pg shell                             # interactive bash
+pg shell -i proj01                   # specific instance
+pg shell -- -c "ls -la /var/lib/postgresql/data"
+pg shell -- -c "cat /etc/postgresql/postgresql.conf"
+```
+
+Use cases:
+- Inspect PostgreSQL data directory and log files
+- Run container-internal commands (e.g., `psql`, `pg_isready`, `pg_repack`)
+- Debug extension installations and configuration files
 
 ## Rules
 
