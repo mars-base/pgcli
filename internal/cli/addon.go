@@ -203,17 +203,17 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return err
 	}
 
-	// 4. Sync users from pg_shadow
+	// 4. Setup auth_query user and function on PG
 	pbMgr, err := podman.NewPgBouncerManager(cfg)
 	if err != nil {
 		return fmt.Errorf("pgbouncer manager: %w", err)
 	}
-	fmt.Println("-> Syncing users from pg_shadow...")
-	users, err := pbMgr.SyncUsers(dsn)
+	fmt.Println("-> Setting up PgBouncer auth_query...")
+	authUser, err := pbMgr.SetupAuth(dsn)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("  Found %d user(s)\n", len(users))
+	fmt.Printf("  [OK] auth user %q configured\n", authUser.User)
 
 	// 5. Get or allocate PgBouncer config
 	// Read optional override flags
@@ -399,7 +399,7 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 
 	// 6. Generate config files
 	fmt.Println("-> Generating PgBouncer configuration...")
-	iniPath, userListPath, err := pbMgr.WriteConfigs(&pbConf, users, dsn, instName)
+	iniPath, userListPath, err := pbMgr.WriteConfigs(&pbConf, authUser, dsn, instName)
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,8 @@
 package podman
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -36,10 +38,10 @@ func NewPgBouncerManager(cfg *config.Config) (*PgBouncerManager, error) {
 	}, nil
 }
 
-// UserEntry holds a PostgreSQL user name and its scram-sha-256 password hash.
-type UserEntry struct {
+// AuthUser holds the pgbouncer_auth user credentials for auth_query.
+type AuthUser struct {
 	User   string
-	Passwd string // SCRAM-SHA-256$4096:…$…:…
+	Passwd string // plaintext password for userlist.txt
 }
 
 // pgBouncerConfigDir returns the host directory for a given instance's
@@ -48,44 +50,54 @@ func pgBouncerConfigDir(baseDir, instName string) string {
 	return filepath.Join(baseDir, "addon", "pgbouncer", instName)
 }
 
-// SyncUsers queries pg_shadow on the target PG instance (via DSN) and returns
-// all users with non-null password hashes.
-func (m *PgBouncerManager) SyncUsers(dsn string) ([]UserEntry, error) {
+// SetupAuth creates the pgbouncer_auth user and lookup function on the
+// target PostgreSQL instance, then returns the plaintext password.
+// The plaintext password is stored in userlist.txt so PgBouncer can
+// authenticate to PostgreSQL to run the auth_query.
+func (m *PgBouncerManager) SetupAuth(dsn string) (*AuthUser, error) {
 	pm, err := New(m.cfg)
 	if err != nil {
 		return nil, err
 	}
-	out, err := pm.ExecDSNQuery(dsn,
-		"SELECT usename, passwd FROM pg_shadow WHERE passwd IS NOT NULL")
-	if err != nil {
-		return nil, fmt.Errorf("querying pg_shadow: %w", err)
+
+	// Generate a random password for pgbouncer_auth
+	pwBytes := make([]byte, 16)
+	if _, err := rand.Read(pwBytes); err != nil {
+		return nil, fmt.Errorf("generating random password: %w", err)
+	}
+	authPassword := "pgb_" + hex.EncodeToString(pwBytes)
+
+	// Create user and lookup function (idempotent via IF NOT EXISTS / CREATE OR REPLACE)
+	setupSQL := fmt.Sprintf(`
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pgbouncer_auth') THEN
+    CREATE ROLE pgbouncer_auth LOGIN PASSWORD '%s';
+  ELSE
+    ALTER ROLE pgbouncer_auth WITH PASSWORD '%s';
+  END IF;
+END $$;
+
+CREATE OR REPLACE FUNCTION pgbouncer_lookup(username text)
+RETURNS TABLE(usename name, passwd text) SECURITY DEFINER AS
+'SELECT rolname, rolpassword FROM pg_authid WHERE rolname = $1 AND rolcanlogin'
+LANGUAGE sql;
+
+REVOKE ALL ON FUNCTION pgbouncer_lookup(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pgbouncer_lookup(text) TO pgbouncer_auth;
+`, authPassword, authPassword)
+
+	if _, err := pm.ExecDSNQuery(dsn, setupSQL); err != nil {
+		return nil, fmt.Errorf("setting up pgbouncer_auth: %w", err)
 	}
 
-	var users []UserEntry
-	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, "|", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		users = append(users, UserEntry{
-			User:   strings.TrimSpace(parts[0]),
-			Passwd: strings.TrimSpace(parts[1]),
-		})
-	}
-	if len(users) == 0 {
-		return nil, fmt.Errorf("no users with passwords found in pg_shadow")
-	}
-	return users, nil
+	return &AuthUser{User: "pgbouncer_auth", Passwd: authPassword}, nil
 }
 
 // WriteConfigs generates pgbouncer.ini and userlist.txt for the given instance
 // into <baseDir>/addon/pgbouncer/<instName>/.
-func (m *PgBouncerManager) WriteConfigs(pbConf *config.PgBouncerConfig, users []UserEntry, dsn, instName string) (iniPath, userListPath string, err error) {
-	host, port, _, _, _, perr := ParseDSN(dsn)
+// Uses auth_query for dynamic password lookup from PostgreSQL.
+func (m *PgBouncerManager) WriteConfigs(pbConf *config.PgBouncerConfig, authUser *AuthUser, dsn, instName string) (iniPath, userListPath string, err error) {
+	host, port, _, _, database, perr := ParseDSN(dsn)
 	if perr != nil {
 		return "", "", perr
 	}
@@ -104,6 +116,9 @@ func (m *PgBouncerManager) WriteConfigs(pbConf *config.PgBouncerConfig, users []
 	fmt.Fprintf(&ini, "listen_port = %d\n", pbConf.HostPort)
 	ini.WriteString("auth_type = scram-sha-256\n")
 	ini.WriteString("auth_file = /etc/pgbouncer/userlist.txt\n")
+	ini.WriteString("auth_user = pgbouncer_auth\n")
+	fmt.Fprintf(&ini, "auth_dbname = %s\n", database)
+	ini.WriteString("auth_query = SELECT usename, passwd FROM pgbouncer_lookup($1)\n")
 	fmt.Fprintf(&ini, "pool_mode = %s\n", pbConf.PoolMode)
 	fmt.Fprintf(&ini, "max_client_conn = %d\n", pbConf.MaxClientConn)
 	fmt.Fprintf(&ini, "default_pool_size = %d\n", pbConf.DefaultPoolSize)
@@ -166,11 +181,9 @@ func (m *PgBouncerManager) WriteConfigs(pbConf *config.PgBouncerConfig, users []
 		return "", "", fmt.Errorf("writing pgbouncer.ini: %w", err)
 	}
 
-	// userlist.txt
+	// userlist.txt — only pgbouncer_auth for auth_query
 	var sb strings.Builder
-	for _, u := range users {
-		fmt.Fprintf(&sb, "%q %q\n", u.User, u.Passwd)
-	}
+	fmt.Fprintf(&sb, "%q %q\n", authUser.User, authUser.Passwd)
 	userListPath = filepath.Join(dir, "userlist.txt")
 	if err := os.WriteFile(userListPath, []byte(sb.String()), 0644); err != nil {
 		return "", "", fmt.Errorf("writing userlist.txt: %w", err)
