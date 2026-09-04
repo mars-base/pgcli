@@ -1,6 +1,6 @@
 ---
-title: Exec 和 psql
-description: pg exec 和 psql 指南
+title: Exec、psql 和 shell
+description: pg exec、psql 和 shell 指南
 weight: 20
 icon: fa-solid fa-book
 cascade:
@@ -9,7 +9,7 @@ cascade:
 ---
 
 
-两种对实例运行 SQL 的方式：`pg exec` 用于一次性 SQL 或容器命令，`pg psql` 用于交互式会话。
+两种对实例运行 SQL 的方式：`pg exec` 用于一次性 SQL 或容器命令，`pg psql` 用于交互式会话，`pg shell` 用于在容器内打开交互式 bash shell。
 
 ## pg exec
 
@@ -89,6 +89,22 @@ pg psql -i pg01 -- -U postgres -d postgres -c "SHOW shared_preload_libraries"
 ```bash
 pg psql --dsn postgres://user:pass@host:5432/db
 ```
+
+## pg shell
+
+在 PostgreSQL 容器内打开交互式 bash shell。
+
+```bash
+pg shell                             # 交互式 bash
+pg shell -i proj01                   # 特定实例
+pg shell -- -c "ls -la /var/lib/postgresql/data"
+pg shell -- -c "cat /etc/postgresql/postgresql.conf"
+```
+
+使用场景：
+- 检查 PostgreSQL 数据目录和日志文件
+- 运行容器内部命令（如 `psql`、`pg_isready`、`pg_repack`）
+- 调试扩展安装和配置文件
 
 ## 规则
 

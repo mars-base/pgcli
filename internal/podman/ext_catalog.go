@@ -279,6 +279,7 @@ var PigstyExtMap = map[string]PigstyExt{
 	"pg_xenophile": {Package: "pg-xenophile", NeedsPreload: false, Repo: "PIGSTY"},
 	"pgagent": {Package: "pgagent", NeedsPreload: false, Repo: "PGDG"},
 	"pgautofailover": {Package: "auto-failover", NeedsPreload: true, Repo: "PGDG"},
+	"pgaudit": {Package: "pgaudit", NeedsPreload: true, Repo: "PGDG"},
 	"pgbson": {Package: "pgbson", NeedsPreload: false, Repo: "PIGSTY"},
 	"pgcalendar": {Package: "pgcalendar", NeedsPreload: false, Repo: "PIGSTY"},
 	"pgcontext": {Package: "pgcontext", NeedsPreload: false, Repo: "PIGSTY"},
