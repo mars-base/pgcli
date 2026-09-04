@@ -21,4 +21,5 @@ Complete guide to managing PostgreSQL databases with pgcli.
 - [Restore](/docs/restore/) — Point-in-time recovery (PITR)
 - [Replication](/docs/replica/) — Read-only replicas and failover
 - [Extensions](/docs/extensions/) — Install and manage PostgreSQL extensions
+- [Addons](/docs/addon/) — PgBouncer connection pooler and other addons
 {.cards}
