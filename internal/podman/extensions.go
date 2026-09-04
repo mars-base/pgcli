@@ -357,19 +357,29 @@ func (m *Manager) RunCreateExtensions(extNames []string) error {
 // (postmaster-level, requires restart).
 // Returns needsRestart=true if any postmaster-level parameter changed.
 func (m *Manager) ApplyExtensions(extNames []string) (needsRestart bool, err error) {
-	// Collect extensions that need preloading
+	// Collect extensions that need preloading.
+	// Citus must be loaded first (FATAL if not at position 0), so we
+	// track it separately and prepend it after the loop.
 	var preload []string
 	hasCron := false
+	hasCitus := false
 	for _, name := range extNames {
 		if ExtNeedsPreload(name) {
-			// Use the resolved SQL name for shared_preload_libraries
 			resolved := ResolveExtName(name)
+			if name == "citus" || resolved == "citus" {
+				hasCitus = true
+				continue // will be prepended below
+			}
 			preload = append(preload, resolved)
 			// Check by catalog key (pg_cron) or alias (cron)
 			if name == "pg_cron" || resolved == "pg_cron" {
 				hasCron = true
 			}
 		}
+	}
+	// Citus must be first in shared_preload_libraries
+	if hasCitus {
+		preload = append([]string{"citus"}, preload...)
 	}
 
 	// Read current postgresql.conf
