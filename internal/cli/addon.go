@@ -208,14 +208,8 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 	if err != nil {
 		return fmt.Errorf("pgbouncer manager: %w", err)
 	}
-	fmt.Println("-> Setting up PgBouncer auth_query...")
-	authUser, err := pbMgr.SetupAuth(dsn)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("  [OK] auth user %q configured\n", authUser.User)
 
-	// 5. Get or allocate PgBouncer config
+	// 5. Get or allocate PgBouncer config (needed before SetupAuth for auth user name)
 	// Read optional override flags
 	maxClientConn, _ := cmd.Flags().GetInt("max-client-conn")
 	defaultPoolSize, _ := cmd.Flags().GetInt("default-pool-size")
@@ -398,7 +392,15 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		pbConf = *cfg.Instances[instName].Addons.PgBouncer
 	}
 
-	// 6. Generate config files
+	// 6. Setup auth_query user and function on PG (needs pbConf for auth user name)
+	fmt.Println("-> Setting up PgBouncer auth_query...")
+	authUser, err := pbMgr.SetupAuth(dsn, &pbConf)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  [OK] auth user %q configured\n", authUser.User)
+
+	// 7. Generate config files
 	fmt.Println("-> Generating PgBouncer configuration...")
 	iniPath, userListPath, err := pbMgr.WriteConfigs(&pbConf, authUser, dsn, instName)
 	if err != nil {
