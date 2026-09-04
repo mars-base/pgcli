@@ -1,5 +1,5 @@
 ---
-title: "exec and psql"
+title: "Exec and psql"
 description: "exec and psql guide for pgcli"
 weight: 90
 icon: fa-solid fa-terminal

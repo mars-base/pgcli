@@ -1,5 +1,5 @@
 ---
-title: exec 和 psql
+title: Exec 和 psql
 description: pg exec 和 psql 指南
 weight: 20
 icon: fa-solid fa-book
