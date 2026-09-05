@@ -1,0 +1,291 @@
+---
+title: "Extension Catalog & Usage Guide"
+description: "Built-in and popular PostgreSQL extensions reference with usage examples"
+weight: 10
+---
+
+
+This page lists all built-in extensions available in the base image and provides usage examples for the most commonly used extensions.
+
+## Built-in Extensions (45)
+
+These extensions ship in the PostgreSQL base image — no image build or `pg extension install` needed. Just run `CREATE EXTENSION` to enable them.
+
+### Requires shared_preload_libraries
+
+These extensions need a PostgreSQL restart after enabling. pgcli handles this automatically when installed via `pg extension install`.
+
+| Extension | Description |
+|-----------|-------------|
+| `pg_stat_statements` | SQL performance analysis — tracks query execution counts, timing, and resource usage |
+| `pg_cron` | Cron-based job scheduler inside the database |
+| `pg_hint_plan` | Query hints to influence the planner |
+| `pg_stat_monitor` | Advanced performance monitoring with query plans |
+| `pg_qualstats` | Query predicate statistics for index recommendations |
+| `pg_stat_kcache` | Kernel-level CPU/IO performance stats |
+| `pg_wait_sampling` | Wait event sampling for performance analysis |
+| `pg_track_settings` | Track configuration changes over time |
+| `timescaledb` | Time-series database extension with hypertables |
+| `pg_prewarm` | Preload table data into shared buffers after restart |
+
+### No restart needed
+
+These extensions can be enabled instantly with `CREATE EXTENSION` — no restart required.
+
+| Extension | Description |
+|-----------|-------------|
+| `uuid-ossp` | UUID generation functions (v1/v3/v4/v5) |
+| `hstore` | Key-value pair storage in a single column |
+| `pgcrypto` | Hashing (bcrypt/sha256), encryption/decryption, random generation |
+| `pg_trgm` | Trigram similarity matching for fuzzy search |
+| `unaccent` | Strip accents from characters for international text search |
+| `fuzzystrmatch` | Fuzzy string matching (Levenshtein, Soundex, Metaphone) |
+| `intarray` | Integer array operations (unique, sort, intersection) |
+| `isn` | ISBN/ISSN/EAN standard number types with validation |
+| `pg_repack` | Online table reorganization without exclusive locks |
+| `pg_squeeze` | Table space reclamation |
+| `pg_partman` | Automatic partition management |
+| `pgvector` (Pigsty) | Vector similarity search for AI applications |
+| `postgis` (Pigsty) | Geospatial data support |
+| `pgmq` (Pigsty) | Lightweight message queue |
+| `tablefunc` | Crosstab / pivot table functions |
+| `btree_gist` | B-tree index support for GiST indexes |
+| `btree_gin` | B-tree index support for GIN indexes |
+| `citext` | Case-insensitive text type |
+| `cube` | Multi-dimensional cube data type |
+| `ltree` | Hierarchical label tree data type |
+| `seg` | Floating-point interval data type |
+| `earthdistance` | Great-circle distance calculations on Earth's surface |
+| `postgres_fdw` | Query external PostgreSQL servers as local tables |
+| `file_fdw` | Read server files as foreign tables |
+| `dblink` | Connect to other PostgreSQL databases |
+| `amcheck` | Verify B-tree index integrity |
+| `pageinspect` | Low-level page inspection for debugging |
+| `pg_buffercache` | View shared buffer cache contents |
+| `pg_freespacemap` | View free space map for tables |
+| `pg_visibility` | View visibility map for tables |
+| `pg_walinspect` | Inspect WAL records |
+| `pgstattuple` | Table-level tuple statistics |
+| `pgrowlocks` | Show row-level locking information |
+| `pg_surgery` | Low-level heap tuple manipulation |
+| `xml2` | XML parsing and XPath functions |
+| `dict_int` | Integer text search dictionary |
+| `dict_xsyn` | Extended synonym text search dictionary |
+| `bloom` | Bloom filter index access method |
+| `autoinc` | Auto-increment trigger function |
+| `insert_username` | Insert username trigger function |
+| `moddatetime` | Auto-update timestamp trigger |
+| `refint` | Referential integrity trigger functions |
+| `tcn` | Triggered change notification |
+| `sslinfo` | SSL connection information functions |
+| `lo` | Large object type support |
+| `intagg` | Integer array aggregate/enumeration |
+| `tsm_system_rows` | Table sampling by row count |
+| `tsm_system_time` | Table sampling by time |
+| `pg_logicalinspect` | Logical replication slot inspection |
+
+## Popular Extensions
+
+The following extensions are the most commonly used in PostgreSQL, tested on **PG 18** with pgcli.
+
+### Performance & Monitoring
+
+| Extension | Install | Description |
+|-----------|---------|-------------|
+| `pg_stat_statements` | `pg extension install pg_stat_statements` | SQL performance analysis. **Must-have for production.** |
+| `pg_repack` | `pg extension install pg_repack` | Online table reorganization. Reclaims bloat. |
+| `pg_prewarm` | `pg extension install pg_prewarm` | Preload table data after restart. |
+
+```bash
+# Install all at once
+pg extension install pg_stat_statements pg_repack pg_prewarm --auto-restart
+
+# Find top 5 slow queries
+pg exec "SELECT query, calls, total_exec_time::numeric(10,2) AS ms
+         FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 5;"
+
+# Repack a bloated table
+pg exec -- pg_repack -U admin -d default_db -t my_table --no-superuser-check
+
+# Prewarm a table
+pg exec "SELECT pg_prewarm('my_table');"
+```
+
+### Data Types & Identifiers
+
+| Extension | Install | Description |
+|-----------|---------|-------------|
+| `uuid-ossp` | builtin | UUID generation (v1/v3/v4/v5). PG 18 has built-in `gen_random_uuid()` and `uuidv7()`. |
+| `hstore` | builtin | Key-value pair storage. |
+| `citext` | builtin | Case-insensitive text. `Foo` = `foo`. |
+
+```bash
+# UUID generation
+pg exec "SELECT uuid_generate_v4();"        # random UUID
+pg exec "SELECT uuidv7();"                  # time-ordered UUID (PG 18 builtin)
+
+# Key-value storage
+pg exec "SELECT 'theme => dark, lang => en'::hstore -> 'theme';"
+# Returns: dark
+
+# Case-insensitive matching
+pg exec "CREATE TABLE users (email citext);
+         INSERT INTO users VALUES ('Alice@Example.COM');
+         SELECT * FROM users WHERE email = 'alice@example.com';"
+```
+
+### Search & Text
+
+| Extension | Install | Description |
+|-----------|---------|-------------|
+| `pg_trgm` | builtin | Trigram similarity for fuzzy search and autocomplete. |
+| `unaccent` | builtin | Strip accents for flexible international text search. |
+
+```bash
+# Fuzzy search
+pg exec "SELECT name, similarity(name, 'John') FROM users
+         ORDER BY similarity(name, 'John') DESC LIMIT 5;"
+
+# Create a trigram index for fast fuzzy search
+pg exec "CREATE INDEX users_name_trgm_idx ON users USING gin (name gin_trgm_ops);"
+
+# Remove accents
+pg exec "SELECT unaccent('Crème Brûlée');"  -- returns 'Creme Brulee'
+
+# Combine for accent-insensitive fuzzy search
+pg exec "SELECT name FROM users WHERE name % unaccent('Creme Brulee');"
+```
+
+### Security & Encryption
+
+| Extension | Install | Description |
+|-----------|---------|-------------|
+| `pgcrypto` | builtin | Hashing, encryption/decryption, random generation. |
+| `pgaudit` | `pg extension install pgaudit` | Audit logging. Required for compliance (GDPR, HIPAA, SOX). |
+
+```bash
+# Hash a password with bcrypt
+pg exec "SELECT crypt('my_password', gen_salt('bf'));"
+
+# Verify a password
+pg exec "SELECT (crypt('my_password', stored_hash) = stored_hash);"
+
+# Symmetric encryption/decryption
+pg exec "SELECT pgp_sym_decrypt(pgp_sym_encrypt('secret', 'key'), 'key');"
+
+# Enable audit logging for specific operations
+pg exec "SET pgaudit.log = 'read, ddl';"
+```
+
+### Geospatial
+
+| Extension | Install | Description |
+|-----------|---------|-------------|
+| `postgis` | `pg extension install postgis` | Full spatial database: geometry, spatial indexes, distance/area. |
+
+```bash
+pg extension install postgis --auto-restart
+
+# Create a table with spatial data
+pg exec "CREATE TABLE places (id serial, name text, geom geometry(Point, 4326));"
+pg exec "INSERT INTO places (name, geom) VALUES
+         ('San Francisco', ST_MakePoint(-122.4, 37.8)),
+         ('London', ST_MakePoint(-0.1276, 51.5074));"
+
+# Find places within 5km of a point
+pg exec "SELECT name FROM places
+         WHERE ST_DWithin(geom, ST_MakePoint(-122.4, 37.8)::geography, 5000);"
+
+# Calculate distance between two cities (in meters)
+pg exec "SELECT ST_Distance(
+           ST_MakePoint(-74.006, 40.7128)::geography,
+           ST_MakePoint(-0.1276, 51.5074)::geography);"
+```
+
+### AI & Vector Search
+
+| Extension | Install | Description |
+|-----------|---------|-------------|
+| `pgvector` | `pg extension install vector` | Store and search embedding vectors. Standard for AI apps. |
+
+```bash
+pg extension install vector --auto-restart
+
+# Create a table with vector column
+pg exec "CREATE TABLE items (id serial PRIMARY KEY, embedding vector(3));"
+pg exec "INSERT INTO items (embedding) VALUES ('[1,2,3]'), ('[4,5,6]'), ('[7,8,9]');"
+
+# Find nearest neighbors (Euclidean distance)
+pg exec "SELECT id FROM items ORDER BY embedding <-> '[3,1,2]' LIMIT 5;"
+
+# Create an IVFFlat index for fast approximate search
+pg exec "CREATE INDEX items_embedding_idx ON items USING ivfflat (embedding vector_l2_ops);"
+```
+
+### Time Series
+
+| Extension | Install | Description |
+|-----------|---------|-------------|
+| `timescaledb` | `pg extension install timescaledb` | Optimized time-series storage with hypertables. |
+
+```bash
+pg extension install timescaledb --auto-restart
+
+# Create a hypertable
+pg exec "CREATE TABLE sensor (time timestamptz NOT NULL, value float);
+         SELECT create_hypertable('sensor', 'time');"
+
+# Time-bucket aggregation
+pg exec "SELECT time_bucket('1 hour', time) AS bucket, avg(value)
+         FROM sensor GROUP BY bucket ORDER BY bucket;"
+```
+
+### Scheduling & Distributed
+
+| Extension | Install | Description |
+|-----------|---------|-------------|
+| `pg_cron` | `pg extension install pg_cron` | Cron-based job scheduler. Auto-configured by pgcli. |
+| `citus` | `pg extension install citus` | Distributed PostgreSQL with sharding. |
+
+```bash
+pg extension install pg_cron --auto-restart
+
+# Schedule a daily cleanup job (runs at midnight)
+pg exec "SELECT cron.schedule('cleanup', '0 0 * * *',
+         'DELETE FROM logs WHERE created_at < now() - interval ''30 days''');"
+
+# List scheduled jobs
+pg exec "SELECT jobid, schedule, command FROM cron.job;"
+
+# Unschedule a job
+pg exec "SELECT cron.unschedule('cleanup');"
+```
+
+### Foreign Data
+
+| Extension | Install | Description |
+|-----------|---------|-------------|
+| `postgres_fdw` | builtin | Query external PostgreSQL servers as local tables. |
+
+```bash
+# Create a foreign server
+pg exec "CREATE SERVER remote FOREIGN DATA WRAPPER postgres_fdw
+         OPTIONS (host '10.0.0.2', port '5432', dbname 'analytics');"
+
+# Create user mapping
+pg exec "CREATE USER MAPPING FOR current_user SERVER remote
+         OPTIONS (user 'reader', password 'secret');"
+
+# Import remote schema as foreign tables
+pg exec "IMPORT FOREIGN SCHEMA public FROM SERVER remote INTO remote_schema;"
+
+# Query remote data as if it were local
+pg exec "SELECT * FROM remote_schema.events LIMIT 10;"
+```
+
+### Compatibility Notes
+
+| Extension | PG 18 Status | Notes |
+|-----------|-------------|-------|
+| `pgml` | Not available | Only supports PG 14-17 (no PG 18 package) |
+| `uuid-ossp` | Partially needed | PG 18 has built-in `gen_random_uuid()` (v4) and `uuidv7()` (time-ordered) |
