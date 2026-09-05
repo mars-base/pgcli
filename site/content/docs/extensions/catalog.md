@@ -115,14 +115,20 @@ pg exec "SELECT pg_prewarm('my_table');"
 
 | Extension | Install | Description |
 |-----------|---------|-------------|
-| `uuid-ossp` | builtin | UUID generation (v1/v3/v4/v5). PG 18 has built-in `gen_random_uuid()` and `uuidv7()`. |
+| `uuid-ossp` | builtin | UUID generation (v1/v3/v5). **PG 18 has built-in `gen_random_uuid()` (v4) and `uuidv7()` (v7) — no extension needed.** |
 | `hstore` | builtin | Key-value pair storage. |
 | `citext` | builtin | Case-insensitive text. `Foo` = `foo`. |
 
 ```bash
-# UUID generation
-pg exec "SELECT uuid_generate_v4();"        # random UUID
-pg exec "SELECT uuidv7();"                  # time-ordered UUID (PG 18 builtin)
+# UUID generation (PG 18 built-in — no extension needed)
+pg exec "SELECT gen_random_uuid();"  # v4 random UUID (built-in since PG 13)
+pg exec "SELECT uuidv7();"           # v7 time-ordered UUID (new in PG 18)
+
+# uuid-ossp extension — only needed for v1/v3/v5 UUIDs
+pg exec "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";"
+pg exec "SELECT uuid_generate_v1();"  # v1 timestamp + MAC address
+pg exec "SELECT uuid_generate_v3(uuid_ns_url(), 'https://example.com');"  # v3 MD5-based
+pg exec "SELECT uuid_generate_v5(uuid_ns_url(), 'https://example.com');"  # v5 SHA-1 based
 
 # Key-value storage
 pg exec "SELECT 'theme => dark, lang => en'::hstore -> 'theme';"
@@ -288,4 +294,4 @@ pg exec "SELECT * FROM remote_schema.events LIMIT 10;"
 | Extension | PG 18 Status | Notes |
 |-----------|-------------|-------|
 | `pgml` | Not available | Only supports PG 14-17 (no PG 18 package) |
-| `uuid-ossp` | Partially needed | PG 18 has built-in `gen_random_uuid()` (v4) and `uuidv7()` (time-ordered) |
+| `uuid-ossp` | Partially needed | PG 18 built-in: `gen_random_uuid()` (v4), `uuidv7()` (v7). Extension only needed for v1/v3/v5 |

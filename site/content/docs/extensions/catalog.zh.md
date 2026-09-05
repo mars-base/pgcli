@@ -114,14 +114,20 @@ pg exec "SELECT pg_prewarm('my_table');"
 
 | 扩展 | 安装 | 描述 |
 |------|------|------|
-| `uuid-ossp` | 内置 | UUID 生成（v1/v3/v4/v5）。PG 18 已内置 `gen_random_uuid()` 和 `uuidv7()`。 |
+| `uuid-ossp` | 内置 | UUID 生成（v1/v3/v5）。**PG 18 已内置 `gen_random_uuid()` (v4) 和 `uuidv7()` (v7)——无需安装扩展。** |
 | `hstore` | 内置 | 键值对存储。 |
 | `citext` | 内置 | 不区分大小写的文本。`Foo` = `foo`。 |
 
 ```bash
-# UUID 生成
-pg exec "SELECT uuid_generate_v4();"        # 随机 UUID
-pg exec "SELECT uuidv7();"                  # 时间有序 UUID（PG 18 内置）
+# UUID 生成（PG 18 内置——无需安装扩展）
+pg exec "SELECT gen_random_uuid();"  # v4 随机 UUID（PG 13 起内置）
+pg exec "SELECT uuidv7();"           # v7 时间有序 UUID（PG 18 新增）
+
+# uuid-ossp 扩展——仅在需要 v1/v3/v5 UUID 时安装
+pg exec "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";"
+pg exec "SELECT uuid_generate_v1();"  # v1 时间戳 + MAC 地址
+pg exec "SELECT uuid_generate_v3(uuid_ns_url(), 'https://example.com');"  # v3 基于 MD5
+pg exec "SELECT uuid_generate_v5(uuid_ns_url(), 'https://example.com');"  # v5 基于 SHA-1
 
 # 键值存储
 pg exec "SELECT 'theme => dark, lang => en'::hstore -> 'theme';"
@@ -287,4 +293,4 @@ pg exec "SELECT * FROM remote_schema.events LIMIT 10;"
 | 扩展 | PG 18 状态 | 备注 |
 |------|-----------|------|
 | `pgml` | 不可用 | 仅支持 PG 14-17（无 PG 18 包） |
-| `uuid-ossp` | 部分需要 | PG 18 已内置 `gen_random_uuid()` (v4) 和 `uuidv7()` (时间有序) |
+| `uuid-ossp` | 部分需要 | PG 18 内置：`gen_random_uuid()` (v4)、`uuidv7()` (v7)。扩展仅在需要 v1/v3/v5 时安装 |
