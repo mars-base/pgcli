@@ -486,6 +486,9 @@ main() {
     if $IS_MACOS; then
         dim "  macOS notes:"
         dim "    - Podman runs inside a VM (podman machine). Use 'podman machine' to manage it."
+        dim "    - Tune VM CPU/memory, e.g. 4 CPUs / 8 GiB (memory in MiB):"
+        dim "        podman machine stop && podman machine set --cpus 4 --memory 8192 && podman machine start"
+        dim "        Check: podman machine list | podman machine inspect"
         dim "    - For files outside your home directory, add volume mounts via podman machine."
         echo ""
     fi
