@@ -129,10 +129,9 @@ Lists all 440 known extensions:
 
 ## Extension Catalog
 
-See [Extension Catalog & Usage Guide](./catalog/) for:
-- Complete list of 45 built-in extensions (no install needed)
-- Detailed usage examples for popular extensions
-- Installation commands and SQL examples
+See [Extension Catalog](./catalog/) for the complete list of 45 built-in extensions (no install needed).
+
+See [Popular Extensions](./popular/) for usage examples of the most commonly used extensions.
 
 ## Extensions Outside the Catalog
 
