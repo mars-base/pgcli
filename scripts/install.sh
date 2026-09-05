@@ -26,10 +26,10 @@ case "$(uname -s)" in
 esac
 
 # Determine default install directory if not set via environment
+# (same rules on Linux and macOS: /usr/local/bin when writable or when
+# passwordless sudo works, otherwise ~/.local/bin)
 if [ -z "$INSTALL_DIR" ]; then
     if [ -w /usr/local/bin ] 2>/dev/null; then
-        INSTALL_DIR="/usr/local/bin"
-    elif $IS_MACOS; then
         INSTALL_DIR="/usr/local/bin"
     elif command -v sudo &>/dev/null && sudo -n true 2>/dev/null; then
         INSTALL_DIR="/usr/local/bin"
@@ -55,7 +55,8 @@ detect_arch() {
 }
 
 latest_version() {
-    curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+    curl -fsSL --connect-timeout 10 --max-time 30 \
+        "https://api.github.com/repos/${REPO}/releases/latest" \
         | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/'
 }
 
@@ -69,17 +70,16 @@ install_binary() {
     tmp="$(mktemp -d)"
     trap "rm -rf '$tmp'" EXIT
 
-    if ! curl -fsSL -o "$tmp/$tarball" "$url"; then
+    if ! curl -fsSL --connect-timeout 15 --max-time 300 -o "$tmp/$tarball" "$url"; then
         die "Download failed: $url"
     fi
 
     tar -xzf "$tmp/$tarball" -C "$tmp"
+    mkdir -p "$INSTALL_DIR" 2>/dev/null || as_root mkdir -p "$INSTALL_DIR"
     if [ -w "$INSTALL_DIR" ]; then
-        mkdir -p "$INSTALL_DIR"
         mv "$tmp/$BINARY" "$INSTALL_DIR/$BINARY"
         chmod +x "$INSTALL_DIR/$BINARY"
     else
-        as_root mkdir -p "$INSTALL_DIR"
         as_root mv "$tmp/$BINARY" "$INSTALL_DIR/$BINARY"
         as_root chmod +x "$INSTALL_DIR/$BINARY"
     fi
@@ -252,25 +252,38 @@ setup_selinux() {
 setup_macos_deps() {
     yellow "-> Checking macOS dependencies..."
 
-    # Homebrew
-    if ! command -v brew &>/dev/null; then
-        yellow "  [!] Homebrew not found — install it first:"
+    local have_brew=false
+    if command -v brew &>/dev/null; then
+        green "  [OK] Homebrew found"
+        have_brew=true
+    else
+        yellow "  [!] Homebrew not found"
+        dim "      Install it first:"
         dim "      /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
-        return
     fi
-    green "  [OK] Homebrew found"
 
-    # Podman
     if ! command -v podman &>/dev/null; then
-        yellow "  [!] podman not found — installing via Homebrew..."
-        brew install podman
-        green "  [OK] podman installed"
+        if $have_brew; then
+            yellow "  [!] podman not found — installing via Homebrew..."
+            brew install podman
+            green "  [OK] podman installed"
+        else
+            yellow "  [!] podman not found — skipping podman setup until Homebrew is installed"
+            return 0
+        fi
     else
         green "  [OK] podman available ($(podman --version 2>/dev/null | head -1))"
     fi
 
-    # Podman machine
-    if podman machine list >/dev/null 2>&1; then
+    # Empty machine list means none initialized yet (podman machine list
+    # exits 0 with an empty table in that case), so check for a real name.
+    local machines
+    if ! machines="$(podman machine list --format '{{.Name}}' 2>/dev/null)"; then
+        yellow "  [!] Cannot query podman machines"
+        dim "      Run 'podman machine init --now' manually"
+        return 0
+    fi
+    if [ -n "$machines" ]; then
         if podman machine list 2>/dev/null | grep -qi "currently running"; then
             green "  [OK] podman machine is running"
         else
@@ -291,11 +304,26 @@ setup_macos_deps() {
             dim "      Run 'podman machine init --now' manually"
         fi
     fi
+}
 
-    # Re-sign binary for macOS Gatekeeper
-    codesign --force --sign - "$INSTALL_DIR/$BINARY" 2>/dev/null \
-        && green "  [OK] $BINARY re-signed for macOS" \
-        || dim "  [!] re-sign skipped (may need: codesign --force --sign - $INSTALL_DIR/$BINARY)"
+re_sign_macos_binary() {
+    # macOS arm64 refuses to run unsigned binaries (Killed: 9), so an
+    # ad-hoc signature is mandatory. Retry with sudo when the binary was
+    # installed by root into a system directory.
+    local bin="$INSTALL_DIR/$BINARY"
+    [ -f "$bin" ] || return 0
+
+    if codesign --force --sign - "$bin" 2>/dev/null; then
+        green "  [OK] $BINARY re-signed for macOS"
+        return 0
+    fi
+    if command -v sudo &>/dev/null && sudo -n true 2>/dev/null \
+        && sudo codesign --force --sign - "$bin" 2>/dev/null; then
+        green "  [OK] $BINARY re-signed for macOS (via sudo)"
+        return 0
+    fi
+    red "  [X] Could not re-sign $bin — macOS arm64 requires a signed binary"
+    red "      Run manually: sudo codesign --force --sign - $bin"
 }
 
 # ─── Podman install (Linux) ──────────────────────────────────────────
@@ -319,11 +347,11 @@ install_podman_launcher() {
 
     if [ -w "$podman_dir" ]; then
         mkdir -p "$podman_dir"
-        curl -fsSL -o "$podman_dir/podman" "$launcher_url"
+        curl -fsSL --connect-timeout 15 --max-time 300 -o "$podman_dir/podman" "$launcher_url"
         chmod +x "$podman_dir/podman"
     else
         as_root mkdir -p "$podman_dir"
-        as_root bash -c "curl -fsSL -o '$podman_dir/podman' '$launcher_url' && chmod +x '$podman_dir/podman'"
+        as_root bash -c "curl -fsSL --connect-timeout 15 --max-time 300 -o '$podman_dir/podman' '$launcher_url' && chmod +x '$podman_dir/podman'"
     fi
     green "  [OK] podman-launcher installed to $podman_dir/podman"
 
@@ -434,12 +462,13 @@ main() {
 
     install_binary "$os" "$arch" "$version"
 
-    if $IS_LINUX; then
+    if $IS_MACOS; then
+        re_sign_macos_binary
+        setup_macos_deps
+    elif $IS_LINUX; then
         install_podman_launcher
         setup_linux_deps
         setup_selinux
-    elif $IS_MACOS; then
-        setup_macos_deps
     fi
 
     pull_images
