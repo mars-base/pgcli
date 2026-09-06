@@ -30,13 +30,16 @@ This script will:
 ## Initialize Configuration
 
 ```bash
+# Create the base directory
+mkdir -p ~/pg
+
 # Initialize config with a default instance
-pg config init --add default --base-dir /data/pg
+pg config init --add default --base-dir ~/pg
 ```
 
 This creates `~/.pgcli/pg.yaml` with sensible defaults including:
 - A default instance named `default`
-- Data directory at `/data/pg/default`
+- Data directory at `~/pg/default`
 - Auto-assigned ports starting from 35432
 
 ## Start Instance

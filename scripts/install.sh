@@ -478,7 +478,7 @@ main() {
     green "Installation complete!"
     echo ""
     echo "  Quick start:"
-    echo "    pg config init --add default --base-dir /data/pg"
+    echo "    pg config init --add default --base-dir ~/pg"
     echo "    pg start"
     echo "    pg status"
     echo ""
