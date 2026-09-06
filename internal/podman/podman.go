@@ -123,7 +123,9 @@ func needsMigrate(output string) bool {
 
 // ensurePodmanReady probes podman once per process and transparently runs
 // `podman system migrate` when a stale rootless state is detected, so pg
-// commands work on first use after a reboot.
+// commands work on first use after a reboot. It also restarts any pgcli
+// containers stuck in a non-running state (e.g. "Stopping" or "Exited"
+// after a host reboot).
 func (m *Manager) ensurePodmanReady() {
 	if runtime.GOOS != "linux" || m.repaired {
 		return
@@ -132,6 +134,8 @@ func (m *Manager) ensurePodmanReady() {
 	if out, err := probe.CombinedOutput(); err != nil && needsMigrate(string(out)) {
 		m.runMigrate()
 	}
+	m.repaired = true
+	m.restartStoppedContainers()
 }
 
 // runMigrate runs `podman system migrate` once per process.
@@ -143,6 +147,79 @@ func (m *Manager) runMigrate() {
 	fmt.Println("-> Detected stale podman state (likely after a reboot); running 'podman system migrate'...")
 	if mg := podmanCommand(m.podman, "system", "migrate"); mg.Run() != nil {
 		slog.Warn("podman system migrate failed; run 'podman system migrate' manually if podman errors persist")
+	}
+}
+
+// restartStoppedContainers finds all pgcli-managed containers that are not
+// running and restarts them. Called after a successful `podman system migrate`
+// to recover instances that got stuck in Exited/Stopping after a host reboot.
+func (m *Manager) restartStoppedContainers() {
+	out, err := m.run("ps", "-a", "--filter", "name=pgcli-", "--format", "{{.Names}}\t{{.Status}}")
+	if err != nil {
+		slog.Warn("failed to list pgcli containers after migrate", "error", err)
+		return
+	}
+
+	var stopped []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		name, status := parts[0], strings.TrimSpace(parts[1])
+		if !strings.HasPrefix(strings.ToLower(status), "up") {
+			stopped = append(stopped, name)
+		}
+	}
+	if len(stopped) == 0 {
+		return
+	}
+
+	fmt.Printf("-> Restarting %d stopped pgcli container(s) after reboot...\n", len(stopped))
+	var pgInstances []string // collect PG instances to restart
+	for _, name := range stopped {
+		if _, err := m.run("start", name); err != nil {
+			// After a reboot the container's internal state may be "improper" —
+			// neither stop nor start works. Force-remove the container record
+			// (host data volumes are safe) so pg start can recreate it.
+			slog.Warn("container in improper state, force-removing", "container", name)
+			if _, rmErr := m.run("rm", "-f", name); rmErr != nil {
+				fmt.Printf("  [!] Failed to remove %s: %v\n", name, rmErr)
+				continue
+			}
+			// Determine container type and provide appropriate hint
+			if strings.Contains(name, "-backup") || strings.Contains(name, "-pgbouncer") {
+				// Backup and addon containers are recreated automatically by pg start
+				fmt.Printf("  [OK] Removed stale %s (auto-recreated on next pg start)\n", name)
+			} else if strings.Contains(name, "-pg-") || strings.HasPrefix(name, "pgcli-pg") {
+				// PG container — find the instance name from config
+				instName := ""
+				for inst, instCfg := range m.cfg.Instances {
+					if instCfg.Podman.ContainerName == name {
+						instName = inst
+						break
+					}
+				}
+				if instName != "" {
+					pgInstances = append(pgInstances, instName)
+				}
+				fmt.Printf("  [OK] Removed stale %s\n", name)
+			} else {
+				fmt.Printf("  [OK] Removed stale %s\n", name)
+			}
+		} else {
+			fmt.Printf("  [OK] Restarted %s\n", name)
+		}
+	}
+	// Provide hint for restarting PG instances
+	if len(pgInstances) > 0 {
+		fmt.Println("  Run 'pg start --all' or restart individually:")
+		for _, inst := range pgInstances {
+			fmt.Printf("    pg start -i %s\n", inst)
+		}
 	}
 }
 
