@@ -99,6 +99,24 @@ func New(cfg *config.Config) (*Manager, error) {
 	return m, nil
 }
 
+// NewForStop creates a Manager without triggering ensurePodmanReady,
+// so stop operations don't restart previously stopped containers.
+func NewForStop(cfg *config.Config) (*Manager, error) {
+	path, err := findPodman()
+	if err != nil {
+		return nil, fmt.Errorf("podman is not installed: %w", err)
+	}
+	dataDir := cfg.BaseDir
+	if dataDir == "" {
+		dataDir = platform.DefaultConfigDir()
+	}
+	return &Manager{
+		cfg:     cfg,
+		podman:  path,
+		dataDir: dataDir,
+	}, nil
+}
+
 // migrateSignals are error fragments podman (podman-launcher) emits when its
 // rootless pause-process record is stale. This happens after a host reboot:
 // the pause process dies but its bookkeeping survives, so every podman
@@ -123,7 +141,9 @@ func needsMigrate(output string) bool {
 
 // ensurePodmanReady probes podman once per process and transparently runs
 // `podman system migrate` when a stale rootless state is detected, so pg
-// commands work on first use after a reboot.
+// commands work on first use after a reboot. It also restarts any pgcli
+// containers stuck in a non-running state (e.g. "Stopping" or "Exited"
+// after a host reboot).
 func (m *Manager) ensurePodmanReady() {
 	if runtime.GOOS != "linux" || m.repaired {
 		return
@@ -132,6 +152,8 @@ func (m *Manager) ensurePodmanReady() {
 	if out, err := probe.CombinedOutput(); err != nil && needsMigrate(string(out)) {
 		m.runMigrate()
 	}
+	m.repaired = true
+	m.restartStoppedContainers()
 }
 
 // runMigrate runs `podman system migrate` once per process.
@@ -143,6 +165,79 @@ func (m *Manager) runMigrate() {
 	fmt.Println("-> Detected stale podman state (likely after a reboot); running 'podman system migrate'...")
 	if mg := podmanCommand(m.podman, "system", "migrate"); mg.Run() != nil {
 		slog.Warn("podman system migrate failed; run 'podman system migrate' manually if podman errors persist")
+	}
+}
+
+// restartStoppedContainers finds all pgcli-managed containers that are not
+// running and restarts them. Called after a successful `podman system migrate`
+// to recover instances that got stuck in Exited/Stopping after a host reboot.
+func (m *Manager) restartStoppedContainers() {
+	out, err := m.run("ps", "-a", "--filter", "name=pgcli-", "--format", "{{.Names}}\t{{.Status}}")
+	if err != nil {
+		slog.Warn("failed to list pgcli containers after migrate", "error", err)
+		return
+	}
+
+	var stopped []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		name, status := parts[0], strings.TrimSpace(parts[1])
+		if !strings.HasPrefix(strings.ToLower(status), "up") {
+			stopped = append(stopped, name)
+		}
+	}
+	if len(stopped) == 0 {
+		return
+	}
+
+	fmt.Printf("-> Restarting %d stopped pgcli container(s) after reboot...\n", len(stopped))
+	var pgInstances []string // collect PG instances to restart
+	for _, name := range stopped {
+		if _, err := m.run("start", name); err != nil {
+			// After a reboot the container's internal state may be "improper" —
+			// neither stop nor start works. Force-remove the container record
+			// (host data volumes are safe) so pg start can recreate it.
+			slog.Warn("container in improper state, force-removing", "container", name)
+			if _, rmErr := m.run("rm", "-f", name); rmErr != nil {
+				fmt.Printf("  [!] Failed to remove %s: %v\n", name, rmErr)
+				continue
+			}
+			// Determine container type and provide appropriate hint
+			if strings.Contains(name, "-backup") || strings.Contains(name, "-pgbouncer") {
+				// Backup and addon containers are recreated automatically by pg start
+				fmt.Printf("  [OK] Removed stale %s (auto-recreated on next pg start)\n", name)
+			} else if strings.Contains(name, "-pg-") || strings.HasPrefix(name, "pgcli-pg") {
+				// PG container — find the instance name from config
+				instName := ""
+				for inst, instCfg := range m.cfg.Instances {
+					if instCfg.Podman.ContainerName == name {
+						instName = inst
+						break
+					}
+				}
+				if instName != "" {
+					pgInstances = append(pgInstances, instName)
+				}
+				fmt.Printf("  [OK] Removed stale %s\n", name)
+			} else {
+				fmt.Printf("  [OK] Removed stale %s\n", name)
+			}
+		} else {
+			fmt.Printf("  [OK] Restarted %s\n", name)
+		}
+	}
+	// Provide hint for restarting PG instances
+	if len(pgInstances) > 0 {
+		fmt.Println("  Run 'pg start --all' or restart individually:")
+		for _, inst := range pgInstances {
+			fmt.Printf("    pg start -i %s\n", inst)
+		}
 	}
 }
 
@@ -465,14 +560,41 @@ func (m *Manager) Status() (*ContainerStatus, error) {
 }
 
 // Exec runs a command inside the container, returns stdout.
+// On Linux with cgroup v2, podman exec may fail with "cgroup.procs: Permission denied"
+// when the caller and container are in different cgroup subtrees (e.g., container
+// started by systemd user unit, caller in SSH session). When this happens, we
+// automatically retry via systemd-run --user --scope which creates a transient scope
+// that can join the container's cgroup.
 func (m *Manager) Exec(args ...string) (string, error) {
 	podmanArgs := append([]string{"exec", "-i=false", m.cfg.Podman.ContainerName}, args...)
-	return execWithTimeout(m.podman, podmanArgs, 30*time.Second)
+	out, err := execWithTimeout(m.podman, podmanArgs, 30*time.Second)
+	if err != nil && isCgroupPermissionError(err) {
+		return m.execViaSystemdRun(args...)
+	}
+	return out, err
+}
+
+// isCgroupPermissionError detects the rootless podman cgroup.procs permission denied error.
+func isCgroupPermissionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "cgroup.procs") && strings.Contains(msg, "Permission denied")
+}
+
+// execViaSystemdRun wraps podman exec in a transient systemd scope to bypass
+// cgroup isolation between the caller and container subtrees.
+func (m *Manager) execViaSystemdRun(args ...string) (string, error) {
+	runArgs := []string{"--user", "--scope", "--quiet", m.podman, "exec", "-i=false", m.cfg.Podman.ContainerName}
+	runArgs = append(runArgs, args...)
+	return execWithTimeout("systemd-run", runArgs, 30*time.Second)
 }
 
 // ExecInteractive runs a command inside the container with stdin/stdout/stderr
 // attached (TTY). Used for interactive psql or shell sessions.
 // Detects whether stdin is a terminal to decide if -t (TTY) flag is needed.
+// Falls back to systemd-run --user --scope on cgroup permission errors (see Exec).
 func (m *Manager) ExecInteractive(args ...string) error {
 	running, err := m.containerRunning(m.cfg.Podman.ContainerName)
 	if err != nil {
@@ -492,7 +614,14 @@ func (m *Manager) ExecInteractive(args ...string) error {
 		execFlags = "-it"
 	}
 	podmanArgs := append([]string{"exec", execFlags, m.cfg.Podman.ContainerName}, args...)
-	return m.runInteractive(podmanArgs...)
+	if err := m.runInteractive(podmanArgs...); err != nil {
+		if isCgroupPermissionError(err) {
+			runArgs := append([]string{"--user", "--scope", "--quiet", m.podman, "exec", execFlags, m.cfg.Podman.ContainerName}, args...)
+			return m.runInteractiveArgs("systemd-run", runArgs...)
+		}
+		return err
+	}
+	return nil
 }
 
 // isTerminal checks if a file is a terminal (TTY).
@@ -671,8 +800,24 @@ func (m *Manager) exportTo(w io.Writer, database string, verbose bool, format st
 	podmanArgs := append([]string{"exec", "-i", m.cfg.Podman.ContainerName}, args...)
 	cmd := podmanCommand(m.podman, podmanArgs...)
 	cmd.Stdout = w
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
+	err := cmd.Run()
+	stderrStr := stderrBuf.String()
+
+	// Cgroup fallback: check stderr for permission denied
+	if err != nil && isCgroupPermErrorStr(stderrStr) {
+		runArgs := append([]string{"--user", "--scope", "--quiet", m.podman}, podmanArgs...)
+		cmd2 := exec.Command("systemd-run", runArgs...)
+		cmd2.Stdout = w
+		cmd2.Stderr = os.Stderr
+		return cmd2.Run()
+	}
+	// Not a cgroup error — replay captured stderr
+	if stderrBuf.Len() > 0 {
+		fmt.Fprint(os.Stderr, stderrBuf.String())
+	}
+	return err
 }
 
 // ImportDatabase imports a database from a dump file using pg_restore or psql.
@@ -777,8 +922,23 @@ func (m *Manager) importFrom(r io.Reader, database string, clean bool, verbose b
 	cmd := podmanCommand(m.podman, podmanArgs...)
 	cmd.Stdin = r
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
+	err := cmd.Run()
+	stderrStr := stderrBuf.String()
+
+	// Cgroup fallback: check stderr for permission denied
+	if err != nil && isCgroupPermErrorStr(stderrStr) {
+		runArgs := append([]string{"--user", "--scope", "--quiet", m.podman}, podmanArgs...)
+		cmd2 := exec.Command("systemd-run", runArgs...)
+		cmd2.Stdin = r
+		cmd2.Stdout = os.Stdout
+		cmd2.Stderr = os.Stderr
+		return cmd2.Run()
+	}
+	// Not a cgroup error — replay captured stderr
+	fmt.Fprint(os.Stderr, stderrStr)
+	return err
 }
 
 // ExportFromDSN exports a remote database to a file or stdout using a temporary container.
@@ -1483,10 +1643,44 @@ func (m *Manager) run(args ...string) (string, error) {
 		out, err = cmd.Output()
 	}
 	if err != nil {
+		// Cgroup fallback for exec commands: container started by systemd user unit,
+		// caller in different cgroup scope (e.g., SSH session).
+		if len(args) > 0 && args[0] == "exec" && isCgroupPermErrorOutput(err) {
+			slog.Debug("cgroup fallback via systemd-run")
+			return m.runViaSystemdRun(args...)
+		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return "", fmt.Errorf("podman %s: %s", strings.Join(args, " "), string(exitErr.Stderr))
 		}
 		return "", fmt.Errorf("podman %s: %w", strings.Join(args, " "), err)
+	}
+	return string(out), nil
+}
+
+// isCgroupPermErrorOutput checks if an exec.ExitError contains cgroup.procs permission denied.
+func isCgroupPermErrorOutput(err error) bool {
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return isCgroupPermErrorStr(string(exitErr.Stderr))
+	}
+	return false
+}
+
+// isCgroupPermErrorStr checks if a string contains cgroup.procs permission denied.
+func isCgroupPermErrorStr(msg string) bool {
+	return strings.Contains(msg, "cgroup.procs") && strings.Contains(msg, "Permission denied")
+}
+
+// runViaSystemdRun wraps a podman command in systemd-run --user --scope.
+func (m *Manager) runViaSystemdRun(args ...string) (string, error) {
+	runArgs := []string{"--user", "--scope", "--quiet", m.podman}
+	runArgs = append(runArgs, args...)
+	cmd := exec.Command("systemd-run", runArgs...)
+	out, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("systemd-run %s: %s", strings.Join(args, " "), string(exitErr.Stderr))
+		}
+		return "", fmt.Errorf("systemd-run %s: %w", strings.Join(args, " "), err)
 	}
 	return string(out), nil
 }
@@ -1498,6 +1692,34 @@ func (m *Manager) runInteractive(args ...string) error {
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
 	return cmd.Run()
+}
+
+// runInteractiveArgs runs a command with attached stdin/stdout/stderr,
+// but captures stderr to detect cgroup permission errors for fallback.
+func (m *Manager) runInteractiveArgs(binary string, args ...string) error {
+	slog.Debug(binary, "args", args)
+	cmd := exec.Command(binary, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stdin = os.Stdin
+	// Capture stderr to detect cgroup errors; replay on failure.
+	var stderrBuf strings.Builder
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
+	if err := cmd.Run(); err != nil {
+		if isCgroupPermissionErrorStr(stderrBuf.String()) {
+			return cgroupPermError{err}
+		}
+		return err
+	}
+	return nil
+}
+
+// cgroupPermError wraps an exec error flagged as cgroup permission denied.
+type cgroupPermError struct{ inner error }
+
+func (e cgroupPermError) Error() string { return e.inner.Error() }
+
+func isCgroupPermissionErrorStr(msg string) bool {
+	return strings.Contains(msg, "cgroup.procs") && strings.Contains(msg, "Permission denied")
 }
 
 func (m *Manager) imageExists(tag string) (bool, error) {

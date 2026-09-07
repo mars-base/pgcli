@@ -55,6 +55,9 @@ type InstanceConfig struct {
 	// Addons tracks optional sidecar components installed for this instance
 	// (e.g. PgBouncer connection pooler). Managed by `pg addon install/remove`.
 	Addons AddonsConfig `yaml:"addons,omitempty"`
+	// Autostart starts this instance automatically on host boot via the
+	// boot service (`pg autostart enable`). `pg stop` does not affect it.
+	Autostart bool `yaml:"autostart,omitempty"`
 }
 
 // AddonsConfig tracks optional sidecar components attached to an instance.
@@ -102,6 +105,10 @@ type PgBouncerConfig struct {
 	// Logging
 	LogConnections    int `yaml:"log_connections,omitempty"`    // 1 (default, enabled)
 	LogDisconnections int `yaml:"log_disconnections,omitempty"` // 1 (default, enabled)
+
+	// Autostart starts this PgBouncer container automatically on host boot
+	// via the boot service (`pg autostart enable --pgbouncer`).
+	Autostart bool `yaml:"autostart,omitempty"`
 }
 
 // PostgresConfig holds PostgreSQL connection settings.
@@ -142,6 +149,9 @@ type BackupConfig struct {
 	DataDir       string `yaml:"data_dir"`       // pgbackrest repo dir, default ~/.pgcli/backup/data
 	LogDir        string `yaml:"log_dir"`        // pgbackrest log dir, default ~/.pgcli/backup/log
 	RetentionFull int    `yaml:"retention_full"` // number of full backups to retain, default 7
+	// Autostart starts the backup container automatically on host boot
+	// (`pg autostart enable --backup`).
+	Autostart bool `yaml:"autostart,omitempty"`
 }
 
 // PigstyConfig holds Pigsty extension repository settings.
@@ -182,6 +192,7 @@ func Default() *Config {
 			DataDir:       filepath.Join(platform.DefaultConfigDir(), "backup", "data"),
 			LogDir:        filepath.Join(platform.DefaultConfigDir(), "backup", "log"),
 			RetentionFull: 7,
+			Autostart:     true, // default: start backup container on boot
 		},
 		Pigsty: PigstyConfig{
 			Repo: "https://repo.pigsty.io",

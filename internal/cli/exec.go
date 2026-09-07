@@ -9,6 +9,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// isCgroupPermError detects rootless podman cgroup.procs permission denied errors.
+func isCgroupPermError(msg string) bool {
+	return strings.Contains(msg, "cgroup.procs") && strings.Contains(msg, "Permission denied")
+}
+
 func init() {
 	execCmd.Flags().String("dsn", "", "database connection string for remote database (postgres://user:pass@host:port/db)")
 	rootCmd.AddCommand(execCmd)
@@ -96,7 +101,22 @@ Examples:
 		execCmd := exec.Command("podman", podmanArgs...)
 		execCmd.Stdin = os.Stdin
 		execCmd.Stdout = os.Stdout
-		execCmd.Stderr = os.Stderr
-		return execCmd.Run()
+		var stderrBuf strings.Builder
+		execCmd.Stderr = &stderrBuf
+		if err := execCmd.Run(); err != nil {
+			// Cgroup fallback: container started by systemd user unit, caller in different scope
+			if isCgroupPermError(stderrBuf.String()) {
+				runArgs := append([]string{"--user", "--scope", "--quiet", "podman"}, podmanArgs...)
+				cmd2 := exec.Command("systemd-run", runArgs...)
+				cmd2.Stdin = os.Stdin
+				cmd2.Stdout = os.Stdout
+				cmd2.Stderr = os.Stderr
+				return cmd2.Run()
+			}
+			// Not a cgroup error — replay captured stderr and return original error
+			fmt.Fprint(os.Stderr, stderrBuf.String())
+			return err
+		}
+		return nil
 	},
 }

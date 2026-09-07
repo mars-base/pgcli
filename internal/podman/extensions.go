@@ -2,6 +2,7 @@ package podman
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -231,11 +232,22 @@ func (m *Manager) extImageHasPackages(imageTag string, packages []string) bool {
 func (m *Manager) EnsurePgpass() error {
 	// Write .pgpass with current credentials
 	pgpassContent := fmt.Sprintf("*:*:*:%s:%s\n", m.cfg.Postgres.User, m.cfg.Postgres.Password)
-	cmd := exec.Command(m.podman, "exec", m.cfg.Podman.ContainerName,
+	execArgs := []string{"exec", m.cfg.Podman.ContainerName,
 		"sh", "-c",
 		fmt.Sprintf("echo '%s' > /var/lib/postgresql/.pgpass && chmod 600 /var/lib/postgresql/.pgpass && chown postgres:postgres /var/lib/postgresql/.pgpass",
-			pgpassContent))
+			pgpassContent)}
+	cmd := exec.Command(m.podman, execArgs...)
 	if out, err := cmd.CombinedOutput(); err != nil {
+		// Cgroup fallback: retry via systemd-run
+		if isCgroupPermErr(err) {
+			slog.Debug("cgroup fallback via systemd-run (EnsurePgpass)")
+			runArgs := append([]string{"--user", "--scope", "--quiet", m.podman}, execArgs...)
+			cmd2 := exec.Command("systemd-run", runArgs...)
+			if out2, err2 := cmd2.CombinedOutput(); err2 != nil {
+				return fmt.Errorf("creating .pgpass: %w (output: %s)", err2, string(out2))
+			}
+			return nil
+		}
 		return fmt.Errorf("creating .pgpass: %w (output: %s)", err, string(out))
 	}
 	return nil

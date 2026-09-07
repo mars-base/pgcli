@@ -30,13 +30,16 @@ curl -fsSL https://raw.githubusercontent.com/mars-base/pgcli/main/scripts/instal
 ## 初始化配置
 
 ```bash
+# 创建基础目录
+mkdir -p ~/pg
+
 # 初始化配置并创建默认实例
-pg config init --add default --base-dir /data/pg
+pg config init --add default --base-dir ~/pg
 ```
 
 这会在 `~/.pgcli/pg.yaml` 创建带有合理默认值的配置，包括：
 - 名为 `default` 的默认实例
-- 数据目录 `/data/pg/default`
+- 数据目录 `~/pg/default`
 - 从 35432 开始自动分配的端口
 
 ## 启动实例
@@ -72,6 +75,9 @@ pg list
 
 # 停止实例
 pg stop
+
+# 停止所有实例、备份容器和 PgBouncer
+pg stop --all
 
 # 启动实例
 pg start
@@ -185,4 +191,5 @@ Shell 以 `root` 身份在容器内运行，可以完全访问：
 - 了解[备份](../backup/)与[恢复](../restore/)
 - 设置[复制](../replica/)以实现高可用
 - 探索[扩展](../extensions/)管理
+- 配置[开机自启](../autostart/)用于生产部署
 - 了解[管理](../administration/)

@@ -16,9 +16,12 @@ cascade:
 
 使用 pgcli 管理 PostgreSQL 数据库的完整指南。
 
+**PostgreSQL 18** — 可用于生产环境。
+
 - [快速开始](/docs/quickstart/) — 安装与基本用法
 - [备份](/docs/backup/) — 快照与 pgBackRest 管理
 - [恢复](/docs/restore/) — 时间点恢复（PITR）
 - [复制](/docs/replica/) — 只读副本与故障转移
 - [扩展](/docs/extensions/) — 安装和管理 PostgreSQL 扩展
+- [开机自启](/docs/autostart/) — 重启后自动启动实例和服务
 {.cards}

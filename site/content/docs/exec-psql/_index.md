@@ -1,6 +1,6 @@
 ---
-title: "Exec, psql, and shell"
-description: "exec, psql, and shell guide for pgcli"
+title: "SQL Commands"
+description: "SQL commands guide for pgcli"
 weight: 90
 icon: fa-solid fa-terminal
 menus:

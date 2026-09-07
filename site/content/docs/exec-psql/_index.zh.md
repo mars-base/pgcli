@@ -1,6 +1,6 @@
 ---
-title: Exec、psql 和 shell
-description: pg exec、psql 和 shell 指南
+title: SQL 命令
+description: pgcli SQL 命令指南
 weight: 20
 icon: fa-solid fa-book
 cascade:
