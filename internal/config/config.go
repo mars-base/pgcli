@@ -16,11 +16,12 @@ import (
 // Config is the complete pgcli configuration.
 type Config struct {
 	BaseDir            string                    `yaml:"base_dir,omitempty"`
-	Network            string                    `yaml:"network,omitempty"`            // shared podman network name, persisted at top level
-	Namespace          string                    `yaml:"namespace,omitempty"`          // container name namespace, empty = disabled (default)
+	Network            string                    `yaml:"network,omitempty"`              // shared podman network name, persisted at top level
+	Namespace          string                    `yaml:"namespace,omitempty"`            // container name namespace, empty = disabled (default)
 	PGStartPort        int                       `yaml:"pg_start_port,omitempty"`        // starting PG host port, default 35432
 	PGSSHPort          int                       `yaml:"pg_ssh_port,omitempty"`          // starting SSH host port, default 42201
 	PgBouncerStartPort int                       `yaml:"pgbouncer_start_port,omitempty"` // starting PgBouncer host port, default 56432
+	EtcdStartPort      int                       `yaml:"etcd_start_port,omitempty"`      // starting etcd client host port, default 2379 (peer gets the next free port)
 	Postgres           PostgresConfig            `yaml:"postgres"`
 	Podman             PodmanConfig              `yaml:"podman"`
 	PITR               PITRConfig                `yaml:"pitr"`
@@ -67,9 +68,11 @@ type AddonsConfig struct {
 
 // TopAddonsConfig holds top-level (cross-instance) addon configurations.
 // These are for addons targeting PG instances NOT managed locally by pgcli
-// (e.g. a PgBouncer fronting a remote database via --dsn).
+// (e.g. a PgBouncer fronting a remote database via --dsn), and for shared
+// infrastructure addons like etcd.
 type TopAddonsConfig struct {
 	PgBouncer map[string]PgBouncerConfig `yaml:"pgbouncer,omitempty"`
+	Etcd      map[string]EtcdConfig      `yaml:"etcd,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -78,8 +81,8 @@ type PgBouncerConfig struct {
 	ImageTag        string `yaml:"image_tag,omitempty"`         // edoburu/pgbouncer:latest (default)
 	HostPort        int    `yaml:"host_port,omitempty"`         // 56432+ auto-assigned
 	PoolMode        string `yaml:"pool_mode,omitempty"`         // transaction (default)
-	DSN             string `yaml:"dsn,omitempty"`              // remote PG DSN (remote mode only)
-	BackendHost     string `yaml:"backend_host,omitempty"`     // backend PG host:port (e.g. "127.0.0.1:35435")
+	DSN             string `yaml:"dsn,omitempty"`               // remote PG DSN (remote mode only)
+	BackendHost     string `yaml:"backend_host,omitempty"`      // backend PG host:port (e.g. "127.0.0.1:35435")
 	MaxClientConn   int    `yaml:"max_client_conn,omitempty"`   // 100 (default)
 	DefaultPoolSize int    `yaml:"default_pool_size,omitempty"` // 20 (default)
 
@@ -90,13 +93,13 @@ type PgBouncerConfig struct {
 	MaxUserConnections int `yaml:"max_user_connections,omitempty"` // 0 (unlimited)
 
 	// Timeouts (in seconds, 0 = disabled/use default)
-	ServerIdleTimeout     int `yaml:"server_idle_timeout,omitempty"`      // 600 (default)
-	ServerLifetime        int `yaml:"server_lifetime,omitempty"`          // 3600 (default)
-	ServerConnectTimeout  int `yaml:"server_connect_timeout,omitempty"`   // 15 (default)
-	QueryTimeout          int `yaml:"query_timeout,omitempty"`            // 0 (disabled, default)
-	QueryWaitTimeout      int `yaml:"query_wait_timeout,omitempty"`       // 120 (default)
+	ServerIdleTimeout      int `yaml:"server_idle_timeout,omitempty"`      // 600 (default)
+	ServerLifetime         int `yaml:"server_lifetime,omitempty"`          // 3600 (default)
+	ServerConnectTimeout   int `yaml:"server_connect_timeout,omitempty"`   // 15 (default)
+	QueryTimeout           int `yaml:"query_timeout,omitempty"`            // 0 (disabled, default)
+	QueryWaitTimeout       int `yaml:"query_wait_timeout,omitempty"`       // 120 (default)
 	IdleTransactionTimeout int `yaml:"idle_transaction_timeout,omitempty"` // 0 (disabled, default)
-	TransactionTimeout    int `yaml:"transaction_timeout,omitempty"`      // 0 (disabled, default)
+	TransactionTimeout     int `yaml:"transaction_timeout,omitempty"`      // 0 (disabled, default)
 
 	// Admin access
 	AdminUsers string `yaml:"admin_users,omitempty"` // comma-separated list
@@ -109,6 +112,20 @@ type PgBouncerConfig struct {
 	// Autostart starts this PgBouncer container automatically on host boot
 	// via the boot service (`pg autostart enable --pgbouncer`).
 	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// EtcdConfig holds a standalone etcd addon (a single-member key-value store,
+// the DCS layer a Patroni/PostgreSQL HA cluster needs). etcd is shared
+// infrastructure, so it is stored at the top level (addons.etcd.<name>)
+// rather than under a specific instance.
+type EtcdConfig struct {
+	ContainerName string `yaml:"container_name"`         // e.g. pgcli-etcd-ns-<name>
+	Name          string `yaml:"name,omitempty"`         // etcd --name, defaults to the addon key
+	ClusterName   string `yaml:"cluster_name,omitempty"` // etcd --initial-cluster-token (unique cluster id; all members must match)
+	ImageTag      string `yaml:"image_tag,omitempty"`    // quay.io/coreos/etcd:v3.5.30 (default)
+	DataDir       string `yaml:"data_dir,omitempty"`     // data dir root; member uses <root>/<name>/data, default <baseDir>/addon/etcd
+	ClientPort    int    `yaml:"client_port,omitempty"`  // 2379+ auto-assigned
+	PeerPort      int    `yaml:"peer_port,omitempty"`    // next free port after ClientPort
 }
 
 // PostgresConfig holds PostgreSQL connection settings.
@@ -162,10 +179,11 @@ type PigstyConfig struct {
 // Default returns a Config populated with default values.
 func Default() *Config {
 	return &Config{
-		BaseDir:     "", // empty means use platform default
-		PGStartPort: 35432,
-		PGSSHPort:   42201,
+		BaseDir:            "", // empty means use platform default
+		PGStartPort:        35432,
+		PGSSHPort:          42201,
 		PgBouncerStartPort: 56432,
+		EtcdStartPort:      2379,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -342,11 +360,12 @@ type displayConfig struct {
 	PGStartPort        int                       `yaml:"pg_start_port,omitempty"`
 	PGSSHPort          int                       `yaml:"pg_ssh_port,omitempty"`
 	PgBouncerStartPort int                       `yaml:"pgbouncer_start_port,omitempty"`
+	EtcdStartPort      int                       `yaml:"etcd_start_port,omitempty"`
 	Logging            LoggingConfig             `yaml:"logging"`
 	Backup             BackupConfig              `yaml:"backup"`
 	Pigsty             PigstyConfig              `yaml:"pigsty"`
 	Addons             TopAddonsConfig           `yaml:"addons,omitempty"`
-	Instances          map[string]InstanceConfig  `yaml:"instances"`
+	Instances          map[string]InstanceConfig `yaml:"instances"`
 }
 
 // Display returns a view of the config suitable for display or saving.
@@ -428,6 +447,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.PgBouncerStartPort == 0 {
 		c.PgBouncerStartPort = d.PgBouncerStartPort
+	}
+	if c.EtcdStartPort == 0 {
+		c.EtcdStartPort = d.EtcdStartPort
 	}
 
 	// Postgres
@@ -587,6 +609,23 @@ func (c *Config) ApplyDefaults() {
 		c.Addons.PgBouncer[name] = addon
 	}
 
+	// Top-level addons defaults (etcd)
+	for name, addon := range c.Addons.Etcd {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ClusterName == "" {
+			addon.ClusterName = "pgcli-etcd"
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-etcd" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = "quay.io/coreos/etcd:v3.5.30"
+		}
+		c.Addons.Etcd[name] = addon
+	}
+
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
 	c.autoAssignPorts()
 }
@@ -620,6 +659,7 @@ func (c *Config) autoAssignPorts() {
 	pgBase := c.PGStartPort
 	sshBase := c.PGSSHPort
 	pbBase := c.PgBouncerStartPort
+	etcdBase := c.EtcdStartPort
 
 	// Probe already-used ports so multiple config files (or other services)
 	// on the same host don't collide.
@@ -648,10 +688,20 @@ func (c *Config) autoAssignPorts() {
 			assignedPB[addon.HostPort] = true
 		}
 	}
+	assignedEtcd := map[int]bool{}
+	for _, addon := range c.Addons.Etcd {
+		if addon.ClientPort != 0 {
+			assignedEtcd[addon.ClientPort] = true
+		}
+		if addon.PeerPort != 0 {
+			assignedEtcd[addon.PeerPort] = true
+		}
+	}
 
 	nextPG := pgBase
 	nextSSH := sshBase
 	nextPB := pbBase
+	nextEtcd := etcdBase
 	for _, name := range sorted {
 		inst := c.Instances[name]
 		changed := false
@@ -705,6 +755,35 @@ func (c *Config) autoAssignPorts() {
 			c.Addons.PgBouncer[name] = addon
 		} else if addon.HostPort >= nextPB && pbBase > 0 {
 			nextPB = addon.HostPort + 1
+		}
+	}
+
+	// Allocate ports for top-level addons (etcd members, client + peer).
+	// Both ports are taken together so a member's two ports never overlap
+	// another member's or any other service's.
+	for name, addon := range c.Addons.Etcd {
+		if addon.ClientPort == 0 && etcdBase > 0 {
+			for (usedPorts != nil && usedPorts[nextEtcd]) || assignedEtcd[nextEtcd] {
+				nextEtcd++
+			}
+			clientPort := nextEtcd
+			nextEtcd++
+			for (usedPorts != nil && usedPorts[nextEtcd]) || assignedEtcd[nextEtcd] {
+				nextEtcd++
+			}
+			peerPort := nextEtcd
+			nextEtcd++
+
+			addon.ClientPort = clientPort
+			addon.PeerPort = peerPort
+			c.Addons.Etcd[name] = addon
+		} else if addon.ClientPort != 0 {
+			if addon.ClientPort >= nextEtcd {
+				nextEtcd = addon.ClientPort + 1
+			}
+			if addon.PeerPort >= nextEtcd {
+				nextEtcd = addon.PeerPort + 1
+			}
 		}
 	}
 }

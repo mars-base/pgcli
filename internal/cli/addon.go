@@ -3,6 +3,9 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -31,6 +34,10 @@ Two modes:
           Stored under top-level addons in config.
           --pg-name is required to identify this remote pooler.
 
+Infra addons (shared, not tied to one instance):
+  pg addon install etcd
+          Stored under top-level addons.etcd in config.
+
 Commands:
   pg addon install <addon>   install an add-on
   pg addon list              list all installed add-ons
@@ -48,17 +55,24 @@ var addonInstallCmd = &cobra.Command{
 
 Currently supported add-ons:
   pgbouncer   connection pooler (transaction mode)
+  etcd        standalone key-value store (HA cluster DCS)
 
-Two modes:
+Two modes (pgbouncer):
   Local:  pg addon install pgbouncer -i <instance>
   Remote: pg addon install pgbouncer --dsn <dsn> --pg-name <name>
+
+Infra addon (etcd — shared, not tied to an instance):
+  pg addon install etcd [--name ha] [--client-port N] [--peer-port N]
+                        [--image ...] [--data-dir ...]
 
 Re-running install is idempotent — it re-syncs all users and passwords from
 pg_shadow, regenerates config files and restarts the container.
 
 Examples:
   pg addon install pgbouncer -i proj01
-  pg addon install pgbouncer --dsn "postgres://admin:pass@host:35432/proj01_db" --pg-name remote-proj01`,
+  pg addon install pgbouncer --dsn "postgres://admin:pass@host:35432/proj01_db" --pg-name remote-proj01
+  pg addon install etcd
+  pg addon install etcd --name ha --client-port 2379 --peer-port 2380`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonInstall(args[0], cmd)
@@ -138,6 +152,15 @@ func init() {
 	addonInstallCmd.Flags().Int("log-disconnections", 0, "log client disconnections (default 1=enabled)")
 
 	addonRemoveCmd.Flags().String("pg-name", "", "name of a remote PgBouncer to remove")
+
+	// etcd flags (top-level shared-infrastructure addon)
+	addonInstallCmd.Flags().String("name", "", "name for the etcd member (also the addon key; default \"etcd\")")
+	addonInstallCmd.Flags().Int("client-port", 0, "etcd client host port (0=auto-assign from etcd_start_port)")
+	addonInstallCmd.Flags().Int("peer-port", 0, "etcd peer host port (0=auto-assign, next free port after client)")
+	addonInstallCmd.Flags().String("image", "", "etcd image tag (default quay.io/coreos/etcd:v3.5.30)")
+	addonInstallCmd.Flags().String("cluster", "", "etcd cluster name (--initial-cluster-token, default \"pgcli-etcd\")")
+	addonInstallCmd.Flags().String("data-dir", "", "etcd data dir root, absolute or relative to base_dir (default <base_dir>/addon/etcd); each member uses <root>/<name>/data")
+	addonRemoveCmd.Flags().String("name", "", "name of the etcd member to remove (default \"etcd\")")
 }
 
 // ---------------------------------------------------------------------------
@@ -145,8 +168,13 @@ func init() {
 // ---------------------------------------------------------------------------
 
 func runAddonInstall(addonName string, cmd *cobra.Command) error {
-	if addonName != "pgbouncer" {
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer)", addonName)
+	switch addonName {
+	case "etcd":
+		return runAddonInstallEtcd(cmd)
+	case "pgbouncer":
+		// falls through to the PgBouncer flow below
+	default:
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -454,6 +482,185 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 }
 
 // ---------------------------------------------------------------------------
+// install logic — etcd
+// ---------------------------------------------------------------------------
+
+// runAddonInstallEtcd installs a standalone single-member etcd container as a
+// top-level (shared infrastructure) addon. Unlike pgbouncer it is not tied to
+// a specific instance and needs no DSN/auth setup.
+func runAddonInstallEtcd(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "etcd"
+	}
+	imageTag, _ := cmd.Flags().GetString("image")
+	clientPort, _ := cmd.Flags().GetInt("client-port")
+	peerPort, _ := cmd.Flags().GetInt("peer-port")
+	dataDir, _ := cmd.Flags().GetString("data-dir")
+	cluster, _ := cmd.Flags().GetString("cluster")
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.Etcd == nil {
+		cfg.Addons.Etcd = make(map[string]config.EtcdConfig)
+	}
+	existing, ok := cfg.Addons.Etcd[name]
+	if !ok {
+		existing = config.EtcdConfig{
+			ContainerName: "pgcli-etcd" + nsSuffixCLI(cfg.Namespace) + "-" + name,
+			Name:          name,
+		}
+	}
+	if imageTag != "" {
+		existing.ImageTag = imageTag
+	}
+	if clientPort != 0 {
+		existing.ClientPort = clientPort
+	}
+	if peerPort != 0 {
+		existing.PeerPort = peerPort
+	}
+	if dataDir != "" {
+		// Resolve relative paths against the config's base_dir (falling back
+		// to the platform default when unset); absolute paths are kept as-is.
+		// Storing the resolved path keeps the persisted config portable and lets
+		// the manager tell a custom dir from the computed default.
+		base := cfg.BaseDir
+		if base == "" {
+			base = platform.DefaultConfigDir()
+		}
+		existing.DataDir = resolveUnderBase(base, dataDir)
+	}
+	if existing.Name == "" {
+		existing.Name = name
+	}
+	if cluster != "" {
+		existing.ClusterName = cluster
+	}
+	cfg.Addons.Etcd[name] = existing
+
+	// Fill defaults and auto-assign any unset ports.
+	cfg.ApplyDefaults()
+	ec := cfg.Addons.Etcd[name]
+
+	em, err := podman.NewEtcdManager(cfg)
+	if err != nil {
+		return fmt.Errorf("etcd manager: %w", err)
+	}
+
+	// Gather every member that belongs to this member's cluster (same
+	// ClusterName), excluding the member being installed. Those are the
+	// peers we join when this is not the cluster's first member.
+	var peers []config.EtcdConfig
+	for k, v := range cfg.Addons.Etcd {
+		if k != name && v.ClusterName == ec.ClusterName {
+			peers = append(peers, v)
+		}
+	}
+	sort.Slice(peers, func(i, j int) bool { return peers[i].Name < peers[j].Name })
+
+	peerURL := fmt.Sprintf("http://127.0.0.1:%d", ec.PeerPort)
+	initialCluster, state := bootstrapCluster(ec, peers)
+
+	if len(peers) == 0 {
+		// First member: bootstrap the cluster.
+		fmt.Println("-> Bootstrapping etcd cluster...")
+	} else {
+		// Joining an existing cluster: register the member with a running
+		// peer first, then start with --initial-cluster-state existing.
+		coord, ok := pickCoordinator(em, ec, peers)
+		if !ok {
+			return fmt.Errorf("cluster %q has no running member to join; start one of the existing etcd members first", ec.ClusterName)
+		}
+		registered, err := em.MemberExists(coord.ContainerName, coord.ClientPort, ec.Name)
+		if err != nil {
+			return fmt.Errorf("querying etcd members: %w", err)
+		}
+		if !registered {
+			fmt.Println("-> Registering new member with the cluster...")
+			if err := em.MemberAdd(coord.ContainerName, coord.ClientPort, ec.Name, peerURL); err != nil {
+				return err
+			}
+		}
+		fmt.Println("-> Starting etcd container (joining cluster)...")
+	}
+
+	if err := em.EnsureContainer(&ec, initialCluster, state); err != nil {
+		return err
+	}
+
+	cfg.Addons.Etcd[name] = ec
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Printf("✓ etcd installed: %q\n", name)
+	fmt.Printf("  Container:    %s\n", ec.ContainerName)
+	fmt.Printf("  Cluster:      %s\n", ec.ClusterName)
+	fmt.Printf("  Data dir:     %s\n", em.DataDir(&ec))
+	fmt.Printf("  Client port:  %d\n", ec.ClientPort)
+	fmt.Printf("  Peer port:    %d\n", ec.PeerPort)
+	fmt.Println()
+	fmt.Printf("  Client URL: http://127.0.0.1:%d\n", ec.ClientPort)
+	fmt.Printf("  Connect (etcdctl): ETCDCTL_ENDPOINTS=http://127.0.0.1:%d\n", ec.ClientPort)
+	return nil
+}
+
+// resolveUnderBase turns a user-supplied data dir into an absolute path:
+// absolute values are returned cleaned as-is, relative values are joined onto
+// base (the config's base_dir). This is what lets `--data-dir ./etcd-data`
+// land under the pg config file's base directory.
+func resolveUnderBase(base, dir string) string {
+	if filepath.IsAbs(dir) {
+		return filepath.Clean(dir)
+	}
+	return filepath.Join(base, dir)
+}
+
+// bootstrapCluster returns the etcd --initial-cluster value and its state for
+// a member, given the other members already in the same cluster. The first
+// member of a cluster bootstraps with state "new" (single-member list);
+// subsequent members join with state "existing" and the full peer list.
+func bootstrapCluster(ec config.EtcdConfig, peers []config.EtcdConfig) (initialCluster, state string) {
+	if len(peers) == 0 {
+		self := fmt.Sprintf("%s=http://127.0.0.1:%d", ec.Name, ec.PeerPort)
+		return self, "new"
+	}
+	parts := make([]string, 0, len(peers)+1)
+	for _, p := range peers {
+		parts = append(parts, fmt.Sprintf("%s=http://127.0.0.1:%d", p.Name, p.PeerPort))
+	}
+	parts = append(parts, fmt.Sprintf("%s=http://127.0.0.1:%d", ec.Name, ec.PeerPort))
+	return strings.Join(parts, ","), "existing"
+}
+
+// pickCoordinator returns a running member of the cluster to use for member
+// registration, preferring the member's own already-running container (so a
+// restart doesn't need a re-add), then any running peer.
+func pickCoordinator(em *podman.EtcdManager, ec config.EtcdConfig, peers []config.EtcdConfig) (config.EtcdConfig, bool) {
+	if running, err := em.ContainerRunning(ec.ContainerName); err == nil && running {
+		return ec, true
+	}
+	for _, p := range peers {
+		if running, err := em.ContainerRunning(p.ContainerName); err == nil && running {
+			return p, true
+		}
+	}
+	return config.EtcdConfig{}, false
+}
+
+// ---------------------------------------------------------------------------
 // list logic
 // ---------------------------------------------------------------------------
 
@@ -471,6 +678,7 @@ func runAddonList() error {
 	}
 
 	pbMgr, _ := podman.NewPgBouncerManager(cfg)
+	em, _ := podman.NewEtcdManager(cfg)
 
 	// Local add-ons (from instances)
 	fmt.Println("Local add-ons:")
@@ -525,6 +733,31 @@ func runAddonList() error {
 		fmt.Println("  (none)")
 	}
 
+	// etcd (shared infrastructure, top-level addon)
+	fmt.Println()
+	fmt.Println("Infra add-ons (etcd):")
+	hasEtcd := false
+	for name, ec := range cfg.Addons.Etcd {
+		hasEtcd = true
+		status := "stopped"
+		if em != nil {
+			if running, err := em.ContainerRunning(ec.ContainerName); err == nil && running {
+				status = "running"
+			}
+		}
+		fmt.Printf("  %s (name: %s)\n", "etcd", name)
+		fmt.Printf("    Status:      %s\n", status)
+		fmt.Printf("    Cluster:     %s\n", ec.ClusterName)
+		fmt.Printf("    Client URL:  http://127.0.0.1:%d\n", ec.ClientPort)
+		fmt.Printf("    Client port: %d\n", ec.ClientPort)
+		fmt.Printf("    Peer port:   %d\n", ec.PeerPort)
+		fmt.Printf("    Image:       %s\n", ec.ImageTag)
+		fmt.Printf("    Container:   %s\n", ec.ContainerName)
+	}
+	if !hasEtcd {
+		fmt.Println("  (none)")
+	}
+
 	return nil
 }
 
@@ -533,8 +766,13 @@ func runAddonList() error {
 // ---------------------------------------------------------------------------
 
 func runAddonRemove(addonName string, cmd *cobra.Command) error {
-	if addonName != "pgbouncer" {
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer)", addonName)
+	switch addonName {
+	case "etcd":
+		return runAddonRemoveEtcd(cmd)
+	case "pgbouncer":
+		// falls through to the PgBouncer flow below
+	default:
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -613,6 +851,74 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 	}
 
 	fmt.Printf("✓ PgBouncer removed from instance %q\n", cfgInstance)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// remove logic — etcd
+// ---------------------------------------------------------------------------
+
+func runAddonRemoveEtcd(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "etcd"
+	}
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.Etcd == nil {
+		return fmt.Errorf("no etcd add-ons configured")
+	}
+	ec, ok := cfg.Addons.Etcd[name]
+	if !ok {
+		return fmt.Errorf("etcd %q not found", name)
+	}
+
+	em, err := podman.NewEtcdManager(cfg)
+	if err != nil {
+		return fmt.Errorf("etcd manager: %w", err)
+	}
+
+	// If other members of the same cluster are running, deregister this one
+	// from the cluster first (via a running peer) so the quorum does not keep
+	// a stale entry. Best-effort: skip when no peer is available (e.g. last
+	// member, or cluster already down).
+	for k, p := range cfg.Addons.Etcd {
+		if k == name || p.ClusterName != ec.ClusterName {
+			continue
+		}
+		if running, err := em.ContainerRunning(p.ContainerName); err == nil && running {
+			fmt.Println("-> Deregistering member from the cluster...")
+			if err := em.MemberRemove(p.ContainerName, p.ClientPort, ec.Name); err != nil {
+				return err
+			}
+			break
+		}
+	}
+
+	fmt.Printf("-> Removing etcd %q...\n", name)
+	if err := em.Remove(&ec); err != nil {
+		return err
+	}
+
+	delete(cfg.Addons.Etcd, name)
+	if len(cfg.Addons.Etcd) == 0 {
+		cfg.Addons.Etcd = nil
+	}
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	fmt.Printf("✓ etcd %q removed\n", name)
 	return nil
 }
 

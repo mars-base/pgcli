@@ -1,0 +1,367 @@
+---
+title: "PgBouncer"
+description: "通过 PgBouncer 插件为 PostgreSQL 实例提供连接池"
+weight: 20
+---
+
+PgBouncer 是轻量级的 PostgreSQL 连接池。作为 pgcli 插件，它以容器形式运行在
+一个或多个 PostgreSQL 实例前面，在大量短生命周期客户端会话之间复用服务端连接 ——
+默认使用事务级池化。
+
+PgBouncer 支持两种部署模式：
+
+- **本地模式：** `pg addon install pgbouncer -i <instance>` —— 存储在 `instances.<name>.addons`
+- **远程模式：** `pg addon install pgbouncer --dsn <dsn> --pg-name <name>` —— 存储在顶层 `addons.pgbouncer`
+
+## 工作原理
+
+1. **`pg addon install pgbouncer`** 生成配置文件并启动容器
+2. 配置文件存储在 `<base-dir>/addon/pgbouncer/<instance>/`
+3. 容器通过主机网络与 PostgreSQL 通信
+4. 配置文件更新时自动重启容器应用变更
+
+**命名空间隔离：** PgBouncer 遵循配置的 `namespace` 设置。容器名和认证用户包含
+命名空间前缀（例如 `pgb_<namespace>_<instance>`），因此使用不同命名空间的不同配置
+文件可以为同一个 PostgreSQL 实例创建独立的连接池，而不会相互冲突。
+
+```bash
+# 使用命名空间 "prod" 的配置
+pg -c prod-pg.yaml addon install pgbouncer -i mypg
+# → 容器: pgcli-pgbouncer-prod-mypg, 认证用户: pgb_prod_mypg
+
+# 使用命名空间 "staging" 的配置
+pg -c staging-pg.yaml addon install pgbouncer -i mypg
+# → 容器: pgcli-pgbouncer-staging-mypg, 认证用户: pgb_staging_mypg
+```
+
+## 命令
+
+### 安装
+
+```bash
+# 本地模式：为托管实例安装
+pg addon install pgbouncer -i mypg
+
+# 远程模式：为远程 PG 实例安装
+pg addon install pgbouncer \
+  --dsn "postgres://admin:pass@10.241.20.50:35432/mypg_db" \
+  --pg-name my-remote-pool
+
+# 指定连接池参数
+pg addon install pgbouncer -i mypg \
+  --max-client-conn 200 \
+  --default-pool-size 30 \
+  --min-pool-size 5 \
+  --reserve-pool-size 10 \
+  --max-db-connections 50 \
+  --query-timeout 60 \
+  --admin-users admin \
+  --log-connections 1
+```
+
+**参数说明：**
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--dsn` | PG 实例连接字符串（远程模式） | — |
+| `--pg-name` | 远程 PgBouncer 标识名（与 --dsn 一起使用） | — |
+| `--max-client-conn` | 最大客户端连接数 | 100 |
+| `--default-pool-size` | 默认连接池大小 | 20 |
+| `--min-pool-size` | 最小连接池大小（预热） | 0 |
+| `--reserve-pool-size` | 预留连接池大小（突发） | 0 |
+| `--max-db-connections` | 每数据库最大连接数 | 50 |
+| `--max-user-connections` | 每用户最大连接数 | 0（无限制） |
+| `--server-idle-timeout` | 空闲服务端连接超时（秒） | 600 |
+| `--server-lifetime` | 服务端连接最大生命周期（秒） | 3600 |
+| `--server-connect-timeout` | 连接 PostgreSQL 超时（秒） | 15 |
+| `--query-timeout` | 查询超时（秒） | 0（无限制） |
+| `--query-wait-timeout` | 等待连接超时（秒） | 120 |
+| `--idle-transaction-timeout` | 空闲事务超时（秒） | 0 |
+| `--transaction-timeout` | 事务超时（秒） | 0 |
+| `--admin-users` | 管理员用户列表 | （空） |
+| `--stats-users` | 只读统计用户列表 | （空） |
+| `--log-connections` | 记录连接日志 | 0 |
+| `--log-disconnections` | 记录断开日志 | 0 |
+
+### 列出
+
+```bash
+pg addon list
+```
+
+PgBouncer 出现在 **Local add-ons** / **Remote add-ons** 段：
+
+```
+Local add-ons:
+  pgbouncer (instance: mypg)
+    Status:    running
+    Host:      127.0.0.1:56432
+    Port:      56432
+    Pool mode: transaction
+    Container: pgcli-pgbouncer-default-mypg
+
+Remote add-ons:
+  pgbouncer (pg-name: my-remote-pool)
+    Status:    running
+    Host:      10.241.20.50:56433
+    Port:      56433
+    Pool mode: transaction
+    Container: pgcli-pgbouncer-default-my-remote-pool
+```
+
+### 卸载
+
+```bash
+# 卸载本地 PgBouncer
+pg addon remove pgbouncer -i mypg
+
+# 卸载远程 PgBouncer
+pg addon remove pgbouncer --pg-name my-remote-pool
+```
+
+工作流：
+1. 停止并删除插件容器
+2. 删除 `<base-dir>/addon/pgbouncer/<instance>/` 目录及配置文件
+3. 从 `pg.yaml` 中移除插件配置
+
+## 配置文件
+
+**本地模式**（存储在 `instances.<name>.addons` 下）：
+```yaml
+instances:
+  mypg:
+    addons:
+      pgbouncer:
+        enabled: true
+        max_client_conn: 200
+        default_pool_size: 30
+        min_pool_size: 5
+        reserve_pool_size: 10
+        max_db_connections: 50
+        query_timeout: 60
+        admin_users: admin
+        log_connections: 1
+```
+
+**远程模式**（存储在顶层 `addons` 下）：
+```yaml
+addons:
+  pgbouncer:
+    my-remote-pool:
+      container_name: pgcli-pgbouncer-default-my-remote-pool
+      host_port: 56433
+      pool_mode: transaction
+      dsn: "postgres://admin:pass@10.241.20.50:35432/mypg_db"
+      max_client_conn: 200
+      default_pool_size: 30
+```
+
+生成的配置文件按实例存储在 `<base-dir>/addon/pgbouncer/`：
+
+```
+<base-dir>/addon/pgbouncer/
+├── mypg/
+│   ├── pgbouncer.ini    # PgBouncer 主配置
+│   └── userlist.txt     # 认证用户凭据（自动重新生成）
+└── my-remote-pool/
+    ├── pgbouncer.ini
+    └── userlist.txt
+```
+
+## 认证方式
+
+PgBouncer 使用 `auth_query` 方式进行动态密码查询：
+
+1. 为每个连接池在 PostgreSQL 上创建独立的认证用户，命名为 `pgb_<namespace>_<instance>`（例如 `pgb_default_mypg`、`pgb_test-ns_my-remote`）
+2. 安装共享的 `SECURITY DEFINER` 函数 `pgbouncer_lookup()` 用于查询 `pg_authid`
+3. 当客户端连接时，PgBouncer 使用自己的认证用户执行 auth_query，获取真实用户的密码哈希
+4. 密码缓存在 PgBouncer 内存中，后续连接直接使用
+
+`userlist.txt` 仅包含连接池的认证用户（明文密码）。其他用户通过 auth_query 动态认证——无需密码同步。
+
+每个连接池都有独立的 PG 认证用户，因此多个连接池（本地或跨主机）指向同一 PG 实例时不会相互冲突。
+
+**修改 PostgreSQL 用户密码后**，重新运行 `pg addon install pgbouncer` 重置认证缓存，或连接管理控制台执行 `RECONNECT`。
+
+## 连接方式
+
+客户端通过插件端口连接：
+
+```bash
+# 直接连接 PostgreSQL
+pg exec -i mypg "SELECT version()"
+
+# 通过 PgBouncer 连接
+pg exec --dsn "postgres://user:pass@127.0.0.1:56432/mypg_db" "SELECT version()"
+```
+
+**端口分配：** PgBouncer 默认使用端口 56432。如果端口被占用，pgcli 会自动分配下一个可用端口。查看当前端口：`pg addon list`。
+
+## 使用场景
+
+### 高并发场景
+
+```bash
+pg addon install pgbouncer -i mypg \
+  --max-client-conn 1000 \
+  --default-pool-size 50 \
+  --reserve-pool-size 20 \
+  --max-db-connections 100
+```
+
+### 短连接应用
+
+```bash
+pg addon install pgbouncer -i mypg \
+  --pool-mode transaction \
+  --server-idle-timeout 60 \
+  --server-lifetime 600
+```
+
+### 长连接应用
+
+```bash
+pg addon install pgbouncer -i mypg \
+  --pool-mode session \
+  --server-lifetime 86400
+```
+
+### 只读副本
+
+```bash
+pg addon install pgbouncer -i mypg-replica \
+  --pool-mode transaction \
+  --max-db-connections 30 \
+  --query-timeout 30
+```
+
+## 监控
+
+PgBouncer 提供管理控制台用于监控连接池和运行状态。
+
+### 连接管理控制台
+
+使用管理员用户连接到 `pgbouncer` 虚拟数据库：
+
+```bash
+pg exec --dsn "postgres://<管理员用户>:<密码>@127.0.0.1:<pgbouncer端口>/pgbouncer" "SHOW pools"
+```
+
+示例：
+```bash
+pg exec --dsn "postgres://admin:secret@127.0.0.1:56432/pgbouncer" "SHOW pools"
+```
+
+**注意：** 只有在 `admin_users` 中列出的用户才能访问管理控制台。
+
+### 常用 SHOW 命令
+
+| 命令 | 说明 |
+|------|------|
+| `SHOW pools` | 连接池状态（活跃/等待的客户端和服务端连接数） |
+| `SHOW clients` | 所有当前客户端连接详情 |
+| `SHOW servers` | 所有当前服务端（PostgreSQL）连接详情 |
+| `SHOW databases` | 已配置的数据库及其连接参数 |
+| `SHOW stats` | 流量统计（事务数、查询数、收发字节数） |
+| `SHOW config` | 所有运行时的配置参数 |
+| `SHOW sockets` | 底层 TCP 套接字信息 |
+| `SHOW active_sockets` | 活跃的 TCP 套接字 |
+| `SHOW mem` | 内存使用统计 |
+| `SHOW lists` | 各类对象数量汇总 |
+
+### 示例
+
+```bash
+# 检查连接池状态
+pg exec --dsn "postgres://admin:secret@127.0.0.1:56432/pgbouncer" "SHOW pools"
+
+# 查看活跃的客户端连接
+pg exec --dsn "postgres://admin:secret@127.0.0.1:56432/pgbouncer" "SHOW clients"
+
+# 查看 PostgreSQL 后端连接
+pg exec --dsn "postgres://admin:secret@127.0.0.1:56432/pgbouncer" "SHOW servers"
+
+# 查看当前配置
+pg exec --dsn "postgres://admin:secret@127.0.0.1:56432/pgbouncer" "SHOW config"
+
+# 查看流量统计
+pg exec --dsn "postgres://admin:secret@127.0.0.1:56432/pgbouncer" "SHOW stats"
+```
+
+### 其他管理命令
+
+| 命令 | 说明 |
+|------|------|
+| `RELOAD` | 重新加载配置文件 |
+| `PAUSE` | 暂停连接池（等待事务完成） |
+| `RESUME` | 恢复连接池 |
+| `RECONNECT` | 强制重新连接所有服务端连接 |
+| `SHUTDOWN` | 关闭 PgBouncer |
+
+## 故障排除
+
+### 连接池满
+
+```
+ERROR: no more connections allowed
+```
+
+原因：达到 `max_client_conn` 限制。
+
+```bash
+# 增加最大连接数
+pg addon install pgbouncer -i mypg --max-client-conn 500
+
+# 或减少连接池大小
+pg addon install pgbouncer -i mypg --default-pool-size 10
+```
+
+### 用户认证失败
+
+```
+FATAL: password authentication failed
+```
+
+原因：认证缓存包含过期的密码哈希。
+
+```bash
+# 重新运行 install 重置认证缓存
+pg addon install pgbouncer -i mypg
+```
+
+### 容器无法启动
+
+```bash
+# 查看容器日志
+podman logs pgcli-pgbouncer-default-mypg
+
+# 检查配置文件
+cat <base-dir>/addon/pgbouncer/mypg/pgbouncer.ini
+```
+
+常见原因：配置文件语法错误、用户列表格式不正确、端口被占用。
+
+### 查询超时
+
+```
+ERROR: query timeout
+```
+
+原因：查询执行时间超过 `query_timeout`。
+
+```bash
+# 增加查询超时或禁用
+pg addon install pgbouncer -i mypg --query-timeout 300
+# 或
+pg addon install pgbouncer -i mypg --query-timeout 0
+```
+
+## 注意事项
+
+- **插件端口：** PgBouncer 默认使用 56432 端口，确保防火墙规则允许访问
+- **用户密码：** 修改 PostgreSQL 用户密码后，需重新运行 `pg addon install` 重置认证缓存
+- **配置文件：** 手动编辑配置文件后，重启容器应用变更：
+  ```bash
+  podman restart pgcli-pgbouncer-default-mypg
+  ```
+- **事务模式：** `transaction` 模式不支持会话级功能（如临时表），需使用 `session` 模式
