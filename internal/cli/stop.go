@@ -123,6 +123,7 @@ func stopAllInstances() error {
 
 	// Stop PgBouncer containers
 	fmt.Println("\n-> Stopping PgBouncer containers...")
+	pgbStopped := 0
 	if pbm, err := podman.NewPgBouncerManager(cfg); err == nil {
 		for _, name := range names {
 			inst := cfg.Instances[name]
@@ -133,6 +134,7 @@ func stopAllInstances() error {
 						fmt.Printf("  [!] pgbouncer %s: %v\n", name, err)
 					} else {
 						fmt.Printf("  [OK] pgbouncer %s stopped\n", name)
+						pgbStopped++
 					}
 				}
 			}
@@ -144,9 +146,13 @@ func stopAllInstances() error {
 					fmt.Printf("  [!] pgbouncer %s (remote): %v\n", name, err)
 				} else {
 					fmt.Printf("  [OK] pgbouncer %s (remote) stopped\n", name)
+					pgbStopped++
 				}
 			}
 		}
+	}
+	if pgbStopped == 0 {
+		fmt.Println("  (no running PgBouncer containers)")
 	}
 
 	return firstErr
