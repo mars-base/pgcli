@@ -403,7 +403,7 @@ main() {
     run_test "Stop second instance for clone test" pg stop -i "$INSTANCE2"
 
     run_test "Clone stopped source fails" \
-        bash -c "out=\$('$BINARY' -c '$CONFIG_FILE' clone e2e-bad -i '$INSTANCE2' 2>&1); rc=\$?; [ \"\$rc\" -ne 0 ] && echo \"\$out\" | grep -q 'is not running'"
+        bash -c "out=\$('$BINARY' -c '$CONFIG_FILE' clone e2e-bad -i '$INSTANCE2' 2>&1); rc=\$?; [ \"\$rc\" -ne 0 ] && echo \"\$out\" | grep -q 'not found in config'"
 
     run_test "Clone unknown source fails" \
         bash -c "out=\$('$BINARY' -c '$CONFIG_FILE' clone e2e-bad2 -i nosuch-inst 2>&1); rc=\$?; [ \"\$rc\" -ne 0 ] && echo \"\$out\" | grep -q 'not found in config'"
