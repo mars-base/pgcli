@@ -644,6 +644,22 @@ test_pg_duckdb() {
         return 1
     fi
 
+    # 5. S3/MinIO remote file read (requires env vars, skipped otherwise)
+    #    PGDUCK_S3_ENDPOINT=<host:port> PGDUCK_S3_KEY=<ak> PGDUCK_S3_SECRET=<sk>
+    #    PGDUCK_S3_FILE=s3://<bucket>/<file> PGDUCK_S3_SCOPE=s3://<bucket> (optional)
+    if [[ -n "${PGDUCK_S3_ENDPOINT:-}${PGDUCK_S3_KEY:-}${PGDUCK_S3_SECRET:-}${PGDUCK_S3_FILE:-}" ]]; then
+        pg_scalar "SELECT duckdb.create_simple_secret('S3', '${PGDUCK_S3_KEY}', '${PGDUCK_S3_SECRET}', '', 'us-east-1', 'path', '', '${PGDUCK_S3_ENDPOINT}', '${PGDUCK_S3_SCOPE:-}', '', 'false');" > /dev/null
+        result=$(pg_scalar "SELECT * FROM duckdb.query(\$\$ SELECT count(*) AS cnt FROM read_csv('${PGDUCK_S3_FILE}', auto_detect=true) \$\$);")
+        if [[ "$result" =~ ^[0-9]+$ ]] && [[ "$result" -gt 0 ]]; then
+            ok "pg_duckdb: S3/MinIO read returned $result rows"
+        else
+            fail "pg_duckdb: S3/MinIO read failed, got '$result'"
+            return 1
+        fi
+    else
+        warn "pg_duckdb: skipping S3/MinIO test (set PGDUCK_S3_ENDPOINT, PGDUCK_S3_KEY, PGDUCK_S3_SECRET, PGDUCK_S3_FILE)"
+    fi
+
     pg_exec "DROP TABLE IF EXISTS _ext_test_duck;"
     pg_exec -- rm -f /tmp/_ext_test_duck.parquet
     ok "pg_duckdb: cleanup done"

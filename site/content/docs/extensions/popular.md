@@ -228,6 +228,19 @@ pg exec "SET duckdb.force_execution = true;
 
 # Pure DuckDB SQL (no PostgreSQL planner involved)
 pg exec "SELECT * FROM duckdb.raw_query(\$\$ SELECT range AS n FROM range(1, 6) \$\$);"
+
+# --- Read files from S3 / MinIO (no file copy needed) ---
+
+# Create an S3 secret once (use_ssl is text: 'true'/'false')
+pg exec "SELECT duckdb.create_simple_secret('S3', '<access_key>', '<secret_key>',
+         '', 'us-east-1', 'path', '', 'minio.example.com:9000',
+         's3://bucket', '', 'false');"
+
+# Query a CSV in the bucket directly
+pg exec "SELECT * FROM duckdb.query(\$\$
+         SELECT category, count(*) AS cnt, sum(sales) AS total_sales
+         FROM read_csv('s3://bucket/products.csv', auto_detect=true)
+         GROUP BY category ORDER BY total_sales DESC \$\$);"
 ```
 
 ## Compatibility Notes

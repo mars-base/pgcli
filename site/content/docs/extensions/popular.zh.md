@@ -228,6 +228,19 @@ pg exec "SET duckdb.force_execution = true;
 
 # 纯 DuckDB SQL（完全绕过 PostgreSQL 规划器）
 pg exec "SELECT * FROM duckdb.raw_query(\$\$ SELECT range AS n FROM range(1, 6) \$\$);"
+
+# --- 从 S3 / MinIO 读取文件（无需复制文件） ---
+
+# 先创建 S3 secret（use_ssl 是文本类型：'true'/'false'）
+pg exec "SELECT duckdb.create_simple_secret('S3', '<access_key>', '<secret_key>',
+         '', 'us-east-1', 'path', '', 'minio.example.com:9000',
+         's3://bucket', '', 'false');"
+
+# 直接查询 bucket 中的 CSV
+pg exec "SELECT * FROM duckdb.query(\$\$
+         SELECT category, count(*) AS cnt, sum(sales) AS total_sales
+         FROM read_csv('s3://bucket/products.csv', auto_detect=true)
+         GROUP BY category ORDER BY total_sales DESC \$\$);"
 ```
 
 ## 兼容性说明
