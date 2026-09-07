@@ -2,6 +2,8 @@ package cli
 
 import (
 	"fmt"
+	"os/exec"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -251,6 +253,16 @@ func runAutostartStatus(cmd *cobra.Command, args []string) error {
 
 	if info.Installed {
 		fmt.Printf("\nBoot command: %s -c %s start --autostart\n", svc.Binary, svc.ConfigPath)
+		// Show detailed service status from systemctl
+		// systemctl returns non-zero exit code when service is not active, so use CombinedOutput
+		if out, _ := exec.Command("systemctl", "--user", "status", info.UnitName).CombinedOutput(); len(out) > 0 {
+			fmt.Println("\n=== Service status ===")
+			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				if line != "" {
+					fmt.Printf("  %s\n", line)
+				}
+			}
+		}
 	}
 	fmt.Println("\nNote: 'pg stop' does not affect auto-start; use 'pg autostart disable' to opt out.")
 	return nil
