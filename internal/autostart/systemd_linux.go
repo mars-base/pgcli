@@ -38,6 +38,7 @@ ConditionPathExists=%s
 
 [Service]
 Type=oneshot
+Delegate=yes
 Environment=PATH=%%h/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin
 ExecStart=%s -c %s start --autostart
 TimeoutStartSec=1800
