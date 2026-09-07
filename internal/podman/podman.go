@@ -542,14 +542,41 @@ func (m *Manager) Status() (*ContainerStatus, error) {
 }
 
 // Exec runs a command inside the container, returns stdout.
+// On Linux with cgroup v2, podman exec may fail with "cgroup.procs: Permission denied"
+// when the caller and container are in different cgroup subtrees (e.g., container
+// started by systemd user unit, caller in SSH session). When this happens, we
+// automatically retry via systemd-run --user --scope which creates a transient scope
+// that can join the container's cgroup.
 func (m *Manager) Exec(args ...string) (string, error) {
 	podmanArgs := append([]string{"exec", "-i=false", m.cfg.Podman.ContainerName}, args...)
-	return execWithTimeout(m.podman, podmanArgs, 30*time.Second)
+	out, err := execWithTimeout(m.podman, podmanArgs, 30*time.Second)
+	if err != nil && isCgroupPermissionError(err) {
+		return m.execViaSystemdRun(args...)
+	}
+	return out, err
+}
+
+// isCgroupPermissionError detects the rootless podman cgroup.procs permission denied error.
+func isCgroupPermissionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "cgroup.procs") && strings.Contains(msg, "Permission denied")
+}
+
+// execViaSystemdRun wraps podman exec in a transient systemd scope to bypass
+// cgroup isolation between the caller and container subtrees.
+func (m *Manager) execViaSystemdRun(args ...string) (string, error) {
+	runArgs := []string{"--user", "--scope", "--quiet", m.podman, "exec", "-i=false", m.cfg.Podman.ContainerName}
+	runArgs = append(runArgs, args...)
+	return execWithTimeout("systemd-run", runArgs, 30*time.Second)
 }
 
 // ExecInteractive runs a command inside the container with stdin/stdout/stderr
 // attached (TTY). Used for interactive psql or shell sessions.
 // Detects whether stdin is a terminal to decide if -t (TTY) flag is needed.
+// Falls back to systemd-run --user --scope on cgroup permission errors (see Exec).
 func (m *Manager) ExecInteractive(args ...string) error {
 	running, err := m.containerRunning(m.cfg.Podman.ContainerName)
 	if err != nil {
@@ -569,7 +596,14 @@ func (m *Manager) ExecInteractive(args ...string) error {
 		execFlags = "-it"
 	}
 	podmanArgs := append([]string{"exec", execFlags, m.cfg.Podman.ContainerName}, args...)
-	return m.runInteractive(podmanArgs...)
+	if err := m.runInteractive(podmanArgs...); err != nil {
+		if isCgroupPermissionError(err) {
+			runArgs := append([]string{"--user", "--scope", "--quiet", m.podman, "exec", execFlags, m.cfg.Podman.ContainerName}, args...)
+			return m.runInteractiveArgs("systemd-run", runArgs...)
+		}
+		return err
+	}
+	return nil
 }
 
 // isTerminal checks if a file is a terminal (TTY).
@@ -1575,6 +1609,34 @@ func (m *Manager) runInteractive(args ...string) error {
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
 	return cmd.Run()
+}
+
+// runInteractiveArgs runs a command with attached stdin/stdout/stderr,
+// but captures stderr to detect cgroup permission errors for fallback.
+func (m *Manager) runInteractiveArgs(binary string, args ...string) error {
+	slog.Debug(binary, "args", args)
+	cmd := exec.Command(binary, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stdin = os.Stdin
+	// Capture stderr to detect cgroup errors; replay on failure.
+	var stderrBuf strings.Builder
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
+	if err := cmd.Run(); err != nil {
+		if isCgroupPermissionErrorStr(stderrBuf.String()) {
+			return cgroupPermError{err}
+		}
+		return err
+	}
+	return nil
+}
+
+// cgroupPermError wraps an exec error flagged as cgroup permission denied.
+type cgroupPermError struct{ inner error }
+
+func (e cgroupPermError) Error() string { return e.inner.Error() }
+
+func isCgroupPermissionErrorStr(msg string) bool {
+	return strings.Contains(msg, "cgroup.procs") && strings.Contains(msg, "Permission denied")
 }
 
 func (m *Manager) imageExists(tag string) (bool, error) {
