@@ -591,6 +591,64 @@ test_pg_prewarm() {
     ok "pg_prewarm: cleanup done"
 }
 
+# ── 19. pg_duckdb ────────────────────────────────────────────────────
+test_pg_duckdb() {
+    info "Installing pg_duckdb from Pigsty catalog..."
+    pg extension install pg_duckdb -i "$INSTANCE" --auto-restart 2>&1 || true
+
+    pg_exec "CREATE EXTENSION IF NOT EXISTS pg_duckdb;"
+
+    # 1. duckdb.query — table function, must be used in FROM clause.
+    #    Referencing result columns by name pushes the query into DuckDB
+    #    (single-column table function), so SELECT * must be used.
+    local result
+    result=$(pg_scalar "SELECT * FROM duckdb.query(\$\$ SELECT 42 AS answer \$\$);")
+    if [[ "$result" == "42" ]]; then
+        ok "pg_duckdb: duckdb.query returned 42"
+    else
+        fail "pg_duckdb: expected 42, got '$result'"
+        return 1
+    fi
+
+    # 2. Parquet export + read_parquet
+    pg_exec "
+        CREATE TABLE IF NOT EXISTS _ext_test_duck (id int, name text);
+        DELETE FROM _ext_test_duck;
+        INSERT INTO _ext_test_duck SELECT g, 'item-' || g FROM generate_series(1,5) g;
+        COPY _ext_test_duck TO '/tmp/_ext_test_duck.parquet' (FORMAT 'parquet');
+    "
+
+    result=$(pg_scalar "SELECT * FROM duckdb.query(\$\$ SELECT count(*) AS cnt FROM read_parquet('/tmp/_ext_test_duck.parquet') WHERE id > 2 \$\$);")
+    if [[ "$result" == "3" ]]; then
+        ok "pg_duckdb: read_parquet returned 3 rows (id > 2)"
+    else
+        fail "pg_duckdb: expected 3, got '$result'"
+        return 1
+    fi
+
+    # 3. force_execution — query runs entirely in DuckDB.
+    #    psql -c prints a command tag per statement, so extract the numeric line.
+    result=$(pg_scalar "SET duckdb.force_execution = true; SELECT avg(id)::int FROM _ext_test_duck; SET duckdb.force_execution = false;" | grep -E '^[0-9]+$')
+    if [[ "$result" == "3" ]]; then
+        ok "pg_duckdb: force_execution avg = 3"
+    else
+        fail "pg_duckdb: expected 3, got '$result'"
+        return 1
+    fi
+
+    # 4. raw_query — pure DuckDB SQL (no PostgreSQL planner)
+    if pg_exec "SELECT * FROM duckdb.raw_query(\$\$ SELECT range AS n FROM range(1, 6) \$\$);" > /dev/null 2>&1; then
+        ok "pg_duckdb: raw_query executed pure DuckDB SQL"
+    else
+        fail "pg_duckdb: raw_query failed"
+        return 1
+    fi
+
+    pg_exec "DROP TABLE IF EXISTS _ext_test_duck;"
+    pg_exec -- rm -f /tmp/_ext_test_duck.parquet
+    ok "pg_duckdb: cleanup done"
+}
+
 # ── 20. PostgresML ───────────────────────────────────────────────────
 test_pgml() {
     # Check PG version - pgml only supports up to PG17
@@ -639,6 +697,7 @@ ALL_EXTENSIONS=(
     citus
     pg_search
     pg_prewarm
+    pg_duckdb
     pgml
 )
 

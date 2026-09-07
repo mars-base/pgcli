@@ -191,6 +191,7 @@ pg exec "SELECT cron.unschedule('cleanup');"
 | Extension | Install | Description |
 |-----------|---------|-------------|
 | `postgres_fdw` | builtin | Query external PostgreSQL servers as local tables. |
+| `pg_duckdb` | `pg extension install pg_duckdb` | Embedded DuckDB analytics engine. Read Parquet/CSV, offload OLAP queries. |
 
 ```bash
 # Create a foreign server
@@ -206,6 +207,27 @@ pg exec "IMPORT FOREIGN SCHEMA public FROM SERVER remote INTO remote_schema;"
 
 # Query remote data as if it were local
 pg exec "SELECT * FROM remote_schema.events LIMIT 10;"
+```
+
+```bash
+pg extension install pg_duckdb --auto-restart
+
+# Run SQL in DuckDB — duckdb.query is a table function (FROM clause required)
+pg exec "SELECT * FROM duckdb.query(\$\$ SELECT 42 AS answer, 'hello' AS msg \$\$);"
+
+# Export a table to Parquet
+pg exec "COPY my_table TO '/tmp/my_table.parquet' (FORMAT 'parquet');"
+
+# Read Parquet/CSV files directly
+pg exec "SELECT * FROM duckdb.query(\$\$
+         SELECT * FROM read_parquet('/tmp/my_table.parquet') WHERE id > 2 \$\$);"
+
+# Offload an entire query to DuckDB (OLAP acceleration)
+pg exec "SET duckdb.force_execution = true;
+         SELECT category, sum(amount) FROM sales GROUP BY category;"
+
+# Pure DuckDB SQL (no PostgreSQL planner involved)
+pg exec "SELECT * FROM duckdb.raw_query(\$\$ SELECT range AS n FROM range(1, 6) \$\$);"
 ```
 
 ## Compatibility Notes

@@ -191,6 +191,7 @@ pg exec "SELECT cron.unschedule('cleanup');"
 | 扩展 | 安装 | 描述 |
 |------|------|------|
 | `postgres_fdw` | 内置 | 将外部 PostgreSQL 服务器作为本地表查询。 |
+| `pg_duckdb` | `pg extension install pg_duckdb` | 嵌入式 DuckDB 分析引擎。读取 Parquet/CSV，OLAP 查询加速。 |
 
 ```bash
 # 创建外部服务器
@@ -206,6 +207,27 @@ pg exec "IMPORT FOREIGN SCHEMA public FROM SERVER remote INTO remote_schema;"
 
 # 像查询本地表一样查询远程数据
 pg exec "SELECT * FROM remote_schema.events LIMIT 10;"
+```
+
+```bash
+pg extension install pg_duckdb --auto-restart
+
+# 在 DuckDB 中执行 SQL —— duckdb.query 是表函数（必须在 FROM 子句中使用）
+pg exec "SELECT * FROM duckdb.query(\$\$ SELECT 42 AS answer, 'hello' AS msg \$\$);"
+
+# 将表导出为 Parquet 文件
+pg exec "COPY my_table TO '/tmp/my_table.parquet' (FORMAT 'parquet');"
+
+# 直接读取 Parquet/CSV 文件
+pg exec "SELECT * FROM duckdb.query(\$\$
+         SELECT * FROM read_parquet('/tmp/my_table.parquet') WHERE id > 2 \$\$);"
+
+# 将整个查询下推到 DuckDB 执行（OLAP 加速）
+pg exec "SET duckdb.force_execution = true;
+         SELECT category, sum(amount) FROM sales GROUP BY category;"
+
+# 纯 DuckDB SQL（完全绕过 PostgreSQL 规划器）
+pg exec "SELECT * FROM duckdb.raw_query(\$\$ SELECT range AS n FROM range(1, 6) \$\$);"
 ```
 
 ## 兼容性说明
