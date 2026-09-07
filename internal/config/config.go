@@ -192,6 +192,7 @@ func Default() *Config {
 			DataDir:       filepath.Join(platform.DefaultConfigDir(), "backup", "data"),
 			LogDir:        filepath.Join(platform.DefaultConfigDir(), "backup", "log"),
 			RetentionFull: 7,
+			Autostart:     true, // default: start backup container on boot
 		},
 		Pigsty: PigstyConfig{
 			Repo: "https://repo.pigsty.io",

@@ -238,10 +238,10 @@ func runAutostartStatus(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("checking boot service: %w", err)
 	}
-	fmt.Printf("  Unit:     %s\n", info.UnitName)
-	fmt.Printf("  Installed: %s\n", onOff(info.Installed))
-	fmt.Printf("  Enabled:  %s\n", onOff(info.Enabled))
-	fmt.Printf("  Running:  %s\n", onOff(info.Running))
+	fmt.Printf("  Unit:      %s\n", info.UnitName)
+	fmt.Printf("  Installed: %s\n", yesNo(info.Installed))
+	fmt.Printf("  Enabled:   %s\n", onOff(info.Enabled))
+	fmt.Printf("  Running:   %s\n", onOff(info.Running))
 	if info.Linger != "" {
 		fmt.Printf("  Linger:   %s\n", info.Linger)
 	}
@@ -261,4 +261,11 @@ func onOff(v bool) string {
 		return "enabled"
 	}
 	return "disabled"
+}
+
+func yesNo(v bool) string {
+	if v {
+		return "yes"
+	}
+	return "no"
 }
