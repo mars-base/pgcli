@@ -782,8 +782,24 @@ func (m *Manager) exportTo(w io.Writer, database string, verbose bool, format st
 	podmanArgs := append([]string{"exec", "-i", m.cfg.Podman.ContainerName}, args...)
 	cmd := podmanCommand(m.podman, podmanArgs...)
 	cmd.Stdout = w
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
+	err := cmd.Run()
+	stderrStr := stderrBuf.String()
+
+	// Cgroup fallback: check stderr for permission denied
+	if err != nil && isCgroupPermErrorStr(stderrStr) {
+		runArgs := append([]string{"--user", "--scope", "--quiet", m.podman}, podmanArgs...)
+		cmd2 := exec.Command("systemd-run", runArgs...)
+		cmd2.Stdout = w
+		cmd2.Stderr = os.Stderr
+		return cmd2.Run()
+	}
+	// Not a cgroup error — replay captured stderr
+	if stderrBuf.Len() > 0 {
+		fmt.Fprint(os.Stderr, stderrBuf.String())
+	}
+	return err
 }
 
 // ImportDatabase imports a database from a dump file using pg_restore or psql.
@@ -888,8 +904,23 @@ func (m *Manager) importFrom(r io.Reader, database string, clean bool, verbose b
 	cmd := podmanCommand(m.podman, podmanArgs...)
 	cmd.Stdin = r
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
+	err := cmd.Run()
+	stderrStr := stderrBuf.String()
+
+	// Cgroup fallback: check stderr for permission denied
+	if err != nil && isCgroupPermErrorStr(stderrStr) {
+		runArgs := append([]string{"--user", "--scope", "--quiet", m.podman}, podmanArgs...)
+		cmd2 := exec.Command("systemd-run", runArgs...)
+		cmd2.Stdin = r
+		cmd2.Stdout = os.Stdout
+		cmd2.Stderr = os.Stderr
+		return cmd2.Run()
+	}
+	// Not a cgroup error — replay captured stderr
+	fmt.Fprint(os.Stderr, stderrStr)
+	return err
 }
 
 // ExportFromDSN exports a remote database to a file or stdout using a temporary container.
@@ -1594,10 +1625,44 @@ func (m *Manager) run(args ...string) (string, error) {
 		out, err = cmd.Output()
 	}
 	if err != nil {
+		// Cgroup fallback for exec commands: container started by systemd user unit,
+		// caller in different cgroup scope (e.g., SSH session).
+		if len(args) > 0 && args[0] == "exec" && isCgroupPermErrorOutput(err) {
+			slog.Debug("cgroup fallback via systemd-run")
+			return m.runViaSystemdRun(args...)
+		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return "", fmt.Errorf("podman %s: %s", strings.Join(args, " "), string(exitErr.Stderr))
 		}
 		return "", fmt.Errorf("podman %s: %w", strings.Join(args, " "), err)
+	}
+	return string(out), nil
+}
+
+// isCgroupPermErrorOutput checks if an exec.ExitError contains cgroup.procs permission denied.
+func isCgroupPermErrorOutput(err error) bool {
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return isCgroupPermErrorStr(string(exitErr.Stderr))
+	}
+	return false
+}
+
+// isCgroupPermErrorStr checks if a string contains cgroup.procs permission denied.
+func isCgroupPermErrorStr(msg string) bool {
+	return strings.Contains(msg, "cgroup.procs") && strings.Contains(msg, "Permission denied")
+}
+
+// runViaSystemdRun wraps a podman command in systemd-run --user --scope.
+func (m *Manager) runViaSystemdRun(args ...string) (string, error) {
+	runArgs := []string{"--user", "--scope", "--quiet", m.podman}
+	runArgs = append(runArgs, args...)
+	cmd := exec.Command("systemd-run", runArgs...)
+	out, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("systemd-run %s: %s", strings.Join(args, " "), string(exitErr.Stderr))
+		}
+		return "", fmt.Errorf("systemd-run %s: %w", strings.Join(args, " "), err)
 	}
 	return string(out), nil
 }
