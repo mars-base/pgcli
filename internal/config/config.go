@@ -615,7 +615,7 @@ func (c *Config) ApplyDefaults() {
 			addon.Name = name
 		}
 		if addon.ClusterName == "" {
-			addon.ClusterName = "default"
+			addon.ClusterName = "pgcli-etcd"
 		}
 		if addon.ContainerName == "" {
 			addon.ContainerName = "pgcli-etcd" + nsSuffix(c.Namespace) + "-" + name

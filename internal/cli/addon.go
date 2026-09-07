@@ -3,6 +3,8 @@ package cli
 import (
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -155,7 +157,7 @@ func init() {
 	addonInstallCmd.Flags().Int("client-port", 0, "etcd client host port (0=auto-assign from etcd_start_port)")
 	addonInstallCmd.Flags().Int("peer-port", 0, "etcd peer host port (0=auto-assign, next free port after client)")
 	addonInstallCmd.Flags().String("image", "", "etcd image tag (default quay.io/coreos/etcd:v3.5.30)")
-	addonInstallCmd.Flags().String("cluster", "", "etcd cluster name (--initial-cluster-token, default \"default\")")
+	addonInstallCmd.Flags().String("cluster", "", "etcd cluster name (--initial-cluster-token, default \"pgcli-etcd\")")
 	addonInstallCmd.Flags().String("data-dir", "", "host data directory for etcd (default <base>/addon/etcd/<name>/data)")
 	addonRemoveCmd.Flags().String("name", "", "name of the etcd member to remove (default \"etcd\")")
 }
@@ -547,8 +549,44 @@ func runAddonInstallEtcd(cmd *cobra.Command) error {
 		return fmt.Errorf("etcd manager: %w", err)
 	}
 
-	fmt.Println("-> Starting etcd container...")
-	if err := em.EnsureContainer(&ec); err != nil {
+	// Gather every member that belongs to this member's cluster (same
+	// ClusterName), excluding the member being installed. Those are the
+	// peers we join when this is not the cluster's first member.
+	var peers []config.EtcdConfig
+	for k, v := range cfg.Addons.Etcd {
+		if k != name && v.ClusterName == ec.ClusterName {
+			peers = append(peers, v)
+		}
+	}
+	sort.Slice(peers, func(i, j int) bool { return peers[i].Name < peers[j].Name })
+
+	peerURL := fmt.Sprintf("http://127.0.0.1:%d", ec.PeerPort)
+	initialCluster, state := bootstrapCluster(ec, peers)
+
+	if len(peers) == 0 {
+		// First member: bootstrap the cluster.
+		fmt.Println("-> Bootstrapping etcd cluster...")
+	} else {
+		// Joining an existing cluster: register the member with a running
+		// peer first, then start with --initial-cluster-state existing.
+		coord, ok := pickCoordinator(em, ec, peers)
+		if !ok {
+			return fmt.Errorf("cluster %q has no running member to join; start one of the existing etcd members first", ec.ClusterName)
+		}
+		registered, err := em.MemberExists(coord.ContainerName, coord.ClientPort, ec.Name)
+		if err != nil {
+			return fmt.Errorf("querying etcd members: %w", err)
+		}
+		if !registered {
+			fmt.Println("-> Registering new member with the cluster...")
+			if err := em.MemberAdd(coord.ContainerName, coord.ClientPort, ec.Name, peerURL); err != nil {
+				return err
+			}
+		}
+		fmt.Println("-> Starting etcd container (joining cluster)...")
+	}
+
+	if err := em.EnsureContainer(&ec, initialCluster, state); err != nil {
 		return err
 	}
 
@@ -567,6 +605,38 @@ func runAddonInstallEtcd(cmd *cobra.Command) error {
 	fmt.Printf("  Client URL: http://127.0.0.1:%d\n", ec.ClientPort)
 	fmt.Printf("  Connect (etcdctl): ETCDCTL_ENDPOINTS=http://127.0.0.1:%d\n", ec.ClientPort)
 	return nil
+}
+
+// bootstrapCluster returns the etcd --initial-cluster value and its state for
+// a member, given the other members already in the same cluster. The first
+// member of a cluster bootstraps with state "new" (single-member list);
+// subsequent members join with state "existing" and the full peer list.
+func bootstrapCluster(ec config.EtcdConfig, peers []config.EtcdConfig) (initialCluster, state string) {
+	if len(peers) == 0 {
+		self := fmt.Sprintf("%s=http://127.0.0.1:%d", ec.Name, ec.PeerPort)
+		return self, "new"
+	}
+	parts := make([]string, 0, len(peers)+1)
+	for _, p := range peers {
+		parts = append(parts, fmt.Sprintf("%s=http://127.0.0.1:%d", p.Name, p.PeerPort))
+	}
+	parts = append(parts, fmt.Sprintf("%s=http://127.0.0.1:%d", ec.Name, ec.PeerPort))
+	return strings.Join(parts, ","), "existing"
+}
+
+// pickCoordinator returns a running member of the cluster to use for member
+// registration, preferring the member's own already-running container (so a
+// restart doesn't need a re-add), then any running peer.
+func pickCoordinator(em *podman.EtcdManager, ec config.EtcdConfig, peers []config.EtcdConfig) (config.EtcdConfig, bool) {
+	if running, err := em.ContainerRunning(ec.ContainerName); err == nil && running {
+		return ec, true
+	}
+	for _, p := range peers {
+		if running, err := em.ContainerRunning(p.ContainerName); err == nil && running {
+			return p, true
+		}
+	}
+	return config.EtcdConfig{}, false
 }
 
 // ---------------------------------------------------------------------------
@@ -796,6 +866,23 @@ func runAddonRemoveEtcd(cmd *cobra.Command) error {
 	em, err := podman.NewEtcdManager(cfg)
 	if err != nil {
 		return fmt.Errorf("etcd manager: %w", err)
+	}
+
+	// If other members of the same cluster are running, deregister this one
+	// from the cluster first (via a running peer) so the quorum does not keep
+	// a stale entry. Best-effort: skip when no peer is available (e.g. last
+	// member, or cluster already down).
+	for k, p := range cfg.Addons.Etcd {
+		if k == name || p.ClusterName != ec.ClusterName {
+			continue
+		}
+		if running, err := em.ContainerRunning(p.ContainerName); err == nil && running {
+			fmt.Println("-> Deregistering member from the cluster...")
+			if err := em.MemberRemove(p.ContainerName, p.ClientPort, ec.Name); err != nil {
+				return err
+			}
+			break
+		}
 	}
 
 	fmt.Printf("-> Removing etcd %q...\n", name)

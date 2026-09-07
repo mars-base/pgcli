@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/mars-base/pgcli/internal/config"
 	"github.com/mars-base/pgcli/internal/platform"
@@ -53,9 +54,11 @@ func (m *EtcdManager) resolveDataDir(ec *config.EtcdConfig) (string, bool) {
 }
 
 // EnsureContainer creates or restarts the etcd container for the given
-// configuration. Idempotent: a running member is recreated to pick up
-// updated flags; a stale (stopped) container is removed first.
-func (m *EtcdManager) EnsureContainer(ec *config.EtcdConfig) error {
+// member. initialCluster is the etcd --initial-cluster value and state is
+// "new" (bootstrapping the first member) or "existing" (joining a running
+// cluster). Idempotent: a running member is recreated to pick up updated
+// flags; a stale (stopped) container is removed first.
+func (m *EtcdManager) EnsureContainer(ec *config.EtcdConfig, initialCluster, state string) error {
 	containerName := ec.ContainerName
 
 	running, err := m.containerRunning(containerName)
@@ -82,16 +85,120 @@ func (m *EtcdManager) EnsureContainer(ec *config.EtcdConfig) error {
 		}
 	}
 
-	if err := m.createContainer(ec); err != nil {
+	if err := m.createContainer(ec, initialCluster, state); err != nil {
 		return err
 	}
 	fmt.Println("  [OK] etcd container started")
 	return nil
 }
 
-// createContainer runs a single-member etcd on host networking with the
-// member's client and peer ports bound to loopback.
-func (m *EtcdManager) createContainer(ec *config.EtcdConfig) error {
+// MemberAdd registers a new member with a running cluster by executing
+// `etcdctl member add` inside the coordinator container (an existing member),
+// pointed at that coordinator's own client endpoint. Must be called before the
+// new member is started; the member then joins with --initial-cluster-state
+// existing.
+//
+// A just-joined cluster briefly reports "unhealthy cluster" while it elects a
+// leader, so the call is retried with a short backoff to absorb that transient.
+func (m *EtcdManager) MemberAdd(coordinatorContainer string, coordinatorClientPort int, newMemberName, peerURL string) error {
+	endpoint := fmt.Sprintf("http://127.0.0.1:%d", coordinatorClientPort)
+	return m.retryMemberQuorum(func() error {
+		_, err := m.run("exec", coordinatorContainer, "etcdctl",
+			"--endpoints="+endpoint, "member", "add", newMemberName, "--peer-urls="+peerURL)
+		if err != nil {
+			return fmt.Errorf("registering etcd member %q with the cluster: %w", newMemberName, err)
+		}
+		return nil
+	})
+}
+
+// MemberRemove deregisters a member from a running cluster by name, resolving
+// its member ID first (etcd v3.5 `member remove` takes a hex ID, not a name).
+// No-op when the member is not currently registered.
+func (m *EtcdManager) MemberRemove(coordinatorContainer string, coordinatorClientPort int, name string) error {
+	id, found, err := m.memberIDByName(coordinatorContainer, coordinatorClientPort, name)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	endpoint := fmt.Sprintf("http://127.0.0.1:%d", coordinatorClientPort)
+	if _, err := m.run("exec", coordinatorContainer, "etcdctl",
+		"--endpoints="+endpoint, "member", "remove", id); err != nil {
+		return fmt.Errorf("deregistering etcd member %q from the cluster: %w", name, err)
+	}
+	return nil
+}
+
+// MemberExists reports whether a member with the given name is already part of
+// the cluster, by listing members from the coordinator container. Used to keep
+// installs idempotent: a member already registered is not re-added.
+func (m *EtcdManager) MemberExists(coordinatorContainer string, coordinatorClientPort int, name string) (bool, error) {
+	_, found, err := m.memberIDByName(coordinatorContainer, coordinatorClientPort, name)
+	return found, err
+}
+
+// memberIDByName lists members from the coordinator container and returns the
+// hex member ID registered under `name`, or ("", false, nil) when no member
+// has that name. Retries the same post-join quorum transient as MemberAdd.
+// etcdctl -w simple lines are:
+//
+//	<id>, <status>, <name>, <peerURLs>, <clientURLs>, <isLearner>
+func (m *EtcdManager) memberIDByName(coordinatorContainer string, coordinatorClientPort int, name string) (string, bool, error) {
+	endpoint := fmt.Sprintf("http://127.0.0.1:%d", coordinatorClientPort)
+	var out string
+	err := m.retryMemberQuorum(func() error {
+		o, err := m.run("exec", coordinatorContainer, "etcdctl",
+			"--endpoints="+endpoint, "member", "list", "-w", "simple")
+		if err != nil {
+			return err
+		}
+		out = o
+		return nil
+	})
+	if err != nil {
+		return "", false, err
+	}
+	for line := range strings.SplitSeq(out, "\n") {
+		fields := strings.Split(line, ",")
+		if len(fields) < 3 {
+			continue
+		}
+		if strings.TrimSpace(fields[2]) == name {
+			return strings.TrimSpace(fields[0]), true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// retryMemberQuorum runs op, retrying while it fails with an etcd
+// "unhealthy cluster" / "no leader" / timeout error — the window right after a
+// member joins or a leader is re-elected, when the cluster briefly lacks
+// quorum. Gives up after a short bounded backoff so a genuinely dead cluster
+// still fails fast.
+func (m *EtcdManager) retryMemberQuorum(op func() error) error {
+	const attempts = 6
+	var err error
+	for i := 0; i < attempts; i++ {
+		err = op()
+		if err == nil {
+			return nil
+		}
+		msg := strings.ToLower(err.Error())
+		if !strings.Contains(msg, "unhealthy cluster") &&
+			!strings.Contains(msg, "no leader") &&
+			!strings.Contains(msg, "deadline exceeded") {
+			return err
+		}
+		time.Sleep(time.Duration(2+i) * time.Second)
+	}
+	return err
+}
+
+// createContainer runs an etcd member on host networking with the member's
+// client and peer ports bound to loopback.
+func (m *EtcdManager) createContainer(ec *config.EtcdConfig, initialCluster, state string) error {
 	dataDir, _ := m.resolveDataDir(ec)
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return fmt.Errorf("creating etcd data dir: %w", err)
@@ -116,8 +223,8 @@ func (m *EtcdManager) createContainer(ec *config.EtcdConfig) error {
 		"--listen-peer-urls", peerURL,
 		"--advertise-client-urls", clientURL,
 		"--listen-client-urls", clientURL,
-		"--initial-cluster", fmt.Sprintf("%s=%s", ec.Name, peerURL),
-		"--initial-cluster-state", "new",
+		"--initial-cluster", initialCluster,
+		"--initial-cluster-state", state,
 		"--initial-cluster-token", ec.ClusterName,
 		// Tuning defaults for a HA-cluster DCS: periodic compaction keeps
 		// the history window bounded (Patroni relies on it), and an 8 GiB
