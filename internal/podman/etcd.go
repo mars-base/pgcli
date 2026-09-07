@@ -38,19 +38,21 @@ func NewEtcdManager(cfg *config.Config) (*EtcdManager, error) {
 	}, nil
 }
 
-// etcdDataDir returns the default host directory holding an etcd member's data.
-func etcdDataDir(baseDir, name string) string {
-	return filepath.Join(baseDir, "addon", "etcd", name, "data")
+// resolveDataDir returns the member's data dir. Data is always laid out as
+// <root>/<name>/data so multiple members on one host never share a directory:
+// the root is the explicit --data-dir override when set, otherwise the default
+// base (<base>/addon/etcd).
+func (m *EtcdManager) resolveDataDir(ec *config.EtcdConfig) string {
+	root := ec.DataDir
+	if root == "" {
+		root = filepath.Join(m.dataDir, "addon", "etcd")
+	}
+	return filepath.Join(root, ec.Name, "data")
 }
 
-// resolveDataDir returns the member's data dir: the explicit override if set,
-// otherwise the default location. The bool reports whether it is the default
-// (custom dirs are not auto-removed on uninstall).
-func (m *EtcdManager) resolveDataDir(ec *config.EtcdConfig) (string, bool) {
-	if ec.DataDir != "" {
-		return ec.DataDir, false
-	}
-	return etcdDataDir(m.dataDir, ec.Name), true
+// DataDir returns the member's resolved host data directory (for display).
+func (m *EtcdManager) DataDir(ec *config.EtcdConfig) string {
+	return m.resolveDataDir(ec)
 }
 
 // EnsureContainer creates or restarts the etcd container for the given
@@ -114,7 +116,8 @@ func (m *EtcdManager) MemberAdd(coordinatorContainer string, coordinatorClientPo
 
 // MemberRemove deregisters a member from a running cluster by name, resolving
 // its member ID first (etcd v3.5 `member remove` takes a hex ID, not a name).
-// No-op when the member is not currently registered.
+// No-op when the member is not currently registered. The remove itself is
+// retried for the same post-join quorum transient as MemberAdd.
 func (m *EtcdManager) MemberRemove(coordinatorContainer string, coordinatorClientPort int, name string) error {
 	id, found, err := m.memberIDByName(coordinatorContainer, coordinatorClientPort, name)
 	if err != nil {
@@ -124,11 +127,13 @@ func (m *EtcdManager) MemberRemove(coordinatorContainer string, coordinatorClien
 		return nil
 	}
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", coordinatorClientPort)
-	if _, err := m.run("exec", coordinatorContainer, "etcdctl",
-		"--endpoints="+endpoint, "member", "remove", id); err != nil {
-		return fmt.Errorf("deregistering etcd member %q from the cluster: %w", name, err)
-	}
-	return nil
+	return m.retryMemberQuorum(func() error {
+		if _, err := m.run("exec", coordinatorContainer, "etcdctl",
+			"--endpoints="+endpoint, "member", "remove", id); err != nil {
+			return fmt.Errorf("deregistering etcd member %q from the cluster: %w", name, err)
+		}
+		return nil
+	})
 }
 
 // MemberExists reports whether a member with the given name is already part of
@@ -179,6 +184,7 @@ func (m *EtcdManager) memberIDByName(coordinatorContainer string, coordinatorCli
 // still fails fast.
 func (m *EtcdManager) retryMemberQuorum(op func() error) error {
 	const attempts = 6
+	transient := []string{"unhealthy cluster", "no leader", "leader changed", "deadline exceeded"}
 	var err error
 	for i := 0; i < attempts; i++ {
 		err = op()
@@ -186,9 +192,14 @@ func (m *EtcdManager) retryMemberQuorum(op func() error) error {
 			return nil
 		}
 		msg := strings.ToLower(err.Error())
-		if !strings.Contains(msg, "unhealthy cluster") &&
-			!strings.Contains(msg, "no leader") &&
-			!strings.Contains(msg, "deadline exceeded") {
+		isTransient := false
+		for _, marker := range transient {
+			if strings.Contains(msg, marker) {
+				isTransient = true
+				break
+			}
+		}
+		if !isTransient {
 			return err
 		}
 		time.Sleep(time.Duration(2+i) * time.Second)
@@ -199,7 +210,7 @@ func (m *EtcdManager) retryMemberQuorum(op func() error) error {
 // createContainer runs an etcd member on host networking with the member's
 // client and peer ports bound to loopback.
 func (m *EtcdManager) createContainer(ec *config.EtcdConfig, initialCluster, state string) error {
-	dataDir, _ := m.resolveDataDir(ec)
+	dataDir := m.resolveDataDir(ec)
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return fmt.Errorf("creating etcd data dir: %w", err)
 	}
@@ -251,17 +262,16 @@ func (m *EtcdManager) Remove(ec *config.EtcdConfig) error {
 	}
 	fmt.Println("  [OK] etcd container removed")
 
-	dir, isDefault := m.resolveDataDir(ec)
+	dir := m.resolveDataDir(ec)
 	if err := os.RemoveAll(dir); err != nil && !os.IsNotExist(err) {
 		fmt.Printf("  [!] Warning: removing data dir %s: %v\n", dir, err)
 	} else {
 		fmt.Printf("  [OK] Data directory removed: %s\n", dir)
 	}
 
-	// For the default layout, remove the empty member parent (addon/etcd/<name>).
-	if isDefault {
-		os.Remove(filepath.Dir(dir)) // ignore error — non-empty dir won't be removed
-	}
+	// Data lives at <root>/<name>/data; drop the now-empty <name> dir too
+	// (leaving the shared root in place). Ignore the error when it's not empty.
+	os.Remove(filepath.Dir(dir))
 
 	return nil
 }

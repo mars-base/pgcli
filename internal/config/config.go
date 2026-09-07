@@ -123,7 +123,7 @@ type EtcdConfig struct {
 	Name          string `yaml:"name,omitempty"`         // etcd --name, defaults to the addon key
 	ClusterName   string `yaml:"cluster_name,omitempty"` // etcd --initial-cluster-token (unique cluster id; all members must match)
 	ImageTag      string `yaml:"image_tag,omitempty"`    // quay.io/coreos/etcd:v3.5.30 (default)
-	DataDir       string `yaml:"data_dir,omitempty"`     // host data dir, default <baseDir>/addon/etcd/<name>/data
+	DataDir       string `yaml:"data_dir,omitempty"`     // data dir root; member uses <root>/<name>/data, default <baseDir>/addon/etcd
 	ClientPort    int    `yaml:"client_port,omitempty"`  // 2379+ auto-assigned
 	PeerPort      int    `yaml:"peer_port,omitempty"`    // next free port after ClientPort
 }

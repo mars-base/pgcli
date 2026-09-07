@@ -32,3 +32,12 @@ func TestBootstrapClusterJoinMember(t *testing.T) {
 		t.Errorf("join member initial-cluster =\n  %q\nwant\n  %q", cluster, want)
 	}
 }
+
+func TestResolveUnderBase(t *testing.T) {
+	if got := resolveUnderBase("/home/pg", "etcd-data"); got != "/home/pg/etcd-data" {
+		t.Errorf("relative path = %q, want /home/pg/etcd-data", got)
+	}
+	if got := resolveUnderBase("/home/pg", "/abs/data"); got != "/abs/data" {
+		t.Errorf("absolute path = %q, want /abs/data (kept as-is)", got)
+	}
+}

@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -158,7 +159,7 @@ func init() {
 	addonInstallCmd.Flags().Int("peer-port", 0, "etcd peer host port (0=auto-assign, next free port after client)")
 	addonInstallCmd.Flags().String("image", "", "etcd image tag (default quay.io/coreos/etcd:v3.5.30)")
 	addonInstallCmd.Flags().String("cluster", "", "etcd cluster name (--initial-cluster-token, default \"pgcli-etcd\")")
-	addonInstallCmd.Flags().String("data-dir", "", "host data directory for etcd (default <base>/addon/etcd/<name>/data)")
+	addonInstallCmd.Flags().String("data-dir", "", "etcd data dir root, absolute or relative to base_dir (default <base_dir>/addon/etcd); each member uses <root>/<name>/data")
 	addonRemoveCmd.Flags().String("name", "", "name of the etcd member to remove (default \"etcd\")")
 }
 
@@ -530,7 +531,15 @@ func runAddonInstallEtcd(cmd *cobra.Command) error {
 		existing.PeerPort = peerPort
 	}
 	if dataDir != "" {
-		existing.DataDir = dataDir
+		// Resolve relative paths against the config's base_dir (falling back
+		// to the platform default when unset); absolute paths are kept as-is.
+		// Storing the resolved path keeps the persisted config portable and lets
+		// the manager tell a custom dir from the computed default.
+		base := cfg.BaseDir
+		if base == "" {
+			base = platform.DefaultConfigDir()
+		}
+		existing.DataDir = resolveUnderBase(base, dataDir)
 	}
 	if existing.Name == "" {
 		existing.Name = name
@@ -599,12 +608,24 @@ func runAddonInstallEtcd(cmd *cobra.Command) error {
 	fmt.Printf("✓ etcd installed: %q\n", name)
 	fmt.Printf("  Container:    %s\n", ec.ContainerName)
 	fmt.Printf("  Cluster:      %s\n", ec.ClusterName)
+	fmt.Printf("  Data dir:     %s\n", em.DataDir(&ec))
 	fmt.Printf("  Client port:  %d\n", ec.ClientPort)
 	fmt.Printf("  Peer port:    %d\n", ec.PeerPort)
 	fmt.Println()
 	fmt.Printf("  Client URL: http://127.0.0.1:%d\n", ec.ClientPort)
 	fmt.Printf("  Connect (etcdctl): ETCDCTL_ENDPOINTS=http://127.0.0.1:%d\n", ec.ClientPort)
 	return nil
+}
+
+// resolveUnderBase turns a user-supplied data dir into an absolute path:
+// absolute values are returned cleaned as-is, relative values are joined onto
+// base (the config's base_dir). This is what lets `--data-dir ./etcd-data`
+// land under the pg config file's base directory.
+func resolveUnderBase(base, dir string) string {
+	if filepath.IsAbs(dir) {
+		return filepath.Clean(dir)
+	}
+	return filepath.Join(base, dir)
 }
 
 // bootstrapCluster returns the etcd --initial-cluster value and its state for
