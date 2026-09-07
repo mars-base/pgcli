@@ -23,4 +23,5 @@ cascade:
 - [恢复](/docs/restore/) — 时间点恢复（PITR）
 - [复制](/docs/replica/) — 只读副本与故障转移
 - [扩展](/docs/extensions/) — 安装和管理 PostgreSQL 扩展
+- [开机自启](/docs/autostart/) — 重启后自动启动实例和服务
 {.cards}

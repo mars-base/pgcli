@@ -238,9 +238,62 @@ func (m *PgBouncerManager) EnsureContainer(iniPath, userListPath string, pbConf 
 		}
 	}
 
+	if err := m.createContainer(iniPath, userListPath, pbConf); err != nil {
+		return err
+	}
+	fmt.Println("  [OK] PgBouncer container started")
+	return nil
+}
+
+// StartContainer starts the PgBouncer container without regenerating config
+// or auth (autostart-on-boot path). Unlike EnsureContainer (install semantics:
+// stop/rm/recreate), this only brings the container up: running → no-op;
+// exists but stopped → podman start, recreating on improper state; missing →
+// create from existing config files.
+func (m *PgBouncerManager) StartContainer(pbConf *config.PgBouncerConfig, instName string) error {
+	containerName := pbConf.ContainerName
+
+	running, err := m.containerRunning(containerName)
+	if err != nil {
+		return err
+	}
+	if running {
+		fmt.Printf("  [OK] PgBouncer %s already running\n", containerName)
+		return nil
+	}
+
+	exists, err := m.containerExists(containerName)
+	if err != nil {
+		return err
+	}
+	if exists {
+		if _, err := m.run("start", containerName); err == nil {
+			fmt.Printf("  [OK] PgBouncer %s started\n", containerName)
+			return nil
+		}
+		fmt.Printf("  [!] PgBouncer %s in improper state, recreating...\n", containerName)
+		if _, err := m.run("rm", "-f", containerName); err != nil {
+			return fmt.Errorf("removing improper PgBouncer container: %w", err)
+		}
+	}
+
+	iniPath := filepath.Join(pgBouncerConfigDir(m.dataDir, instName), "pgbouncer.ini")
+	userListPath := filepath.Join(pgBouncerConfigDir(m.dataDir, instName), "userlist.txt")
+	if _, err := os.Stat(iniPath); err != nil {
+		return fmt.Errorf("pgbouncer config %s not found -- run 'pg addon install pgbouncer' first", iniPath)
+	}
+
+	if err := m.createContainer(iniPath, userListPath, pbConf); err != nil {
+		return err
+	}
+	fmt.Printf("  [OK] PgBouncer %s started\n", containerName)
+	return nil
+}
+
+func (m *PgBouncerManager) createContainer(iniPath, userListPath string, pbConf *config.PgBouncerConfig) error {
 	args := []string{
 		"run", "-d",
-		"--name", containerName,
+		"--name", pbConf.ContainerName,
 		"--network", "host",
 		"--restart", "unless-stopped",
 		"-v", fmt.Sprintf("%s:/etc/pgbouncer/pgbouncer.ini:ro,z", hostMountPath(iniPath)),
@@ -251,8 +304,6 @@ func (m *PgBouncerManager) EnsureContainer(iniPath, userListPath string, pbConf 
 	if _, err := m.run(args...); err != nil {
 		return fmt.Errorf("creating PgBouncer container: %w", err)
 	}
-
-	fmt.Println("  [OK] PgBouncer container started")
 	return nil
 }
 

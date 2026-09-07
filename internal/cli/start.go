@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,10 +17,13 @@ import (
 func init() {
 	rootCmd.AddCommand(startCmd)
 	startCmd.Flags().BoolVar(&startAll, "all", false, "start all configured instances")
+	startCmd.Flags().BoolVar(&startAutostartFlag, "autostart", false, "start only instances/addons with autostart enabled (used by the boot service)")
+	startCmd.MarkFlagsMutuallyExclusive("all", "autostart")
 }
 
 var (
-	startAll bool
+	startAll           bool
+	startAutostartFlag bool
 )
 
 var startCmd = &cobra.Command{
@@ -37,11 +41,130 @@ Steps:
 
 Use --all to start all instances configured in the current config file.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if startAutostartFlag {
+			return startAutostart()
+		}
 		if startAll {
 			return startAllInstances()
 		}
 		return startInstance()
 	},
+}
+
+// startAutostart starts only the instances and addons that have autostart
+// enabled in the config. Invoked by the boot service (systemd unit or
+// launchd agent) after a host reboot. Returns nil when nothing is enabled
+// so the boot unit always succeeds.
+func startAutostart() error {
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	c, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	cfgPath = path
+
+	// Instances with autostart enabled, sorted for deterministic order.
+	var names []string
+	for name, inst := range c.Instances {
+		if inst.Autostart {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer)")
+		return nil
+	}
+
+	var firstErr error
+	ok := 0
+	for _, name := range names {
+		fmt.Printf("\n>>> starting instance %q (autostart) <<<\n", name)
+		if err := startSingle(c, name); err != nil {
+			fmt.Printf("  [X] %s: %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		ok++
+	}
+	if len(names) > 0 {
+		fmt.Printf("\n>>> started %d/%d autostart instances <<<\n", ok, len(names))
+	}
+
+	// Shared backup container. When PITR is enabled, doStart already ensured
+	// it per instance; the explicit call covers configs without PITR.
+	if c.Backup.Autostart {
+		bm, err := podman.NewBackupManager(c)
+		if err != nil {
+			fmt.Printf("  [X] backup autostart: %v\n", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		} else if err := bm.EnsureBackupInfra(); err != nil {
+			fmt.Printf("  [X] backup autostart: %v\n", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		} else {
+			fmt.Println("  [OK] backup container running (autostart)")
+		}
+	}
+
+	// PgBouncer containers (local per-instance + remote).
+	if err := startAutostartPgbouncers(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	return firstErr
+}
+
+func hasAutostartPgbouncer(c *config.Config) bool {
+	for _, inst := range c.Instances {
+		if inst.Addons.PgBouncer != nil && inst.Addons.PgBouncer.Autostart {
+			return true
+		}
+	}
+	for _, pb := range c.Addons.PgBouncer {
+		if pb.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+func startAutostartPgbouncers(c *config.Config) error {
+	pbMgr, err := podman.NewPgBouncerManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for name, inst := range c.Instances {
+		if inst.Addons.PgBouncer != nil && inst.Addons.PgBouncer.Autostart {
+			if err := pbMgr.StartContainer(inst.Addons.PgBouncer, name); err != nil {
+				fmt.Printf("  [X] pgbouncer autostart (%s): %v\n", name, err)
+				if firstErr == nil {
+					firstErr = err
+				}
+			}
+		}
+	}
+	for name, pb := range c.Addons.PgBouncer {
+		if pb.Autostart {
+			if err := pbMgr.StartContainer(&pb, name); err != nil {
+				fmt.Printf("  [X] pgbouncer autostart (%s): %v\n", name, err)
+				if firstErr == nil {
+					firstErr = err
+				}
+			}
+		}
+	}
+	return firstErr
 }
 
 // startAllInstances starts every instance listed in the config file.
