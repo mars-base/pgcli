@@ -1,0 +1,210 @@
+package podman
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+
+	"github.com/mars-base/pgcli/internal/config"
+	"github.com/mars-base/pgcli/internal/platform"
+)
+
+// EtcdManager manages standalone etcd containers. Like PgBouncerManager it
+// operates over the top-level (cross-instance) addon configs, since etcd is
+// shared infrastructure for a HA cluster rather than a per-instance sidecar.
+type EtcdManager struct {
+	cfg     *config.Config
+	podman  string // podman binary path
+	dataDir string // base data directory (e.g. ~/.pgcli/)
+}
+
+// NewEtcdManager creates an EtcdManager.
+func NewEtcdManager(cfg *config.Config) (*EtcdManager, error) {
+	path, err := findPodman()
+	if err != nil {
+		return nil, fmt.Errorf("podman is not installed: %w", err)
+	}
+	dataDir := cfg.BaseDir
+	if dataDir == "" {
+		dataDir = platform.DefaultConfigDir()
+	}
+	return &EtcdManager{
+		cfg:     cfg,
+		podman:  path,
+		dataDir: dataDir,
+	}, nil
+}
+
+// etcdDataDir returns the default host directory holding an etcd member's data.
+func etcdDataDir(baseDir, name string) string {
+	return filepath.Join(baseDir, "addon", "etcd", name, "data")
+}
+
+// resolveDataDir returns the member's data dir: the explicit override if set,
+// otherwise the default location. The bool reports whether it is the default
+// (custom dirs are not auto-removed on uninstall).
+func (m *EtcdManager) resolveDataDir(ec *config.EtcdConfig) (string, bool) {
+	if ec.DataDir != "" {
+		return ec.DataDir, false
+	}
+	return etcdDataDir(m.dataDir, ec.Name), true
+}
+
+// EnsureContainer creates or restarts the etcd container for the given
+// configuration. Idempotent: a running member is recreated to pick up
+// updated flags; a stale (stopped) container is removed first.
+func (m *EtcdManager) EnsureContainer(ec *config.EtcdConfig) error {
+	containerName := ec.ContainerName
+
+	running, err := m.containerRunning(containerName)
+	if err != nil {
+		return err
+	}
+	if running {
+		fmt.Println("-> etcd container already running, restarting to apply updated config...")
+		if _, err := m.run("stop", containerName); err != nil {
+			return fmt.Errorf("stopping etcd container: %w", err)
+		}
+		if _, err := m.run("rm", "-f", containerName); err != nil {
+			return fmt.Errorf("removing etcd container: %w", err)
+		}
+	} else {
+		exists, err := m.containerExists(containerName)
+		if err != nil {
+			return err
+		}
+		if exists {
+			if _, err := m.run("rm", "-f", containerName); err != nil {
+				return fmt.Errorf("removing stale etcd container: %w", err)
+			}
+		}
+	}
+
+	if err := m.createContainer(ec); err != nil {
+		return err
+	}
+	fmt.Println("  [OK] etcd container started")
+	return nil
+}
+
+// createContainer runs a single-member etcd on host networking with the
+// member's client and peer ports bound to loopback.
+func (m *EtcdManager) createContainer(ec *config.EtcdConfig) error {
+	dataDir, _ := m.resolveDataDir(ec)
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return fmt.Errorf("creating etcd data dir: %w", err)
+	}
+
+	clientURL := fmt.Sprintf("http://127.0.0.1:%d", ec.ClientPort)
+	peerURL := fmt.Sprintf("http://127.0.0.1:%d", ec.PeerPort)
+
+	// The etcd image ships no ENTRYPOINT — its CMD is the full path to the
+	// binary — so the executable must be passed explicitly before the flags.
+	args := []string{
+		"run", "-d",
+		"--name", ec.ContainerName,
+		"--network", "host",
+		"--restart", "unless-stopped",
+		"-v", fmt.Sprintf("%s:/etcd-data:z", hostMountPath(dataDir)),
+		ec.ImageTag,
+		"/usr/local/bin/etcd",
+		"--name", ec.Name,
+		"--data-dir", "/etcd-data",
+		"--initial-advertise-peer-urls", peerURL,
+		"--listen-peer-urls", peerURL,
+		"--advertise-client-urls", clientURL,
+		"--listen-client-urls", clientURL,
+		"--initial-cluster", fmt.Sprintf("%s=%s", ec.Name, peerURL),
+		"--initial-cluster-state", "new",
+		"--initial-cluster-token", ec.ClusterName,
+		// Tuning defaults for a HA-cluster DCS: periodic compaction keeps
+		// the history window bounded (Patroni relies on it), and an 8 GiB
+		// backend quota is well above what a small metadata store needs.
+		"--auto-compaction-mode", "periodic",
+		"--auto-compaction-retention", "24h",
+		"--quota-backend-bytes", "8589934592",
+	}
+
+	if _, err := m.run(args...); err != nil {
+		return fmt.Errorf("creating etcd container: %w", err)
+	}
+	return nil
+}
+
+// Remove stops and removes the etcd container, then cleans up its data
+// directory on the host.
+func (m *EtcdManager) Remove(ec *config.EtcdConfig) error {
+	containerName := ec.ContainerName
+
+	m.run("stop", containerName)
+	if _, err := m.run("rm", "-f", containerName); err != nil {
+		return fmt.Errorf("removing etcd container: %w", err)
+	}
+	fmt.Println("  [OK] etcd container removed")
+
+	dir, isDefault := m.resolveDataDir(ec)
+	if err := os.RemoveAll(dir); err != nil && !os.IsNotExist(err) {
+		fmt.Printf("  [!] Warning: removing data dir %s: %v\n", dir, err)
+	} else {
+		fmt.Printf("  [OK] Data directory removed: %s\n", dir)
+	}
+
+	// For the default layout, remove the empty member parent (addon/etcd/<name>).
+	if isDefault {
+		os.Remove(filepath.Dir(dir)) // ignore error — non-empty dir won't be removed
+	}
+
+	return nil
+}
+
+// ContainerRunning reports whether the named container is currently running.
+func (m *EtcdManager) ContainerRunning(name string) (bool, error) {
+	return m.containerRunning(name)
+}
+
+// Stop stops an etcd container.
+func (m *EtcdManager) Stop(name string) (string, error) {
+	return m.run("stop", name)
+}
+
+// --- Internal helpers ------------------------------------------------
+
+func (m *EtcdManager) run(args ...string) (string, error) {
+	cmd := podmanCommand(m.podman, args...)
+	out, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("podman %s: %s", strings.Join(args, " "), string(exitErr.Stderr))
+		}
+		return "", fmt.Errorf("podman %s: %w", strings.Join(args, " "), err)
+	}
+	return string(out), nil
+}
+
+func (m *EtcdManager) containerExists(name string) (bool, error) {
+	out, err := m.run("ps", "-a", "--filter", "name="+name, "--format", "{{.Names}}")
+	if err != nil {
+		return false, err
+	}
+	for line := range strings.SplitSeq(out, "\n") {
+		if strings.TrimSpace(line) == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (m *EtcdManager) containerRunning(name string) (bool, error) {
+	out, err := m.run("ps", "--filter", "name="+name, "--filter", "status=running", "--format", "{{.Names}}")
+	if err != nil {
+		return false, err
+	}
+	for line := range strings.SplitSeq(out, "\n") {
+		if strings.TrimSpace(line) == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
