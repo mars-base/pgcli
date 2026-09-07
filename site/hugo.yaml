@@ -1,6 +1,6 @@
 # pgcli documentation site — OINK theme
 title: &siteTitle pgcli
-baseURL: https://pgcli.dev/
+baseURL: https://pgcli.pages.dev/
 defaultContentLanguage: en
 enableGitInfo: true
 enableRobotsTXT: true
