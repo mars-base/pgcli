@@ -340,6 +340,11 @@ func (m *PgBouncerManager) ContainerRunning(name string) (bool, error) {
 	return m.containerRunning(name)
 }
 
+// Stop stops a PgBouncer container.
+func (m *PgBouncerManager) Stop(name string) (string, error) {
+	return m.run("stop", name)
+}
+
 // --- Internal helpers ------------------------------------------------
 
 func (m *PgBouncerManager) run(args ...string) (string, error) {

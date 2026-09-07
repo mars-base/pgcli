@@ -99,6 +99,24 @@ func New(cfg *config.Config) (*Manager, error) {
 	return m, nil
 }
 
+// NewForStop creates a Manager without triggering ensurePodmanReady,
+// so stop operations don't restart previously stopped containers.
+func NewForStop(cfg *config.Config) (*Manager, error) {
+	path, err := findPodman()
+	if err != nil {
+		return nil, fmt.Errorf("podman is not installed: %w", err)
+	}
+	dataDir := cfg.BaseDir
+	if dataDir == "" {
+		dataDir = platform.DefaultConfigDir()
+	}
+	return &Manager{
+		cfg:     cfg,
+		podman:  path,
+		dataDir: dataDir,
+	}, nil
+}
+
 // migrateSignals are error fragments podman (podman-launcher) emits when its
 // rootless pause-process record is stale. This happens after a host reboot:
 // the pause process dies but its bookkeeping survives, so every podman

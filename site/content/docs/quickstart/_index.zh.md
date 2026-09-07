@@ -76,6 +76,9 @@ pg list
 # 停止实例
 pg stop
 
+# 停止所有实例、备份容器和 PgBouncer
+pg stop --all
+
 # 启动实例
 pg start
 
@@ -188,4 +191,5 @@ Shell 以 `root` 身份在容器内运行，可以完全访问：
 - 了解[备份](../backup/)与[恢复](../restore/)
 - 设置[复制](../replica/)以实现高可用
 - 探索[扩展](../extensions/)管理
+- 配置[开机自启](../autostart/)用于生产部署
 - 了解[管理](../administration/)

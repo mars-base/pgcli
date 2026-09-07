@@ -13,7 +13,9 @@ pgcli 可以在主机重启后自动启动 PostgreSQL 实例、备份容器和 P
 
 启用开机自启后，pgcli 会创建一个系统服务，在开机时（或用户登录时）运行 `pg start --autostart`。`--autostart` 标志仅启动配置中标记为 `autostart: true` 的实例和服务。
 
-开机自启是**配置驱动**的：如果你对某个实例执行了 `pg stop`，它仍然会在下次开机时自动启动。要阻止自动启动，请使用 `pg autostart disable`。
+开机自启是**配置驱动**的：如果你对某个实例执行了 `pg stop`（或 `pg stop --all`），它仍然会在下次开机时自动启动。要阻止自动启动，请使用 `pg autostart disable`。
+
+**默认行为**：备份容器在新配置中默认 `autostart: true`。实例和 PgBouncer 默认 `autostart: false`，需要手动启用。
 
 ## 启用开机自启
 
@@ -81,6 +83,80 @@ pg autostart status
 **重要**：Rootless podman 需要 `loginctl enable-linger` 才能在开机时（用户登录前）启动容器。pgcli 会自动尝试此操作，但如果失败会打印提示。
 
 没有 linger，服务会在用户登录时启动，而不是在系统开机时。
+
+#### Systemd Unit 配置
+
+pgcli 生成的 systemd unit 包含以下关键配置：
+
+```ini
+[Service]
+Type=oneshot
+Delegate=yes
+RemainAfterExit=yes
+```
+
+- **Delegate=yes** - 将 cgroup 控制权委托给服务进程，允许 rootless podman 正确管理容器的 cgroup 层级
+- **RemainAfterExit=yes** - 服务执行完成后保持 `active` 状态，而不是立即变为 `inactive`
+- **Type=oneshot** - 一次性执行 `pg start --autostart`，然后退出
+
+#### Cgroup 隔离与自动回退
+
+**问题**：当容器由 systemd 用户单元启动时，从 SSH 会话或其他上下文访问容器时可能会遇到 cgroup 权限错误：
+
+```
+Error: crun: writing file `/sys/fs/cgroup/.../cgroup.procs`: Permission denied: OCI permission denied
+```
+
+**原因**：systemd 用户单元启动的容器位于 `user@1000.service/app.slice` cgroup 子树，而 SSH 会话位于 `session-N.scope`，两者在不同的 cgroup 作用域。
+
+**解决方案**：pgcli 会自动检测 cgroup 权限错误，并通过 `systemd-run --user --scope` 重新执行命令。这会创建一个临时 scope，使其能够加入容器的 cgroup 子树。
+
+**受影响的命令**（自动回退）：
+- `pg exec` - 执行 SQL 或容器命令
+- `pg psql` - 交互式 psql 会话
+- `pg status` - 检查容器状态
+- `pg backup` - 备份操作
+- `pg extension` - 扩展管理
+- 所有其他 `podman exec` 操作
+
+**不受影响的命令**：
+- `pg start` - 启动容器（使用 systemd-run 本身）
+- `pg stop` - 停止容器
+- `pg restart` - 重启容器
+
+#### 查看服务状态
+
+`pg autostart status` 现在会显示详细的 systemctl 信息：
+
+```bash
+pg autostart status
+```
+
+输出包括：
+- 所有开机自启目标的启用状态
+- systemd unit 名称、加载状态、活跃状态
+- 服务日志和最近执行记录
+- Linger 状态
+
+示例输出：
+```
+=== Auto-start targets ===
+  instance default         enabled
+  backup                 enabled
+
+=== Boot service ===
+  Unit:      pgcli-autostart-554d14ed
+  Installed: yes
+  Enabled:   enabled
+  Running:   active
+  Linger:    yes
+
+=== Service status ===
+     Loaded: loaded (/home/user/.config/systemd/user/pgcli-autostart-554d14ed.service; enabled)
+     Active: active (exited) since Mon 2026-09-07 14:30:00 CST; 2h ago
+    Process: 1234 pg -c /home/user/.config/pgcli/pg.yaml start --autostart (code=exited, status=0/SUCCESS)
+   Main PID: 1234 (code=exited, status=0/SUCCESS)
+```
 
 ### macOS (launchd)
 

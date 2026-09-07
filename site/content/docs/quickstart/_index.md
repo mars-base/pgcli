@@ -76,6 +76,9 @@ pg list
 # Stop an instance
 pg stop
 
+# Stop all instances, backup container, and PgBouncer
+pg stop --all
+
 # Start an instance
 pg start
 
@@ -189,4 +192,5 @@ The shell runs as `root` inside the container, giving full access to:
 - Learn about [backup](../backup/) and [restore](../restore/)
 - Set up [replication](../replica/) for high availability
 - Explore [extensions](../extensions/) management
+- Configure [auto-start on boot](../autostart/) for production deployments
 - Understand [administration](../administration/)
