@@ -124,7 +124,7 @@ func runClone(newName, dsn string) error {
 		if err := srcCfg.SetInstance(cfgInstance); err != nil {
 			return err
 		}
-		sourcePM, err = podman.New(&srcCfg)
+		sourcePM, err = podman.NewForStop(&srcCfg)
 		if err != nil {
 			return err
 		}
