@@ -3,6 +3,7 @@
 **Easy-to-use PostgreSQL instance manager**
 
 [![Release](https://img.shields.io/github/v/release/mars-base/pgcli)](https://github.com/mars-base/pgcli/releases)
+[![Docs](https://img.shields.io/badge/docs-pgcli.pages.dev-blue)](https://pgcli.pages.dev)
 [![License](https://img.shields.io/github/license/mars-base/pgcli)](https://github.com/mars-base/pgcli/blob/main/LICENSE)
 [![Platform](https://img.shields.io/badge/platform-linux%20|%20macOS-blue)]()
 
@@ -16,6 +17,8 @@ Whether you're running multiple dev databases, managing staging environments, or
 - Cross-platform support (Linux and macOS)
 
 ## Documentation
+
+Full documentation site: **[https://pgcli.pages.dev](https://pgcli.pages.dev)** (EN / 中文)
 
 | Document | Description |
 |----------|-------------|
