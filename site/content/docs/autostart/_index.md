@@ -5,7 +5,7 @@ weight: 60
 icon: fa-solid fa-power-off
 ---
 
-pgcli can automatically start PostgreSQL instances, backup containers, and PgBouncer services after a host reboot. This feature uses system service managers:
+pgcli can automatically start PostgreSQL instances, backup containers, PgBouncer services, and etcd members after a host reboot. This feature uses system service managers:
 - **Linux**: systemd user units
 - **macOS**: launchd LaunchAgents
 
@@ -15,7 +15,7 @@ When you enable auto-start, pgcli creates a system service that runs `pg start -
 
 Auto-start is **config-driven**: if you run `pg stop` (or `pg stop --all`) on an instance, it will still be started automatically at the next boot. To prevent auto-start, use `pg autostart disable`.
 
-**Default behavior**: The backup container has `autostart: true` by default in new configurations. Instances and PgBouncer default to `autostart: false` and must be explicitly enabled.
+**Default behavior**: The backup container has `autostart: true` by default in new configurations. Instances, PgBouncer, and etcd members default to `autostart: false` and must be explicitly enabled.
 
 ## Enable Auto-start
 
@@ -52,6 +52,31 @@ Or for a remote PgBouncer:
 pg autostart enable --pgbouncer --pg-name <remote-name>
 ```
 
+### For an etcd Member
+
+Enable auto-start for an etcd member installed via `pg addon install etcd`:
+```bash
+pg autostart enable --etcd --name <member-name>
+```
+
+The member name defaults to `etcd` when `--name` is omitted:
+```bash
+pg autostart enable --etcd
+```
+
+Repeat for each member of a cluster (`m1`, `m2`, `m3`, …) — autostart is
+per-member. On a cross-host cluster, run the command on each host for that
+host's member(s).
+
+**Boot is start-only.** At boot pgcli just brings the member's existing
+container up (`podman start`, recreating the container from config only if it
+is missing or stuck in an improper state). It never re-registers membership —
+a data-dir-initialized etcd member reloads its cluster from disk and rejoins
+on a plain start, so it must have been installed while the cluster was
+reachable first. Starting members before quorum forms briefly reports
+`etcdserver: no leader`; that is normal and resolves once enough members are
+up.
+
 ## Disable Auto-start
 
 ```bash
@@ -59,6 +84,7 @@ pg autostart disable -i <instance-name>
 pg autostart disable --backup
 pg autostart disable --pgbouncer -i <instance-name>
 pg autostart disable --pgbouncer --pg-name <remote-name>
+pg autostart disable --etcd --name <member-name>
 ```
 
 When all auto-start targets are disabled, the boot service is automatically removed.
@@ -143,6 +169,7 @@ Example output:
 === Auto-start targets ===
   instance default         enabled
   backup                 enabled
+  etcd m1                  enabled
 
 === Boot service ===
   Unit:      pgcli-autostart-554d14ed
@@ -178,10 +205,15 @@ backup:
   # ... other settings ...
   autostart: true
 
-# For PgBouncer
 addons:
+  # For PgBouncer
   pgbouncer:
     default:
+      # ... other settings ...
+      autostart: true
+  # For etcd members
+  etcd:
+    m1:
       # ... other settings ...
       autostart: true
 ```
@@ -192,8 +224,15 @@ The boot service runs `pg start --autostart`, which:
 1. Starts all instances with `autostart: true`
 2. Starts the backup container if `backup.autostart: true`
 3. Starts PgBouncer services with `autostart: true`
+4. Starts etcd members with `autostart: true` (start-only; see above)
 
 If no auto-start targets are configured, the service exits successfully (no error).
+
+Each manager (PostgreSQL, backup, PgBouncer, etcd) self-heals stale rootless
+podman state at startup — after a reboot the pause-process record is dead, so
+the service transparently runs `podman system migrate` before touching
+containers. This means boot works even when only addons (no PG instance) are
+marked for auto-start.
 
 ## Troubleshooting
 
@@ -240,8 +279,12 @@ pg autostart enable --backup
 # Enable PgBouncer for the default instance
 pg autostart enable --pgbouncer -i default
 
+# Enable etcd members m1 and m2 (names from pg addon list / pg.yaml)
+pg autostart enable --etcd --name m1
+pg autostart enable --etcd --name m2
+
 # Check the status
 pg autostart status
 ```
 
-After the next reboot, all three services will start automatically.
+After the next reboot, all these services will start automatically.

@@ -78,9 +78,10 @@ pg addon install etcd --name m3 --cluster prod \
   --join http://10.0.0.1:2379
 ```
 
-要求：每个成员的 `--advertise-host` 互相可达（同一 LAN），主机之间放行
-2379/2380 端口，所有成员使用相同的 `--cluster` token。任意一台机器宕机后其余
-主机照常工作；集群只需要保住*机器*的多数派。
+要求：每个成员的 `--advertise-host` 互相可达（同一 LAN），每台主机的防火墙为
+**所有成员的 client 与 peer 端口**向其它成员放行（peer 是双向通信 —— 例如 4 成员
+默认端口集群放行 2379-2386/tcp），且所有成员使用相同的 `--cluster` token。任意
+一台机器宕机后其余主机照常工作；集群只需要保住*机器*的多数派。
 
 | | 单机 | 跨主机 |
 |---|---|---|
@@ -88,6 +89,7 @@ pg addon install etcd --name m3 --cluster prod \
 | `--advertise-host` | 省略（回环默认） | 必填，且每个成员都要 |
 | `--join` | 不用 | 除第一个外每个成员都要 |
 | 端口 | 同主机内每个成员互不相同 | 可重复，各主机绑各自网卡 |
+| 防火墙 | 无需（仅回环） | 每个成员的 client+peer 端口，双向放行 |
 | 能否扛单机故障 | 否 | 能（quorum 成立时） |
 
 ## 命令
@@ -171,8 +173,12 @@ pg addon install etcd --name m2 --cluster prod \
   由远端集群校验，而非本地配置。
 - `--join` 必须搭配 `--advertise-host`；否则其它成员会注册一个拨不通的 peer URL。
 - 端口可以跨主机重复（两台机器都用 `2379/2380`），因为各主机只绑定自己的网卡。
-- 成员间 client/peer 端口必须互通 —— 记得放行防火墙（如 VM 网段 → 主机的
-  2379/2380）。
+- 成员间 client/peer 端口必须互通 —— **为每个成员的端口、双向放行防火墙**。peer
+  之间是双向互连（都拨对方的 peer 端口），client（以及 `--join`/`pg etcdctl`）需要
+  能访问 client 端口。自动分配的端口每个成员不同，从安装输出或 `pg addon list` 里
+  读取实际端口（或用 `--client-port`/`--peer-port` 固定），按范围放行 —— 例如 4
+  成员默认端口集群放行 `2379-2386/tcp`。漏配防火墙正是成员长时间
+  `etcdserver: no leader`、或 `--join` 超时的常见原因。
 - 对已注册的名字重复执行相同的 `--join` 安装会直接报错；先用
   `pg etcdctl member remove <hex-id>` 从集群注销。
 
@@ -307,6 +313,7 @@ addons:
       data_dir: /home/user/.pgcli/addon/etcd
       client_port: 2379
       peer_port: 2380
+      autostart: true
     m2:
       container_name: pgcli-etcd-m2
       name: m2
@@ -316,6 +323,24 @@ addons:
 ```
 
 端口起始值可通过顶层 `etcd_start_port` 配置（默认 2379）。
+
+## 开机自启
+
+容器还带有 `--restart unless-stopped` 策略，由每容器的 conmon 监控进程执行
+（无需 podman 守护进程）——它能应对进程崩溃，但**不覆盖**主机重启。要让成员
+在重启后自动拉起，按成员启用 autostart：
+
+```bash
+pg autostart enable --etcd --name m1
+pg autostart enable --etcd --name m2
+pg autostart enable --etcd --name m3
+```
+
+这会把成员的 `autostart: true` 写入 `pg.yaml`，并安装/刷新开机服务（见
+[开机自启](/docs/autostart/)）。开机时**只做启动**：拉起成员已存在的容器，
+绝不重新执行 `member add`——已初始化的成员从磁盘加载集群状态即可重新加入。
+跨主机集群时，在各自主机上为该主机的成员执行命令。`pg autostart status`
+可查看所有成员的状态。
 
 ## 说明
 

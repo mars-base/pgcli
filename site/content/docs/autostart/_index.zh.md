@@ -5,7 +5,7 @@ weight: 60
 icon: fa-solid fa-power-off
 ---
 
-pgcli 可以在主机重启后自动启动 PostgreSQL 实例、备份容器和 PgBouncer 服务。此功能使用系统服务管理器：
+pgcli 可以在主机重启后自动启动 PostgreSQL 实例、备份容器、PgBouncer 服务和 etcd 成员。此功能使用系统服务管理器：
 - **Linux**: systemd 用户单元
 - **macOS**: launchd LaunchAgents
 
@@ -15,7 +15,7 @@ pgcli 可以在主机重启后自动启动 PostgreSQL 实例、备份容器和 P
 
 开机自启是**配置驱动**的：如果你对某个实例执行了 `pg stop`（或 `pg stop --all`），它仍然会在下次开机时自动启动。要阻止自动启动，请使用 `pg autostart disable`。
 
-**默认行为**：备份容器在新配置中默认 `autostart: true`。实例和 PgBouncer 默认 `autostart: false`，需要手动启用。
+**默认行为**：备份容器在新配置中默认 `autostart: true`。实例、PgBouncer 和 etcd 成员默认 `autostart: false`，需要手动启用。
 
 ## 启用开机自启
 
@@ -52,6 +52,28 @@ pg autostart enable --pgbouncer -i <实例名>
 pg autostart enable --pgbouncer --pg-name <远程名称>
 ```
 
+### etcd 成员
+
+为通过 `pg addon install etcd` 安装的 etcd 成员启用开机自启：
+```bash
+pg autostart enable --etcd --name <成员名>
+```
+
+省略 `--name` 时成员名默认为 `etcd`：
+```bash
+pg autostart enable --etcd
+```
+
+集群的每个成员都要分别启用一次（`m1`、`m2`、`m3`……）——自启是按成员配置的。
+跨主机集群时，在各自主机上为该主机的成员执行此命令。
+
+**开机只做启动（start-only）。** 开机时 pgcli 只把成员已存在的容器拉起
+（`podman start`，仅当容器缺失或卡在 improper 状态时才按配置重建容器），
+绝不重新注册 membership——data-dir 已初始化的 etcd 成员会从磁盘加载集群状态，
+普通 start 即可重新加入，所以该成员必须事先在集群可达时安装好。成员启动后、
+quorum 尚未形成前会短暂报 `etcdserver: no leader`，属正常现象，足够多成员
+起来后即恢复。
+
 ## 禁用开机自启
 
 ```bash
@@ -59,6 +81,7 @@ pg autostart disable -i <实例名>
 pg autostart disable --backup
 pg autostart disable --pgbouncer -i <实例名>
 pg autostart disable --pgbouncer --pg-name <远程名称>
+pg autostart disable --etcd --name <成员名>
 ```
 
 当所有开机自启目标都被禁用后，开机服务会被自动移除。
@@ -143,6 +166,7 @@ pg autostart status
 === Auto-start targets ===
   instance default         enabled
   backup                 enabled
+  etcd m1                  enabled
 
 === Boot service ===
   Unit:      pgcli-autostart-554d14ed
@@ -178,10 +202,15 @@ backup:
   # ... 其他设置 ...
   autostart: true
 
-# 对于 PgBouncer
 addons:
+  # 对于 PgBouncer
   pgbouncer:
     default:
+      # ... 其他设置 ...
+      autostart: true
+  # 对于 etcd 成员
+  etcd:
+    m1:
       # ... 其他设置 ...
       autostart: true
 ```
@@ -192,8 +221,14 @@ addons:
 1. 启动所有 `autostart: true` 的实例
 2. 如果 `backup.autostart: true`，启动备份容器
 3. 启动 `autostart: true` 的 PgBouncer 服务
+4. 启动 `autostart: true` 的 etcd 成员（只做启动；见上文）
 
 如果没有配置任何开机自启目标，服务会正常退出（无错误）。
+
+每个 manager（PostgreSQL、备份、PgBouncer、etcd）在启动时都会自愈 rootless
+podman 的过期状态——主机重启后 pause 进程已死，服务会在触碰容器前透明地执行
+`podman system migrate`。因此即使只给 addon（没有 PG 实例）配置了自启，开机
+也能正常工作。
 
 ## 故障排查
 
@@ -240,8 +275,12 @@ pg autostart enable --backup
 # 为 default 实例启用 PgBouncer
 pg autostart enable --pgbouncer -i default
 
+# 为 etcd 成员 m1、m2 启用（成员名来自 pg addon list / pg.yaml）
+pg autostart enable --etcd --name m1
+pg autostart enable --etcd --name m2
+
 # 检查状态
 pg autostart status
 ```
 
-下次重启后，这三个服务都会自动启动。
+下次重启后，这些服务都会自动启动。

@@ -88,9 +88,11 @@ pg addon install etcd --name m3 --cluster prod \
 ```
 
 Requirements: every member's `--advertise-host` is a mutual-LAN-reachable
-address, ports 2379/2380 are open between hosts, and all members share one
-`pg.yaml`-per-host with the same `--cluster` token. Each host survives losing
-any one member; the cluster only needs a majority of *machines*.
+address, the firewall on each host lets the other members through on **every
+member's client and peer ports** (bidirectional peer traffic — e.g. open
+2379-2386/tcp for a 4-member cluster on default ports), and all members share
+the same `--cluster` token. Each host survives losing any one member; the
+cluster only needs a majority of *machines*.
 
 | | Single host | Cross host |
 |---|---|---|
@@ -98,6 +100,7 @@ any one member; the cluster only needs a majority of *machines*.
 | `--advertise-host` | omit (loopback default) | required, every member |
 | `--join` | not used | every member after the first |
 | Ports | unique per member on one host | may repeat, one host each |
+| Firewall | none (loopback only) | open every member's client+peer ports, both ways |
 | Survives machine loss | no | yes (with quorum) |
 
 ## Commands
@@ -190,8 +193,15 @@ Notes for cross-host clusters:
   could register a peer URL they can't dial.
 - Ports may repeat across hosts (`2379/2380` on both) since each host binds
   its own interfaces.
-- A member's client/peer ports must be reachable between hosts — open your
-  firewall (e.g. the VM subnet → 2379/2380 on the host).
+- A member's client/peer ports must be reachable between hosts — **open your
+  firewall for every member's ports, in both directions.** Peers dial each
+  other's *peer* ports bidirectionally, and clients (and `--join`/`pg etcdctl`)
+  reach the *client* ports, so allow both. Auto-assignment means the exact
+  numbers vary per member — read them from the install summary or
+  `pg addon list` (or pin them with `--client-port`/`--peer-port`) and open
+  that range, e.g. `2379-2386/tcp` for a 4-member cluster on default ports.
+  Skipping this is the usual cause of a member hanging with `etcdserver: no
+  leader` or a `--join` that times out.
 - Re-running the same `--join` install for an already-registered name fails
   with a clear error; deregister first via
   `pg etcdctl member remove <hex-id>` against the cluster.
@@ -334,6 +344,7 @@ addons:
       data_dir: /home/user/.pgcli/addon/etcd
       client_port: 2379
       peer_port: 2380
+      autostart: true
     m2:
       container_name: pgcli-etcd-m2
       name: m2
@@ -355,6 +366,26 @@ addons:
       client_port: 2379
       peer_port: 2380
 ```
+
+## Auto-start on Boot
+
+Containers also carry a `--restart unless-stopped` policy, which a per-container
+conmon monitor enforces even without a podman daemon — it covers crashes but
+**not** host reboots. To bring members up after a reboot, enable autostart
+per member:
+
+```bash
+pg autostart enable --etcd --name m1
+pg autostart enable --etcd --name m2
+pg autostart enable --etcd --name m3
+```
+
+This sets `autostart: true` on the member in `pg.yaml` and installs/refreshes
+the boot service (see [Auto-start on Boot](/docs/autostart/)). Boot is
+**start-only**: it starts the member's existing container and never re-runs
+`member add` — an initialized member reloads its cluster from disk and rejoins.
+On a cross-host cluster, run the command on each host for that host's
+member(s). `pg autostart status` lists every member's state.
 
 ## Notes
 
