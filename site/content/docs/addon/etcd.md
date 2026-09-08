@@ -204,9 +204,10 @@ installed, pulling the image on demand). The target comes from
 `ETCDCTL_ENDPOINTS`, falling back to the first configured member:
 
 ```bash
+export ETCDCTL_ENDPOINTS=http://10.0.0.2:2379
 pg etcdctl member list
 pg etcdctl endpoint health
-ETCDCTL_ENDPOINTS=http://10.0.0.2:2379 pg etcdctl endpoint status -- -w table
+pg etcdctl endpoint status -- -w table
 ```
 
 etcdctl flags that pg's own parser would reject (`-w table`, `--hex`, …) go

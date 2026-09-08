@@ -183,9 +183,10 @@ pg addon install etcd --name m2 --cluster prod \
 `ETCDCTL_ENDPOINTS`，未设置时回退到配置中的第一个成员：
 
 ```bash
+export ETCDCTL_ENDPOINTS=http://10.0.0.2:2379
 pg etcdctl member list
 pg etcdctl endpoint health
-ETCDCTL_ENDPOINTS=http://10.0.0.2:2379 pg etcdctl endpoint status -- -w table
+pg etcdctl endpoint status -- -w table
 ```
 
 pg 自身参数解析器不接受的 etcdctl 参数（`-w table`、`--hex` 等）放在 `--` 之后。
