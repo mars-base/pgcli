@@ -126,28 +126,6 @@ pg stop
 
 See the full [Quick Start](docs/quickstart.md) guide for multi-instance setup, interactive psql sessions, and container shell usage.
 
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `pg config` | Configuration management |
-| `pg create` | Create new instance |
-| `pg clone` | Clone an instance into a new one via logical dump |
-| `pg start` | Start instance + backup services |
-| `pg stop` | Stop services |
-| `pg status` | Show status and connection info |
-| `pg list` | List all instances |
-| `pg psql` | Open interactive psql session (also via `--dsn` for remote DBs) |
-| `pg shell` | Open interactive bash shell in container |
-| `pg exec` | Execute SQL or shell commands (also via `--dsn` for remote DBs) |
-| `pg export` | Export database to dump file |
-| `pg import` | Import database from dump file |
-| `pg snapshot` | Manage backups (create/list/delete) |
-| `pg restore` | PITR point-in-time recovery |
-| `pg replica` | Create/list read-only physical replicas (standbys) of an instance |
-| `pg destroy` | Destroy instance |
-| `pg completion` | Generate shell completion scripts |
-
 ## License
 
 Apache 2.0
