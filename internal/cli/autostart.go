@@ -24,7 +24,8 @@ func init() {
 		c.Flags().Bool("pgbouncer", false, "select the PgBouncer addon (use with -i for a local pooler, --pg-name for a remote one)")
 		c.Flags().String("pg-name", "", "name of a remote PgBouncer (top-level addons)")
 		c.Flags().Bool("etcd", false, "select an etcd member (top-level addons)")
-		c.Flags().String("name", "", "name of the etcd member (default \"etcd\")")
+		c.Flags().String("name", "", "name of the etcd member or pgdog proxy (default \"etcd\"/\"pgdog\")")
+		c.Flags().Bool("pgdog", false, "select a PgDog proxy (top-level addons)")
 	}
 }
 
@@ -41,7 +42,7 @@ Use 'pg autostart disable' to opt out.`,
 
 var autostartEnableCmd = &cobra.Command{
 	Use:   "enable",
-	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, or an etcd member",
+	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, an etcd member, or a PgDog proxy",
 	Long: `Enable auto-start on boot for exactly one target:
 
   pg autostart enable -i myinst          # instance
@@ -49,9 +50,12 @@ var autostartEnableCmd = &cobra.Command{
   pg autostart enable --pgbouncer -i myinst      # local PgBouncer for an instance
   pg autostart enable --pgbouncer --pg-name x    # remote PgBouncer
   pg autostart enable --etcd --name m1           # etcd member (default name "etcd")
+  pg autostart enable --pgdog --name proxy       # PgDog proxy (default name "pgdog")
 
 Etcd autostart only starts the member's existing container at boot; it never
 re-registers membership (a data-dir-initialized etcd rejoins on plain start).
+PgDog autostart likewise only starts the existing container, reading the
+pgdog.toml/users.toml already on disk — install the proxy first.
 
 On Linux the boot service is a systemd --user unit. True boot-time start
 (without a login) requires loginctl enable-linger — attempted automatically,
@@ -106,8 +110,9 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	backupSel, _ := cmd.Flags().GetBool("backup")
 	pgbSel, _ := cmd.Flags().GetBool("pgbouncer")
 	etcdSel, _ := cmd.Flags().GetBool("etcd")
+	pgdogSel, _ := cmd.Flags().GetBool("pgdog")
 	pgName, _ := cmd.Flags().GetString("pg-name")
-	etcdName, _ := cmd.Flags().GetString("name")
+	addonName, _ := cmd.Flags().GetString("name")
 	instChanged := cmd.Flags().Changed("instance")
 
 	// Exactly one selector required.
@@ -124,29 +129,44 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	if etcdSel {
 		sel++
 	}
+	if pgdogSel {
+		sel++
+	}
 	if sel != 1 {
-		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, or --etcd")
+		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --etcd, or --pgdog")
 	}
 	if pgName != "" && !pgbSel {
 		return fmt.Errorf("--pg-name requires --pgbouncer")
 	}
-	if etcdName != "" && !etcdSel {
-		return fmt.Errorf("--name requires --etcd")
+	if addonName != "" && !etcdSel && !pgdogSel {
+		return fmt.Errorf("--name requires --etcd or --pgdog")
 	}
 
 	var targetDesc string
 	switch {
-	case etcdSel:
-		if etcdName == "" {
-			etcdName = "etcd"
+	case pgdogSel:
+		proxyName := addonName
+		if proxyName == "" {
+			proxyName = "pgdog"
 		}
-		ec, ok := cfg.Addons.Etcd[etcdName]
+		pd, ok := cfg.Addons.PgDog[proxyName]
 		if !ok {
-			return fmt.Errorf("etcd member %q not found in config", etcdName)
+			return fmt.Errorf("pgdog proxy %q not found in config", proxyName)
+		}
+		pd.Autostart = enable
+		cfg.Addons.PgDog[proxyName] = pd
+		targetDesc = fmt.Sprintf("pgdog proxy %q", proxyName)
+	case etcdSel:
+		if addonName == "" {
+			addonName = "etcd"
+		}
+		ec, ok := cfg.Addons.Etcd[addonName]
+		if !ok {
+			return fmt.Errorf("etcd member %q not found in config", addonName)
 		}
 		ec.Autostart = enable
-		cfg.Addons.Etcd[etcdName] = ec
-		targetDesc = fmt.Sprintf("etcd member %q", etcdName)
+		cfg.Addons.Etcd[addonName] = ec
+		targetDesc = fmt.Sprintf("etcd member %q", addonName)
 	case backupSel:
 		cfg.Backup.Autostart = enable
 		targetDesc = "backup container"
@@ -240,6 +260,11 @@ func countAutostartTargets(c *config.Config) int {
 			n++
 		}
 	}
+	for _, pd := range c.Addons.PgDog {
+		if pd.Autostart {
+			n++
+		}
+	}
 	return n
 }
 
@@ -262,6 +287,9 @@ func runAutostartStatus(cmd *cobra.Command, args []string) error {
 	}
 	for name, ec := range cfg.Addons.Etcd {
 		fmt.Printf("  etcd %-17s %s\n", name, onOff(ec.Autostart))
+	}
+	for name, pd := range cfg.Addons.PgDog {
+		fmt.Printf("  pgdog %-16s %s\n", name, onOff(pd.Autostart))
 	}
 
 	fmt.Println("\n=== Boot service ===")

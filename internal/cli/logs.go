@@ -29,7 +29,8 @@ Examples:
   pg logs addon pgbouncer -i myinst    # Local PgBouncer logs for myinst
   pg logs addon pgbouncer --pg-name my-pool   # Remote PgBouncer logs
   pg logs addon pgbouncer --pg-name my-pool -f
-  pg logs addon etcd --name m1         # etcd member logs`,
+  pg logs addon etcd --name m1         # etcd member logs
+  pg logs addon pgdog --name proxy     # PgDog proxy logs`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		follow, _ := cmd.Flags().GetBool("follow")
 		tail, _ := cmd.Flags().GetInt("tail")
@@ -51,9 +52,9 @@ var logsAddonCmd = &cobra.Command{
 	Short: "Show addon console output logs",
 	Long: `Show addon console output logs.
 
-Requires the addon type (pgbouncer, etcd).
+Requires the addon type (pgbouncer, etcd, pgdog).
 Use -i for local instance addons, --pg-name for remote addons,
---name for an etcd member (default "etcd").
+--name for an etcd member or pgdog proxy (default "etcd"/"pgdog").
 
 Examples:
   pg logs addon pgbouncer -i myinst
@@ -63,7 +64,9 @@ Examples:
   pg logs addon pgbouncer --pg-name my-pool -n 200
   pg logs addon etcd --name m1
   pg logs addon etcd --name m1 -f
-  pg logs addon etcd --name m2 -n 200`,
+  pg logs addon etcd --name m2 -n 200
+  pg logs addon pgdog --name proxy
+  pg logs addon pgdog --name proxy -f`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		follow, _ := cmd.Flags().GetBool("follow")
@@ -80,25 +83,40 @@ Examples:
 		var containerName string
 
 		switch addonType {
-		case "etcd":
+		case "etcd", "pgdog":
 			if pgName != "" {
-				return fmt.Errorf("--pg-name selects a remote PgBouncer; use --name for an etcd member")
+				return fmt.Errorf("--pg-name selects a remote PgBouncer; use --name for an %s", addonType)
+			}
+			deflt := "etcd"
+			if addonType == "pgdog" {
+				deflt = "pgdog"
 			}
 			name := etcdName
 			if name == "" {
-				name = "etcd"
+				name = deflt
 			}
-			if cfg.Addons.Etcd == nil {
-				return fmt.Errorf("no etcd addons configured")
+			if addonType == "etcd" {
+				if cfg.Addons.Etcd == nil {
+					return fmt.Errorf("no etcd addons configured")
+				}
+				ec, ok := cfg.Addons.Etcd[name]
+				if !ok {
+					return fmt.Errorf("etcd member %q not found (use 'pg addon list' to see available)", name)
+				}
+				containerName = ec.ContainerName
+			} else {
+				if cfg.Addons.PgDog == nil {
+					return fmt.Errorf("no pgdog addons configured")
+				}
+				pd, ok := cfg.Addons.PgDog[name]
+				if !ok {
+					return fmt.Errorf("pgdog proxy %q not found (use 'pg addon list' to see available)", name)
+				}
+				containerName = pd.ContainerName
 			}
-			ec, ok := cfg.Addons.Etcd[name]
-			if !ok {
-				return fmt.Errorf("etcd member %q not found (use 'pg addon list' to see available)", name)
-			}
-			containerName = ec.ContainerName
 		case "pgbouncer":
 			if etcdName != "" {
-				return fmt.Errorf("--name selects an etcd member; use -i or --pg-name for PgBouncer")
+				return fmt.Errorf("--name selects an etcd member or pgdog proxy; use -i or --pg-name for PgBouncer")
 			}
 			if pgName != "" {
 				// Remote mode
@@ -122,7 +140,7 @@ Examples:
 				containerName = inst.Addons.PgBouncer.ContainerName
 			}
 		default:
-			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd)", addonType)
+			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog)", addonType)
 		}
 
 		return runPodmanLogs(containerName, tail, follow)

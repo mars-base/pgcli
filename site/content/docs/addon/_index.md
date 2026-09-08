@@ -25,6 +25,7 @@ The following addons are currently supported:
 |-------|-------------|
 | [`pgbouncer`](./pgbouncer/) | Connection pool manager with transaction-level pooling |
 | [`etcd`](./etcd/) | Distributed key-value store — standalone, clusterable, for HA / DCS use |
+| [`pgdog`](./pgdog/) | Postgres proxy — connection pooling, load balancing and sharding |
 
 Each addon has its own page with commands, parameters, and troubleshooting.
 
@@ -48,4 +49,4 @@ pg addon remove <addon> [flags]     # remove the addon, container, and data
 ```
 
 See each addon's page for its specific flags and examples:
-[Pgbouncer](./pgbouncer/) · [etcd](./etcd/)
+[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/)

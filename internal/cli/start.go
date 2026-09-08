@@ -75,8 +75,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartEtcd(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --etcd)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --etcd / --pgdog)")
 		return nil
 	}
 
@@ -123,6 +123,11 @@ func startAutostart() error {
 
 	// etcd members (top-level infra addon).
 	if err := startAutostartEtcds(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// pgdog proxies (top-level infra addon).
+	if err := startAutostartPgDogs(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -204,6 +209,46 @@ func startAutostartEtcds(c *config.Config) error {
 		ec := c.Addons.Etcd[name]
 		if err := em.StartContainer(&ec); err != nil {
 			fmt.Printf("  [X] etcd autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+func hasAutostartPgDog(c *config.Config) bool {
+	for _, pd := range c.Addons.PgDog {
+		if pd.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartPgDogs starts each autostart-enabled PgDog proxy. Order is
+// sorted by proxy name for deterministic, readable boot logs.
+func startAutostartPgDogs(c *config.Config) error {
+	var names []string
+	for name, pd := range c.Addons.PgDog {
+		if pd.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	dm, err := podman.NewPgDogManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		pd := c.Addons.PgDog[name]
+		if err := dm.StartContainer(&pd); err != nil {
+			fmt.Printf("  [X] pgdog autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}

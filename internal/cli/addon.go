@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -37,6 +38,8 @@ Two modes:
 Infra addons (shared, not tied to one instance):
   pg addon install etcd
           Stored under top-level addons.etcd in config.
+  pg addon install pgdog
+          Stored under top-level addons.pgdog in config.
 
 Commands:
   pg addon install <addon>   install an add-on
@@ -56,6 +59,7 @@ var addonInstallCmd = &cobra.Command{
 Currently supported add-ons:
   pgbouncer   connection pooler (transaction mode)
   etcd        standalone key-value store (HA cluster DCS)
+  pgdog       Postgres proxy (pooling, load balancing, sharding)
 
 Two modes (pgbouncer):
   Local:  pg addon install pgbouncer -i <instance>
@@ -65,6 +69,11 @@ Infra addon (etcd — shared, not tied to an instance):
   pg addon install etcd [--name ha] [--client-port N] [--peer-port N]
                         [--image ...] [--data-dir ...]
 
+Infra addon (pgdog — shared Postgres proxy):
+  pg addon install pgdog [--name proxy] [--backend NAME=HOST:PORT:DB[:SHARD[:ROLE]]]
+                         [--user NAME:PASSWORD[:DBNAME]] [--sharded-table DB:TABLE:COLUMN:TYPE]
+                         [--port N] [--pool-mode ...] [--workers N] [--default-pool-size N]
+
 Re-running install is idempotent — it re-syncs all users and passwords from
 pg_shadow, regenerates config files and restarts the container.
 
@@ -72,7 +81,9 @@ Examples:
   pg addon install pgbouncer -i proj01
   pg addon install pgbouncer --dsn "postgres://admin:pass@host:35432/proj01_db" --pg-name remote-proj01
   pg addon install etcd
-  pg addon install etcd --name ha --client-port 2379 --peer-port 2380`,
+  pg addon install etcd --name ha --client-port 2379 --peer-port 2380
+  pg addon install pgdog --backend app=127.0.0.1:5432:appdb
+  pg addon install pgdog --backend app=127.0.0.1:5432:shard0:0 --backend app=127.0.0.1:5433:shard1:1 --user alice:s3cret:app`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonInstall(args[0], cmd)
@@ -154,7 +165,7 @@ func init() {
 	addonRemoveCmd.Flags().String("pg-name", "", "name of a remote PgBouncer to remove")
 
 	// etcd flags (top-level shared-infrastructure addon)
-	addonInstallCmd.Flags().String("name", "", "name for the etcd member (also the addon key; default \"etcd\")")
+	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member or pgdog proxy (default \"etcd\"/\"pgdog\")")
 	addonInstallCmd.Flags().Int("client-port", 0, "etcd client host port (0=auto-assign from etcd_start_port)")
 	addonInstallCmd.Flags().Int("peer-port", 0, "etcd peer host port (0=auto-assign, next free port after client)")
 	addonInstallCmd.Flags().String("image", "", "etcd image tag (default quay.io/coreos/etcd:v3.5.30)")
@@ -162,7 +173,16 @@ func init() {
 	addonInstallCmd.Flags().String("data-dir", "", "etcd data dir root, absolute or relative to base_dir (default <base_dir>/addon/etcd); each member uses <root>/<name>/data")
 	addonInstallCmd.Flags().String("advertise-host", "", "host advertised in this member's peer/client URLs (empty=127.0.0.1 for single-host; set a LAN IP or FQDN for cross-host clusters)")
 	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.241.20.147:2379 (implies --initial-cluster-state existing; requires --advertise-host)")
-	addonRemoveCmd.Flags().String("name", "", "name of the etcd member to remove (default \"etcd\")")
+	addonRemoveCmd.Flags().String("name", "", "name of the etcd member or pgdog proxy to remove (default \"etcd\"/\"pgdog\")")
+
+	// pgdog flags (top-level shared Postgres proxy addon)
+	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port)")
+	addonInstallCmd.Flags().String("host", "", "PgDog listen address (default 127.0.0.1)")
+	addonInstallCmd.Flags().String("pool-mode", "", "PgDog pooler mode: transaction (default) or session")
+	addonInstallCmd.Flags().Int("workers", 0, "PgDog worker threads (default 2)")
+	addonInstallCmd.Flags().StringArray("backend", nil, "backend database NAME=HOST:PORT:DBNAME[:SHARD[:ROLE]] (repeatable)")
+	addonInstallCmd.Flags().StringArray("user", nil, "proxy user NAME:PASSWORD[:DBNAME] (repeatable; DBNAME defaults to the first backend's name)")
+	addonInstallCmd.Flags().StringArray("sharded-table", nil, "sharded table DBNAME:TABLE:COLUMN:DATA_TYPE (repeatable)")
 }
 
 // ---------------------------------------------------------------------------
@@ -173,10 +193,12 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 	switch addonName {
 	case "etcd":
 		return runAddonInstallEtcd(cmd)
+	case "pgdog":
+		return runAddonInstallPgDog(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -734,6 +756,254 @@ func pickCoordinator(em *podman.EtcdManager, ec config.EtcdConfig, peers []confi
 }
 
 // ---------------------------------------------------------------------------
+// install logic — pgdog
+// ---------------------------------------------------------------------------
+
+// parsePgDogBackend parses a --backend value of the form
+// NAME=HOST:PORT:DBNAME[:SHARD[:ROLE]]. NAME is the logical database name
+// clients connect to; SHARD defaults to 0 and ROLE to empty (pgdog's default,
+// primary). Used to build one [[databases]] entry in pgdog.toml.
+func parsePgDogBackend(spec string) (config.PgDogBackend, error) {
+	var b config.PgDogBackend
+	name, rest, ok := strings.Cut(spec, "=")
+	if !ok || name == "" {
+		return b, fmt.Errorf("backend %q must be NAME=HOST:PORT:DBNAME[:SHARD[:ROLE]]", spec)
+	}
+	parts := strings.Split(rest, ":")
+	if len(parts) < 3 || len(parts) > 5 {
+		return b, fmt.Errorf("backend %q: expected HOST:PORT:DBNAME[:SHARD[:ROLE]] after the name", spec)
+	}
+	b.Name = name
+	b.Host = parts[0]
+	port, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return b, fmt.Errorf("backend %q: invalid port %q", spec, parts[1])
+	}
+	b.Port = port
+	b.DatabaseName = parts[2]
+	if len(parts) >= 4 {
+		shard, err := strconv.Atoi(parts[3])
+		if err != nil {
+			return b, fmt.Errorf("backend %q: invalid shard %q", spec, parts[3])
+		}
+		b.Shard = shard
+	}
+	if len(parts) == 5 {
+		b.Role = parts[4]
+	}
+	if b.Host == "" || b.DatabaseName == "" {
+		return b, fmt.Errorf("backend %q: host and database name must not be empty", spec)
+	}
+	return b, nil
+}
+
+// parsePgDogUser parses a --user value of the form NAME:PASSWORD[:DBNAME].
+// TODO: also support the backend role decoupling pgdog offers — server_user /
+// server_password per [[users]] (and user/password per [[databases]]) — so the
+// role PgDog uses to reach the backends need not equal the client --user name.
+// DBNAME (the logical database the user may reach) defaults to defaultDB, the
+// first backend's name. Passwords may contain ':' — only the first two fields
+// are split off, the remainder is the password+dbname tail; since DBNAME is
+// optional we take the last ':'-segment as the database only when the spec has
+// at least three fields. Returns the parsed user.
+func parsePgDogUser(spec, defaultDB string) (config.PgDogUser, error) {
+	var u config.PgDogUser
+	name, rest, ok := strings.Cut(spec, ":")
+	if !ok || name == "" {
+		return u, fmt.Errorf("user %q must be NAME:PASSWORD[:DBNAME]", spec)
+	}
+	// The password is everything up to the final ':' segment when a DBNAME is
+	// present, or the whole remainder otherwise. A DBNAME never contains ':',
+	// so the last segment is unambiguously the database when there are >=2
+	// remaining ':'-parts.
+	if i := strings.LastIndex(rest, ":"); i >= 0 {
+		u.Password = rest[:i]
+		u.Database = rest[i+1:]
+	} else {
+		u.Password = rest
+		u.Database = defaultDB
+	}
+	if u.Password == "" {
+		return u, fmt.Errorf("user %q: password must not be empty", spec)
+	}
+	if u.Database == "" {
+		u.Database = defaultDB
+	}
+	u.Name = name
+	return u, nil
+}
+
+// parsePgDogShardedTable parses a --sharded-table value of the form
+// DBNAME:TABLE:COLUMN:DATA_TYPE into one [[sharded_tables]] entry.
+func parsePgDogShardedTable(spec string) (config.PgDogShardedTable, error) {
+	var t config.PgDogShardedTable
+	parts := strings.Split(spec, ":")
+	if len(parts) != 4 {
+		return t, fmt.Errorf("sharded-table %q must be DBNAME:TABLE:COLUMN:DATA_TYPE", spec)
+	}
+	t.Database, t.Name, t.Column, t.DataType = parts[0], parts[1], parts[2], parts[3]
+	for _, f := range []*string{&t.Database, &t.Name, &t.Column, &t.DataType} {
+		if *f == "" {
+			return t, fmt.Errorf("sharded-table %q: all fields must be non-empty", spec)
+		}
+	}
+	return t, nil
+}
+
+// runAddonInstallPgDog installs a standalone PgDog proxy container as a
+// top-level (shared infrastructure) addon. Its pgdog.toml/users.toml are
+// generated entirely from the flags below — there is no config file editing.
+// At least one --backend is required; --user entries authenticate clients.
+func runAddonInstallPgDog(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "pgdog"
+	}
+	imageTag, _ := cmd.Flags().GetString("image")
+	port, _ := cmd.Flags().GetInt("port")
+	host, _ := cmd.Flags().GetString("host")
+	poolMode, _ := cmd.Flags().GetString("pool-mode")
+	workers, _ := cmd.Flags().GetInt("workers")
+	defaultPoolSize, _ := cmd.Flags().GetInt("default-pool-size")
+	backendSpecs, _ := cmd.Flags().GetStringArray("backend")
+	userSpecs, _ := cmd.Flags().GetStringArray("user")
+	shardSpecs, _ := cmd.Flags().GetStringArray("sharded-table")
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if len(backendSpecs) == 0 {
+		return fmt.Errorf("--backend is required (at least one NAME=HOST:PORT:DBNAME)")
+	}
+	if len(userSpecs) == 0 {
+		return fmt.Errorf("--user is required (at least one NAME:PASSWORD[:DBNAME])")
+	}
+
+	backends := make([]config.PgDogBackend, 0, len(backendSpecs))
+	for _, s := range backendSpecs {
+		b, err := parsePgDogBackend(s)
+		if err != nil {
+			return err
+		}
+		backends = append(backends, b)
+	}
+	// --user DBNAME defaults to the first backend's logical database name.
+	users := make([]config.PgDogUser, 0, len(userSpecs))
+	for _, s := range userSpecs {
+		u, err := parsePgDogUser(s, backends[0].Name)
+		if err != nil {
+			return err
+		}
+		// Every referenced database name must exist among the backends.
+		found := false
+		for _, b := range backends {
+			if b.Name == u.Database {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("user %q references database %q, which no --backend defines", u.Name, u.Database)
+		}
+		users = append(users, u)
+	}
+	sharded := make([]config.PgDogShardedTable, 0, len(shardSpecs))
+	for _, s := range shardSpecs {
+		t, err := parsePgDogShardedTable(s)
+		if err != nil {
+			return err
+		}
+		sharded = append(sharded, t)
+	}
+
+	if cfg.Addons.PgDog == nil {
+		cfg.Addons.PgDog = make(map[string]config.PgDogConfig)
+	}
+	existing, ok := cfg.Addons.PgDog[name]
+	if !ok {
+		existing = config.PgDogConfig{
+			ContainerName: "pgcli-pgdog" + nsSuffixCLI(cfg.Namespace) + "-" + name,
+			Name:          name,
+		}
+	}
+	if imageTag != "" {
+		existing.ImageTag = imageTag
+	}
+	if port != 0 {
+		existing.HostPort = port
+	}
+	if host != "" {
+		existing.Host = host
+	}
+	if poolMode != "" {
+		existing.PoolerMode = poolMode
+	}
+	if workers != 0 {
+		existing.Workers = workers
+	}
+	if defaultPoolSize != 0 {
+		existing.DefaultPoolSize = defaultPoolSize
+	}
+	// Lists are fully replaced by the flags: pgdog.toml is generated solely
+	// from this command's inputs, so re-running install is a clean re-render.
+	existing.Backends = backends
+	existing.Users = users
+	existing.ShardedTables = sharded
+	if existing.Name == "" {
+		existing.Name = name
+	}
+	cfg.Addons.PgDog[name] = existing
+
+	cfg.ApplyDefaults()
+	pd := cfg.Addons.PgDog[name]
+
+	dm, err := podman.NewPgDogManager(cfg)
+	if err != nil {
+		return fmt.Errorf("pgdog manager: %w", err)
+	}
+
+	tomlPath, usersPath, err := dm.WriteConfigs(&pd)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("-> Starting PgDog container...")
+	if err := dm.EnsureContainer(&pd); err != nil {
+		return err
+	}
+
+	cfg.Addons.PgDog[name] = pd
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Printf("✓ pgdog installed: %q\n", name)
+	fmt.Printf("  Container:    %s\n", pd.ContainerName)
+	fmt.Printf("  Image:        %s\n", pd.ImageTag)
+	fmt.Printf("  Pooler mode:  %s\n", pd.PoolerMode)
+	fmt.Printf("  Listen:       %s\n", pd.ClientAddr())
+	fmt.Printf("  Metrics:      http://%s:%d/metrics\n", pd.Host, pd.OpenmetricsPort)
+	fmt.Printf("  Backends:     %d\n", len(pd.Backends))
+	fmt.Printf("  Users:        %d\n", len(pd.Users))
+	fmt.Printf("  Config:       %s\n", tomlPath)
+	fmt.Printf("  Users file:   %s (mode 0600)\n", usersPath)
+	fmt.Println()
+	fmt.Printf("  Connect via PgDog:\n")
+	fmt.Printf("    postgres://%s@%s/%s\n", pd.Users[0].Name, pd.ClientAddr(), pd.Users[0].Database)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // list logic
 // ---------------------------------------------------------------------------
 
@@ -752,6 +1022,7 @@ func runAddonList() error {
 
 	pbMgr, _ := podman.NewPgBouncerManager(cfg)
 	em, _ := podman.NewEtcdManager(cfg)
+	dm, _ := podman.NewPgDogManager(cfg)
 
 	// Local add-ons (from instances)
 	fmt.Println("Local add-ons:")
@@ -831,6 +1102,33 @@ func runAddonList() error {
 		fmt.Println("  (none)")
 	}
 
+	// pgdog (shared infrastructure proxy, top-level addon)
+	fmt.Println()
+	fmt.Println("Infra add-ons (pgdog):")
+	hasPgDog := false
+	for name, pd := range cfg.Addons.PgDog {
+		hasPgDog = true
+		status := "stopped"
+		if dm != nil {
+			if running, err := dm.ContainerRunning(pd.ContainerName); err == nil && running {
+				status = "running"
+			}
+		}
+		fmt.Printf("  %s (name: %s)\n", "pgdog", name)
+		fmt.Printf("    Status:      %s\n", status)
+		fmt.Printf("    Listen:      %s\n", pd.ClientAddr())
+		fmt.Printf("    Client port: %d\n", pd.HostPort)
+		fmt.Printf("    Metrics:     http://%s:%d/metrics\n", pd.Host, pd.OpenmetricsPort)
+		fmt.Printf("    Pool mode:   %s\n", pd.PoolerMode)
+		fmt.Printf("    Backends:    %d\n", len(pd.Backends))
+		fmt.Printf("    Users:       %d\n", len(pd.Users))
+		fmt.Printf("    Image:       %s\n", pd.ImageTag)
+		fmt.Printf("    Container:   %s\n", pd.ContainerName)
+	}
+	if !hasPgDog {
+		fmt.Println("  (none)")
+	}
+
 	return nil
 }
 
@@ -842,10 +1140,12 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 	switch addonName {
 	case "etcd":
 		return runAddonRemoveEtcd(cmd)
+	case "pgdog":
+		return runAddonRemovePgDog(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -992,6 +1292,57 @@ func runAddonRemoveEtcd(cmd *cobra.Command) error {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 	fmt.Printf("✓ etcd %q removed\n", name)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// remove logic — pgdog
+// ---------------------------------------------------------------------------
+
+func runAddonRemovePgDog(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "pgdog"
+	}
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.PgDog == nil {
+		return fmt.Errorf("no pgdog add-ons configured")
+	}
+	pd, ok := cfg.Addons.PgDog[name]
+	if !ok {
+		return fmt.Errorf("pgdog %q not found", name)
+	}
+
+	dm, err := podman.NewPgDogManager(cfg)
+	if err != nil {
+		return fmt.Errorf("pgdog manager: %w", err)
+	}
+
+	fmt.Printf("-> Removing pgdog %q...\n", name)
+	if err := dm.Remove(&pd); err != nil {
+		return err
+	}
+
+	delete(cfg.Addons.PgDog, name)
+	if len(cfg.Addons.PgDog) == 0 {
+		cfg.Addons.PgDog = nil
+	}
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	fmt.Printf("✓ pgdog %q removed\n", name)
 	return nil
 }
 

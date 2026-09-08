@@ -22,6 +22,7 @@ type Config struct {
 	PGSSHPort          int                       `yaml:"pg_ssh_port,omitempty"`          // starting SSH host port, default 42201
 	PgBouncerStartPort int                       `yaml:"pgbouncer_start_port,omitempty"` // starting PgBouncer host port, default 56432
 	EtcdStartPort      int                       `yaml:"etcd_start_port,omitempty"`      // starting etcd client host port, default 2379 (peer gets the next free port)
+	PgDogStartPort     int                       `yaml:"pgdog_start_port,omitempty"`     // starting PgDog host port, default 7432 (openmetrics gets the next free port)
 	Postgres           PostgresConfig            `yaml:"postgres"`
 	Podman             PodmanConfig              `yaml:"podman"`
 	PITR               PITRConfig                `yaml:"pitr"`
@@ -73,6 +74,7 @@ type AddonsConfig struct {
 type TopAddonsConfig struct {
 	PgBouncer map[string]PgBouncerConfig `yaml:"pgbouncer,omitempty"`
 	Etcd      map[string]EtcdConfig      `yaml:"etcd,omitempty"`
+	PgDog     map[string]PgDogConfig     `yaml:"pgdog,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -153,6 +155,71 @@ func (e EtcdConfig) PeerURL() string {
 	return fmt.Sprintf("http://%s:%d", e.AdvertiseAddr(), e.PeerPort)
 }
 
+// PgDogBackend is one [[databases]] entry in pgdog.toml — a single PostgreSQL
+// shard (and, within a shard, a role: primary or replica) behind the proxy.
+type PgDogBackend struct {
+	Name         string `yaml:"name"`            // logical database name clients connect to (the [[databases]] name)
+	Host         string `yaml:"host"`            // backend PG host
+	Port         int    `yaml:"port"`            // backend PG port
+	DatabaseName string `yaml:"database_name"`   // real database name on the backend
+	Shard        int    `yaml:"shard,omitempty"` // shard index (0 for a non-sharded setup)
+	Role         string `yaml:"role,omitempty"`  // "primary" (default) or "replica"
+}
+
+// PgDogUser is one [[users]] entry in users.toml. PgDog stores no hashed
+// passwords, so Password is always plaintext and is written to users.toml
+// as-is (mode 0600 on the host, mounted read-only into the container).
+type PgDogUser struct {
+	Name            string `yaml:"name"`
+	Password        string `yaml:"password"`
+	Database        string `yaml:"database"`                   // the [[databases]] name this user may connect to
+	ReplicationMode bool   `yaml:"replication_mode,omitempty"` // allow physical-replication connections
+}
+
+// PgDogShardedTable is one [[sharded_tables]] entry in pgdog.toml — a table
+// whose routing is determined by a single column.
+type PgDogShardedTable struct {
+	Database string `yaml:"database"`
+	Name     string `yaml:"name"`
+	Column   string `yaml:"column"`
+	DataType string `yaml:"data_type"` // e.g. "bigint", "text"
+}
+
+// PgDogConfig holds a standalone PgDog addon (PostgreSQL proxy: connection
+// pooling, load balancing and sharding). Like etcd it is shared infrastructure
+// rather than a per-instance sidecar, so it lives at the top level
+// (addons.pgdog.<name>) and its config files are generated entirely from the
+// flags passed to `pg addon install pgdog` — pgdog.toml + users.toml.
+type PgDogConfig struct {
+	ContainerName   string `yaml:"container_name"`              // e.g. pgcli-pgdog-ns-<name>
+	Name            string `yaml:"name,omitempty"`              // addon key, defaults to the map key
+	ImageTag        string `yaml:"image_tag,omitempty"`         // ghcr.io/pgdogdev/pgdog:v0.1.57 (default)
+	Host            string `yaml:"host,omitempty"`              // listen address, default 127.0.0.1
+	HostPort        int    `yaml:"host_port,omitempty"`         // client-facing port, 7432+ auto-assigned
+	OpenmetricsPort int    `yaml:"openmetrics_port,omitempty"`  // Prometheus /metrics port, next free port after HostPort
+	PoolerMode      string `yaml:"pooler_mode,omitempty"`       // transaction (default) | session
+	Workers         int    `yaml:"workers,omitempty"`           // tokio worker threads, default 2
+	DefaultPoolSize int    `yaml:"default_pool_size,omitempty"` // server connections per user/db pair, default 10
+
+	Backends      []PgDogBackend      `yaml:"backends,omitempty"`       // [[databases]] entries
+	Users         []PgDogUser         `yaml:"users,omitempty"`          // [[users]] entries (users.toml)
+	ShardedTables []PgDogShardedTable `yaml:"sharded_tables,omitempty"` // [[sharded_tables]] entries
+
+	// Autostart brings this container up on host boot via the boot service
+	// (`pg autostart enable --pgdog`). It only starts an existing container,
+	// reading the pgdog.toml/users.toml already on disk — so install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// ClientAddr is the address clients connect to through the proxy.
+func (p PgDogConfig) ClientAddr() string {
+	host := p.Host
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	return fmt.Sprintf("%s:%d", host, p.HostPort)
+}
+
 // PostgresConfig holds PostgreSQL connection settings.
 type PostgresConfig struct {
 	URL      string `yaml:"url"`      // connection string (postgres://user:pass@host:port/db)
@@ -209,6 +276,7 @@ func Default() *Config {
 		PGSSHPort:          42201,
 		PgBouncerStartPort: 56432,
 		EtcdStartPort:      2379,
+		PgDogStartPort:     7432,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -386,6 +454,7 @@ type displayConfig struct {
 	PGSSHPort          int                       `yaml:"pg_ssh_port,omitempty"`
 	PgBouncerStartPort int                       `yaml:"pgbouncer_start_port,omitempty"`
 	EtcdStartPort      int                       `yaml:"etcd_start_port,omitempty"`
+	PgDogStartPort     int                       `yaml:"pgdog_start_port,omitempty"`
 	Logging            LoggingConfig             `yaml:"logging"`
 	Backup             BackupConfig              `yaml:"backup"`
 	Pigsty             PigstyConfig              `yaml:"pigsty"`
@@ -402,6 +471,8 @@ func (c *Config) Display() displayConfig {
 		PGStartPort:        c.PGStartPort,
 		PGSSHPort:          c.PGSSHPort,
 		PgBouncerStartPort: c.PgBouncerStartPort,
+		EtcdStartPort:      c.EtcdStartPort,
+		PgDogStartPort:     c.PgDogStartPort,
 		Logging:            c.Logging,
 		Backup:             c.Backup,
 		Pigsty:             c.Pigsty,
@@ -651,6 +722,32 @@ func (c *Config) ApplyDefaults() {
 		c.Addons.Etcd[name] = addon
 	}
 
+	// Top-level addons defaults (pgdog proxy)
+	for name, addon := range c.Addons.PgDog {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-pgdog" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = "ghcr.io/pgdogdev/pgdog:v0.1.57"
+		}
+		if addon.Host == "" {
+			addon.Host = "127.0.0.1"
+		}
+		if addon.PoolerMode == "" {
+			addon.PoolerMode = "transaction"
+		}
+		if addon.Workers == 0 {
+			addon.Workers = 2
+		}
+		if addon.DefaultPoolSize == 0 {
+			addon.DefaultPoolSize = 10
+		}
+		c.Addons.PgDog[name] = addon
+	}
+
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
 	c.autoAssignPorts()
 }
@@ -685,6 +782,7 @@ func (c *Config) autoAssignPorts() {
 	sshBase := c.PGSSHPort
 	pbBase := c.PgBouncerStartPort
 	etcdBase := c.EtcdStartPort
+	pgdogBase := c.PgDogStartPort
 
 	// Probe already-used ports so multiple config files (or other services)
 	// on the same host don't collide.
@@ -722,11 +820,21 @@ func (c *Config) autoAssignPorts() {
 			assignedEtcd[addon.PeerPort] = true
 		}
 	}
+	assignedPgDog := map[int]bool{}
+	for _, addon := range c.Addons.PgDog {
+		if addon.HostPort != 0 {
+			assignedPgDog[addon.HostPort] = true
+		}
+		if addon.OpenmetricsPort != 0 {
+			assignedPgDog[addon.OpenmetricsPort] = true
+		}
+	}
 
 	nextPG := pgBase
 	nextSSH := sshBase
 	nextPB := pbBase
 	nextEtcd := etcdBase
+	nextPgDog := pgdogBase
 	for _, name := range sorted {
 		inst := c.Instances[name]
 		changed := false
@@ -808,6 +916,35 @@ func (c *Config) autoAssignPorts() {
 			}
 			if addon.PeerPort >= nextEtcd {
 				nextEtcd = addon.PeerPort + 1
+			}
+		}
+	}
+
+	// Allocate ports for top-level addons (pgdog proxies, client + openmetrics).
+	// Same paired allocation as etcd: a proxy's two ports never overlap another
+	// proxy's or any other service's.
+	for name, addon := range c.Addons.PgDog {
+		if addon.HostPort == 0 && pgdogBase > 0 {
+			for (usedPorts != nil && usedPorts[nextPgDog]) || assignedPgDog[nextPgDog] {
+				nextPgDog++
+			}
+			hostPort := nextPgDog
+			nextPgDog++
+			for (usedPorts != nil && usedPorts[nextPgDog]) || assignedPgDog[nextPgDog] {
+				nextPgDog++
+			}
+			metricsPort := nextPgDog
+			nextPgDog++
+
+			addon.HostPort = hostPort
+			addon.OpenmetricsPort = metricsPort
+			c.Addons.PgDog[name] = addon
+		} else if addon.HostPort != 0 {
+			if addon.HostPort >= nextPgDog {
+				nextPgDog = addon.HostPort + 1
+			}
+			if addon.OpenmetricsPort >= nextPgDog {
+				nextPgDog = addon.OpenmetricsPort + 1
 			}
 		}
 	}

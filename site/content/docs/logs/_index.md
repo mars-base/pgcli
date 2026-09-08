@@ -78,6 +78,19 @@ pg logs addon etcd --name m1 -f        # Follow m1
 pg logs addon etcd -n 200              # Member "etcd", last 200 lines
 ```
 
+### PgDog proxies
+
+PgDog is also a top-level infra addon — select the proxy with `--name`
+(defaults to `pgdog`):
+
+```bash
+pg logs addon pgdog --name pgdog       # Proxy logs
+pg logs addon pgdog --name pgdog -f    # Follow
+```
+
+PgDog logs connection-pool events (new server connections, auth, client
+connect/disconnect) as structured INFO lines.
+
 ## Options
 
 | Option | Short | Description |
@@ -86,7 +99,7 @@ pg logs addon etcd -n 200              # Member "etcd", last 200 lines
 | `--tail N` | `-n N` | Show last N lines (default: 50, use 0 for all) |
 | `--instance NAME` | `-i NAME` | Instance name (default: `default`) |
 | `--pg-name NAME` | | Remote addon name (for remote PgBouncer) |
-| `--name NAME` | | etcd member name (default: `etcd`) |
+| `--name NAME` | | etcd member / PgDog proxy name (default: `etcd` / `pgdog`) |
 
 ## Examples
 
@@ -105,6 +118,9 @@ pg logs addon pgbouncer --pg-name analytics-pool -n 50
 
 # Watch an etcd member for leader elections / peer issues
 pg logs addon etcd --name m1 -f
+
+# Watch PgDog pool activity
+pg logs addon pgdog --name pgdog -f
 ```
 
 ## Notes
@@ -112,5 +128,6 @@ pg logs addon etcd --name m1 -f
 - PostgreSQL logs include query execution, connection events, and system messages
 - Addon logs show connection pooler activity (connections, disconnections, pool stats)
 - etcd member logs are JSON-formatted raft/leader/peer events — useful for debugging quorum issues
+- PgDog proxy logs are structured INFO lines for connection-pool events (server connections, auth, client connect/disconnect)
 - Follow mode (`-f`) keeps the connection open until interrupted with Ctrl+C
-- Remote addons use `--pg-name` instead of `-i` to identify the target pooler; etcd members use `--name`
+- Remote addons use `--pg-name` instead of `-i` to identify the target pooler; etcd members and PgDog proxies use `--name`
