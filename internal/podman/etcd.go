@@ -2,6 +2,7 @@ package podman
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -281,12 +282,97 @@ func (m *EtcdManager) ContainerRunning(name string) (bool, error) {
 	return m.containerRunning(name)
 }
 
+// EnsureImage pulls the etcd image if it is not present locally, so etcdctl
+// works on a host that has no etcd member installed yet (or none running).
+func (m *EtcdManager) EnsureImage(imageTag string) error {
+	exists, err := m.imageExists(imageTag)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	fmt.Printf("-> Pulling image %s...\n", imageTag)
+	if err := m.runInteractive("pull", imageTag); err != nil {
+		return fmt.Errorf("pulling etcd image %s: %w", imageTag, err)
+	}
+	fmt.Println("  [OK] Image pulled")
+	return nil
+}
+
+// Etcdctl runs an etcdctl subcommand from a short-lived container. etcd
+// containers are per-member, so instead of exec'ing into one we launch
+// `podman run --rm` on the member's image over the host network and hand the
+// args to etcdctl. The client endpoint comes from ETCDCTL_ENDPOINTS (a native
+// etcdctl env var) — inherited from the caller's environment when set, or from
+// defaultEndpoint otherwise — so no member container needs to be picked. The
+// image is pulled first if the host does not already have it.
+func (m *EtcdManager) Etcdctl(imageTag, defaultEndpoint string, args []string) error {
+	if err := m.EnsureImage(imageTag); err != nil {
+		return err
+	}
+
+	endpoint := os.Getenv("ETCDCTL_ENDPOINTS")
+	if endpoint == "" {
+		endpoint = defaultEndpoint
+	}
+
+	runArgs := []string{"run", "--rm"}
+	if isTerminal(os.Stdin) {
+		runArgs = append(runArgs, "-it")
+	} else {
+		runArgs = append(runArgs, "-i=false")
+	}
+	runArgs = append(runArgs,
+		"--network", "host",
+		"-e", "ETCDCTL_ENDPOINTS="+endpoint,
+		imageTag,
+		"etcdctl",
+	)
+	runArgs = append(runArgs, args...)
+
+	slog.Debug("podman etcdctl", "endpoint", endpoint, "args", args)
+	cmd := podmanCommand(m.podman, runArgs...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("running etcdctl: %w", err)
+	}
+	return nil
+}
+
 // Stop stops an etcd container.
 func (m *EtcdManager) Stop(name string) (string, error) {
 	return m.run("stop", name)
 }
 
 // --- Internal helpers ------------------------------------------------
+
+// runInteractive runs a podman command with attached stdin/stdout/stderr,
+// used for image pulls so the download progress is visible to the user.
+func (m *EtcdManager) runInteractive(args ...string) error {
+	slog.Debug("podman", "args", args)
+	cmd := podmanCommand(m.podman, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	return cmd.Run()
+}
+
+// imageExists reports whether the given image tag is present locally.
+func (m *EtcdManager) imageExists(tag string) (bool, error) {
+	out, err := m.run("images", "--format", "{{.Repository}}:{{.Tag}}")
+	if err != nil {
+		return false, err
+	}
+	for line := range strings.SplitSeq(out, "\n") {
+		if strings.TrimSpace(line) == tag {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 
 func (m *EtcdManager) run(args ...string) (string, error) {
 	cmd := podmanCommand(m.podman, args...)
