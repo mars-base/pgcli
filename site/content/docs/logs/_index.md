@@ -15,7 +15,7 @@ cascade:
   footer_style: slim
 ---
 
-The `pg logs` command displays console output logs from PostgreSQL instances and addon components (such as PgBouncer connection poolers).
+The `pg logs` command displays console output logs from PostgreSQL instances and addon components (such as PgBouncer connection poolers and etcd members).
 
 ## PostgreSQL Instance Logs
 
@@ -67,6 +67,17 @@ pg logs addon pgbouncer --pg-name my-pool -f
 pg logs addon pgbouncer --pg-name my-pool -n 200
 ```
 
+### etcd members
+
+etcd is a top-level infra addon — select the member with `--name` (defaults
+to `etcd`):
+
+```bash
+pg logs addon etcd --name m1           # Member m1 logs
+pg logs addon etcd --name m1 -f        # Follow m1
+pg logs addon etcd -n 200              # Member "etcd", last 200 lines
+```
+
 ## Options
 
 | Option | Short | Description |
@@ -75,6 +86,7 @@ pg logs addon pgbouncer --pg-name my-pool -n 200
 | `--tail N` | `-n N` | Show last N lines (default: 50, use 0 for all) |
 | `--instance NAME` | `-i NAME` | Instance name (default: `default`) |
 | `--pg-name NAME` | | Remote addon name (for remote PgBouncer) |
+| `--name NAME` | | etcd member name (default: `etcd`) |
 
 ## Examples
 
@@ -90,11 +102,15 @@ pg logs addon pgbouncer -i myapp -f
 
 # View remote pooler logs
 pg logs addon pgbouncer --pg-name analytics-pool -n 50
+
+# Watch an etcd member for leader elections / peer issues
+pg logs addon etcd --name m1 -f
 ```
 
 ## Notes
 
 - PostgreSQL logs include query execution, connection events, and system messages
 - Addon logs show connection pooler activity (connections, disconnections, pool stats)
+- etcd member logs are JSON-formatted raft/leader/peer events — useful for debugging quorum issues
 - Follow mode (`-f`) keeps the connection open until interrupted with Ctrl+C
-- Remote addons use `--pg-name` instead of `-i` to identify the target pooler
+- Remote addons use `--pg-name` instead of `-i` to identify the target pooler; etcd members use `--name`

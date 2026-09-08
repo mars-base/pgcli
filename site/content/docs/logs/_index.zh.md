@@ -15,7 +15,7 @@ cascade:
   footer_style: slim
 ---
 
-`pg logs` 命令用于查看 PostgreSQL 实例和插件组件（如 PgBouncer 连接池）的控制台输出日志。
+`pg logs` 命令用于查看 PostgreSQL 实例和插件组件（如 PgBouncer 连接池、etcd 成员）的控制台输出日志。
 
 ## PostgreSQL 实例日志
 
@@ -67,6 +67,16 @@ pg logs addon pgbouncer --pg-name my-pool -f
 pg logs addon pgbouncer --pg-name my-pool -n 200
 ```
 
+### etcd 成员
+
+etcd 属于顶层 infra 插件，用 `--name` 指定成员（省略时默认为 `etcd`）：
+
+```bash
+pg logs addon etcd --name m1           # 成员 m1 的日志
+pg logs addon etcd --name m1 -f        # 持续跟踪 m1
+pg logs addon etcd -n 200              # 成员 "etcd"，最后 200 行
+```
+
 ## 选项说明
 
 | 选项 | 简写 | 描述 |
@@ -75,6 +85,7 @@ pg logs addon pgbouncer --pg-name my-pool -n 200
 | `--tail N` | `-n N` | 显示最后 N 行（默认：50，0 表示全部） |
 | `--instance NAME` | `-i NAME` | 实例名称（默认：`default`） |
 | `--pg-name NAME` | | 远程插件名称（用于远程 PgBouncer） |
+| `--name NAME` | | etcd 成员名称（默认：`etcd`） |
 
 ## 示例
 
@@ -90,11 +101,15 @@ pg logs addon pgbouncer -i myapp -f
 
 # 查看远程连接池日志
 pg logs addon pgbouncer --pg-name analytics-pool -n 50
+
+# 观察 etcd 成员的选主 / peer 事件
+pg logs addon etcd --name m1 -f
 ```
 
 ## 注意事项
 
 - PostgreSQL 日志包括查询执行、连接事件和系统消息
 - 插件日志显示连接池活动（连接、断开、池统计）
+- etcd 成员日志为 JSON 格式的 raft/选主/peer 事件，适合排查 quorum 问题
 - 跟踪模式（`-f`）会保持连接直到按 Ctrl+C 中断
-- 远程插件使用 `--pg-name` 而不是 `-i` 来标识目标连接池
+- 远程插件使用 `--pg-name` 而不是 `-i` 来标识目标连接池；etcd 成员使用 `--name`

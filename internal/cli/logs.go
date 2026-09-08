@@ -28,7 +28,8 @@ Examples:
   pg logs -i myinst                    # Specific instance
   pg logs addon pgbouncer -i myinst    # Local PgBouncer logs for myinst
   pg logs addon pgbouncer --pg-name my-pool   # Remote PgBouncer logs
-  pg logs addon pgbouncer --pg-name my-pool -f`,
+  pg logs addon pgbouncer --pg-name my-pool -f
+  pg logs addon etcd --name m1         # etcd member logs`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		follow, _ := cmd.Flags().GetBool("follow")
 		tail, _ := cmd.Flags().GetInt("tail")
@@ -50,27 +51,27 @@ var logsAddonCmd = &cobra.Command{
 	Short: "Show addon console output logs",
 	Long: `Show addon console output logs.
 
-Requires the addon type (e.g. pgbouncer).
-Use -i for local instance addons, --pg-name for remote addons.
+Requires the addon type (pgbouncer, etcd).
+Use -i for local instance addons, --pg-name for remote addons,
+--name for an etcd member (default "etcd").
 
 Examples:
   pg logs addon pgbouncer -i myinst
   pg logs addon pgbouncer -i myinst -f
-  pg logs addon pgbouncer -i myinst
-  pg logs addon pgbouncer -i myinst -f
   pg logs addon pgbouncer --pg-name my-pool
   pg logs addon pgbouncer --pg-name my-pool -f
-  pg logs addon pgbouncer --pg-name my-pool -n 200`,
+  pg logs addon pgbouncer --pg-name my-pool -n 200
+  pg logs addon etcd --name m1
+  pg logs addon etcd --name m1 -f
+  pg logs addon etcd --name m2 -n 200`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		follow, _ := cmd.Flags().GetBool("follow")
 		tail, _ := cmd.Flags().GetInt("tail")
 		pgName, _ := cmd.Flags().GetString("pg-name")
+		etcdName, _ := cmd.Flags().GetString("name")
 
 		addonType := args[0]
-		if addonType != "pgbouncer" {
-			return fmt.Errorf("unknown addon: %s (available: pgbouncer)", addonType)
-		}
 
 		if err := loadConfig(); err != nil {
 			return err
@@ -78,26 +79,50 @@ Examples:
 
 		var containerName string
 
-		if pgName != "" {
-			// Remote mode
-			if cfg.Addons.PgBouncer == nil {
-				return fmt.Errorf("no remote PgBouncer addons configured")
+		switch addonType {
+		case "etcd":
+			if pgName != "" {
+				return fmt.Errorf("--pg-name selects a remote PgBouncer; use --name for an etcd member")
 			}
-			pb, ok := cfg.Addons.PgBouncer[pgName]
+			name := etcdName
+			if name == "" {
+				name = "etcd"
+			}
+			if cfg.Addons.Etcd == nil {
+				return fmt.Errorf("no etcd addons configured")
+			}
+			ec, ok := cfg.Addons.Etcd[name]
 			if !ok {
-				return fmt.Errorf("remote PgBouncer %q not found (use 'pg addon list' to see available)", pgName)
+				return fmt.Errorf("etcd member %q not found (use 'pg addon list' to see available)", name)
 			}
-			containerName = pb.ContainerName
-		} else {
-			// Local mode: -i
-			inst, ok := cfg.Instances[cfg.Instance]
-			if !ok {
-				return fmt.Errorf("instance %q not found", cfg.Instance)
+			containerName = ec.ContainerName
+		case "pgbouncer":
+			if etcdName != "" {
+				return fmt.Errorf("--name selects an etcd member; use -i or --pg-name for PgBouncer")
 			}
-			if inst.Addons.PgBouncer == nil {
-				return fmt.Errorf("no PgBouncer addon configured for instance %q", cfg.Instance)
+			if pgName != "" {
+				// Remote mode
+				if cfg.Addons.PgBouncer == nil {
+					return fmt.Errorf("no remote PgBouncer addons configured")
+				}
+				pb, ok := cfg.Addons.PgBouncer[pgName]
+				if !ok {
+					return fmt.Errorf("remote PgBouncer %q not found (use 'pg addon list' to see available)", pgName)
+				}
+				containerName = pb.ContainerName
+			} else {
+				// Local mode: -i
+				inst, ok := cfg.Instances[cfg.Instance]
+				if !ok {
+					return fmt.Errorf("instance %q not found", cfg.Instance)
+				}
+				if inst.Addons.PgBouncer == nil {
+					return fmt.Errorf("no PgBouncer addon configured for instance %q", cfg.Instance)
+				}
+				containerName = inst.Addons.PgBouncer.ContainerName
 			}
-			containerName = inst.Addons.PgBouncer.ContainerName
+		default:
+			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd)", addonType)
 		}
 
 		return runPodmanLogs(containerName, tail, follow)
@@ -116,7 +141,8 @@ func init() {
 	// Flags on addon subcommand
 	logsAddonCmd.Flags().BoolP("follow", "f", false, "Stream logs continuously")
 	logsAddonCmd.Flags().IntP("tail", "n", 50, "Number of lines to show (0 = all)")
-	logsAddonCmd.Flags().String("pg-name", "", "Remote addon pooler name (required)")
+	logsAddonCmd.Flags().String("pg-name", "", "Remote addon pooler name (for remote PgBouncer)")
+	logsAddonCmd.Flags().String("name", "", "etcd member name (default \"etcd\")")
 
 	rootCmd.AddCommand(logsCmd)
 	logsCmd.AddCommand(logsAddonCmd)
