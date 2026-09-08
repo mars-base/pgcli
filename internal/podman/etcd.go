@@ -234,10 +234,15 @@ func (m *EtcdManager) createContainer(ec *config.EtcdConfig, initialCluster, sta
 
 	// The etcd image ships no ENTRYPOINT — its CMD is the full path to the
 	// binary — so the executable must be passed explicitly before the flags.
+	// --http-proxy=false stops podman from injecting the host's HTTP(S)_PROXY
+	// into the container: etcd's raft transport honors those vars, so a proxy
+	// would hijack peer traffic to the advertised (LAN) URLs and break
+	// cross-address clustering. Image pulls run client-side and keep the proxy.
 	args := []string{
 		"run", "-d",
 		"--name", ec.ContainerName,
 		"--network", "host",
+		"--http-proxy=false",
 		"--restart", "unless-stopped",
 		"-v", fmt.Sprintf("%s:/etcd-data:z", hostMountPath(dataDir)),
 		ec.ImageTag,
@@ -407,6 +412,10 @@ func (m *EtcdManager) runEtcdctl(imageTag, endpoint string, interactive bool, ar
 	}
 	runArgs = append(runArgs,
 		"--network", "host",
+		// Same reason as createContainer: etcdctl's gRPC transport honors
+		// HTTP(S)_PROXY, so podman's proxy injection would hijack requests to
+		// advertised (LAN) endpoints.
+		"--http-proxy=false",
 		"-e", "ETCDCTL_ENDPOINTS="+endpoint,
 		imageTag,
 		"etcdctl",
