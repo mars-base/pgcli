@@ -31,6 +31,7 @@ func NewPgBouncerManager(cfg *config.Config) (*PgBouncerManager, error) {
 	if dataDir == "" {
 		dataDir = platform.DefaultConfigDir()
 	}
+	ensurePodmanStateReady(path)
 	return &PgBouncerManager{
 		cfg:     cfg,
 		podman:  path,

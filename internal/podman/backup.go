@@ -39,6 +39,7 @@ func NewBackupManager(cfg *config.Config) (*BackupManager, error) {
 	if dataDir == "" {
 		dataDir = platform.DefaultConfigDir()
 	}
+	ensurePodmanStateReady(path)
 	return &BackupManager{
 		cfg:     cfg,
 		podman:  path,

@@ -148,12 +148,32 @@ func (m *Manager) ensurePodmanReady() {
 	if runtime.GOOS != "linux" || m.repaired {
 		return
 	}
-	probe := podmanCommand(m.podman, "ps", "-a", "--format", "{{.Names}}")
-	if out, err := probe.CombinedOutput(); err != nil && needsMigrate(string(out)) {
-		m.runMigrate()
-	}
 	m.repaired = true
+	ensurePodmanStateReady(m.podman)
 	m.restartStoppedContainers()
+}
+
+// podmanStateRepaired guards ensurePodmanStateReady to one probe per process,
+// mirroring Manager.repaired for the addon managers that have no such field.
+var podmanStateRepaired bool
+
+// ensurePodmanStateReady probes podman and runs `podman system migrate` when
+// the rootless pause-process record is stale — the classic failure after a
+// host reboot. Every manager (PostgreSQL, backup, PgBouncer, etcd) calls it at
+// construction, so boot-time 'start --autostart' self-heals even in configs
+// where only addons autostart and no PG instance path runs.
+func ensurePodmanStateReady(podmanPath string) {
+	if runtime.GOOS != "linux" || podmanStateRepaired {
+		return
+	}
+	podmanStateRepaired = true
+	probe := podmanCommand(podmanPath, "ps", "-a", "--format", "{{.Names}}")
+	if out, err := probe.CombinedOutput(); err != nil && needsMigrate(string(out)) {
+		fmt.Println("-> Detected stale podman state (likely after a reboot); running 'podman system migrate'...")
+		if mg := podmanCommand(podmanPath, "system", "migrate"); mg.Run() != nil {
+			slog.Warn("podman system migrate failed; run 'podman system migrate' manually if podman errors persist")
+		}
+	}
 }
 
 // runMigrate runs `podman system migrate` once per process.
