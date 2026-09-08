@@ -209,7 +209,7 @@ Notes for cross-host clusters:
 ### Inspect with `pg etcdctl`
 
 `pg etcdctl` runs etcd's client from a short-lived container — no need to
-`podman exec` into a member (and it works even on a host with no member
+exec into a member (and it works even on a host with no member
 installed, pulling the image on demand). The target comes from
 `ETCDCTL_ENDPOINTS`, falling back to the first configured member:
 
@@ -307,12 +307,6 @@ etcdctl endpoint status -w table
 etcdctl endpoint health
 etcdctl put foo bar
 etcdctl get foo
-```
-
-Inside a member container the tools are already present:
-
-```bash
-podman exec pgcli-etcd-m1 etcdctl member list
 ```
 
 ## Topology & Quorum

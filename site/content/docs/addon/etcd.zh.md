@@ -184,7 +184,7 @@ pg addon install etcd --name m2 --cluster prod \
 
 ### 用 `pg etcdctl` 查看
 
-`pg etcdctl` 从短生命周期容器里运行 etcd 官方客户端 —— 无需 `podman exec` 钻进
+`pg etcdctl` 从短生命周期容器里运行 etcd 官方客户端 —— 无需钻进
 成员容器（本机一个成员都没有时也能用，镜像按需拉取）。目标端点取自
 `ETCDCTL_ENDPOINTS`，未设置时回退到配置中的第一个成员：
 
@@ -277,12 +277,6 @@ etcdctl endpoint status -w table
 etcdctl endpoint health
 etcdctl put foo bar
 etcdctl get foo
-```
-
-成员容器内已自带这些工具：
-
-```bash
-podman exec pgcli-etcd-m1 etcdctl member list
 ```
 
 ## 拓扑与 Quorum
