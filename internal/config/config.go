@@ -127,6 +127,11 @@ type EtcdConfig struct {
 	ClientPort    int    `yaml:"client_port,omitempty"`    // 2379+ auto-assigned
 	PeerPort      int    `yaml:"peer_port,omitempty"`      // next free port after ClientPort
 	AdvertiseHost string `yaml:"advertise_host,omitempty"` // host in this member's peer/client URLs; empty = 127.0.0.1 (single-host); set a LAN IP or FQDN for cross-host
+	// Autostart brings this member's container up on host boot via the boot
+	// service (pg start --autostart). It only starts an existing container —
+	// etcd membership cannot be re-registered at boot — so install the member
+	// first. Independent of the container's --restart policy.
+	Autostart bool `yaml:"autostart,omitempty"`
 }
 
 // AdvertiseAddr is the host used in this member's peer/client URLs — the

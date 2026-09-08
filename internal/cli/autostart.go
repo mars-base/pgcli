@@ -23,6 +23,8 @@ func init() {
 		c.Flags().Bool("backup", false, "select the shared backup container")
 		c.Flags().Bool("pgbouncer", false, "select the PgBouncer addon (use with -i for a local pooler, --pg-name for a remote one)")
 		c.Flags().String("pg-name", "", "name of a remote PgBouncer (top-level addons)")
+		c.Flags().Bool("etcd", false, "select an etcd member (top-level addons)")
+		c.Flags().String("name", "", "name of the etcd member (default \"etcd\")")
 	}
 }
 
@@ -39,13 +41,17 @@ Use 'pg autostart disable' to opt out.`,
 
 var autostartEnableCmd = &cobra.Command{
 	Use:   "enable",
-	Short: "Enable auto-start for an instance, the backup container, or a PgBouncer",
+	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, or an etcd member",
 	Long: `Enable auto-start on boot for exactly one target:
 
   pg autostart enable -i myinst          # instance
   pg autostart enable --backup           # shared backup container
   pg autostart enable --pgbouncer -i myinst      # local PgBouncer for an instance
   pg autostart enable --pgbouncer --pg-name x    # remote PgBouncer
+  pg autostart enable --etcd --name m1           # etcd member (default name "etcd")
+
+Etcd autostart only starts the member's existing container at boot; it never
+re-registers membership (a data-dir-initialized etcd rejoins on plain start).
 
 On Linux the boot service is a systemd --user unit. True boot-time start
 (without a login) requires loginctl enable-linger — attempted automatically,
@@ -99,7 +105,9 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 
 	backupSel, _ := cmd.Flags().GetBool("backup")
 	pgbSel, _ := cmd.Flags().GetBool("pgbouncer")
+	etcdSel, _ := cmd.Flags().GetBool("etcd")
 	pgName, _ := cmd.Flags().GetString("pg-name")
+	etcdName, _ := cmd.Flags().GetString("name")
 	instChanged := cmd.Flags().Changed("instance")
 
 	// Exactly one selector required.
@@ -113,15 +121,32 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	if pgbSel {
 		sel++
 	}
+	if etcdSel {
+		sel++
+	}
 	if sel != 1 {
-		return fmt.Errorf("select exactly one target: -i <name>, --backup, or --pgbouncer")
+		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, or --etcd")
 	}
 	if pgName != "" && !pgbSel {
 		return fmt.Errorf("--pg-name requires --pgbouncer")
 	}
+	if etcdName != "" && !etcdSel {
+		return fmt.Errorf("--name requires --etcd")
+	}
 
 	var targetDesc string
 	switch {
+	case etcdSel:
+		if etcdName == "" {
+			etcdName = "etcd"
+		}
+		ec, ok := cfg.Addons.Etcd[etcdName]
+		if !ok {
+			return fmt.Errorf("etcd member %q not found in config", etcdName)
+		}
+		ec.Autostart = enable
+		cfg.Addons.Etcd[etcdName] = ec
+		targetDesc = fmt.Sprintf("etcd member %q", etcdName)
 	case backupSel:
 		cfg.Backup.Autostart = enable
 		targetDesc = "backup container"
@@ -210,6 +235,11 @@ func countAutostartTargets(c *config.Config) int {
 			n++
 		}
 	}
+	for _, ec := range c.Addons.Etcd {
+		if ec.Autostart {
+			n++
+		}
+	}
 	return n
 }
 
@@ -229,6 +259,9 @@ func runAutostartStatus(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  backup %-15s %s\n", "", onOff(cfg.Backup.Autostart))
 	for name, pb := range cfg.Addons.PgBouncer {
 		fmt.Printf("  pgbouncer %-13s %s (remote)\n", name, onOff(pb.Autostart))
+	}
+	for name, ec := range cfg.Addons.Etcd {
+		fmt.Printf("  etcd %-17s %s\n", name, onOff(ec.Autostart))
 	}
 
 	fmt.Println("\n=== Boot service ===")

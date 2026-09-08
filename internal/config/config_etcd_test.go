@@ -38,7 +38,7 @@ func TestEtcdSaveLoadRoundTrip(t *testing.T) {
 	cfg := Default()
 	cfg.Instances = map[string]InstanceConfig{"a": {}}
 	cfg.Addons.Etcd = map[string]EtcdConfig{
-		"ha": {ClientPort: 2379, PeerPort: 2380},
+		"ha": {ClientPort: 2379, PeerPort: 2380, AdvertiseHost: "10.0.0.1", Autostart: true},
 	}
 	if err := cfg.Save(path); err != nil {
 		t.Fatalf("save: %v", err)
@@ -54,5 +54,11 @@ func TestEtcdSaveLoadRoundTrip(t *testing.T) {
 	}
 	if ec.ClientPort != 2379 || ec.PeerPort != 2380 {
 		t.Errorf("ports not persisted: client=%d peer=%d", ec.ClientPort, ec.PeerPort)
+	}
+	if ec.AdvertiseHost != "10.0.0.1" {
+		t.Errorf("advertise host not persisted: %q", ec.AdvertiseHost)
+	}
+	if !ec.Autostart {
+		t.Error("autostart not persisted")
 	}
 }

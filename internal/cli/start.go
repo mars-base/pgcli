@@ -75,8 +75,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartEtcd(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --etcd)")
 		return nil
 	}
 
@@ -121,6 +121,11 @@ func startAutostart() error {
 		firstErr = err
 	}
 
+	// etcd members (top-level infra addon).
+	if err := startAutostartEtcds(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
 	return firstErr
 }
 
@@ -161,6 +166,46 @@ func startAutostartPgbouncers(c *config.Config) error {
 				if firstErr == nil {
 					firstErr = err
 				}
+			}
+		}
+	}
+	return firstErr
+}
+
+func hasAutostartEtcd(c *config.Config) bool {
+	for _, ec := range c.Addons.Etcd {
+		if ec.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartEtcds starts each autostart-enabled etcd member. Order is
+// sorted by member name for deterministic, readable boot logs.
+func startAutostartEtcds(c *config.Config) error {
+	var names []string
+	for name, ec := range c.Addons.Etcd {
+		if ec.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	em, err := podman.NewEtcdManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		ec := c.Addons.Etcd[name]
+		if err := em.StartContainer(&ec); err != nil {
+			fmt.Printf("  [X] etcd autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
 			}
 		}
 	}

@@ -32,6 +32,7 @@ func NewEtcdManager(cfg *config.Config) (*EtcdManager, error) {
 	if dataDir == "" {
 		dataDir = platform.DefaultConfigDir()
 	}
+	ensurePodmanStateReady(path)
 	return &EtcdManager{
 		cfg:     cfg,
 		podman:  path,
@@ -442,6 +443,48 @@ func (m *EtcdManager) runEtcdctl(imageTag, endpoint string, interactive bool, ar
 		return "", fmt.Errorf("etcdctl %s: %w", strings.Join(args, " "), err)
 	}
 	return string(out), nil
+}
+
+// StartContainer brings an existing etcd member container up for the boot
+// service — the start-only counterpart of EnsureContainer (which performs
+// cluster registration and is install semantics). It never re-runs member
+// add: a data-dir-initialized member reloads its cluster state from disk, so
+// plain start (or a config-only recreate when the container is gone or stuck
+// in an improper state) is enough to rejoin.
+//
+// An already-initialized member ignores the --initial-cluster flags on
+// restart, so the recreate path passes a placeholder self entry.
+func (m *EtcdManager) StartContainer(ec *config.EtcdConfig) error {
+	containerName := ec.ContainerName
+
+	running, err := m.containerRunning(containerName)
+	if err != nil {
+		return err
+	}
+	if running {
+		fmt.Printf("  [OK] etcd %s already running\n", containerName)
+		return nil
+	}
+
+	exists, err := m.containerExists(containerName)
+	if err != nil {
+		return err
+	}
+	if exists {
+		if _, err := m.run("start", containerName); err == nil {
+			fmt.Printf("  [OK] etcd %s started\n", containerName)
+			return nil
+		}
+		fmt.Printf("  [!] etcd %s in improper state, recreating...\n", containerName)
+		if _, err := m.run("rm", "-f", containerName); err != nil {
+			return fmt.Errorf("removing improper etcd container: %w", err)
+		}
+	}
+	if err := m.createContainer(ec, ec.Name+"="+ec.PeerURL(), "existing"); err != nil {
+		return err
+	}
+	fmt.Printf("  [OK] etcd %s started\n", containerName)
+	return nil
 }
 
 // Stop stops an etcd container.
