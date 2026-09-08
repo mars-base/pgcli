@@ -208,16 +208,29 @@ func (m *EtcdManager) retryMemberQuorum(op func() error) error {
 	return err
 }
 
+// clientURL/peerURL helpers: a member advertises on its AdvertiseHost
+// (LAN address for cross-host clusters, loopback otherwise) but always also
+// listens on loopback, so local etcdctl and cross-host peers both work.
+func etcdListenURLs(host string, port int) string {
+	url := fmt.Sprintf("http://%s:%d", host, port)
+	if host != "127.0.0.1" {
+		url = fmt.Sprintf("http://127.0.0.1:%d,%s", port, url)
+	}
+	return url
+}
+
 // createContainer runs an etcd member on host networking with the member's
-// client and peer ports bound to loopback.
+// client and peer ports, advertising on its AdvertiseHost.
 func (m *EtcdManager) createContainer(ec *config.EtcdConfig, initialCluster, state string) error {
 	dataDir := m.resolveDataDir(ec)
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return fmt.Errorf("creating etcd data dir: %w", err)
 	}
 
-	clientURL := fmt.Sprintf("http://127.0.0.1:%d", ec.ClientPort)
-	peerURL := fmt.Sprintf("http://127.0.0.1:%d", ec.PeerPort)
+	clientURL := ec.ClientURL()
+	peerURL := ec.PeerURL()
+	listenClient := etcdListenURLs(ec.AdvertiseAddr(), ec.ClientPort)
+	listenPeer := etcdListenURLs(ec.AdvertiseAddr(), ec.PeerPort)
 
 	// The etcd image ships no ENTRYPOINT — its CMD is the full path to the
 	// binary — so the executable must be passed explicitly before the flags.
@@ -232,9 +245,9 @@ func (m *EtcdManager) createContainer(ec *config.EtcdConfig, initialCluster, sta
 		"--name", ec.Name,
 		"--data-dir", "/etcd-data",
 		"--initial-advertise-peer-urls", peerURL,
-		"--listen-peer-urls", peerURL,
+		"--listen-peer-urls", listenPeer,
 		"--advertise-client-urls", clientURL,
-		"--listen-client-urls", clientURL,
+		"--listen-client-urls", listenClient,
 		"--initial-cluster", initialCluster,
 		"--initial-cluster-state", state,
 		"--initial-cluster-token", ec.ClusterName,
@@ -282,6 +295,66 @@ func (m *EtcdManager) ContainerRunning(name string) (bool, error) {
 	return m.containerRunning(name)
 }
 
+// MemberAddAt registers a new member with a cluster coordinator reachable at
+// coordinatorEndpoint (any client URL — a local member or a cross-host peer).
+// It uses a short-lived etcdctl container (host network), so the coordinator
+// does not have to be a local pgcli-managed container. Returns the raw
+// etcdctl output so callers can parse the authoritative ETCD_INITIAL_CLUSTER
+// it prints for the joining member's --initial-cluster value.
+func (m *EtcdManager) MemberAddAt(imageTag, coordinatorEndpoint, newMemberName, peerURL string) (string, error) {
+	var out string
+	err := m.retryMemberQuorum(func() error {
+		o, err := m.runEtcdctl(imageTag, coordinatorEndpoint, false,
+			"member", "add", newMemberName, "--peer-urls="+peerURL)
+		if err != nil {
+			return fmt.Errorf("registering etcd member %q with the cluster at %s: %w", newMemberName, coordinatorEndpoint, err)
+		}
+		out = o
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return out, nil
+}
+
+// ListMembersAt returns the raw output of `etcdctl member list -w simple`
+// against a coordinator endpoint. Same transport as MemberAddAt — usable to
+// discover an existing cluster's membership before starting a new cross-host
+// member.
+func (m *EtcdManager) ListMembersAt(imageTag, coordinatorEndpoint string) (string, error) {
+	var out string
+	err := m.retryMemberQuorum(func() error {
+		o, err := m.runEtcdctl(imageTag, coordinatorEndpoint, false, "member", "list", "-w", "simple")
+		if err != nil {
+			return fmt.Errorf("listing etcd members via %s: %w", coordinatorEndpoint, err)
+		}
+		out = o
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return out, nil
+}
+
+// MemberExistsAt reports whether a member named `name` is registered in the
+// cluster reachable at coordinatorEndpoint (cross-host capable). Parses the
+// same `<id>, <status>, <name>, ...` lines as memberIDByName.
+func (m *EtcdManager) MemberExistsAt(imageTag, coordinatorEndpoint, name string) (bool, error) {
+	out, err := m.ListMembersAt(imageTag, coordinatorEndpoint)
+	if err != nil {
+		return false, err
+	}
+	for line := range strings.SplitSeq(out, "\n") {
+		fields := strings.Split(line, ",")
+		if len(fields) >= 3 && strings.TrimSpace(fields[2]) == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // EnsureImage pulls the etcd image if it is not present locally, so etcdctl
 // works on a host that has no etcd member installed yet (or none running).
 func (m *EtcdManager) EnsureImage(imageTag string) error {
@@ -308,17 +381,26 @@ func (m *EtcdManager) EnsureImage(imageTag string) error {
 // defaultEndpoint otherwise — so no member container needs to be picked. The
 // image is pulled first if the host does not already have it.
 func (m *EtcdManager) Etcdctl(imageTag, defaultEndpoint string, args []string) error {
-	if err := m.EnsureImage(imageTag); err != nil {
-		return err
-	}
-
 	endpoint := os.Getenv("ETCDCTL_ENDPOINTS")
 	if endpoint == "" {
 		endpoint = defaultEndpoint
 	}
+	_, err := m.runEtcdctl(imageTag, endpoint, true, args...)
+	return err
+}
+
+// runEtcdctl is the internal base for invoking etcdctl from a short-lived
+// container on the host network. It ensures the image, wires up
+// ETCDCTL_ENDPOINTS, and either attaches stdout for the user (`interactive`)
+// or captures it for parsing. Cross-host member-add/list flows use the
+// captured mode; the `pg etcdctl` command uses the attached mode.
+func (m *EtcdManager) runEtcdctl(imageTag, endpoint string, interactive bool, args ...string) (string, error) {
+	if err := m.EnsureImage(imageTag); err != nil {
+		return "", err
+	}
 
 	runArgs := []string{"run", "--rm"}
-	if isTerminal(os.Stdin) {
+	if interactive && isTerminal(os.Stdin) {
 		runArgs = append(runArgs, "-it")
 	} else {
 		runArgs = append(runArgs, "-i=false")
@@ -333,13 +415,24 @@ func (m *EtcdManager) Etcdctl(imageTag, defaultEndpoint string, args []string) e
 
 	slog.Debug("podman etcdctl", "endpoint", endpoint, "args", args)
 	cmd := podmanCommand(m.podman, runArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("running etcdctl: %w", err)
+	if interactive {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return "", fmt.Errorf("running etcdctl: %w", err)
+		}
+		return "", nil
 	}
-	return nil
+
+	out, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("etcdctl %s: %s", strings.Join(args, " "), string(exitErr.Stderr))
+		}
+		return "", fmt.Errorf("etcdctl %s: %w", strings.Join(args, " "), err)
+	}
+	return string(out), nil
 }
 
 // Stop stops an etcd container.

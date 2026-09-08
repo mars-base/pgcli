@@ -9,23 +9,86 @@ addon** 运行 —— 它是共享基础设施，而非绑定某个实例的 sid
 PostgreSQL 高可用栈充当 DCS（Distributed Concurrent Store），或作为通用的配置 /
 锁服务。
 
+> **安全提示：** pgcli 管理的 etcd 成员目前**不提供** TLS/CA 证书，也**没有**
+> 认证 / RBAC —— 任何能连到 client 端口的客户端都拥有完整读写权限。部署时请依靠
+> 网络隔离（默认仅绑定回环；广播端口务必放在受信网络内）。CA/TLS 与认证/RBAC
+> 支持在后续版本中规划开发。
+
 成员通过一次次 `pg addon install etcd` 管理：第一个成员引导（bootstrap）集群，
-后续成员动态加入同名的集群。
+后续成员动态加入同名的集群 —— 可以在同一台机器，也可以跨机器。
 
 ## 工作原理
 
 - **共享基础设施：** etcd 存放在 `pg.yaml` 顶层的 `addons.etcd` map 中，以成员名
   为 key，不隶属于任何单个实例。
-- **host 网络 + 仅监听回环：** 每个成员以 `--network host` 运行，client/peer URL
-  绑定到 `127.0.0.1`。etcd 本身不带认证，因此仅回环暴露是预期的安全姿态。
+- **host 网络 + 可配置监听：** 每个成员以 `--network host` 运行。默认情况下
+  client/peer URL 绑定到 `127.0.0.1` —— etcd 本身不带认证，单机集群仅回环暴露是
+  预期的安全姿态。跨机集群中每个成员通过 `--advertise-host` 广播一个对端可达的
+  地址，同时**仍然**监听回环，本机 etcdctl 与远端 peer 都能访问。
 - **动态成员管理：** 第一个成员以 `--initial-cluster-state new` 启动；每个后续成员
   先对一个运行中的对等成员执行 `etcdctl member add` 注册，再以
-  `--initial-cluster-state existing` 启动。pgcli 自动完成这些步骤。
+  `--initial-cluster-state existing` 启动。pgcli 自动完成这些步骤 —— 同机走成员
+  容器，跨机走临时 etcdctl 容器。
 - **集群身份：** `--cluster` 值相同的成员加入同一个 etcd 集群（对应 etcd 的
   `--initial-cluster-token`）。默认值为 `pgcli-etcd`。
 - **内置调优：** 每个成员启动时都带周期性压缩（`--auto-compaction-mode periodic`、
   `--auto-compaction-retention 24h`）以及 8 GiB 后端配额
   （`--quota-backend-bytes 8589934592`）—— 对于小型 HA 元数据存储是合理的默认值。
+
+## 部署形态
+
+pgcli 支持两种集群形态，使用的安装命令完全相同 —— 区别只在于成员是否共用一台
+主机。
+
+### 单机 —— 所有成员在同一台机器（测试 / 开发）
+
+开发机或 CI 的经典布局：每个成员用不同的自动分配端口监听回环。无需
+`--advertise-host`（默认 `127.0.0.1`），无需改防火墙，主机之外什么都访问不到。
+
+```bash
+pg addon install etcd --name m1              # 127.0.0.1:2379/2380
+pg addon install etcd --name m2              # 127.0.0.1:2381/2382
+pg addon install etcd --name m3              # 127.0.0.1:2383/2384
+```
+
+三个成员同属 `pgcli-etcd` 集群；m1 引导，m2/m3 动态加入。这能体验真正的 3 节点
+raft 语义，但没有任何主机隔离 —— 整集群随一台机器一起消失，正因如此它只是
+*测试*形态。
+
+### 跨主机 —— 每台机器一个成员（生产 HA）
+
+生产形态：把成员分散到不同机器（最好 3 或 5 个奇数个 —— 见拓扑与 Quorum）。
+每个成员广播自己主机的 LAN 地址；第一个成员 bootstrap 时**必须**带
+`--advertise-host`，远端 peer 才拨得通。端口可以在各主机上重复，因为每台只绑
+自己的网卡。
+
+```bash
+# 主机 A (10.0.0.1) — 引导
+pg addon install etcd --name m1 --cluster prod \
+  --advertise-host 10.0.0.1 --client-port 2379 --peer-port 2380
+
+# 主机 B (10.0.0.2) — 加入
+pg addon install etcd --name m2 --cluster prod \
+  --advertise-host 10.0.0.2 --client-port 2379 --peer-port 2380 \
+  --join http://10.0.0.1:2379
+
+# 主机 C (10.0.0.3) — 加入
+pg addon install etcd --name m3 --cluster prod \
+  --advertise-host 10.0.0.3 --client-port 2379 --peer-port 2380 \
+  --join http://10.0.0.1:2379
+```
+
+要求：每个成员的 `--advertise-host` 互相可达（同一 LAN），主机之间放行
+2379/2380 端口，所有成员使用相同的 `--cluster` token。任意一台机器宕机后其余
+主机照常工作；集群只需要保住*机器*的多数派。
+
+| | 单机 | 跨主机 |
+|---|---|---|
+| 适用 | 开发、CI、功能测试 | 生产 HA |
+| `--advertise-host` | 省略（回环默认） | 必填，且每个成员都要 |
+| `--join` | 不用 | 除第一个外每个成员都要 |
+| 端口 | 同主机内每个成员互不相同 | 可重复，各主机绑各自网卡 |
+| 能否扛单机故障 | 否 | 能（quorum 成立时） |
 
 ## 命令
 
@@ -45,6 +108,7 @@ pg addon install etcd --name m1
   Data dir:     ~/.pgcli/addon/etcd/m1/data
   Client port:  2379
   Peer port:    2380
+  Advertise:    127.0.0.1
 
   Client URL: http://127.0.0.1:2379
   Connect (etcdctl): ETCDCTL_ENDPOINTS=http://127.0.0.1:2379
@@ -68,6 +132,63 @@ pgcli 会找到一个运行中的对等成员作为协调者，通过 `etcdctl m
 失去 quorum；pgcli 会自动重试成员操作，无需在安装之间手动等待。
 
 使用不同的 `--cluster` 可让成员归属另一个独立的 etcd 集群。
+
+### 跨机器添加成员
+
+不同主机上的成员也能组成同一个集群。每个跨机成员都必须广播一个**对端可达**的
+地址，用 `--advertise-host` 指定。在已有成员的主机上，bootstrap 时传入本机 LAN
+地址：
+
+```bash
+# 主机 A (10.0.0.1)
+pg addon install etcd --name m1 --cluster prod \
+  --advertise-host 10.0.0.1 --client-port 2379 --peer-port 2380
+```
+
+然后在新主机上，把 `--join` 指向任一现有成员的 client endpoint。pgcli 通过该
+endpoint 完成注册（借助临时 etcdctl 容器 —— 本机无需已有成员容器或镜像，镜像会
+按需拉取），取响应中的权威 `ETCD_INITIAL_CLUSTER`，再启动成员：
+
+```bash
+# 主机 B (10.0.0.2)
+pg addon install etcd --name m2 --cluster prod \
+  --advertise-host 10.0.0.2 --client-port 2379 --peer-port 2380 \
+  --join http://10.0.0.1:2379
+```
+
+```
+-> Registering member with the cluster at http://10.0.0.1:2379...
+-> Starting etcd container (joining cluster)...
+  [OK] etcd container started
+```
+
+跨机集群注意事项：
+
+- **每个**成员都需要可达的 `--advertise-host`，第一个也不例外。它广播的 peer
+  URL 会进入集群成员列表，用默认 `127.0.0.1` 启动的首个成员永远无法被其它主机
+  加入。计划跨机组网时，bootstrap 时就要传 LAN 地址。
+- `--join` 必须搭配 `--cluster`，且取值要与远端集群的 token 一致 —— 成员注册
+  由远端集群校验，而非本地配置。
+- `--join` 必须搭配 `--advertise-host`；否则其它成员会注册一个拨不通的 peer URL。
+- 端口可以跨主机重复（两台机器都用 `2379/2380`），因为各主机只绑定自己的网卡。
+- 成员间 client/peer 端口必须互通 —— 记得放行防火墙（如 VM 网段 → 主机的
+  2379/2380）。
+- 对已注册的名字重复执行相同的 `--join` 安装会直接报错；先用
+  `pg etcdctl member remove <hex-id>` 从集群注销。
+
+### 用 `pg etcdctl` 查看
+
+`pg etcdctl` 从短生命周期容器里运行 etcd 官方客户端 —— 无需 `podman exec` 钻进
+成员容器（本机一个成员都没有时也能用，镜像按需拉取）。目标端点取自
+`ETCDCTL_ENDPOINTS`，未设置时回退到配置中的第一个成员：
+
+```bash
+pg etcdctl member list
+pg etcdctl endpoint health
+ETCDCTL_ENDPOINTS=http://10.0.0.2:2379 pg etcdctl endpoint status -- -w table
+```
+
+pg 自身参数解析器不接受的 etcdctl 参数（`-w table`、`--hex` 等）放在 `--` 之后。
 
 ### 查看
 
@@ -109,6 +230,8 @@ pg addon remove etcd --name m2
 | `--peer-port` | peer 主机端口（0 = 自动分配，取下一个空闲端口） | auto |
 | `--image` | etcd 镜像 tag | `quay.io/coreos/etcd:v3.5.30` |
 | `--data-dir` | 数据目录**根**——绝对路径，或相对 `base_dir`；每个成员用 `<root>/<name>/data` | `<base_dir>/addon/etcd` |
+| `--advertise-host` | 本成员 peer/client URL 中广播的主机（留空 = `127.0.0.1` 单机；跨机填 LAN IP 或 FQDN） | `127.0.0.1` |
+| `--join` | 要跨机加入的现有成员 client endpoint，如 `http://10.0.0.1:2379`（隐含 `--initial-cluster-state existing`；需搭配 `--advertise-host` 与 `--cluster`） | — |
 
 容器名遵循命名空间约定：`pgcli-etcd-<namespace>-<name>`（未设 namespace 时省略）。
 
@@ -197,6 +320,7 @@ addons:
 
 - **单成员 vs 集群：** 仅 `--name m1` 得到单成员集群；用相同 `--cluster` 再装更多
   成员即可扩容。
-- **无认证：** 这些成员不启用认证且仅绑定回环。未加认证前，不要把 client 端口暴露到主机之外。
+- **生产可用：** 每个成员默认已带周期性压缩与 8 GiB 后端配额等调优参数（见上文
+  「工作原理」），可直接用于生产环境的 DCS 场景。
 - **重复安装是幂等的：** 对运行中的成员再次执行 `pg addon install etcd --name <m>`
   会以更新后的参数重建其容器；已在集群中注册的成员不会被重复 add。
