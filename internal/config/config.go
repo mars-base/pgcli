@@ -119,13 +119,33 @@ type PgBouncerConfig struct {
 // infrastructure, so it is stored at the top level (addons.etcd.<name>)
 // rather than under a specific instance.
 type EtcdConfig struct {
-	ContainerName string `yaml:"container_name"`         // e.g. pgcli-etcd-ns-<name>
-	Name          string `yaml:"name,omitempty"`         // etcd --name, defaults to the addon key
-	ClusterName   string `yaml:"cluster_name,omitempty"` // etcd --initial-cluster-token (unique cluster id; all members must match)
-	ImageTag      string `yaml:"image_tag,omitempty"`    // quay.io/coreos/etcd:v3.5.30 (default)
-	DataDir       string `yaml:"data_dir,omitempty"`     // data dir root; member uses <root>/<name>/data, default <baseDir>/addon/etcd
-	ClientPort    int    `yaml:"client_port,omitempty"`  // 2379+ auto-assigned
-	PeerPort      int    `yaml:"peer_port,omitempty"`    // next free port after ClientPort
+	ContainerName string `yaml:"container_name"`           // e.g. pgcli-etcd-ns-<name>
+	Name          string `yaml:"name,omitempty"`           // etcd --name, defaults to the addon key
+	ClusterName   string `yaml:"cluster_name,omitempty"`   // etcd --initial-cluster-token (unique cluster id; all members must match)
+	ImageTag      string `yaml:"image_tag,omitempty"`      // quay.io/coreos/etcd:v3.5.30 (default)
+	DataDir       string `yaml:"data_dir,omitempty"`       // data dir root; member uses <root>/<name>/data, default <baseDir>/addon/etcd
+	ClientPort    int    `yaml:"client_port,omitempty"`    // 2379+ auto-assigned
+	PeerPort      int    `yaml:"peer_port,omitempty"`      // next free port after ClientPort
+	AdvertiseHost string `yaml:"advertise_host,omitempty"` // host in this member's peer/client URLs; empty = 127.0.0.1 (single-host); set a LAN IP or FQDN for cross-host
+}
+
+// AdvertiseAddr is the host used in this member's peer/client URLs — the
+// explicit AdvertiseHost, or loopback for a single-host cluster.
+func (e EtcdConfig) AdvertiseAddr() string {
+	if e.AdvertiseHost != "" {
+		return e.AdvertiseHost
+	}
+	return "127.0.0.1"
+}
+
+// ClientURL is this member's advertised client endpoint.
+func (e EtcdConfig) ClientURL() string {
+	return fmt.Sprintf("http://%s:%d", e.AdvertiseAddr(), e.ClientPort)
+}
+
+// PeerURL is this member's advertised peer endpoint.
+func (e EtcdConfig) PeerURL() string {
+	return fmt.Sprintf("http://%s:%d", e.AdvertiseAddr(), e.PeerPort)
 }
 
 // PostgresConfig holds PostgreSQL connection settings.

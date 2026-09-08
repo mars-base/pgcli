@@ -160,6 +160,8 @@ func init() {
 	addonInstallCmd.Flags().String("image", "", "etcd image tag (default quay.io/coreos/etcd:v3.5.30)")
 	addonInstallCmd.Flags().String("cluster", "", "etcd cluster name (--initial-cluster-token, default \"pgcli-etcd\")")
 	addonInstallCmd.Flags().String("data-dir", "", "etcd data dir root, absolute or relative to base_dir (default <base_dir>/addon/etcd); each member uses <root>/<name>/data")
+	addonInstallCmd.Flags().String("advertise-host", "", "host advertised in this member's peer/client URLs (empty=127.0.0.1 for single-host; set a LAN IP or FQDN for cross-host clusters)")
+	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.241.20.147:2379 (implies --initial-cluster-state existing; requires --advertise-host)")
 	addonRemoveCmd.Flags().String("name", "", "name of the etcd member to remove (default \"etcd\")")
 }
 
@@ -498,6 +500,8 @@ func runAddonInstallEtcd(cmd *cobra.Command) error {
 	peerPort, _ := cmd.Flags().GetInt("peer-port")
 	dataDir, _ := cmd.Flags().GetString("data-dir")
 	cluster, _ := cmd.Flags().GetString("cluster")
+	advertiseHost, _ := cmd.Flags().GetString("advertise-host")
+	joinEndpoint, _ := cmd.Flags().GetString("join")
 
 	path := cfgPath
 	if path == "" {
@@ -509,6 +513,15 @@ func runAddonInstallEtcd(cmd *cobra.Command) error {
 	cfg, err := config.Load(path)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if joinEndpoint != "" {
+		if advertiseHost == "" {
+			return fmt.Errorf("--join requires --advertise-host so existing members can reach this new member over the network")
+		}
+		if cluster == "" {
+			return fmt.Errorf("--join requires --cluster (must match the remote cluster's --initial-cluster-token)")
+		}
 	}
 
 	if cfg.Addons.Etcd == nil {
@@ -531,10 +544,6 @@ func runAddonInstallEtcd(cmd *cobra.Command) error {
 		existing.PeerPort = peerPort
 	}
 	if dataDir != "" {
-		// Resolve relative paths against the config's base_dir (falling back
-		// to the platform default when unset); absolute paths are kept as-is.
-		// Storing the resolved path keeps the persisted config portable and lets
-		// the manager tell a custom dir from the computed default.
 		base := cfg.BaseDir
 		if base == "" {
 			base = platform.DefaultConfigDir()
@@ -547,6 +556,9 @@ func runAddonInstallEtcd(cmd *cobra.Command) error {
 	if cluster != "" {
 		existing.ClusterName = cluster
 	}
+	if advertiseHost != "" {
+		existing.AdvertiseHost = advertiseHost
+	}
 	cfg.Addons.Etcd[name] = existing
 
 	// Fill defaults and auto-assign any unset ports.
@@ -558,45 +570,60 @@ func runAddonInstallEtcd(cmd *cobra.Command) error {
 		return fmt.Errorf("etcd manager: %w", err)
 	}
 
-	// Gather every member that belongs to this member's cluster (same
-	// ClusterName), excluding the member being installed. Those are the
-	// peers we join when this is not the cluster's first member.
-	var peers []config.EtcdConfig
-	for k, v := range cfg.Addons.Etcd {
-		if k != name && v.ClusterName == ec.ClusterName {
-			peers = append(peers, v)
-		}
-	}
-	sort.Slice(peers, func(i, j int) bool { return peers[i].Name < peers[j].Name })
+	peerURL := ec.PeerURL()
 
-	peerURL := fmt.Sprintf("http://127.0.0.1:%d", ec.PeerPort)
-	initialCluster, state := bootstrapCluster(ec, peers)
-
-	if len(peers) == 0 {
-		// First member: bootstrap the cluster.
-		fmt.Println("-> Bootstrapping etcd cluster...")
-	} else {
-		// Joining an existing cluster: register the member with a running
-		// peer first, then start with --initial-cluster-state existing.
-		coord, ok := pickCoordinator(em, ec, peers)
-		if !ok {
-			return fmt.Errorf("cluster %q has no running member to join; start one of the existing etcd members first", ec.ClusterName)
-		}
-		registered, err := em.MemberExists(coord.ContainerName, coord.ClientPort, ec.Name)
+	switch {
+	case joinEndpoint != "":
+		// Cross-host join: no coordinator container on this machine. Use
+		// etcdctl from a short-lived container to register with the remote
+		// coordinator, then start with the authoritative initial-cluster it
+		// prints (already reflects every existing member's advertised URL,
+		// plus this new one).
+		initialCluster, err := joinViaEndpoint(em, ec, joinEndpoint, peerURL)
 		if err != nil {
-			return fmt.Errorf("querying etcd members: %w", err)
+			return err
 		}
-		if !registered {
-			fmt.Println("-> Registering new member with the cluster...")
-			if err := em.MemberAdd(coord.ContainerName, coord.ClientPort, ec.Name, peerURL); err != nil {
-				return err
+		if err := em.EnsureContainer(&ec, initialCluster, "existing"); err != nil {
+			return err
+		}
+
+	default:
+		// Local-cluster path: peers are pgcli-managed members in the same
+		// config. First member bootstraps; later ones join via a running
+		// peer container.
+		var peers []config.EtcdConfig
+		for k, v := range cfg.Addons.Etcd {
+			if k != name && v.ClusterName == ec.ClusterName {
+				peers = append(peers, v)
 			}
 		}
-		fmt.Println("-> Starting etcd container (joining cluster)...")
-	}
+		sort.Slice(peers, func(i, j int) bool { return peers[i].Name < peers[j].Name })
 
-	if err := em.EnsureContainer(&ec, initialCluster, state); err != nil {
-		return err
+		initialCluster, state := bootstrapCluster(ec, peers)
+
+		if len(peers) == 0 {
+			fmt.Println("-> Bootstrapping etcd cluster...")
+		} else {
+			coord, ok := pickCoordinator(em, ec, peers)
+			if !ok {
+				return fmt.Errorf("cluster %q has no running member to join; start one of the existing etcd members first", ec.ClusterName)
+			}
+			registered, err := em.MemberExists(coord.ContainerName, coord.ClientPort, ec.Name)
+			if err != nil {
+				return fmt.Errorf("querying etcd members: %w", err)
+			}
+			if !registered {
+				fmt.Println("-> Registering new member with the cluster...")
+				if err := em.MemberAdd(coord.ContainerName, coord.ClientPort, ec.Name, peerURL); err != nil {
+					return err
+				}
+			}
+			fmt.Println("-> Starting etcd container (joining cluster)...")
+		}
+
+		if err := em.EnsureContainer(&ec, initialCluster, state); err != nil {
+			return err
+		}
 	}
 
 	cfg.Addons.Etcd[name] = ec
@@ -611,10 +638,55 @@ func runAddonInstallEtcd(cmd *cobra.Command) error {
 	fmt.Printf("  Data dir:     %s\n", em.DataDir(&ec))
 	fmt.Printf("  Client port:  %d\n", ec.ClientPort)
 	fmt.Printf("  Peer port:    %d\n", ec.PeerPort)
+	fmt.Printf("  Advertise:    %s\n", ec.AdvertiseAddr())
 	fmt.Println()
-	fmt.Printf("  Client URL: http://127.0.0.1:%d\n", ec.ClientPort)
-	fmt.Printf("  Connect (etcdctl): ETCDCTL_ENDPOINTS=http://127.0.0.1:%d\n", ec.ClientPort)
+	fmt.Printf("  Client URL: %s\n", ec.ClientURL())
+	fmt.Printf("  Connect (etcdctl): ETCDCTL_ENDPOINTS=%s\n", ec.ClientURL())
 	return nil
+}
+
+// joinViaEndpoint registers a new member with a coordinator reachable at
+// coordinatorEndpoint (cross-host or a non-pgcli-managed peer) and returns the
+// authoritative ETCD_INITIAL_CLUSTER from etcdctl's response, to be passed to
+// the joining container. Idempotent in the other direction: it errors when the
+// member name is already registered, since re-adding would fail and the caller
+// should remove the stale member first.
+func joinViaEndpoint(em *podman.EtcdManager, ec config.EtcdConfig, coordinatorEndpoint, peerURL string) (string, error) {
+	registered, err := em.MemberExistsAt(ec.ImageTag, coordinatorEndpoint, ec.Name)
+	if err != nil {
+		return "", err
+	}
+	if registered {
+		return "", fmt.Errorf("member %q is already registered with the cluster at %s — remove it first with `pg etcdctl member remove` against that endpoint", ec.Name, coordinatorEndpoint)
+	}
+	fmt.Printf("-> Registering member with the cluster at %s...\n", coordinatorEndpoint)
+	out, err := em.MemberAddAt(ec.ImageTag, coordinatorEndpoint, ec.Name, peerURL)
+	if err != nil {
+		return "", err
+	}
+	initialCluster, ok := parseInitialCluster(out)
+	if !ok {
+		return "", fmt.Errorf("coordinator response did not contain ETCD_INITIAL_CLUSTER:\n%s", out)
+	}
+	fmt.Println("-> Starting etcd container (joining cluster)...")
+	return initialCluster, nil
+}
+
+// parseInitialCluster extracts the ETCD_INITIAL_CLUSTER value from the
+// `etcdctl member add` response, e.g.:
+//
+//	ETCD_INITIAL_CLUSTER="m1=http://10.0.0.1:2380,m2=http://10.0.0.2:2380"
+func parseInitialCluster(out string) (string, bool) {
+	const key = "ETCD_INITIAL_CLUSTER=\""
+	for _, line := range strings.Split(out, "\n") {
+		if i := strings.Index(line, key); i >= 0 {
+			rest := line[i+len(key):]
+			if j := strings.IndexByte(rest, '"'); j >= 0 {
+				return rest[:j], true
+			}
+		}
+	}
+	return "", false
 }
 
 // resolveUnderBase turns a user-supplied data dir into an absolute path:
@@ -631,17 +703,18 @@ func resolveUnderBase(base, dir string) string {
 // bootstrapCluster returns the etcd --initial-cluster value and its state for
 // a member, given the other members already in the same cluster. The first
 // member of a cluster bootstraps with state "new" (single-member list);
-// subsequent members join with state "existing" and the full peer list.
+// subsequent members join with state "existing" and the full peer list. Each
+// entry uses that member's advertised peer URL, so a mixed host/network
+// layout is represented correctly.
 func bootstrapCluster(ec config.EtcdConfig, peers []config.EtcdConfig) (initialCluster, state string) {
 	if len(peers) == 0 {
-		self := fmt.Sprintf("%s=http://127.0.0.1:%d", ec.Name, ec.PeerPort)
-		return self, "new"
+		return ec.Name + "=" + ec.PeerURL(), "new"
 	}
 	parts := make([]string, 0, len(peers)+1)
 	for _, p := range peers {
-		parts = append(parts, fmt.Sprintf("%s=http://127.0.0.1:%d", p.Name, p.PeerPort))
+		parts = append(parts, p.Name+"="+p.PeerURL())
 	}
-	parts = append(parts, fmt.Sprintf("%s=http://127.0.0.1:%d", ec.Name, ec.PeerPort))
+	parts = append(parts, ec.Name+"="+ec.PeerURL())
 	return strings.Join(parts, ","), "existing"
 }
 

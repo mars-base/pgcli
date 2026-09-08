@@ -9,20 +9,32 @@ as a **standalone, top-level addon** — shared infrastructure rather than a
 per-instance sidecar. This is useful as the DCS (Distributed Concurrent Store)
 backing a PostgreSQL HA stack, or as a general config/lock service.
 
+> **Security caveat:** pgcli-managed etcd members currently run **without**
+> TLS/CA certificates and **without** authentication/RBAC — any client that can
+> reach a client port has full read/write access. Plan a deployment around
+> network isolation (loopback binds by default; keep advertised ports inside a
+> trusted network). CA/TLS and auth/RBAC support is on the roadmap for a later
+> release.
+
 Members are managed one `pg addon install etcd` at a time: the first member
-bootstraps a cluster, and later members join the same named cluster on the fly.
+bootstraps a cluster, and later members join the same named cluster on the fly
+— from the same host or from another machine.
 
 ## How It Works
 
 - **Shared infrastructure:** etcd lives in the top-level `addons.etcd` map in
   `pg.yaml`, keyed by member name — not under any single instance.
-- **Host network, loopback binds:** each member runs with `--network host` and
-  binds its client/peer URLs to `127.0.0.1`. etcd ships without authentication,
-  so loopback-only exposure is the intended posture.
+- **Host network, configurable bind:** each member runs with `--network host`.
+  By default its client/peer URLs bind to `127.0.0.1` — etcd ships without
+  authentication, so loopback-only exposure is the intended posture for a
+  single-host cluster. For cross-host clusters each member advertises a
+  reachable address (`--advertise-host`) while **also** listening on loopback,
+  so local `etcdctl` and remote peers both work.
 - **Dynamic membership:** the first member starts with
   `--initial-cluster-state new`; each subsequent member is registered with
   `etcdctl member add` against a running peer, then started with
-  `--initial-cluster-state existing`. pgcli does this automatically.
+  `--initial-cluster-state existing`. pgcli does this automatically — same-host
+  via a member container, cross-host via a temporary etcdctl container.
 - **Cluster identity:** members sharing the same `--cluster` value join the
   same etcd cluster (it maps to etcd's `--initial-cluster-token`). The default
   is `pgcli-etcd`.
@@ -30,6 +42,63 @@ bootstraps a cluster, and later members join the same named cluster on the fly.
   (`--auto-compaction-mode periodic`, `--auto-compaction-retention 24h`) and an
   8 GiB backend quota (`--quota-backend-bytes 8589934592`) — sane defaults for
   a small HA metadata store.
+
+## Deployment Topologies
+
+pgcli supports two cluster shapes. Both use the same install commands — the
+difference is whether members share a host.
+
+### Single host — all members on one machine (testing / dev)
+
+The classic layout for a dev box or CI: every member listens on loopback with a
+different auto-assigned port. No `--advertise-host` needed (default
+`127.0.0.1`), no firewall changes, nothing reachable from outside the host.
+
+```bash
+pg addon install etcd --name m1              # 127.0.0.1:2379/2380
+pg addon install etcd --name m2              # 127.0.0.1:2381/2382
+pg addon install etcd --name m3              # 127.0.0.1:2383/2384
+```
+
+All three belong to cluster `pgcli-etcd`; m1 bootstraps, m2/m3 join on the fly.
+This gives you real 3-node raft semantics but zero host isolation — the whole
+cluster dies with one machine, which is exactly why it is a *testing* topology.
+
+### Cross host — one member per machine (production HA)
+
+The production shape: spread members across machines (ideally 3 or 5, an odd
+count — see Topology & Quorum). Each member advertises its host's LAN address;
+the first member **must** bootstrap with `--advertise-host` so remote peers can
+dial it. Ports may repeat on every host since each binds its own interface.
+
+```bash
+# host A (10.0.0.1) — bootstrap
+pg addon install etcd --name m1 --cluster prod \
+  --advertise-host 10.0.0.1 --client-port 2379 --peer-port 2380
+
+# host B (10.0.0.2) — join
+pg addon install etcd --name m2 --cluster prod \
+  --advertise-host 10.0.0.2 --client-port 2379 --peer-port 2380 \
+  --join http://10.0.0.1:2379
+
+# host C (10.0.0.3) — join
+pg addon install etcd --name m3 --cluster prod \
+  --advertise-host 10.0.0.3 --client-port 2379 --peer-port 2380 \
+  --join http://10.0.0.1:2379
+```
+
+Requirements: every member's `--advertise-host` is a mutual-LAN-reachable
+address, ports 2379/2380 are open between hosts, and all members share one
+`pg.yaml`-per-host with the same `--cluster` token. Each host survives losing
+any one member; the cluster only needs a majority of *machines*.
+
+| | Single host | Cross host |
+|---|---|---|
+| Use for | dev, CI, functional testing | production HA |
+| `--advertise-host` | omit (loopback default) | required, every member |
+| `--join` | not used | every member after the first |
+| Ports | unique per member on one host | may repeat, one host each |
+| Survives machine loss | no | yes (with quorum) |
 
 ## Commands
 
@@ -49,6 +118,7 @@ pg addon install etcd --name m1
   Data dir:     ~/.pgcli/addon/etcd/m1/data
   Client port:  2379
   Peer port:    2380
+  Advertise:    127.0.0.1
 
   Client URL: http://127.0.0.1:2379
   Connect (etcdctl): ETCDCTL_ENDPOINTS=http://127.0.0.1:2379
@@ -74,6 +144,73 @@ re-election; pgcli retries the membership operations automatically, so you do
 not need to wait between installs.
 
 Use a different `--cluster` to keep members in a separate etcd cluster.
+
+### Join a member on another machine
+
+Members on different hosts form one cluster too. Each cross-host member must
+advertise an address the *other* members can reach, set with
+`--advertise-host`. On the machine that already hosts a member, bootstrap as
+usual, passing its LAN address:
+
+```bash
+# host A (10.0.0.1)
+pg addon install etcd --name m1 --cluster prod \
+  --advertise-host 10.0.0.1 --client-port 2379 --peer-port 2380
+```
+
+Then on the new host, point `--join` at any existing member's client endpoint.
+pgcli registers the member through that endpoint (from a temporary etcdctl
+container — no local member container or image needed; the image is pulled on
+demand), takes the authoritative `ETCD_INITIAL_CLUSTER` from the response, and
+starts the member:
+
+```bash
+# host B (10.0.0.2)
+pg addon install etcd --name m2 --cluster prod \
+  --advertise-host 10.0.0.2 --client-port 2379 --peer-port 2380 \
+  --join http://10.0.0.1:2379
+```
+
+```
+-> Registering member with the cluster at http://10.0.0.1:2379...
+-> Starting etcd container (joining cluster)...
+  [OK] etcd container started
+```
+
+Notes for cross-host clusters:
+
+- **Every** member needs a reachable `--advertise-host` — including the first.
+  Its advertised peer URL propagates into the cluster's membership list, so a
+  first member started on the default `127.0.0.1` can never be joined from
+  another host. If you plan a cross-host cluster, pass the LAN address at
+  bootstrap time.
+- `--cluster` is required with `--join` and must match the remote cluster's
+  token — membership is checked by that cluster, not by the local config.
+- `--advertise-host` is required with `--join`; without it the other members
+  could register a peer URL they can't dial.
+- Ports may repeat across hosts (`2379/2380` on both) since each host binds
+  its own interfaces.
+- A member's client/peer ports must be reachable between hosts — open your
+  firewall (e.g. the VM subnet → 2379/2380 on the host).
+- Re-running the same `--join` install for an already-registered name fails
+  with a clear error; deregister first via
+  `pg etcdctl member remove <hex-id>` against the cluster.
+
+### Inspect with `pg etcdctl`
+
+`pg etcdctl` runs etcd's client from a short-lived container — no need to
+`podman exec` into a member (and it works even on a host with no member
+installed, pulling the image on demand). The target comes from
+`ETCDCTL_ENDPOINTS`, falling back to the first configured member:
+
+```bash
+pg etcdctl member list
+pg etcdctl endpoint health
+ETCDCTL_ENDPOINTS=http://10.0.0.2:2379 pg etcdctl endpoint status -- -w table
+```
+
+etcdctl flags that pg's own parser would reject (`-w table`, `--hex`, …) go
+after `--`.
 
 ### List
 
@@ -116,6 +253,8 @@ as long as quorum holds.
 | `--peer-port` | Peer host port (0 = auto-assign, next free port) | auto |
 | `--image` | etcd image tag | `quay.io/coreos/etcd:v3.5.30` |
 | `--data-dir` | Data dir **root** — absolute, or relative to `base_dir`; each member uses `<root>/<name>/data` | `<base_dir>/addon/etcd` |
+| `--advertise-host` | Host advertised in this member's peer/client URLs (empty = `127.0.0.1` for single-host; set a LAN IP or FQDN for cross-host) | `127.0.0.1` |
+| `--join` | Client endpoint of an existing member to join cross-host, e.g. `http://10.0.0.1:2379` (implies `--initial-cluster-state existing`; requires `--advertise-host` and `--cluster`) | — |
 
 Container name follows the namespace convention:
 `pgcli-etcd-<namespace>-<name>` (namespace omitted when unset).
@@ -202,14 +341,27 @@ addons:
       peer_port: 2382
 ```
 
-Port base is configurable via top-level `etcd_start_port` (default 2379).
+Port base is configurable via top-level `etcd_start_port` (default 2379). A
+cross-host member records the address it advertises:
+
+```yaml
+addons:
+  etcd:
+    m1:
+      name: m1
+      cluster_name: prod
+      advertise_host: 10.0.0.1
+      client_port: 2379
+      peer_port: 2380
+```
 
 ## Notes
 
 - **Single-node vs cluster:** `--name m1` alone gives a one-member cluster;
   install more members with the same `--cluster` to grow it.
-- **No auth:** these members run unauthenticated and bound to loopback. Do not
-  expose the client port beyond the host without adding authentication.
+- **Production-ready defaults:** every member already launches with periodic
+  compaction and an 8 GiB backend quota (see How It Works), suitable for a
+  production DCS without further tuning.
 - **Reinstall is idempotent:** re-running `pg addon install etcd --name <m>`
   on a running member recreates its container with updated flags; a member
   already registered in the cluster is not re-added.
