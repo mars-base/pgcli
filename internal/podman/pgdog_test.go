@@ -115,3 +115,50 @@ func TestPgDogReplicationModeLine(t *testing.T) {
 		t.Errorf("expected replication_mode line, got:\n%s", data)
 	}
 }
+
+// TestPgDogWriteConfigsListenBind pins the pgdog [general] host rendering:
+// the macOS bridge widens the default loopback bind to 0.0.0.0 (a published
+// port can't reach a loopback-only bind), while Linux keeps the value verbatim.
+// The pd.Host field itself is never mutated — ClientAddr()/status still show it.
+func TestPgDogWriteConfigsListenBind(t *testing.T) {
+	base := &config.PgDogConfig{
+		Name: "proxy", Host: "127.0.0.1", HostPort: 7432, OpenmetricsPort: 7433,
+		PoolerMode: "transaction", Workers: 2, DefaultPoolSize: 10,
+		// Backend host is deliberately non-loopback so the only `127.0.0.1`
+		// in the file can be the [general] bind under test.
+		Backends: []config.PgDogBackend{{Name: "app", Host: "10.0.0.9", Port: 5432, DatabaseName: "app"}},
+		Users:    []config.PgDogUser{{Name: "alice", Password: "p", Database: "app"}},
+	}
+
+	cases := []struct {
+		name     string
+		bridge   bool
+		wantHost string // expected `host = "..."` line in [general]
+	}{
+		{"linux keeps loopback bind", false, `host = "127.0.0.1"`},
+		{"macOS bridge widens to 0.0.0.0", true, `host = "0.0.0.0"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pd := *base // copy so we can assert Host is untouched
+			m := &PgDogManager{cfg: config.Default(), podman: "podman", dataDir: t.TempDir(), bridge: tc.bridge}
+			tomlPath, _, err := m.WriteConfigs(&pd)
+			if err != nil {
+				t.Fatalf("WriteConfigs: %v", err)
+			}
+			data, err := os.ReadFile(tomlPath)
+			if err != nil {
+				t.Fatalf("read pgdog.toml: %v", err)
+			}
+			toml := string(data)
+			general := toml[strings.Index(toml, "[general]"):strings.Index(toml, "[[databases]]")]
+			if !strings.Contains(general, tc.wantHost) {
+				t.Errorf("[general] missing %q, got:\n%s", tc.wantHost, general)
+			}
+			// The struct field must not be rewritten — display path relies on it.
+			if pd.Host != "127.0.0.1" {
+				t.Errorf("pd.Host mutated to %q, want 127.0.0.1", pd.Host)
+			}
+		})
+	}
+}

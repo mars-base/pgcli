@@ -250,6 +250,14 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 	if err != nil {
 		return fmt.Errorf("podman: %w", err)
 	}
+	// macOS: bring up the podman machine and the pgcli-net bridge that the
+	// pgbouncer container joins (no-ops on Linux).
+	if err := pm.EnsureMachine(); err != nil {
+		return err
+	}
+	if err := pm.EnsureNetwork(); err != nil {
+		return err
+	}
 	fmt.Println("-> Checking PG connectivity...")
 	if err := pm.CheckDSNReachable(dsn); err != nil {
 		return err
@@ -973,6 +981,19 @@ func runAddonInstallPgDog(cmd *cobra.Command) error {
 
 	tomlPath, usersPath, err := dm.WriteConfigs(&pd)
 	if err != nil {
+		return err
+	}
+
+	// macOS: bring up the podman machine and the pgcli-net bridge the container
+	// joins (no-ops on Linux).
+	pm, err := podman.New(cfg)
+	if err != nil {
+		return fmt.Errorf("podman: %w", err)
+	}
+	if err := pm.EnsureMachine(); err != nil {
+		return err
+	}
+	if err := pm.EnsureNetwork(); err != nil {
 		return err
 	}
 

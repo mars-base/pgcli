@@ -13,11 +13,23 @@ PgBouncer 支持两种部署模式：
 - **本地模式：** `pg addon install pgbouncer -i <instance>` —— 存储在 `instances.<name>.addons`
 - **远程模式：** `pg addon install pgbouncer --dsn <dsn> --pg-name <name>` —— 存储在顶层 `addons.pgbouncer`
 
+## 平台支持
+
+PgBouncer 支持 **Linux**（host 网络，含跨主机连接池）与 **macOS 单主机
+dev/test**（容器加入 `pgcli-net` bridge 网络并发布端口，与 podman machine 下的
+PG 实例同一套机制）。macOS 上：
+
+- **本地模式**开箱即用：PgBouncer 自动按容器名访问受管实例，无需配置地址。
+- **远程模式：** `--dsn` 里的主机必须是**从 Mac 可达**的地址 —— 别填
+  `127.0.0.1`，那是 Mac 本机，而不是 podman machine 虚拟机。
+- **客户端连接**仍然指向 `127.0.0.1:<port>`；gvproxy 会把发布端口转发到 Mac 的
+  回环，与 PG 实例完全一致。
+
 ## 工作原理
 
 1. **`pg addon install pgbouncer`** 生成配置文件并启动容器
 2. 配置文件存储在 `<base-dir>/addon/pgbouncer/<instance>/`
-3. 容器通过主机网络与 PostgreSQL 通信
+3. 容器通过主机网络（Linux）或 `pgcli-net` bridge 按容器名（macOS）访问 PostgreSQL
 4. 配置文件更新时自动重启容器应用变更
 
 **命名空间隔离：** PgBouncer 遵循配置的 `namespace` 设置。容器名和认证用户包含

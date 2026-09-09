@@ -19,6 +19,7 @@ type PgDogManager struct {
 	cfg     *config.Config
 	podman  string // podman binary path
 	dataDir string // base data directory (e.g. ~/.pgcli/)
+	bridge  bool   // macOS: run on the pgcli-net bridge instead of host networking
 }
 
 // NewPgDogManager creates a PgDogManager.
@@ -36,6 +37,7 @@ func NewPgDogManager(cfg *config.Config) (*PgDogManager, error) {
 		cfg:     cfg,
 		podman:  path,
 		dataDir: dataDir,
+		bridge:  platform.Detect() == platform.MacOS,
 	}, nil
 }
 
@@ -82,7 +84,10 @@ func (m *PgDogManager) WriteConfigs(pd *config.PgDogConfig) (tomlPath, usersPath
 
 	var toml strings.Builder
 	toml.WriteString("[general]\n")
-	fmt.Fprintf(&toml, "host = %s\n", tomlQuote(pd.Host))
+	// macOS bridge: a published port can't reach a loopback-only bind inside
+	// the container, so the default (127.0.0.1) renders as 0.0.0.0 — without
+	// touching pd.Host itself, which ClientAddr()/status output still display.
+	fmt.Fprintf(&toml, "host = %s\n", tomlQuote(proxyBindHost(m.bridge, pd.Host)))
 	fmt.Fprintf(&toml, "port = %d\n", pd.HostPort)
 	fmt.Fprintf(&toml, "workers = %d\n", pd.Workers)
 	fmt.Fprintf(&toml, "default_pool_size = %d\n", pd.DefaultPoolSize)
@@ -213,22 +218,21 @@ func (m *PgDogManager) StartContainer(pd *config.PgDogConfig) error {
 	return nil
 }
 
-// createContainer runs a PgDog proxy on host network, bind-mounting its config
-// directory read-only at /pgdog (matching the image's expected layout) and
-// pointing the binary at the two TOML files.
+// createContainer runs a PgDog proxy, bind-mounting its config directory at
+// /pgdog (matching the image's expected layout) and pointing the binary at the
+// two TOML files. Linux uses host networking; macOS joins the pgcli-net bridge
+// and publishes its ports (see netFlags).
 func (m *PgDogManager) createContainer(pd *config.PgDogConfig) error {
 	dir := pgDogConfigDir(m.dataDir, pd.Name)
 
 	// The role mounts /pgdog read-write (pgdog may write there), so do the
 	// same rather than :ro.
-	// --http-proxy=false: the proxy terminates PostgreSQL traffic on host
-	// networking; podman would otherwise inject the host's HTTP(S)_PROXY and
-	// the process could honor it for outbound connections. Image pulls run
+	// --http-proxy=false: podman would otherwise inject the host's HTTP(S)_PROXY
+	// and the process could honor it for outbound connections. Image pulls run
 	// client-side and keep the proxy.
-	args := []string{
-		"run", "-d",
-		"--name", pd.ContainerName,
-		"--network", "host",
+	args := []string{"run", "-d", "--name", pd.ContainerName}
+	args = append(args, netFlags(m.bridge, m.cfg.Podman.Network, pd.HostPort, pd.OpenmetricsPort)...)
+	args = append(args,
 		"--http-proxy=false",
 		"--restart", "unless-stopped",
 		"-v", fmt.Sprintf("%s:/pgdog:z", hostMountPath(dir)),
@@ -236,7 +240,7 @@ func (m *PgDogManager) createContainer(pd *config.PgDogConfig) error {
 		"pgdog",
 		"-c", "/pgdog/pgdog.toml",
 		"-u", "/pgdog/users.toml",
-	}
+	)
 
 	if _, err := m.run(args...); err != nil {
 		return fmt.Errorf("creating PgDog container: %w", err)

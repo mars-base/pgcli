@@ -22,13 +22,30 @@ pgcli **generates both entirely from the install flags**: there is no config
 file to hand-edit, so `pg addon install pgdog` is the source of truth and is
 idempotent — re-running it re-renders the files from the flags given.
 
+## Platform support
+
+PgDog runs on **Linux** (host networking) and on **macOS** for **single-host
+dev/test**, joining the same `pgcli-net` bridge a PG instance uses under podman
+machine and publishing its client + openmetrics ports. On macOS:
+
+- The listen bind is widened to `0.0.0.0` inside the container so the published
+  port is reachable (a loopback-only bind can't be forwarded to); the client
+  address you connect to is still `127.0.0.1:<port>`.
+- **Backends must be reachable from the bridge.** PgDog has no automatic
+  name-resolution for `--backend`, so a `127.0.0.1` backend would point at the
+  Mac, not the podman machine VM. Give each `--backend` either the target
+  instance's **container name** (run `pg status -i <instance>` and read the
+  `Container:` line, e.g. `app=pgcli-pg-mypg:5432:...`) or an address the Mac
+  can route to — never `127.0.0.1` for a managed instance.
+
 ## How It Works
 
 - **Shared infrastructure:** PgDog lives in the top-level `addons.pgdog` map in
   `pg.yaml`, keyed by proxy name — not under any single instance.
-- **Host network:** the proxy runs with `--network host` and listens on its
-  client port (auto-assigned from `pgdog_start_port`, default 7432) plus a
-  Prometheus-style `openmetrics` port on the next free number.
+- **Host network (Linux) / bridge (macOS):** the proxy listens on its client
+  port (auto-assigned from `pgdog_start_port`, default 7432) plus a
+  Prometheus-style `openmetrics` port on the next free number. On Linux it runs
+  with `--network host`; on macOS it joins `pgcli-net` and publishes both ports.
 - **Generated config:** `pgdog.toml` + `users.toml` are written under
   `<base-dir>/addon/pgdog/<name>/` and bind-mounted into the container at
   `/pgdog`.

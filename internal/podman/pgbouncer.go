@@ -19,6 +19,7 @@ type PgBouncerManager struct {
 	cfg     *config.Config
 	podman  string // podman binary path
 	dataDir string // base data directory (e.g. ~/.pgcli/)
+	bridge  bool   // macOS: run on the pgcli-net bridge instead of host networking
 }
 
 // NewPgBouncerManager creates a PgBouncerManager.
@@ -36,6 +37,7 @@ func NewPgBouncerManager(cfg *config.Config) (*PgBouncerManager, error) {
 		cfg:     cfg,
 		podman:  path,
 		dataDir: dataDir,
+		bridge:  platform.Detect() == platform.MacOS,
 	}, nil
 }
 
@@ -117,6 +119,14 @@ func (m *PgBouncerManager) WriteConfigs(pbConf *config.PgBouncerConfig, authUser
 	host, port, _, _, database, perr := ParseDSN(dsn)
 	if perr != nil {
 		return "", "", perr
+	}
+
+	// macOS bridge: the instance lives on pgcli-net, so a loopback backend host
+	// (local mode's default) is unreachable from the pgbouncer container and is
+	// replaced by the instance's container name. Remote backends (an explicit
+	// non-loopback host) and Linux pass through unchanged.
+	if inst, ok := m.cfg.Instances[instName]; ok {
+		host = backendBindHost(m.bridge, host, inst.Podman.ContainerName)
 	}
 
 	dir := pgBouncerConfigDir(m.dataDir, instName)
@@ -292,15 +302,14 @@ func (m *PgBouncerManager) StartContainer(pbConf *config.PgBouncerConfig, instNa
 }
 
 func (m *PgBouncerManager) createContainer(iniPath, userListPath string, pbConf *config.PgBouncerConfig) error {
-	args := []string{
-		"run", "-d",
-		"--name", pbConf.ContainerName,
-		"--network", "host",
+	args := []string{"run", "-d", "--name", pbConf.ContainerName}
+	args = append(args, netFlags(m.bridge, m.cfg.Podman.Network, pbConf.HostPort)...)
+	args = append(args,
 		"--restart", "unless-stopped",
 		"-v", fmt.Sprintf("%s:/etc/pgbouncer/pgbouncer.ini:ro,z", hostMountPath(iniPath)),
 		"-v", fmt.Sprintf("%s:/etc/pgbouncer/userlist.txt:ro,z", hostMountPath(userListPath)),
 		pbConf.ImageTag,
-	}
+	)
 
 	if _, err := m.run(args...); err != nil {
 		return fmt.Errorf("creating PgBouncer container: %w", err)
@@ -333,7 +342,6 @@ func (m *PgBouncerManager) Remove(pbConf *config.PgBouncerConfig, instName strin
 
 	return nil
 }
-
 
 // ContainerRunning reports whether the named container is currently running.
 // Exported so the CLI can display status.

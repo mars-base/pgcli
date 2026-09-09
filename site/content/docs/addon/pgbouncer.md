@@ -16,11 +16,26 @@ PgBouncer supports two deployment modes:
 - **Remote:** `pg addon install pgbouncer --dsn <dsn> --pg-name <name>` —
   stored in top-level `addons.pgbouncer`
 
+## Platform support
+
+PgBouncer works on **Linux** (host networking, including cross-host pools) and
+on **macOS** for **single-host dev/test** (the container joins the `pgcli-net`
+bridge and publishes its port, the same way a PG instance does under podman
+machine). On macOS:
+
+- **Local mode** just works: PgBouncer reaches the managed instance by its
+  container name automatically — no address to configure.
+- **Remote mode:** the `--dsn` host must be reachable **from the Mac** — do not
+  point it at `127.0.0.1`, which is the Mac itself, not the podman machine VM.
+- **Client connections** still target `127.0.0.1:<port>`; gvproxy forwards the
+  published port to the Mac's loopback, exactly as for a PG instance.
+
 ## How It Works
 
 1. **`pg addon install pgbouncer`** generates configuration files and starts the container
 2. Config files live in `<base-dir>/addon/pgbouncer/<instance>/`
-3. The container talks to PostgreSQL over the host network
+3. The container reaches PostgreSQL over the host network (Linux) or the
+   `pgcli-net` bridge by container name (macOS)
 4. Config file updates restart the container automatically
 
 **Namespace isolation:** PgBouncer respects the config's `namespace` setting.

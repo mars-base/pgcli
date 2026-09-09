@@ -19,13 +19,28 @@ PgDog 由两个 TOML 文件配置——`pgdog.toml`（代理本身、其后端�
 需要手工编辑的配置文件，因此 `pg addon install pgdog` 就是唯一事实来源，且具
 有幂等性——重新执行会根据所给参数重新渲染文件。
 
+## 平台支持
+
+PgDog 支持 **Linux**（host 网络）与 **macOS 单主机 dev/test**：macOS 下容器加
+入 PG 实例在 podman machine 里使用的同一张 `pgcli-net` bridge 网络，并发布客户
+端与 openmetrics 两个端口。macOS 上：
+
+- 容器内的监听地址会被自动放宽为 `0.0.0.0`，否则发布端口转发不到只绑回环的进
+  程；对外连接的地址仍然是 `127.0.0.1:<port>`。
+- **后端必须是从 bridge 可达的地址。** PgDog 不会自动解析 `--backend` 里的名字，
+  所以 `127.0.0.1` 指向的是 Mac 本机，而不是 podman machine 虚拟机。请给每个
+  `--backend` 填目标实例的**容器名**（用 `pg status -i <instance>` 查看
+  `Container:` 一行，例如 `app=pgcli-pg-mypg:5432:...`），或 Mac 能路由到的地
+  址 —— 对受管实例绝对不要填 `127.0.0.1`。
+
 ## 工作原理
 
 - **共享基础设施：** PgDog 存放在 `pg.yaml` 顶层的 `addons.pgdog` map 中，按
   代理名索引——不隶属于任何单个实例。
-- **主机网络：** 代理以 `--network host` 运行，监听其客户端端口（从
+- **主机网络（Linux）/ bridge 网络（macOS）：** 代理监听其客户端端口（从
   `pgdog_start_port` 自动分配，默认 7432），并在下一个空闲端口提供
-  Prometheus 风格的 openmetrics 端口。
+  Prometheus 风格的 openmetrics 端口。Linux 上以 `--network host` 运行；macOS
+  上加入 `pgcli-net` 并发布两个端口。
 - **生成的配置：** `pgdog.toml` + `users.toml` 写在
   `<base-dir>/addon/pgdog/<name>/` 下，并绑定挂载进容器的 `/pgdog`。
 - **锁定镜像：** 默认 `ghcr.io/pgdogdev/pgdog:v0.1.57`，可用 `--image` 覆盖。
