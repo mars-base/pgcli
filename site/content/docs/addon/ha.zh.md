@@ -231,11 +231,11 @@ addons:
       name: app
       etcd_members: [m1]                # 或 etcd_endpoints 指向外部 DCS
       passwords:
-        superuser: 55FsvnM7drbpZbwb
-        replication: nsArpkU1tgUUnTsp
-        rewind: tY8McHFqGYwKuqxB
+        superuser: <superuser-password>
+        replication: <replication-password>
+        rewind: <rewind-password>
         restapi_user: postgres
-        restapi_password: QWRHRrxYivJecKkN
+        restapi_password: <restapi-password>
       members:
         node1:
           container_name: pgcli-patroni-app-node1
