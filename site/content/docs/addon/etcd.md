@@ -324,19 +324,21 @@ shared root in place.
 
 ## Connecting
 
-Point a v3 client at a member's client URL. With `etcdctl` installed locally,
-set `ETCDCTL_ENDPOINTS` and use it directly; otherwise `pg etcdctl` runs the
-same client from a short-lived container (etcdctl flags go after `--`, and
-`ETCDCTL_ENDPOINTS` is optional — it falls back to the first configured
-member):
+Use `pg etcdctl`, which runs etcd's **v3** client from a short-lived container
+against a member's client URL — the target comes from `ETCDCTL_ENDPOINTS`,
+falling back to the first configured member. etcdctl's native flags go after
+`--`:
 
 ```bash
-etcdctl member list                            # or: pg etcdctl member list
-etcdctl endpoint status -w table               # or: pg etcdctl endpoint status -- -w table
-etcdctl endpoint health                        # or: pg etcdctl endpoint health
-etcdctl put foo bar                            # or: pg etcdctl put foo bar
-etcdctl get foo --hex                          # or: pg etcdctl get foo -- --hex
+pg etcdctl member list
+pg etcdctl endpoint status -- -w table
+pg etcdctl endpoint health
+pg etcdctl put foo bar
+pg etcdctl get foo -- --hex
 ```
+
+`pg etcdctl` always speaks the v3 API (`ETCDCTL_API=3`, etcdctl's default); v2
+is not supported.
 
 ## Topology & Quorum
 
