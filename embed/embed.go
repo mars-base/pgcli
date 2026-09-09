@@ -13,6 +13,19 @@ var Containerfile string
 //go:embed backup.Containerfile
 var BackupContainerfile string
 
+// PatroniContainerfile is the container build file for the Patroni HA image:
+// PostgreSQL 18 plus the Patroni daemon, co-located so Patroni can drive the
+// server binaries in the same image.
+//
+//go:embed patroni.Containerfile
+var PatroniContainerfile string
+
+// PatroniEntrypointShell is the Patroni container entrypoint: it execs the
+// Patroni daemon on a bind-mounted config file.
+//
+//go:embed patroni-entrypoint.sh
+var PatroniEntrypointShell string
+
 // InitShell is the PostgreSQL init script (enables WAL archiving via cp).
 //
 //go:embed init.sh

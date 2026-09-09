@@ -24,8 +24,10 @@ func init() {
 		c.Flags().Bool("pgbouncer", false, "select the PgBouncer addon (use with -i for a local pooler, --pg-name for a remote one)")
 		c.Flags().String("pg-name", "", "name of a remote PgBouncer (top-level addons)")
 		c.Flags().Bool("etcd", false, "select an etcd member (top-level addons)")
-		c.Flags().String("name", "", "name of the etcd member or pgdog proxy (default \"etcd\"/\"pgdog\")")
+		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, or Patroni member")
 		c.Flags().Bool("pgdog", false, "select a PgDog proxy (top-level addons)")
+		c.Flags().Bool("ha", false, "select Patroni HA members (top-level addons; requires --scope)")
+		c.Flags().String("scope", "", "Patroni cluster scope (required only with --ha)")
 	}
 }
 
@@ -42,7 +44,7 @@ Use 'pg autostart disable' to opt out.`,
 
 var autostartEnableCmd = &cobra.Command{
 	Use:   "enable",
-	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, an etcd member, or a PgDog proxy",
+	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, an etcd member, a PgDog proxy, or a Patroni member",
 	Long: `Enable auto-start on boot for exactly one target:
 
   pg autostart enable -i myinst          # instance
@@ -51,11 +53,16 @@ var autostartEnableCmd = &cobra.Command{
   pg autostart enable --pgbouncer --pg-name x    # remote PgBouncer
   pg autostart enable --etcd --name m1           # etcd member (default name "etcd")
   pg autostart enable --pgdog --name proxy       # PgDog proxy (default name "pgdog")
+  pg autostart enable --ha --scope app --name node1  # Patroni member (one at a time)
 
 Etcd autostart only starts the member's existing container at boot; it never
 re-registers membership (a data-dir-initialized etcd rejoins on plain start).
 PgDog autostart likewise only starts the existing container, reading the
 pgdog.toml/users.toml already on disk — install the proxy first.
+Patroni member autostart only brings that member's existing container up,
+reading the patroni.yml already on disk — create the member first (pg ha
+create). Start order relative to the DCS doesn't matter: Patroni retries until
+etcd answers, then re-elects normally.
 
 On Linux the boot service is a systemd --user unit. True boot-time start
 (without a login) requires loginctl enable-linger — attempted automatically,
@@ -103,7 +110,12 @@ func autostartConfigPath() string {
 // keeps the boot service in sync with the config.
 func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	path := autostartConfigPath()
-	if err := loadConfig(); err != nil {
+	// loadConfigForDSN, not loadConfig: an --ha/--etcd/--pgdog toggle must
+	// work before any PG instance exists (e.g. Patroni-only or etcd-only
+	// hosts). The instance/pgbouncer cases below check cfg.Instances[cfgInstance]
+	// directly, so the same "instance not found" error still surfaces where it
+	// actually matters.
+	if err := loadConfigForDSN(); err != nil {
 		return err
 	}
 
@@ -111,8 +123,10 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	pgbSel, _ := cmd.Flags().GetBool("pgbouncer")
 	etcdSel, _ := cmd.Flags().GetBool("etcd")
 	pgdogSel, _ := cmd.Flags().GetBool("pgdog")
+	haSel, _ := cmd.Flags().GetBool("ha")
 	pgName, _ := cmd.Flags().GetString("pg-name")
 	addonName, _ := cmd.Flags().GetString("name")
+	scope, _ := cmd.Flags().GetString("scope")
 	instChanged := cmd.Flags().Changed("instance")
 
 	// Exactly one selector required.
@@ -132,18 +146,43 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	if pgdogSel {
 		sel++
 	}
+	if haSel {
+		sel++
+	}
 	if sel != 1 {
-		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --etcd, or --pgdog")
+		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --etcd, --pgdog, or --ha")
 	}
 	if pgName != "" && !pgbSel {
 		return fmt.Errorf("--pg-name requires --pgbouncer")
 	}
-	if addonName != "" && !etcdSel && !pgdogSel {
-		return fmt.Errorf("--name requires --etcd or --pgdog")
+	if addonName != "" && !etcdSel && !pgdogSel && !haSel {
+		return fmt.Errorf("--name requires --etcd, --pgdog, or --ha")
+	}
+	if scope != "" && !haSel {
+		return fmt.Errorf("--scope requires --ha")
+	}
+	if haSel && scope == "" {
+		return fmt.Errorf("--ha requires --scope <cluster-scope>")
+	}
+	if haSel && addonName == "" {
+		return fmt.Errorf("--ha requires --name <member> (one member at a time)")
 	}
 
 	var targetDesc string
 	switch {
+	case haSel:
+		cluster, ok := cfg.Addons.Patroni[scope]
+		if !ok {
+			return fmt.Errorf("Patroni cluster %q not found in config", scope)
+		}
+		mb, ok := cluster.Members[addonName]
+		if !ok {
+			return fmt.Errorf("Patroni member %q not found in cluster %q", addonName, scope)
+		}
+		mb.Autostart = enable
+		cluster.Members[addonName] = mb
+		cfg.Addons.Patroni[scope] = cluster
+		targetDesc = fmt.Sprintf("Patroni member %q of cluster %q", addonName, scope)
 	case pgdogSel:
 		proxyName := addonName
 		if proxyName == "" {
@@ -265,12 +304,21 @@ func countAutostartTargets(c *config.Config) int {
 			n++
 		}
 	}
+	for _, cluster := range c.Addons.Patroni {
+		for _, mb := range cluster.Members {
+			if mb.Autostart {
+				n++
+			}
+		}
+	}
 	return n
 }
 
 func runAutostartStatus(cmd *cobra.Command, args []string) error {
 	path := autostartConfigPath()
-	if err := loadConfig(); err != nil {
+	// loadConfigForDSN: listing autostart targets must work on configs that
+	// have addons but no PG instances (e.g. patroni-only or etcd-only hosts).
+	if err := loadConfigForDSN(); err != nil {
 		return err
 	}
 
@@ -290,6 +338,11 @@ func runAutostartStatus(cmd *cobra.Command, args []string) error {
 	}
 	for name, pd := range cfg.Addons.PgDog {
 		fmt.Printf("  pgdog %-16s %s\n", name, onOff(pd.Autostart))
+	}
+	for scope, cluster := range cfg.Addons.Patroni {
+		for name, mb := range cluster.Members {
+			fmt.Printf("  ha %-19s %s\n", scope+"/"+name, onOff(mb.Autostart))
+		}
 	}
 
 	fmt.Println("\n=== Boot service ===")

@@ -27,6 +27,7 @@ pgcli 支持通过插件系统扩展 PostgreSQL 功能。插件是独立的容�
 | [`pgbouncer`](./pgbouncer/) | 连接池管理器，提供事务级连接池化 |
 | [`etcd`](./etcd/) | 分布式键值存储——独立运行、可组集群，用于 HA / DCS |
 | [`pgdog`](./pgdog/) | Postgres 代理——连接池化、负载均衡与分片 |
+| [`ha`](./ha/) | Patroni 高可用——自动故障切换。**不通过 `pg addon` 安装**：它是独立的顶层命令 `pg ha` |
 
 每个插件都有独立页面，包含命令、参数与故障排除说明。
 
@@ -51,4 +52,4 @@ pg addon remove <addon> [flags]     # 移除插件、容器与数据
 ```
 
 各插件的具体参数与示例见其独立页面：
-[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/)
+[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [Patroni 高可用](./ha/)

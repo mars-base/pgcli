@@ -4,8 +4,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
+	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/mars-base/pgcli/internal/config"
 )
 
 // ---------------------------------------------------------------------------
@@ -52,9 +56,10 @@ var logsAddonCmd = &cobra.Command{
 	Short: "Show addon console output logs",
 	Long: `Show addon console output logs.
 
-Requires the addon type (pgbouncer, etcd, pgdog).
+Requires the addon type (pgbouncer, etcd, pgdog, patroni).
 Use -i for local instance addons, --pg-name for remote addons,
---name for an etcd member or pgdog proxy (default "etcd"/"pgdog").
+--name for an etcd member, pgdog proxy, or Patroni member (default
+"etcd"/"pgdog"; Patroni members have no default and also require --scope).
 
 Examples:
   pg logs addon pgbouncer -i myinst
@@ -66,24 +71,59 @@ Examples:
   pg logs addon etcd --name m1 -f
   pg logs addon etcd --name m2 -n 200
   pg logs addon pgdog --name proxy
-  pg logs addon pgdog --name proxy -f`,
+  pg logs addon pgdog --name proxy -f
+  pg logs addon patroni --scope app --name node1
+  pg logs addon patroni --scope app --name node1 -f`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		follow, _ := cmd.Flags().GetBool("follow")
 		tail, _ := cmd.Flags().GetInt("tail")
 		pgName, _ := cmd.Flags().GetString("pg-name")
 		etcdName, _ := cmd.Flags().GetString("name")
+		scope, _ := cmd.Flags().GetString("scope")
 
 		addonType := args[0]
 
-		if err := loadConfig(); err != nil {
+		// loadConfigForDSN, not loadConfig: `pg logs addon ...` only needs the
+		// addon section of the config, and requiring a valid *instance* here
+		// would make etcd/pgdog/patroni logs unusable on a config that has
+		// addons but no PG instance yet. pgbouncer's local branch below reads
+		// cfgInstance (the raw -i flag) rather than cfg.Instance, which only
+		// SetInstance populates.
+		if err := loadConfigForDSN(); err != nil {
 			return err
+		}
+		if scope != "" && addonType != "patroni" {
+			return fmt.Errorf("--scope only applies to the patroni addon type")
 		}
 
 		var containerName string
 
 		switch addonType {
+		case "patroni":
+			if pgName != "" {
+				return fmt.Errorf("--pg-name selects a remote PgBouncer; use --scope/--name for a Patroni member")
+			}
+			if scope == "" {
+				return fmt.Errorf("--scope is required for Patroni members, e.g. pg logs addon patroni --scope app --name node1")
+			}
+			if cfg.Addons.Patroni == nil {
+				return fmt.Errorf("no Patroni HA clusters configured")
+			}
+			cluster, ok := cfg.Addons.Patroni[scope]
+			if !ok {
+				return fmt.Errorf("Patroni cluster %q not found (use 'pg ha status' to list scopes)", scope)
+			}
+			if etcdName == "" {
+				return fmt.Errorf("--name is required: the Patroni member, e.g. pg logs addon patroni --scope %s --name node1", scope)
+			}
+			mb, ok := cluster.Members[etcdName]
+			if !ok {
+				return fmt.Errorf("Patroni member %q not found in cluster %q (this host's view: %s)", etcdName, scope, patroniMemberNames(cluster))
+			}
+			containerName = mb.ContainerName
 		case "etcd", "pgdog":
+			// (patroni is handled above; it shares --name but requires --scope.)
 			if pgName != "" {
 				return fmt.Errorf("--pg-name selects a remote PgBouncer; use --name for an %s", addonType)
 			}
@@ -116,7 +156,7 @@ Examples:
 			}
 		case "pgbouncer":
 			if etcdName != "" {
-				return fmt.Errorf("--name selects an etcd member or pgdog proxy; use -i or --pg-name for PgBouncer")
+				return fmt.Errorf("--name selects an etcd member, pgdog proxy, or Patroni member; use -i or --pg-name for PgBouncer")
 			}
 			if pgName != "" {
 				// Remote mode
@@ -129,18 +169,19 @@ Examples:
 				}
 				containerName = pb.ContainerName
 			} else {
-				// Local mode: -i
-				inst, ok := cfg.Instances[cfg.Instance]
+				// Local mode: -i. Uses cfgInstance (the raw flag) since this
+				// path loads config without SetInstance (see comment above).
+				inst, ok := cfg.Instances[cfgInstance]
 				if !ok {
-					return fmt.Errorf("instance %q not found", cfg.Instance)
+					return fmt.Errorf("instance %q not found", cfgInstance)
 				}
 				if inst.Addons.PgBouncer == nil {
-					return fmt.Errorf("no PgBouncer addon configured for instance %q", cfg.Instance)
+					return fmt.Errorf("no PgBouncer addon configured for instance %q", cfgInstance)
 				}
 				containerName = inst.Addons.PgBouncer.ContainerName
 			}
 		default:
-			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog)", addonType)
+			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, patroni)", addonType)
 		}
 
 		return runPodmanLogs(containerName, tail, follow)
@@ -160,7 +201,8 @@ func init() {
 	logsAddonCmd.Flags().BoolP("follow", "f", false, "Stream logs continuously")
 	logsAddonCmd.Flags().IntP("tail", "n", 50, "Number of lines to show (0 = all)")
 	logsAddonCmd.Flags().String("pg-name", "", "Remote addon pooler name (for remote PgBouncer)")
-	logsAddonCmd.Flags().String("name", "", "etcd member name (default \"etcd\")")
+	logsAddonCmd.Flags().String("name", "", "etcd member name, pgdog proxy name, or Patroni member name")
+	logsAddonCmd.Flags().String("scope", "", "Patroni cluster scope (required only with addon type patroni)")
 
 	rootCmd.AddCommand(logsCmd)
 	logsCmd.AddCommand(logsAddonCmd)
@@ -169,6 +211,17 @@ func init() {
 // ---------------------------------------------------------------------------
 // log output helpers
 // ---------------------------------------------------------------------------
+
+// patroniMemberNames lists a cluster's members (this host's config view), for
+// a "member not found" error message.
+func patroniMemberNames(cluster config.PatroniClusterConfig) string {
+	names := make([]string, 0, len(cluster.Members))
+	for name := range cluster.Members {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return strings.Join(names, ", ")
+}
 
 // runPodmanLogs runs podman logs directly, output goes to os.Stdout.
 func runPodmanLogs(containerName string, tail int, follow bool) error {

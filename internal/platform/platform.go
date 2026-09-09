@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 )
 
 // OS represents the operating system type.
@@ -102,6 +103,25 @@ func CheckPodmanMachine() DepStatus {
 		Path:    path,
 		Version: out,
 	}
+}
+
+// Rootless reports whether the current podman is running in rootless mode
+// (a non-root user's own namespace). Patroni-managed PG containers must run
+// as the image's `postgres` user (uid 999) — that only works when podman
+// remaps uids via a subuid range, i.e. rootless. On a rootful daemon the
+// bind-mounted data dir would not be writable by the postgres user, so pgcli
+// fails fast with a clear message instead of a broken cluster. Returns false
+// when podman is missing or the query fails (fail-closed: not rootless).
+func Rootless() bool {
+	path, err := exec.LookPath("podman")
+	if err != nil {
+		return false
+	}
+	out, err := runCmd(path, "info", "--format", "{{.Host.Security.Rootless}}")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(out) == "true"
 }
 
 // MissingPrereqs returns the list of missing dependencies.

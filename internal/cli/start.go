@@ -75,8 +75,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --etcd / --pgdog)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --etcd / --pgdog / --ha)")
 		return nil
 	}
 
@@ -128,6 +128,11 @@ func startAutostart() error {
 
 	// pgdog proxies (top-level infra addon).
 	if err := startAutostartPgDogs(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// Patroni HA members (top-level infra addon).
+	if err := startAutostartPatroni(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -251,6 +256,65 @@ func startAutostartPgDogs(c *config.Config) error {
 			fmt.Printf("  [X] pgdog autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+func hasAutostartPatroni(c *config.Config) bool {
+	for _, cluster := range c.Addons.Patroni {
+		for _, mb := range cluster.Members {
+			if mb.Autostart {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// startAutostartPatroni starts each autostart-enabled Patroni member. Like the
+// other infra autostarts this only brings the existing container up — it never
+// re-renders patroni.yml or re-creates anything. Members whose DCS (etcd) is
+// also autostart-managed will simply rejoin and re-elect normally; Patroni
+// tolerates the DCS not being up yet by retrying, so member ordering relative
+// to etcd does not need special handling. Scope and member names are sorted
+// for deterministic, readable boot logs.
+func startAutostartPatroni(c *config.Config) error {
+	var scopes []string
+	for scope, cluster := range c.Addons.Patroni {
+		for _, mb := range cluster.Members {
+			if mb.Autostart {
+				scopes = append(scopes, scope)
+				break
+			}
+		}
+	}
+	if len(scopes) == 0 {
+		return nil
+	}
+	sort.Strings(scopes)
+
+	pm, err := podman.NewPatroniManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, scope := range scopes {
+		cluster := c.Addons.Patroni[scope]
+		var members []string
+		for name, mb := range cluster.Members {
+			if mb.Autostart {
+				members = append(members, name)
+			}
+		}
+		sort.Strings(members)
+		for _, name := range members {
+			if err := pm.StartMemberContainer(&cluster, name); err != nil {
+				fmt.Printf("  [X] patroni autostart (%s/%s): %v\n", scope, name, err)
+				if firstErr == nil {
+					firstErr = err
+				}
 			}
 		}
 	}

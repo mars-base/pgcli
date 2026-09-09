@@ -15,22 +15,24 @@ import (
 
 // Config is the complete pgcli configuration.
 type Config struct {
-	BaseDir            string                    `yaml:"base_dir,omitempty"`
-	Network            string                    `yaml:"network,omitempty"`              // shared podman network name, persisted at top level
-	Namespace          string                    `yaml:"namespace,omitempty"`            // container name namespace, empty = disabled (default)
-	PGStartPort        int                       `yaml:"pg_start_port,omitempty"`        // starting PG host port, default 35432
-	PGSSHPort          int                       `yaml:"pg_ssh_port,omitempty"`          // starting SSH host port, default 42201
-	PgBouncerStartPort int                       `yaml:"pgbouncer_start_port,omitempty"` // starting PgBouncer host port, default 56432
-	EtcdStartPort      int                       `yaml:"etcd_start_port,omitempty"`      // starting etcd client host port, default 2379 (peer gets the next free port)
-	PgDogStartPort     int                       `yaml:"pgdog_start_port,omitempty"`     // starting PgDog host port, default 7432 (openmetrics gets the next free port)
-	Postgres           PostgresConfig            `yaml:"postgres"`
-	Podman             PodmanConfig              `yaml:"podman"`
-	PITR               PITRConfig                `yaml:"pitr"`
-	Logging            LoggingConfig             `yaml:"logging"`
-	Backup             BackupConfig              `yaml:"backup"`
-	Pigsty             PigstyConfig              `yaml:"pigsty"`
-	Addons             TopAddonsConfig           `yaml:"addons,omitempty"` // top-level addon configs (e.g. remote PgBouncer)
-	Instances          map[string]InstanceConfig `yaml:"instances"`
+	BaseDir                 string                    `yaml:"base_dir,omitempty"`
+	Network                 string                    `yaml:"network,omitempty"`                    // shared podman network name, persisted at top level
+	Namespace               string                    `yaml:"namespace,omitempty"`                  // container name namespace, empty = disabled (default)
+	PGStartPort             int                       `yaml:"pg_start_port,omitempty"`              // starting PG host port, default 35432
+	PGSSHPort               int                       `yaml:"pg_ssh_port,omitempty"`                // starting SSH host port, default 42201
+	PgBouncerStartPort      int                       `yaml:"pgbouncer_start_port,omitempty"`       // starting PgBouncer host port, default 56432
+	EtcdStartPort           int                       `yaml:"etcd_start_port,omitempty"`            // starting etcd client host port, default 2379 (peer gets the next free port)
+	PgDogStartPort          int                       `yaml:"pgdog_start_port,omitempty"`           // starting PgDog host port, default 7432 (openmetrics gets the next free port)
+	PatroniStartPort        int                       `yaml:"patroni_start_port,omitempty"`         // starting Patroni member PG host port, default 35532
+	PatroniRestapiStartPort int                       `yaml:"patroni_restapi_start_port,omitempty"` // starting Patroni REST API host port, default 8008
+	Postgres                PostgresConfig            `yaml:"postgres"`
+	Podman                  PodmanConfig              `yaml:"podman"`
+	PITR                    PITRConfig                `yaml:"pitr"`
+	Logging                 LoggingConfig             `yaml:"logging"`
+	Backup                  BackupConfig              `yaml:"backup"`
+	Pigsty                  PigstyConfig              `yaml:"pigsty"`
+	Addons                  TopAddonsConfig           `yaml:"addons,omitempty"` // top-level addon configs (e.g. remote PgBouncer)
+	Instances               map[string]InstanceConfig `yaml:"instances"`
 
 	Instance string `yaml:"-"` // current instance name (set at runtime, not persisted)
 }
@@ -72,9 +74,10 @@ type AddonsConfig struct {
 // (e.g. a PgBouncer fronting a remote database via --dsn), and for shared
 // infrastructure addons like etcd.
 type TopAddonsConfig struct {
-	PgBouncer map[string]PgBouncerConfig `yaml:"pgbouncer,omitempty"`
-	Etcd      map[string]EtcdConfig      `yaml:"etcd,omitempty"`
-	PgDog     map[string]PgDogConfig     `yaml:"pgdog,omitempty"`
+	PgBouncer map[string]PgBouncerConfig      `yaml:"pgbouncer,omitempty"`
+	Etcd      map[string]EtcdConfig           `yaml:"etcd,omitempty"`
+	PgDog     map[string]PgDogConfig          `yaml:"pgdog,omitempty"`
+	Patroni   map[string]PatroniClusterConfig `yaml:"patroni,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -220,6 +223,54 @@ func (p PgDogConfig) ClientAddr() string {
 	return fmt.Sprintf("%s:%d", host, p.HostPort)
 }
 
+// PatroniPasswords are the credentials a Patroni cluster uses internally. They
+// live in the member's local patroni.yml (Patroni requires authentication in
+// the per-node config, not the DCS), so for a cross-host cluster every host
+// must carry the identical set — `pg ha create --passwords-file` copies them
+// between hosts. Stored in pg.yaml at 0644 with the rest of the config; treat
+// pg.yaml as a secret for HA clusters, same as pgdog's users.toml caveat.
+type PatroniPasswords struct {
+	Superuser     string `yaml:"superuser,omitempty"`        // postgres superuser password
+	Replication   string `yaml:"replication,omitempty"`      // replication-role password
+	Rewind        string `yaml:"rewind,omitempty"`           // pg_rewind role password
+	RestapiUser   string `yaml:"restapi_user,omitempty"`     // REST API basic-auth username
+	RestapiPasswd string `yaml:"restapi_password,omitempty"` // REST API basic-auth password
+}
+
+// PatroniMemberConfig is a single Patroni member (one postmaster, one
+// patroni container) on this host. pgcli owns the container/image/config-file/
+// ports; Patroni owns the postmaster and all failover decisions.
+type PatroniMemberConfig struct {
+	ContainerName string `yaml:"container_name,omitempty"` // pgcli-patroni<ns>-<scope>-<member>
+	ImageTag      string `yaml:"image_tag,omitempty"`      // ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5 (default)
+	AdvertiseHost string `yaml:"advertise_host,omitempty"` // connect_address host; empty = loopback only (single host); a LAN IP/FQDN for cross-host
+	HostPort      int    `yaml:"host_port,omitempty"`      // PG listen port, 35532+ auto-assigned per host
+	RestapiPort   int    `yaml:"restapi_port,omitempty"`   // Patroni REST API port, 8008+ auto-assigned per host
+	DataDir       string `yaml:"data_dir,omitempty"`       // host dir bound to /var/lib/postgresql (PGDATA under it)
+	// Autostart brings this member's container up on host boot via the boot
+	// service (pg autostart enable --ha). Start-only: it starts the existing
+	// container reading the patroni.yml already on disk; never re-renders.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// PatroniClusterConfig is one Patroni HA cluster (a `scope`), keyed in
+// addons.patroni. Each host records only its own members; the cluster is
+// reassembled across hosts through the shared DCS (etcd), so two hosts'
+// pg.yaml files each hold a partial `Members` view of the same scope.
+type PatroniClusterConfig struct {
+	Name string `yaml:"name,omitempty"` // scope, defaults to the map key
+
+	// DCS wiring: either reference local etcd addon members (rendered to their
+	// client URLs) or give explicit host:port endpoints (external / cross-host
+	// etcd). EtcdEndpoints wins if set.
+	EtcdMembers   []string `yaml:"etcd_members,omitempty"`   // keys into cfg.Addons.Etcd
+	EtcdEndpoints []string `yaml:"etcd_endpoints,omitempty"` // external host:port list (takes precedence)
+
+	Passwords PatroniPasswords `yaml:"passwords,omitempty"`
+
+	Members map[string]PatroniMemberConfig `yaml:"members,omitempty"` // member name -> config (this host's only)
+}
+
 // PostgresConfig holds PostgreSQL connection settings.
 type PostgresConfig struct {
 	URL      string `yaml:"url"`      // connection string (postgres://user:pass@host:port/db)
@@ -271,12 +322,14 @@ type PigstyConfig struct {
 // Default returns a Config populated with default values.
 func Default() *Config {
 	return &Config{
-		BaseDir:            "", // empty means use platform default
-		PGStartPort:        35432,
-		PGSSHPort:          42201,
-		PgBouncerStartPort: 56432,
-		EtcdStartPort:      2379,
-		PgDogStartPort:     7432,
+		BaseDir:                 "", // empty means use platform default
+		PGStartPort:             35432,
+		PGSSHPort:               42201,
+		PgBouncerStartPort:      56432,
+		EtcdStartPort:           2379,
+		PgDogStartPort:          7432,
+		PatroniStartPort:        35532,
+		PatroniRestapiStartPort: 8008,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -318,6 +371,14 @@ func nsSuffix(namespace string) string {
 		return ""
 	}
 	return "-" + namespace
+}
+
+// PatroniScope is the scope a Patroni cluster uses in the shared DCS: the
+// config-level scope namespaced so two pgcli namespaces sharing one etcd do
+// not collide (Patroni's etcd prefix is the raw scope and has no namespace of
+// its own). Exported for the podman layer, which renders it into patroni.yml.
+func (c *Config) PatroniScope(scope string) string {
+	return scope + nsSuffix(c.Namespace)
 }
 
 // InstanceDefaults returns default configuration for the named instance.
@@ -447,37 +508,41 @@ func Load(path string) (*Config, error) {
 // displayConfig is the serializable subset of Config for save/display.
 // Global postgres/podman/pitr are excluded -- they are in-memory defaults only.
 type displayConfig struct {
-	BaseDir            string                    `yaml:"base_dir,omitempty"`
-	Network            string                    `yaml:"network,omitempty"`
-	Namespace          string                    `yaml:"namespace,omitempty"`
-	PGStartPort        int                       `yaml:"pg_start_port,omitempty"`
-	PGSSHPort          int                       `yaml:"pg_ssh_port,omitempty"`
-	PgBouncerStartPort int                       `yaml:"pgbouncer_start_port,omitempty"`
-	EtcdStartPort      int                       `yaml:"etcd_start_port,omitempty"`
-	PgDogStartPort     int                       `yaml:"pgdog_start_port,omitempty"`
-	Logging            LoggingConfig             `yaml:"logging"`
-	Backup             BackupConfig              `yaml:"backup"`
-	Pigsty             PigstyConfig              `yaml:"pigsty"`
-	Addons             TopAddonsConfig           `yaml:"addons,omitempty"`
-	Instances          map[string]InstanceConfig `yaml:"instances"`
+	BaseDir                 string                    `yaml:"base_dir,omitempty"`
+	Network                 string                    `yaml:"network,omitempty"`
+	Namespace               string                    `yaml:"namespace,omitempty"`
+	PGStartPort             int                       `yaml:"pg_start_port,omitempty"`
+	PGSSHPort               int                       `yaml:"pg_ssh_port,omitempty"`
+	PgBouncerStartPort      int                       `yaml:"pgbouncer_start_port,omitempty"`
+	EtcdStartPort           int                       `yaml:"etcd_start_port,omitempty"`
+	PgDogStartPort          int                       `yaml:"pgdog_start_port,omitempty"`
+	PatroniStartPort        int                       `yaml:"patroni_start_port,omitempty"`
+	PatroniRestapiStartPort int                       `yaml:"patroni_restapi_start_port,omitempty"`
+	Logging                 LoggingConfig             `yaml:"logging"`
+	Backup                  BackupConfig              `yaml:"backup"`
+	Pigsty                  PigstyConfig              `yaml:"pigsty"`
+	Addons                  TopAddonsConfig           `yaml:"addons,omitempty"`
+	Instances               map[string]InstanceConfig `yaml:"instances"`
 }
 
 // Display returns a view of the config suitable for display or saving.
 func (c *Config) Display() displayConfig {
 	return displayConfig{
-		BaseDir:            c.BaseDir,
-		Network:            c.Podman.Network,
-		Namespace:          c.Namespace,
-		PGStartPort:        c.PGStartPort,
-		PGSSHPort:          c.PGSSHPort,
-		PgBouncerStartPort: c.PgBouncerStartPort,
-		EtcdStartPort:      c.EtcdStartPort,
-		PgDogStartPort:     c.PgDogStartPort,
-		Logging:            c.Logging,
-		Backup:             c.Backup,
-		Pigsty:             c.Pigsty,
-		Addons:             c.Addons,
-		Instances:          c.Instances,
+		BaseDir:                 c.BaseDir,
+		Network:                 c.Podman.Network,
+		Namespace:               c.Namespace,
+		PGStartPort:             c.PGStartPort,
+		PGSSHPort:               c.PGSSHPort,
+		PgBouncerStartPort:      c.PgBouncerStartPort,
+		EtcdStartPort:           c.EtcdStartPort,
+		PgDogStartPort:          c.PgDogStartPort,
+		PatroniStartPort:        c.PatroniStartPort,
+		PatroniRestapiStartPort: c.PatroniRestapiStartPort,
+		Logging:                 c.Logging,
+		Backup:                  c.Backup,
+		Pigsty:                  c.Pigsty,
+		Addons:                  c.Addons,
+		Instances:               c.Instances,
 	}
 }
 
@@ -546,6 +611,12 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.EtcdStartPort == 0 {
 		c.EtcdStartPort = d.EtcdStartPort
+	}
+	if c.PatroniStartPort == 0 {
+		c.PatroniStartPort = d.PatroniStartPort
+	}
+	if c.PatroniRestapiStartPort == 0 {
+		c.PatroniRestapiStartPort = d.PatroniRestapiStartPort
 	}
 
 	// Postgres
@@ -748,6 +819,36 @@ func (c *Config) ApplyDefaults() {
 		c.Addons.PgDog[name] = addon
 	}
 
+	// Top-level addons defaults (Patroni HA clusters). Each host records only
+	// its own members of a scope; the cluster reassembles across hosts via the
+	// shared DCS. Container name, image, and per-member data dir are filled
+	// here so `pg ha create` need only set the flags.
+	{
+		patroniBaseDir := platform.DefaultConfigDir()
+		if c.BaseDir != "" {
+			patroniBaseDir = c.BaseDir
+		}
+		for scope, cluster := range c.Addons.Patroni {
+			if cluster.Name == "" {
+				cluster.Name = scope
+			}
+			nsScope := scope + nsSuffix(c.Namespace)
+			for member, mb := range cluster.Members {
+				if mb.ContainerName == "" {
+					mb.ContainerName = "pgcli-patroni" + nsSuffix(c.Namespace) + "-" + scope + "-" + member
+				}
+				if mb.ImageTag == "" {
+					mb.ImageTag = "ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5"
+				}
+				if mb.DataDir == "" {
+					mb.DataDir = filepath.Join(patroniBaseDir, "addon", "patroni", nsScope, member)
+				}
+				cluster.Members[member] = mb
+			}
+			c.Addons.Patroni[scope] = cluster
+		}
+	}
+
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
 	c.autoAssignPorts()
 }
@@ -946,6 +1047,69 @@ func (c *Config) autoAssignPorts() {
 			if addon.OpenmetricsPort >= nextPgDog {
 				nextPgDog = addon.OpenmetricsPort + 1
 			}
+		}
+	}
+
+	// Allocate ports for top-level addons (Patroni HA members). Each member has
+	// two ports from two independent pools: the PG listen port (patroni_start_
+	// port base, default 35532) and the REST API port (patroni_restapi_start_
+	// port base, default 8008). The pools are separate because they live on
+	// different well-known ranges; members are iterated by name so allocation is
+	// deterministic across map-ordering. Only this host's members are in the
+	// config; a cross-host peer's port is not allocated here (it is set by that
+	// host's own `pg ha create`, and must match — see docs).
+	patroniBase := c.PatroniStartPort
+	patroniRestBase := c.PatroniRestapiStartPort
+	assignedPatroniPG := map[int]bool{}
+	assignedPatroniRest := map[int]bool{}
+	for _, cluster := range c.Addons.Patroni {
+		for _, mb := range cluster.Members {
+			if mb.HostPort != 0 {
+				assignedPatroniPG[mb.HostPort] = true
+			}
+			if mb.RestapiPort != 0 {
+				assignedPatroniRest[mb.RestapiPort] = true
+			}
+		}
+	}
+	{
+		scopes := make([]string, 0, len(c.Addons.Patroni))
+		for scope := range c.Addons.Patroni {
+			scopes = append(scopes, scope)
+		}
+		sort.Strings(scopes)
+		nextPG := patroniBase
+		nextRest := patroniRestBase
+		for _, scope := range scopes {
+			cluster := c.Addons.Patroni[scope]
+			members := make([]string, 0, len(cluster.Members))
+			for m := range cluster.Members {
+				members = append(members, m)
+			}
+			sort.Strings(members)
+			for _, m := range members {
+				mb := cluster.Members[m]
+				if mb.HostPort == 0 && patroniBase > 0 {
+					for (usedPorts != nil && usedPorts[nextPG]) || assignedPatroniPG[nextPG] {
+						nextPG++
+					}
+					mb.HostPort = nextPG
+					nextPG++
+				} else if mb.HostPort >= nextPG {
+					nextPG = mb.HostPort + 1
+				}
+				if mb.RestapiPort == 0 && patroniRestBase > 0 {
+					for (usedPorts != nil && usedPorts[nextRest]) || assignedPatroniRest[nextRest] {
+						nextRest++
+					}
+					mb.RestapiPort = nextRest
+					nextRest++
+				} else if mb.RestapiPort >= nextRest {
+					nextRest = mb.RestapiPort + 1
+				}
+				cluster.Members[m] = mb
+			}
+			c.Addons.Patroni[scope] = cluster
 		}
 	}
 }
