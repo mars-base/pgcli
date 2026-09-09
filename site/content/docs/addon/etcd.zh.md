@@ -227,6 +227,29 @@ pg addon remove etcd --name m2
 `member remove` 接受 ID 而非名字），再删除容器和该成员的数据目录。只要 quorum
 仍成立，其余成员保持健康。
 
+**跨主机成员需要单独注销。** 上面这一步的自动注销，只在本地 `pg.yaml` 里存在
+同一集群的另一个运行中成员时才会生效 —— pgcli 看不到住在其他主机上的成员。因
+此对于跨主机集群，在运行该成员的那台主机上执行移除，只会删掉容器和数据，**集
+群的成员列表里仍会留下它**（一个"残留"成员）—— 存活的成员会一直尝试和已经删
+除的这台主机建立 peer 连接。
+
+正确的做法是分两步：
+
+```bash
+# 1. 在运行该成员的主机上 —— 停止并清理本地状态
+pg addon remove etcd --name m4
+
+# 2. 从任意一台仍存活的成员所在主机，把它从集群里注销
+export ETCDCTL_ENDPOINTS=http://10.0.0.1:2379   # 指向一个存活成员的 client URL
+pg etcdctl member list                            # 找到 m4 的十六进制 ID
+pg etcdctl member remove <hex-id>                 # 如 5c7048c8f7521ec7
+```
+
+`pg etcdctl` 需要一个可达的 peer 来通信 —— 把 `ETCDCTL_ENDPOINTS` 指向该集群
+中**仍在运行**的成员（在仍有本机运行成员的主机上执行时会自动回退到它；否则就
+显式设置），再按 ID 移除（见[用 `pg etcdctl` 查看](#用-pg-etcdctl-查看)）。
+事后用 `pg etcdctl member list` 复核：被移除的名字应该已经不在了。
+
 ## 参数
 
 | 参数 | 说明 | 默认值 |

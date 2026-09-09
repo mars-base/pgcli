@@ -254,6 +254,32 @@ member ID — etcd v3.5 `member remove` takes an ID, not a name), then deletes
 the container and the member's data directory. Remaining members stay healthy
 as long as quorum holds.
 
+**Cross-host members must be deregistered separately.** The automatic
+deregistration above only works when another running member of the *same
+cluster* is present in the local `pg.yaml` — pgcli has no view of members that
+live on other hosts. So on a cross-host cluster, removing a member from the
+host that runs it deletes the container and data but **leaves its entry in the
+cluster's membership list** (a "stale" member) — the surviving members keep
+trying to peer with the now-deleted host.
+
+Remove it in two steps instead:
+
+```bash
+# 1. on the host that runs the member — stop and clean up local state
+pg addon remove etcd --name m4
+
+# 2. from any surviving host's member, deregister it from the cluster
+export ETCDCTL_ENDPOINTS=http://10.0.0.1:2379   # a surviving member's client URL
+pg etcdctl member list                            # find m4's hex ID
+pg etcdctl member remove <hex-id>                 # e.g. 5c7048c8f7521ec7
+```
+
+`pg etcdctl` needs a reachable peer to talk to — point `ETCDCTL_ENDPOINTS` at
+a member of that cluster that is **still running** (on a host that still has a
+running member, this falls back automatically; otherwise set it explicitly),
+then remove by ID (see [Inspect with `pg etcdctl`](#inspect-with-pg-etcdctl)).
+Verify with `pg etcdctl member list` afterward: the removed name should be gone.
+
 ## Parameters
 
 | Flag | Description | Default |
