@@ -141,16 +141,19 @@ func needsMigrate(output string) bool {
 
 // ensurePodmanReady probes podman once per process and transparently runs
 // `podman system migrate` when a stale rootless state is detected, so pg
-// commands work on first use after a reboot. It also restarts any pgcli
-// containers stuck in a non-running state (e.g. "Stopping" or "Exited"
-// after a host reboot).
+// commands work on first use after a reboot. Only in that case — a reboot
+// interrupted containers that were meant to be running — does it also
+// restart pgcli containers left stuck in a non-running state. A healthy
+// podman is never touched, so a container the user stopped on purpose stays
+// stopped across read-only commands like `pg list`.
 func (m *Manager) ensurePodmanReady() {
 	if runtime.GOOS != "linux" || m.repaired {
 		return
 	}
 	m.repaired = true
-	ensurePodmanStateReady(m.podman)
-	m.restartStoppedContainers()
+	if ensurePodmanStateReady(m.podman) {
+		m.restartStoppedContainers()
+	}
 }
 
 // podmanStateRepaired guards ensurePodmanStateReady to one probe per process,
@@ -161,10 +164,13 @@ var podmanStateRepaired bool
 // the rootless pause-process record is stale — the classic failure after a
 // host reboot. Every manager (PostgreSQL, backup, PgBouncer, etcd) calls it at
 // construction, so boot-time 'start --autostart' self-heals even in configs
-// where only addons autostart and no PG instance path runs.
-func ensurePodmanStateReady(podmanPath string) {
+// where only addons autostart and no PG instance path runs. It reports whether
+// a migration was performed, which the caller uses to decide whether stopped
+// containers are reboot casualties (restart them) or intentional stops (leave
+// them alone).
+func ensurePodmanStateReady(podmanPath string) bool {
 	if runtime.GOOS != "linux" || podmanStateRepaired {
-		return
+		return false
 	}
 	podmanStateRepaired = true
 	probe := podmanCommand(podmanPath, "ps", "-a", "--format", "{{.Names}}")
@@ -173,7 +179,9 @@ func ensurePodmanStateReady(podmanPath string) {
 		if mg := podmanCommand(podmanPath, "system", "migrate"); mg.Run() != nil {
 			slog.Warn("podman system migrate failed; run 'podman system migrate' manually if podman errors persist")
 		}
+		return true
 	}
+	return false
 }
 
 // runMigrate runs `podman system migrate` once per process.
@@ -545,6 +553,48 @@ func (m *Manager) StopContainer() error {
 		return fmt.Errorf("stopping container: %w", err)
 	}
 	return nil
+}
+
+// KillContainer force-stops the container, bypassing the graceful shutdown
+// wait. It issues `podman stop -t 0` (immediate SIGKILL), then — if the
+// container is wedged in a stale "stopping" state, a rootless podman failure
+// where the process is already gone but libpod never finalizes the state —
+// falls back to `podman rm -f` to clear it. Mounted data is preserved; a
+// subsequent `pg start` recreates the container.
+func (m *Manager) KillContainer() error {
+	name := m.cfg.Podman.ContainerName
+	// Best-effort immediate stop; errors are ignored because a container in a
+	// bad state may reject `stop`, which the rm fallback below handles.
+	_, _ = m.run("stop", "--ignore", "-t", "0", name)
+
+	state, err := m.containerState(name)
+	if err != nil {
+		return err
+	}
+	switch state {
+	case "", "exited", "stopped", "created":
+		return nil
+	}
+	if _, err := m.run("rm", "-f", name); err != nil {
+		return fmt.Errorf("force-stopping container: %w", err)
+	}
+	return nil
+}
+
+// containerState returns podman's state for the named container (running,
+// exited, stopping, ...), or "" if no such container exists. The name filter
+// is a substring match, so the exact name is compared line by line.
+func (m *Manager) containerState(name string) (string, error) {
+	out, err := m.run("ps", "-a", "--filter", "name="+name, "--format", "{{.Names}}\t{{.State}}")
+	if err != nil {
+		return "", fmt.Errorf("querying container state: %w", err)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if n, s, ok := strings.Cut(strings.TrimSpace(line), "\t"); ok && n == name {
+			return s, nil
+		}
+	}
+	return "", nil
 }
 
 // Status returns detailed container status.

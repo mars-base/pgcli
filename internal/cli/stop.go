@@ -13,21 +13,31 @@ import (
 func init() {
 	rootCmd.AddCommand(stopCmd)
 	stopCmd.Flags().BoolVar(&stopAll, "all", false, "stop all configured instances, backup container, and pgbouncer")
+	stopCmd.Flags().BoolVarP(&stopForce, "force", "f", false, "force stop: SIGKILL without a graceful drain, and clear a container wedged in a stale stopping state")
 }
 
-var stopAll bool
+var (
+	stopAll   bool
+	stopForce bool
+)
 
 var stopCmd = &cobra.Command{
 	Use:   "stop",
+	Args:  cobra.MaximumNArgs(1),
 	Short: "Stop pg services",
 	Long: `stop terminates the PostgreSQL container and associated services.
 
 By default, stops only the current instance (specified by -i).
 Use --all to stop all instances, the backup container, and PgBouncer services.
+Use -f/--force to SIGKILL immediately without a graceful drain, and to clear a
+container stuck in a stale "stopping" state.
 
 Note: This does not affect auto-start configuration. Instances with
 autostart enabled will still start automatically at boot.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 1 && args[0] != "default" {
+			return fmt.Errorf("unexpected argument %q: to stop a named instance use 'pg stop -i %s'", args[0], args[0])
+		}
 		if stopAll {
 			return stopAllInstances()
 		}
@@ -40,14 +50,24 @@ func stopInstance() error {
 		return err
 	}
 
-	pm, err := newPodman()
+	// NewForStop (not New): stopping must never trigger the post-reboot
+	// container recovery, which would otherwise resurrect other stopped
+	// containers the user did not ask to start.
+	pm, err := podman.NewForStop(cfg)
 	if err != nil {
 		return err
 	}
 
-	fmt.Println("-> Stopping pg services...")
-	if err := pm.StopContainer(); err != nil {
-		return err
+	if stopForce {
+		fmt.Println("-> Force-stopping pg services...")
+		if err := pm.KillContainer(); err != nil {
+			return err
+		}
+	} else {
+		fmt.Println("-> Stopping pg services...")
+		if err := pm.StopContainer(); err != nil {
+			return err
+		}
 	}
 
 	fmt.Println("[OK] pg stopped")
@@ -94,7 +114,11 @@ func stopAllInstances() error {
 			continue
 		}
 
-		if err := pm.StopContainer(); err != nil {
+		stopFn := pm.StopContainer
+		if stopForce {
+			stopFn = pm.KillContainer
+		}
+		if err := stopFn(); err != nil {
 			if strings.Contains(err.Error(), "no such container") {
 				fmt.Printf("  [OK] %s: container not running (does not exist)\n", name)
 				ok++
