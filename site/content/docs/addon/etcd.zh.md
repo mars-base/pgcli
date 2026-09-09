@@ -291,15 +291,16 @@ pg addon install etcd --name d2 --data-dir /mnt/ssd/etcd
 
 ## 连接
 
-将 `etcdctl`（或任意 v3 客户端）指向某成员的 client URL：
+把 v3 客户端指向某个成员的 client URL。本机装了 `etcdctl` 就直接用；没有的话
+`pg etcdctl` 会用一个短生命周期容器跑同样的客户端（etcdctl 的原生参数放在 `--`
+之后；`ETCDCTL_ENDPOINTS` 可省略 —— 未设置时自动回退到配置中的第一个成员）：
 
 ```bash
-export ETCDCTL_ENDPOINTS=http://127.0.0.1:2379
-etcdctl member list
-etcdctl endpoint status -w table
-etcdctl endpoint health
-etcdctl put foo bar
-etcdctl get foo
+etcdctl member list                            # 或：pg etcdctl member list
+etcdctl endpoint status -w table               # 或：pg etcdctl endpoint status -- -w table
+etcdctl endpoint health                        # 或：pg etcdctl endpoint health
+etcdctl put foo bar                            # 或：pg etcdctl put foo bar
+etcdctl get foo --hex                          # 或：pg etcdctl get foo -- --hex
 ```
 
 ## 拓扑与 Quorum

@@ -324,15 +324,18 @@ shared root in place.
 
 ## Connecting
 
-Point `etcdctl` (or any v3 client) at a member's client URL:
+Point a v3 client at a member's client URL. With `etcdctl` installed locally,
+set `ETCDCTL_ENDPOINTS` and use it directly; otherwise `pg etcdctl` runs the
+same client from a short-lived container (etcdctl flags go after `--`, and
+`ETCDCTL_ENDPOINTS` is optional — it falls back to the first configured
+member):
 
 ```bash
-export ETCDCTL_ENDPOINTS=http://127.0.0.1:2379
-etcdctl member list
-etcdctl endpoint status -w table
-etcdctl endpoint health
-etcdctl put foo bar
-etcdctl get foo
+etcdctl member list                            # or: pg etcdctl member list
+etcdctl endpoint status -w table               # or: pg etcdctl endpoint status -- -w table
+etcdctl endpoint health                        # or: pg etcdctl endpoint health
+etcdctl put foo bar                            # or: pg etcdctl put foo bar
+etcdctl get foo --hex                          # or: pg etcdctl get foo -- --hex
 ```
 
 ## Topology & Quorum
