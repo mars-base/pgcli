@@ -226,7 +226,6 @@ func (m *PatroniManager) EnsurePatroniImage(tag string) error {
 		return err
 	}
 	if exists {
-		fmt.Printf("-> Patroni image %s already present, skipping pull/build\n", tag)
 		return nil
 	}
 	fmt.Printf("-> Pulling Patroni image %s...\n", tag)
