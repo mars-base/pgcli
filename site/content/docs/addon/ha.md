@@ -68,6 +68,53 @@ The DCS is the source of truth: Patroni re-renders each member's
 `postgresql.conf`/`pg_hba.conf` from it every loop, so hand-edits on disk are
 lost — use `pg ha edit-config` instead.
 
+## Scope and the DCS layout
+
+The `<scope>` in `pg ha create <scope>` **is the Patroni cluster name** — the
+identity of one HA cluster. Every command that takes a scope (`status`,
+`switchover`, `failover`, `pause`, `ctl`, …) names the same cluster; the first
+`create` for a scope bootstraps it, later `create`s with the same scope add
+members. (`--member` is the per-host node name *inside* the cluster — one
+member per machine.)
+
+In `pg.yaml` the cluster is keyed by that scope under `addons.patroni.<scope>`.
+
+### What actually lands in etcd
+
+Patroni stores everything under a fixed etcd namespace plus the scope:
+
+- **namespace:** `/service/` — Patroni's top-level key, not changed by pgcli.
+- **scope:** pgcli writes `PatroniScope(scope)` into `patroni.yml`, which is
+  your scope **plus the pgcli namespace suffix**. Patroni has no namespace
+  concept of its own (its etcd prefix is the raw scope), so pgcli bakes the
+  suffix into the scope to keep two pgcli namespaces sharing one etcd from
+  cross-talking.
+
+So the full etcd prefix for a cluster is:
+
+```
+/service/<scope>[-<namespace>]/          # e.g. /service/app/  (no namespace)
+                                         #      /service/app-prod/  (namespace: prod)
+├── initialize       # bootstrap marker (written once)
+├── leader           # current leader; value = member name
+├── members/<member> # per-member registration (conn_url, api_url, state)
+├── status           # cluster LSN / state
+├── config           # dynamic config (pause lives here too)
+├── history          # config revision history
+├── failover         # manual failover request
+└── sync             # synchronous-replication state
+```
+
+The keys below the prefix are Patroni's own DCS layout. To inspect them, point
+`pg etcdctl` at a running etcd member of the same host/config:
+
+```bash
+ETCDCTL_ENDPOINTS=http://127.0.0.1:2379 pg etcdctl get --prefix /service/ --keys-only
+```
+
+Note the scope shown there carries the namespace suffix, even if you configured
+the cluster with the bare name.
+
 ## Install
 
 Prerequisite: a DCS. Either reuse local etcd addon members or point at an
@@ -104,6 +151,54 @@ rest `Replica … streaming`:
 With no argument, `pg ha status` rolls up every cluster: container state, member
 count, and each member's `pg=`/`rest=` ports.
 
+## Choosing a DCS
+
+Patroni only needs a reachable etcd cluster, so there are two layouts:
+
+- **Co-located** — run the etcd members as addons on the same hosts as the
+  Patroni members and pass `--etcd m1,m2,m3`. Simplest: one machine per role,
+  no extra hosts. Good for a starter 3-node HA cluster.
+- **Dedicated DCS hosts** — run the etcd cluster on its own (virtual) machines
+  and point every Patroni member at it with `--etcd-endpoints`. Each line below
+  runs on a different machine (pgcli is per-host):
+
+  ```bash
+  # host E1 (10.0.0.20) — bootstrap the etcd cluster
+  pg addon install etcd --name e1 --cluster prod \
+      --advertise-host 10.0.0.20 --client-port 2379 --peer-port 2380
+
+  # host E2 (10.0.0.21) — join
+  pg addon install etcd --name e2 --cluster prod \
+      --advertise-host 10.0.0.21 --client-port 2379 --peer-port 2380 \
+      --join http://10.0.0.20:2379
+
+  # host E3 (10.0.0.22) — join
+  pg addon install etcd --name e3 --cluster prod \
+      --advertise-host 10.0.0.22 --client-port 2379 --peer-port 2380 \
+      --join http://10.0.0.20:2379
+
+  # hosts A / B / C — one Patroni member each; same endpoint list everywhere
+  pg ha create app --member node1 --advertise-host 10.0.0.11 \
+      --etcd-endpoints 10.0.0.20:2379,10.0.0.21:2379,10.0.0.22:2379
+  ```
+
+  This is the more available topology: etcd's quorum survives losing a PG host,
+  and re-imaging a database machine never takes the DCS down with it. The PG
+  hosts only ever *talk to* the DCS; `--etcd-endpoints` lists all member client
+  URLs, so Patroni falls through to the next endpoint if one etcd host is down
+  (writes still need the etcd quorum itself — 2 of 3). Keep the endpoint list
+  identical on every PG host.
+
+  A single endpoint (`--etcd-endpoints 10.0.0.20:2379`) does work — that one
+  etcd member serves the whole cluster, and the other two are hidden behind it.
+  But it re-introduces a single point of failure: if E1 goes down, Patroni
+  cannot reach the DCS *even though the etcd quorum is healthy*, and a leader
+  that fails to renew its lock demotes itself. List every endpoint you actually
+  have.
+
+A dedicated odd-sized etcd cluster (3 or 5) is the production recommendation;
+co-locating is fine for dev and small footprints.
+
 ## Commands
 
 | Command | What it does |
@@ -116,6 +211,7 @@ count, and each member's `pg=`/`rest=` ports.
 | `pg ha edit-config <scope> -- …` | View or patch the dynamic config in the DCS (never recreates a container) |
 | `pg ha start` / `stop <scope> --member m \| --all` | Raw container start/stop (see lifecycle caveat) |
 | `pg ha remove <scope> --member m \| --scope-all [--clean-data] [--force]` | Remove member(s); `--scope-all` also clears the DCS |
+| `pg ha passwords <scope> [--file F]` | Export the stored password set (the `--passwords-file` format, for other hosts) |
 | `pg ha ctl <scope> -- <patronictl args…>` | Passthrough to any `patronictl` command |
 
 Flags after `--` reach `patronictl` verbatim (cobra strips the `--`), so
@@ -146,11 +242,17 @@ Cross-host checklist (all three must line up on every host):
    DCS cluster-wide. Pass `--host-port` / `--restapi-port` with the **same value
    on every host**, or replicas can't reach each other.
 2. **Passwords** — Patroni's replication / rewind / REST-API auth is cluster-wide.
-   Export the first host's generated set (see [Passwords](#passwords)) and pass
-   `--passwords-file` to every other `pg ha create`.
+   Export the first host's generated set with `pg ha passwords app --file
+   app-passwd.yml` and pass `--passwords-file app-passwd.yml` to every other
+   `pg ha create`.
 3. **`--advertise-host`** — required for cross-host members; it flips the
    listen address to `0.0.0.0` and puts a reachable IP in `connect_address`.
-   Left empty, a member is loopback-only.
+   Left empty, a member is loopback-only. **This applies to the first (bootstrap)
+   member too**: it becomes the leader, and its loopback `connect_address` is
+   what every later host would try to `pg_basebackup` from — cross-host joins
+   fail forever once the cluster was bootstrapped with the default. If you may
+   ever add a member on another host, pass your LAN IPv4 from the very first
+   `create`.
 4. **Firewall** — allow the two ports (PG + REST API) pairwise between members.
 
 pgcli does not validate the peers' config; `pg ha status` shows each member's
@@ -160,9 +262,19 @@ pgcli does not validate the peers' config; `pg ha status` shows each member's
 
 The first `pg ha create` for a scope generates four credentials — `superuser`,
 `replication`, `rewind`, and the `restapi` basic-auth pair (`restapi_user` /
-`restapi_password`) — and stores them in `pg.yaml` under the cluster.
+`restapi_password`) — and stores them in `pg.yaml` under the cluster. You never
+pass passwords on the command line: the first member generates them, and
+`pg ha passwords` exports the stored set:
 
-For more control (or cross-host members) supply them from a file:
+```bash
+pg ha passwords app --file app-passwd.yml   # the exact --passwords-file format, mode 0600
+```
+
+(Without `--file` the YAML goes to stdout — prefer `--file` so the secrets stay
+out of shell history and scrollback.)
+
+For full control (or when you'd rather author the file yourself) use the same
+format with `--passwords-file`:
 
 ```yaml
 # app-passwd.yml

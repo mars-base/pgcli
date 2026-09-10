@@ -60,6 +60,50 @@ DCS 是唯一真相来源：Patroni 每个周期都从 DCS 重新渲染每个成
 `postgresql.conf`/`pg_hba.conf`，手工改盘上文件会丢 —— 请用
 `pg ha edit-config`。
 
+## Scope 与 DCS 存储路径
+
+`pg ha create <scope>` 里的 `<scope>` **就是 Patroni 集群名** —— 一个 HA 集群
+的身份标识。所有接收 scope 的命令（`status`、`switchover`、`failover`、
+`pause`、`ctl` 等）指的都是同一个集群；某 scope 的第一次 `create` 完成
+bootstrap，之后同 scope 的 `create` 是加成员。（`--member` 是集群**内部**逐主
+机的节点名 —— 每台机器一个成员。）
+
+`pg.yaml` 中集群以该 scope 为 key 存放在 `addons.patroni.<scope>` 下。
+
+### etcd 里实际存了什么
+
+Patroni 把一切存在固定的 etcd namespace + scope 之下：
+
+- **namespace：** `/service/` —— Patroni 的顶层键，pgcli 不改动。
+- **scope：** pgcli 写入 `patroni.yml` 的是 `PatroniScope(scope)`，即你起的名字
+  **加上 pgcli 的 namespace 后缀**。Patroni 自己没有 namespace 概念（其 etcd
+  前缀就是裸 scope），pgcli 把后缀烘进 scope，防止两个 pgcli namespace 共用一
+  套 etcd 时串群。
+
+因此一个集群在 etcd 里的完整前缀是：
+
+```
+/service/<scope>[-<namespace>]/          # 例：/service/app/（无 namespace）
+                                         #     /service/app-prod/（namespace: prod）
+├── initialize       # bootstrap 标记（只写一次）
+├── leader           # 当前主；值 = 成员名
+├── members/<member> # 每个成员的注册信息（conn_url、api_url、状态）
+├── status           # 集群 LSN / 状态
+├── config           # 动态配置（pause 标记也在这里）
+├── history          # 配置修订历史
+├── failover         # 手动 failover 请求
+└── sync             # 同步复制状态
+```
+
+前缀以下的键属于 Patroni 自己的 DCS 布局。想查看，把 `pg etcdctl` 指向同机
+器/同配置里一个运行中的 etcd 成员：
+
+```bash
+ETCDCTL_ENDPOINTS=http://127.0.0.1:2379 pg etcdctl get --prefix /service/ --keys-only
+```
+
+注意：即使建集群时用的是裸名字，这里显示的 scope 也会带着 namespace 后缀。
+
 ## 安装
 
 前置条件：一个 DCS。要么复用本地 etcd addon 成员，要么指向外部 etcd。
@@ -95,6 +139,51 @@ pg ha status app
 不带参数时，`pg ha status` 汇总每个集群：容器状态、成员数、每个成员的
 `pg=`/`rest=` 端口。
 
+## DCS 选型
+
+Patroni 只需要一个可达的 etcd 集群，因此有两种布局：
+
+- **同机部署** —— 把 etcd 成员作为 addon 跑在和 Patroni 成员相同的主机上，用
+  `--etcd m1,m2,m3` 指定。最省事：一台机器同时扮演两个角色，不多占主机。适合
+  起步的 3 节点 HA 集群。
+- **专用 DCS 主机** —— 把 etcd 集群跑在**单独的（虚拟）机器**上，再用
+  `--etcd-endpoints` 让每个 Patroni 成员指向它。下面每一行都在不同主机上执行
+  （pgcli 是按主机管理的）：
+
+  ```bash
+  # 主机 E1 (10.0.0.20) —— bootstrap etcd 集群
+  pg addon install etcd --name e1 --cluster prod \
+      --advertise-host 10.0.0.20 --client-port 2379 --peer-port 2380
+
+  # 主机 E2 (10.0.0.21) —— 加入
+  pg addon install etcd --name e2 --cluster prod \
+      --advertise-host 10.0.0.21 --client-port 2379 --peer-port 2380 \
+      --join http://10.0.0.20:2379
+
+  # 主机 E3 (10.0.0.22) —— 加入
+  pg addon install etcd --name e3 --cluster prod \
+      --advertise-host 10.0.0.22 --client-port 2379 --peer-port 2380 \
+      --join http://10.0.0.20:2379
+
+  # 主机 A / B / C —— 每台一个 Patroni 成员，endpoint 列表完全相同
+  pg ha create app --member node1 --advertise-host 10.0.0.11 \
+      --etcd-endpoints 10.0.0.20:2379,10.0.0.21:2379,10.0.0.22:2379
+  ```
+
+  这是可用性更高的拓扑：etcd 的 quorum 不会随某台 PG 主机一起消失，重装数据库
+  机器也不会顺带带走 DCS。PG 主机只是**访问** DCS；`--etcd-endpoints` 列出全部
+  成员的 client URL，因此某一台 etcd 主机宕机时 Patroni 会自动顺延到下一个
+  endpoint（写入仍然需要 etcd 自身的 quorum —— 3 台中要活 2 台）。每台 PG 主机
+  上的 endpoint 列表要保持一致。
+
+  只写一个 endpoint（`--etcd-endpoints 10.0.0.20:2379`）**也能用** —— 那一台
+  etcd 成员会服务整个集群，另外两台被它挡在后面。但这又把单点引回来了：E1 一
+  宕，Patroni 就够不到 DCS，**哪怕 etcd 的 quorum 是健康的**；leader 续不上锁
+  就会自我降级。你实际有几个成员，就把它们全部列出来。
+
+生产环境推荐独立的奇数（3 或 5）成员 etcd 集群；同机部署用于开发和小型部署即
+可。
+
 ## 命令
 
 | 命令 | 作用 |
@@ -107,6 +196,7 @@ pg ha status app
 | `pg ha edit-config <scope> -- …` | 查看或修改 DCS 里的动态配置（绝不重建容器） |
 | `pg ha start` / `stop <scope> --member m \| --all` | 裸容器 start/stop（见生命周期警告） |
 | `pg ha remove <scope> --member m \| --scope-all [--clean-data] [--force]` | 移除成员；`--scope-all` 同时清 DCS |
+| `pg ha passwords <scope> [--file F]` | 导出存储的密码集（`--passwords-file` 的格式，供其它主机使用） |
 | `pg ha ctl <scope> -- <patronictl 参数…>` | 透传任意 `patronictl` 命令 |
 
 `--` 之后的 flag 原样到达 `patronictl`（cobra 会剥掉 `--`），所以
@@ -135,11 +225,14 @@ pg ha create app --member node2 --advertise-host 10.0.0.12 \
 1. **端口** —— 自动分配是按主机的，但 `connect_address` 存在 DCS 里全集群共
    享。请在**每台主机上把 `--host-port` / `--restapi-port` 设成相同值**，否则
    副本之间连不通。
-2. **密码** —— Patroni 的复制 / rewind / REST-API 鉴权是全集群一致的。导出第
-   一台生成的那套（见[密码](#密码)），对每台其他 `pg ha create` 传
-   `--passwords-file`。
+2. **密码** —— Patroni 的复制 / rewind / REST-API 鉴权是全集群一致的。用
+   `pg ha passwords app --file app-passwd.yml` 导出第一台生成的那套，对每台其
+   他 `pg ha create` 传 `--passwords-file app-passwd.yml`。
 3. **`--advertise-host`** —— 跨主机成员必传；它把监听地址翻成 `0.0.0.0` 并把
-   可达 IP 写进 `connect_address`。留空则该成员只走回环。
+   可达 IP 写进 `connect_address`。留空则该成员只走回环。**第一个（bootstrap）
+   成员也不例外**：它就是 leader，其 `connect_address` 会写进 DCS，之后每台主
+   机的 `pg_basebackup` 都拨这个地址 —— 用默认值引导的集群永远无法再加跨机成
+   员。只要以后可能在别的主机加成员，第一次 `create` 就该传本机 LAN IPv4。
 4. **防火墙** —— 在成员之间两两放行两个端口（PG + REST API）。
 
 pgcli 不校验对端配置；`pg ha status` 会显示每个成员的 `connect_address`，便于
@@ -149,9 +242,18 @@ pgcli 不校验对端配置；`pg ha status` 会显示每个成员的 `connect_a
 
 某个 scope 的第一次 `pg ha create` 生成四份凭据 —— `superuser`、
 `replication`、`rewind`，以及 `restapi` basic-auth 对（`restapi_user` /
-`restapi_password`）—— 存在 `pg.yaml` 的对应集群下。
+`restapi_password`）—— 存在 `pg.yaml` 的对应集群下。命令行上永远不用传密码：
+第一个成员自动生成，`pg ha passwords` 把存储的这套导出成 `--passwords-file`
+的格式，供其它主机复用：
 
-需要更多控制（或跨主机成员）时用文件提供：
+```bash
+pg ha passwords app --file app-passwd.yml   # 即 --passwords-file 的格式，写入权限 0600
+```
+
+（不加 `--file` 则输出到 stdout —— 建议用 `--file`，免得密码落进 shell 历史和
+滚屏。）
+
+需要完全自己掌控（或想手写这份文件）时，用同样格式配 `--passwords-file`：
 
 ```yaml
 # app-passwd.yml
