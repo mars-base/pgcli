@@ -99,7 +99,7 @@ Patroni 把一切存在固定的 etcd namespace + scope 之下：
 器/同配置里一个运行中的 etcd 成员：
 
 ```bash
-ETCDCTL_ENDPOINTS=http://127.0.0.1:2379 pg etcdctl get --prefix /service/ --keys-only
+ETCDCTL_ENDPOINTS=http://127.0.0.1:2379 pg etcdctl get /service/ -- --prefix --keys-only
 ```
 
 注意：即使建集群时用的是裸名字，这里显示的 scope 也会带着 namespace 后缀。
@@ -213,6 +213,9 @@ Patroni 只需要一个可达的 etcd 集群，因此有两种布局：
 # host A (10.0.0.11) —— bootstrap（自带 etcd，或外部 DCS）
 pg ha create app --member node1 --advertise-host 10.0.0.11 \
     --etcd-endpoints 10.0.0.9:2379,10.0.0.10:2379
+
+# host A —— 导出第一台生成的密码，供其他主机使用
+pg ha passwords app --file app-passwd.yml
 
 # host B (10.0.0.12) —— 加入，共用同一个 DCS 与同一套密码
 pg ha create app --member node2 --advertise-host 10.0.0.12 \
@@ -354,6 +357,74 @@ addons:
 
 DCS 的 scope 键 = scope 加命名空间后缀（Patroni 自己没有 namespace 概念，所以
 把前缀烙进 scope，好让两个 pgcli namespace 共用一个 etcd 时不串台）。
+
+## 动态配置
+
+Patroni 的动态配置存在 DCS（etcd）的 `/service/<scope>/config` 下。每个成员
+在每个循环（每 `loop_wait` 秒）都读取并应用这些配置 —— 所以 `pg ha edit-config`
+是调优运行时参数的正确方式，无需重启容器。
+
+**持久化：** 改动直接写入 etcd，不是容器里的文件。容器重启、`pg ha start`/`stop`，
+甚至 `pg ha create`（重装）都不会丢失这些设置 —— 新成员会自动从 DCS 拿到最新配置。
+
+### 查看当前配置
+
+```bash
+pg ha edit-config app --show
+```
+
+这是 `pg ha ctl app -- show-config` 的便捷别名。输出是存在 `/service/<scope>/config`
+里的完整 JSON。
+
+### 修改参数
+
+```bash
+# 设置单个参数
+pg ha edit-config app -- -s loop_wait=5
+
+# 设置多个参数
+pg ha edit-config app -- -s loop_wait=5 -s retry_timeout=3
+
+# 不确认直接应用（脚本场景）
+pg ha edit-config app -- -s loop_wait=5 --force
+
+# 交互式编辑（用 $EDITOR 打开当前配置）
+pg ha edit-config app
+```
+
+改动后，所有成员在下一个循环（`loop_wait` 秒内）应用。无需重启。
+
+### 常用可调参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `loop_wait` | `10` | leader 循环间隔（秒），用于锁续租、DCS 更新 |
+| `ttl` | `30` | leader 锁的 TTL。leader 在此窗口内未续租，副本触发 failover |
+| `retry_timeout` | `10` | DCS/PostgreSQL 操作超时。必须 `< ttl - loop_wait`，给 leader 至少一次重试机会 |
+| `maximum_lag_on_failover` | `1048576` | 副本可被提升的最大复制延迟（字节），默认 1 MB |
+| `synchronous_mode` | `false` | 启用同步复制（零数据丢失，更高延迟） |
+| `synchronous_node_count` | `1` | 同步 standby 节点数（`synchronous_mode=true` 时） |
+| `use_pg_rewind` | `true` | 用 `pg_rewind` 让失败的 leader 重新加入（比全量 `pg_basebackup` 快） |
+| `use_slots` | `true` | 启用复制槽（副本断开时防止 WAL 丢失） |
+| `failover_timeout` | `0` | failover 前等待时间（0 = leader 丢失时立即切换） |
+
+PostgreSQL 运行时参数也可以在 `postgresql.parameters` 下设置：
+
+```bash
+pg ha edit-config app -- -s 'postgresql.parameters.max_connections=200'
+pg ha edit-config app -- -s 'postgresql.parameters.work_mem=64MB'
+```
+
+这会触发 PostgreSQL `reload`（或重启，取决于参数的 context）。查阅 `pg_hba.conf`
+和 `postgresql.conf` 参数文档，了解哪些设置需要重启。
+
+### 不要直接编辑的内容
+
+- **不要直接编辑磁盘上的 `patroni.yml`** —— 每次 `pg ha create` 都会从 `pg.yaml`
+  重新生成，且 Patroni 的动态配置从 DCS 读取。
+- **不要直接编辑 `postgresql.conf`** —— Patroni 每个循环都会从 DCS 配置覆盖它。
+- **不要改 `scope` 或 `namespace`** —— 这些在 bootstrap 时烙进 DCS 键，无法修改，
+  只能重建集群。
 
 ## 注意
 

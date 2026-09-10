@@ -109,7 +109,7 @@ The keys below the prefix are Patroni's own DCS layout. To inspect them, point
 `pg etcdctl` at a running etcd member of the same host/config:
 
 ```bash
-ETCDCTL_ENDPOINTS=http://127.0.0.1:2379 pg etcdctl get --prefix /service/ --keys-only
+ETCDCTL_ENDPOINTS=http://127.0.0.1:2379 pg etcdctl get /service/ -- --prefix --keys-only
 ```
 
 Note the scope shown there carries the namespace suffix, even if you configured
@@ -229,6 +229,9 @@ partial view of one `scope`.
 # host A (10.0.0.11) — bootstrap (its own etcd, or an external DCS)
 pg ha create app --member node1 --advertise-host 10.0.0.11 \
     --etcd-endpoints 10.0.0.9:2379,10.0.0.10:2379
+
+# host A — export the generated password set for other hosts
+pg ha passwords app --file app-passwd.yml
 
 # host B (10.0.0.12) — join, sharing the SAME DCS and password set
 pg ha create app --member node2 --advertise-host 10.0.0.12 \
@@ -380,6 +383,80 @@ so Patroni members never collide with plain-instance or addon ports.
 The DCS-scope key is the scope plus the namespace suffix (Patroni has no
 namespace concept of its own, so the prefix is baked into the scope to keep two
 pgcli namespaces sharing one etcd from cross-talking).
+
+## Dynamic Configuration
+
+Patroni's dynamic configuration lives in the DCS (etcd) under `/service/<scope>/config`.
+Every member reads it on each loop (every `loop_wait` seconds) and applies
+changes live — so `pg ha edit-config` is the right way to tune runtime parameters
+without restarting containers.
+
+**Persistence:** changes are written directly to etcd, not to container files.
+Container restarts, `pg ha start`/`stop`, or even `pg ha create` (re-install)
+do not lose these settings — new members automatically pick up the latest config
+from the DCS.
+
+### Viewing the current config
+
+```bash
+pg ha edit-config app --show
+```
+
+This is a convenience alias for `pg ha ctl app -- show-config`. The output is
+the full JSON blob stored in `/service/<scope>/config`.
+
+### Modifying parameters
+
+```bash
+# Set a single parameter
+pg ha edit-config app -- -s loop_wait=5
+
+# Set multiple parameters
+pg ha edit-config app -- -s loop_wait=5 -s retry_timeout=3
+
+# Apply without confirmation (useful in scripts)
+pg ha edit-config app -- -s loop_wait=5 --force
+
+# Interactive edit (opens $EDITOR with the current config)
+pg ha edit-config app
+```
+
+After a change, all members apply it on their next loop (within `loop_wait`
+seconds). No restart needed.
+
+### Common tunable parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `loop_wait` | `10` | Seconds between leader-loop iterations (lock renewal, DCS updates) |
+| `ttl` | `30` | Leader lock TTL. If the leader fails to renew within this window, replicas trigger failover |
+| `retry_timeout` | `10` | Timeout for DCS/PostgreSQL operations. Must be `< ttl - loop_wait` to give the leader at least one retry chance |
+| `maximum_lag_on_failover` | `1048576` | Maximum replication lag (bytes) for a replica to be eligible for promotion. Default 1 MB |
+| `synchronous_mode` | `false` | Enable synchronous replication (zero data loss, higher latency) |
+| `synchronous_node_count` | `1` | How many synchronous standby nodes (when `synchronous_mode=true`) |
+| `use_pg_rewind` | `true` | Use `pg_rewind` to rejoin a failed leader (faster than full `pg_basebackup`) |
+| `use_slots` | `true` | Use replication slots (prevent WAL loss when a replica disconnects) |
+| `failover_timeout` | `0` | How long to wait before failover (0 = immediate when leader is lost) |
+
+PostgreSQL runtime parameters can also be set under `postgresql.parameters`:
+
+```bash
+pg ha edit-config app -- -s 'postgresql.parameters.max_connections=200'
+pg ha edit-config app -- -s 'postgresql.parameters.work_mem=64MB'
+```
+
+These trigger a PostgreSQL `reload` (or restart, depending on the parameter's
+context). Check `pg_hba.conf` and `postgresql.conf` parameter documentation for
+which settings require a restart.
+
+### What not to edit
+
+- **Do not edit `patroni.yml` on disk** — it is regenerated from `pg.yaml` on
+  every `pg ha create`, and Patroni reads dynamic config from the DCS anyway.
+- **Do not edit `postgresql.conf` directly** — Patroni overwrites it each loop
+  from the DCS config.
+- **Do not change `scope` or `namespace`** — these are baked into the DCS key
+  at bootstrap time and cannot be changed without recreating the cluster.
 
 ## Notes
 
