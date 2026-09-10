@@ -243,6 +243,22 @@ Infra add-ons (etcd):
     Container:   pgcli-etcd-m1
 ```
 
+### Start and stop
+
+After a host reboot or a manual stop, bring a member back up without
+re-running install — no `member add`, the existing config and on-disk data are
+reused:
+
+```bash
+pg addon start etcd --name m1
+pg addon stop etcd --name m1
+```
+
+`start` is safe to repeat: an already-running member is a no-op, and a member
+whose container was removed is recreated from its data with
+`--initial-cluster-state existing`. For a cross-host cluster, confirm the
+member's peers are reachable (quorum intact) before starting it.
+
 ### Remove a member
 
 ```bash

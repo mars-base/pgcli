@@ -129,6 +129,24 @@ Remote add-ons:
     Container: pgcli-pgbouncer-default-my-remote-pool
 ```
 
+### Start and stop
+
+After a reboot or manual stop, bring the pooler back up without re-running
+install (config and auth users are untouched):
+
+```bash
+# Local
+pg addon start pgbouncer -i mypg
+pg addon stop pgbouncer -i mypg
+
+# Remote
+pg addon start pgbouncer --pg-name my-remote-pool
+pg addon stop pgbouncer --pg-name my-remote-pool
+```
+
+`start` is idempotent — a running pooler is left alone. `stop` keeps the
+container and its config; use `pg addon remove` to tear it down.
+
 ### Remove
 
 ```bash

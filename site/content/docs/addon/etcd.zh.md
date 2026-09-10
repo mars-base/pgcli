@@ -217,6 +217,20 @@ Infra add-ons (etcd):
     Container:   pgcli-etcd-m1
 ```
 
+### 启动与停止
+
+宿主机重启或手动停掉后,无需重跑 install 即可把成员拉回来 —— 不会重新执行
+`member add`,复用已有配置与磁盘数据:
+
+```bash
+pg addon start etcd --name m1
+pg addon stop etcd --name m1
+```
+
+`start` 可重复执行:已在运行的成员是 no-op;容器被删掉的成员会以
+`--initial-cluster-state existing` 从其数据重建。跨机集群启动某成员前,请确认
+其对端可达(quorum 成立)。
+
 ### 移除成员
 
 ```bash

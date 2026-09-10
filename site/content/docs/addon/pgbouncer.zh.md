@@ -121,6 +121,23 @@ Remote add-ons:
     Container: pgcli-pgbouncer-default-my-remote-pool
 ```
 
+### 启动与停止
+
+宿主机重启或手动停掉后,无需重跑 install 即可拉起连接池(配置与 auth 用户不动):
+
+```bash
+# 本地
+pg addon start pgbouncer -i mypg
+pg addon stop pgbouncer -i mypg
+
+# 远端
+pg addon start pgbouncer --pg-name my-remote-pool
+pg addon stop pgbouncer --pg-name my-remote-pool
+```
+
+`start` 幂等 —— 已在运行则不动。`stop` 保留容器与配置;要彻底清理请用
+`pg addon remove`。
+
 ### 卸载
 
 ```bash

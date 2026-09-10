@@ -44,6 +44,8 @@ Infra addons (shared, not tied to one instance):
 Commands:
   pg addon install <addon>   install an add-on
   pg addon list              list all installed add-ons
+  pg addon start <addon>     start an installed but stopped add-on
+  pg addon stop <addon>      stop a running add-on (keeps config)
   pg addon remove <addon>    remove an add-on`,
 }
 
@@ -125,12 +127,61 @@ Examples:
 }
 
 // ---------------------------------------------------------------------------
+// start / stop
+// ---------------------------------------------------------------------------
+
+var addonStartCmd = &cobra.Command{
+	Use:   "start <addon>",
+	Short: "Start an installed add-on container",
+	Long: `Start an add-on container that is installed but not running (e.g. after a
+host reboot or a manual stop). This brings the existing container up without
+regenerating config or re-registering cluster members.
+
+Supported add-ons:
+  etcd       pg addon start etcd [--name m1]
+  pgdog      pg addon start pgdog [--name proxy]
+  pgbouncer  pg addon start pgbouncer -i <instance>
+             pg addon start pgbouncer --pg-name <remote-name>
+
+Examples:
+  pg addon start etcd --name m1
+  pg addon start pgdog
+  pg addon start pgbouncer -i proj01`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runAddonStart(args[0], cmd)
+	},
+}
+
+var addonStopCmd = &cobra.Command{
+	Use:   "stop <addon>",
+	Short: "Stop a running add-on container",
+	Long: `Stop an add-on container without removing it or its configuration. Bring it
+back up later with 'pg addon start <addon>'.
+
+Supported add-ons:
+  etcd       pg addon stop etcd [--name m1]
+  pgdog      pg addon stop pgdog [--name proxy]
+  pgbouncer  pg addon stop pgbouncer -i <instance>
+             pg addon stop pgbouncer --pg-name <remote-name>
+
+Examples:
+  pg addon stop etcd --name m1
+  pg addon stop pgdog
+  pg addon stop pgbouncer -i proj01`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runAddonStop(args[0], cmd)
+	},
+}
+
+// ---------------------------------------------------------------------------
 // init
 // ---------------------------------------------------------------------------
 
 func init() {
 	rootCmd.AddCommand(addonCmd)
-	addonCmd.AddCommand(addonInstallCmd, addonListCmd, addonRemoveCmd)
+	addonCmd.AddCommand(addonInstallCmd, addonListCmd, addonRemoveCmd, addonStartCmd, addonStopCmd)
 
 	// Basic flags
 	addonInstallCmd.Flags().String("dsn", "", "PG instance connection string for remote mode (postgres://user:pass@host:port/db)")
@@ -174,6 +225,12 @@ func init() {
 	addonInstallCmd.Flags().String("advertise-host", "", "host advertised in this member's peer/client URLs (empty=127.0.0.1 for single-host; set a LAN IP or FQDN for cross-host clusters)")
 	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.241.20.147:2379 (implies --initial-cluster-state existing; requires --advertise-host)")
 	addonRemoveCmd.Flags().String("name", "", "name of the etcd member or pgdog proxy to remove (default \"etcd\"/\"pgdog\")")
+
+	// start / stop flags
+	addonStartCmd.Flags().String("name", "", "name of the etcd member or pgdog proxy to start (default \"etcd\"/\"pgdog\")")
+	addonStartCmd.Flags().String("pg-name", "", "name of a remote PgBouncer to start")
+	addonStopCmd.Flags().String("name", "", "name of the etcd member or pgdog proxy to stop (default \"etcd\"/\"pgdog\")")
+	addonStopCmd.Flags().String("pg-name", "", "name of a remote PgBouncer to stop")
 
 	// pgdog flags (top-level shared Postgres proxy addon)
 	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port)")
@@ -1365,6 +1422,235 @@ func runAddonRemovePgDog(cmd *cobra.Command) error {
 	}
 	fmt.Printf("✓ pgdog %q removed\n", name)
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// start / stop logic
+// ---------------------------------------------------------------------------
+
+func runAddonStart(addonName string, cmd *cobra.Command) error {
+	switch addonName {
+	case "etcd":
+		return runAddonStartEtcd(cmd)
+	case "pgdog":
+		return runAddonStartPgDog(cmd)
+	case "pgbouncer":
+		return runAddonStartPgBouncer(cmd)
+	default:
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog)", addonName)
+	}
+}
+
+func runAddonStop(addonName string, cmd *cobra.Command) error {
+	switch addonName {
+	case "etcd":
+		return runAddonStopEtcd(cmd)
+	case "pgdog":
+		return runAddonStopPgDog(cmd)
+	case "pgbouncer":
+		return runAddonStopPgBouncer(cmd)
+	default:
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog)", addonName)
+	}
+}
+
+// loadAddonCfg reads pg.yaml (or the -c override) into a fresh Config.
+func loadAddonCfg() (*config.Config, string, error) {
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil, "", fmt.Errorf("config file not found: %s", path)
+	}
+	c, err := config.Load(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to load config: %w", err)
+	}
+	return c, path, nil
+}
+
+// ensureProxyBridge brings up the podman machine and pgcli-net bridge on macOS
+// (both no-op on Linux) before a proxy container joins the bridge network.
+func ensureProxyBridge(cfg *config.Config) error {
+	pm, err := podman.New(cfg)
+	if err != nil {
+		return fmt.Errorf("podman: %w", err)
+	}
+	if err := pm.EnsureMachine(); err != nil {
+		return err
+	}
+	return pm.EnsureNetwork()
+}
+
+func runAddonStartEtcd(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "etcd"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	if cfg.Addons.Etcd == nil {
+		return fmt.Errorf("no etcd add-ons configured (run 'pg addon install etcd')")
+	}
+	ec, ok := cfg.Addons.Etcd[name]
+	if !ok {
+		return fmt.Errorf("etcd %q not found (run 'pg addon install etcd --name %s')", name, name)
+	}
+	em, err := podman.NewEtcdManager(cfg)
+	if err != nil {
+		return fmt.Errorf("etcd manager: %w", err)
+	}
+	fmt.Printf("-> Starting etcd %q...\n", name)
+	return em.StartContainer(&ec)
+}
+
+func runAddonStopEtcd(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "etcd"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	ec, ok := cfg.Addons.Etcd[name]
+	if !ok {
+		return fmt.Errorf("etcd %q not found", name)
+	}
+	em, err := podman.NewEtcdManager(cfg)
+	if err != nil {
+		return fmt.Errorf("etcd manager: %w", err)
+	}
+	running, _ := em.ContainerRunning(ec.ContainerName)
+	if !running {
+		fmt.Printf("etcd %q is not running\n", name)
+		return nil
+	}
+	fmt.Printf("-> Stopping etcd %q...\n", name)
+	_, err = em.Stop(ec.ContainerName)
+	return err
+}
+
+func runAddonStartPgDog(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "pgdog"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	if cfg.Addons.PgDog == nil {
+		return fmt.Errorf("no pgdog add-ons configured (run 'pg addon install pgdog')")
+	}
+	pd, ok := cfg.Addons.PgDog[name]
+	if !ok {
+		return fmt.Errorf("pgdog %q not found (run 'pg addon install pgdog --name %s')", name, name)
+	}
+	if err := ensureProxyBridge(cfg); err != nil {
+		return err
+	}
+	dm, err := podman.NewPgDogManager(cfg)
+	if err != nil {
+		return fmt.Errorf("pgdog manager: %w", err)
+	}
+	fmt.Printf("-> Starting pgdog %q...\n", name)
+	return dm.StartContainer(&pd)
+}
+
+func runAddonStopPgDog(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "pgdog"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	pd, ok := cfg.Addons.PgDog[name]
+	if !ok {
+		return fmt.Errorf("pgdog %q not found", name)
+	}
+	dm, err := podman.NewPgDogManager(cfg)
+	if err != nil {
+		return fmt.Errorf("pgdog manager: %w", err)
+	}
+	running, _ := dm.ContainerRunning(pd.ContainerName)
+	if !running {
+		fmt.Printf("pgdog %q is not running\n", name)
+		return nil
+	}
+	fmt.Printf("-> Stopping pgdog %q...\n", name)
+	_, err = dm.Stop(pd.ContainerName)
+	return err
+}
+
+// resolvePgBouncerTarget maps (pg-name / cfgInstance) to (pbConf, instName).
+// pg-name non-empty → remote (top-level addons.pgbouncer[pg-name]); otherwise
+// local (instances.<-i>.addons.pgbouncer).
+func resolvePgBouncerTarget(cfg *config.Config, cmd *cobra.Command) (*config.PgBouncerConfig, string, error) {
+	pgName, _ := cmd.Flags().GetString("pg-name")
+	if pgName != "" {
+		pb, ok := cfg.Addons.PgBouncer[pgName]
+		if !ok {
+			return nil, "", fmt.Errorf("remote PgBouncer %q not found (run 'pg addon install pgbouncer --pg-name %s --dsn <dsn>')", pgName, pgName)
+		}
+		return &pb, pgName, nil
+	}
+	inst, ok := cfg.Instances[cfgInstance]
+	if !ok {
+		return nil, "", fmt.Errorf("instance %q not found in config", cfgInstance)
+	}
+	if inst.Addons.PgBouncer == nil {
+		return nil, "", fmt.Errorf("PgBouncer is not installed for instance %q (run 'pg addon install pgbouncer -i %s')", cfgInstance, cfgInstance)
+	}
+	return inst.Addons.PgBouncer, cfgInstance, nil
+}
+
+func runAddonStartPgBouncer(cmd *cobra.Command) error {
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	pbConf, instName, err := resolvePgBouncerTarget(cfg, cmd)
+	if err != nil {
+		return err
+	}
+	if err := ensureProxyBridge(cfg); err != nil {
+		return err
+	}
+	pbm, err := podman.NewPgBouncerManager(cfg)
+	if err != nil {
+		return fmt.Errorf("pgbouncer manager: %w", err)
+	}
+	fmt.Printf("-> Starting PgBouncer for %q...\n", instName)
+	return pbm.StartContainer(pbConf, instName)
+}
+
+func runAddonStopPgBouncer(cmd *cobra.Command) error {
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	pbConf, instName, err := resolvePgBouncerTarget(cfg, cmd)
+	if err != nil {
+		return err
+	}
+	pbm, err := podman.NewPgBouncerManager(cfg)
+	if err != nil {
+		return fmt.Errorf("pgbouncer manager: %w", err)
+	}
+	running, _ := pbm.ContainerRunning(pbConf.ContainerName)
+	if !running {
+		fmt.Printf("PgBouncer for %q is not running\n", instName)
+		return nil
+	}
+	fmt.Printf("-> Stopping PgBouncer for %q...\n", instName)
+	_, err = pbm.Stop(pbConf.ContainerName)
+	return err
 }
 
 // ---------------------------------------------------------------------------

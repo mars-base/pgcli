@@ -305,6 +305,20 @@ Infra add-ons (pgdog):
 `Backends` / `Users` are the counts from `pgdog.toml` / `users.toml`; `Status`
 reflects the live container (a stopped proxy shows `stopped`).
 
+## Start and stop
+
+After a reboot or a manual stop, bring the proxy up without re-running install
+(config and users are untouched):
+
+```bash
+pg addon start pgdog            # default name "pgdog"
+pg addon start pgdog --name proxy
+pg addon stop pgdog --name proxy
+```
+
+`start` is idempotent — a running proxy is left alone; a proxy whose container
+was removed is recreated from its config directory.
+
 ## Auto-start on Boot
 
 Containers carry a `--restart unless-stopped` policy (crashes, not reboots). To

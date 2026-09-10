@@ -280,6 +280,18 @@ Infra add-ons (pgdog):
 `Backends` / `Users` 取自 `pgdog.toml` / `users.toml` 中的条目数；`Status`
 反映容器的实时状态（已停止的代理显示为 `stopped`）。
 
+## 启动与停止
+
+宿主机重启或手动停掉后,无需重跑 install 即可拉起代理(配置与 users 不动):
+
+```bash
+pg addon start pgdog            # 默认名 "pgdog"
+pg addon start pgdog --name proxy
+pg addon stop pgdog --name proxy
+```
+
+`start` 幂等 —— 已在运行则不动;容器被删掉的代理会从其配置目录重建。
+
 ## 开机自启
 
 容器带有 `--restart unless-stopped` 策略（应对崩溃，而非重启）。要在主机重启后
