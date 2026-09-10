@@ -358,11 +358,94 @@ addons:
 DCS 的 scope 键 = scope 加命名空间后缀（Patroni 自己没有 namespace 概念，所以
 把前缀烙进 scope，好让两个 pgcli namespace 共用一个 etcd 时不串台）。
 
+### 默认 `patroni.yml`
+
+下面是 pgcli 渲染并以只读方式挂载到每个成员容器里的配置文件。密码在 bootstrap
+时自动生成；可用 `--passwords-file` 提供自己的密码集。
+
+```yaml
+scope: app-default
+namespace: /service/
+name: node1
+
+etcd3:
+    hosts: 10.0.0.11:2379       # 来自 --etcd-endpoints 或本地 etcd 成员
+    protocol: http
+
+restapi:
+    listen: 0.0.0.0:8009
+    connect_address: 10.0.0.11:8009
+    authentication:
+        username: postgres
+        password: <自动生成>
+
+bootstrap:
+    dcs:
+        ttl: 30
+        loop_wait: 10
+        retry_timeout: 10
+        maximum_lag_on_failover: 1048576
+        postgresql:
+            use_pg_rewind: true
+            use_slots: true
+            parameters:
+                wal_level: replica
+                hot_standby: "on"
+    initdb:
+        - encoding: UTF8
+        - data-checksums
+    pg_hba:
+        - host all all all scram-sha-256
+        - host replication all all scram-sha-256
+
+postgresql:
+    listen: 0.0.0.0:35532
+    connect_address: 10.0.0.11:35532
+    data_dir: /var/lib/postgresql/data
+    bin_dir: /usr/lib/postgresql/18/bin
+    pgpass: /patroni/.pgpass
+    authentication:
+        superuser:
+            username: postgres
+            password: <自动生成>
+        replication:
+            username: replicator
+            password: <自动生成>
+        rewind:
+            username: rewind_user
+            password: <自动生成>
+    parameters:
+        unix_socket_directories: /var/lib/postgresql
+```
+
+要点：
+
+- **`scope`** = Patroni 集群名。与 `namespace` 组合后形成 etcd 键前缀。
+- **`etcd3.hosts`** = 只写 `host:port`（不带 `http://` 前缀）。多端点逗号分隔。
+- **`bootstrap.dcs`** 里的值仅为默认值 —— 只在首次 bootstrap 时生效；之后用 `pg ha edit-config` 修改。
+- **`postgresql.listen: 0.0.0.0`** 在传了 `--advertise-host`（跨主机）时才会设置；否则监听 `127.0.0.1`。
+- **密码** 在首次 bootstrap 时自动生成并存入 `pg.yaml`；可通过 `pg ha passwords` 导出。
+
 ## 动态配置
 
 Patroni 的动态配置存在 DCS（etcd）的 `/service/<scope>/config` 下。每个成员
 在每个循环（每 `loop_wait` 秒）都读取并应用这些配置 —— 所以 `pg ha edit-config`
 是调优运行时参数的正确方式，无需重启容器。
+
+> **`bootstrap.dcs` 是一次性的。** `patroni.yml` 里的 `bootstrap.dcs` 块只在某
+> scope 的**第一个**成员执行 `pg ha create`（即集群 bootstrap）时生效。一旦
+> Patroni 把配置写入 DCS，之后对 YAML 文件中 `bootstrap.dcs` 的任何修改都会被
+> **完全忽略** —— 即使重新执行 `pg ha create`（重装）也一样。bootstrap 之后要
+> 改动态配置，请用 `pg ha edit-config`。
+>
+> 常见的误区：重新跑 `pg ha create` **不会**重新读取 YAML 里的 `bootstrap.dcs`
+> —— Patroni 看到 DCS 里已有 `config` 键，就直接使用它。
+>
+> | 方式 | 说明 |
+> |------|------|
+> | `pg ha edit-config app -- -s key=value` | **推荐**，pgcli 的标准方式 |
+> | `pg ha ctl app -- edit-config` | 透传到 patronictl，效果一样 |
+> | Patroni REST API（`PATCH /config`） | 需要能访问到某个成员的 REST API 端口 |
 
 **持久化：** 改动直接写入 etcd，不是容器里的文件。容器重启、`pg ha start`/`stop`，
 甚至 `pg ha create`（重装）都不会丢失这些设置 —— 新成员会自动从 DCS 拿到最新配置。
@@ -425,6 +508,8 @@ pg ha edit-config app -- -s 'postgresql.parameters.work_mem=64MB'
 - **不要直接编辑 `postgresql.conf`** —— Patroni 每个循环都会从 DCS 配置覆盖它。
 - **不要改 `scope` 或 `namespace`** —— 这些在 bootstrap 时烙进 DCS 键，无法修改，
   只能重建集群。
+
+> **完整参数参考：** [Patroni 动态配置](./ha-dynamic/) 涵盖所有 DCS 可调参数，包含默认值、约束条件和示例。
 
 ## 注意
 
