@@ -44,8 +44,14 @@ Single-host cluster (uses the etcd addon as DCS):
 
 Cross-host members (run one create per host, sharing one DCS and one password
 set; see ` + "`pg ha create --help`" + ` and the docs page):
-  pg ha create app --member node1 --advertise-host 10.0.0.11 --etcd-endpoints 10.0.0.9:2379 --passwords-file app.yml
-  pg ha create app --member node2 --advertise-host 10.0.0.12 --etcd-endpoints 10.0.0.9:2379 --passwords-file app.yml
+  # host A — first member bootstraps the cluster (passwords auto-generated)
+  pg ha create app --member node1 --advertise-host 10.0.0.11 --etcd-endpoints 10.0.0.9:2379
+
+  # host A — export the generated password set for other hosts
+  pg ha passwords app --file app-passwd.yml
+
+  # host B — subsequent member joins, reusing the same password set
+  pg ha create app --member node2 --advertise-host 10.0.0.12 --etcd-endpoints 10.0.0.9:2379 --passwords-file app-passwd.yml
 
 Commands:
   pg ha create <scope> --member <m> ...   register + (re)install a member
@@ -89,8 +95,8 @@ Examples:
   pg ha create app --member node1 --etcd m1
   pg ha create app --member node2 --etcd m1
   pg ha create app --member node1 --etcd-endpoints 10.0.0.9:2379,10.0.0.10:2379
-  pg ha create app --member node2 --advertise-host 10.0.0.12 --host-port 5432 --etcd-endpoints 10.0.0.9:2379 --passwords-file app.yml
-  pg ha passwords app --file app-passwd.yml   # export the set for other hosts`,
+  pg ha passwords app --file app-passwd.yml                   # export the set for other hosts
+  pg ha create app --member node2 --advertise-host 10.0.0.12 --host-port 5432 --etcd-endpoints 10.0.0.9:2379 --passwords-file app-passwd.yml`,
 	Args:      cobra.ExactArgs(1),
 	ValidArgs: nil,
 	RunE:      runHACreate,
@@ -716,8 +722,11 @@ func patronictlArgsFor(cmd *cobra.Command, args []string) ([]string, error) {
 		base = append(base, scope)
 	case "edit-config":
 		if v, _ := cmd.Flags().GetBool("show"); v {
-			// --show is a patronictl flag, not a subcommand.
-			return []string{"show-config", scope}, nil
+			// patronictl show-config takes no scope arg (reads it from
+			// the config file). Passing the scope here causes it to be
+			// silently swallowed as an unknown positional, producing no
+			// output — the bug `pg ha edit-config app --show` hit.
+			return []string{"show-config"}, nil
 		}
 		base = append(base, scope)
 	default:
