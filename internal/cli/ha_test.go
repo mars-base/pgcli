@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	yaml "gopkg.in/yaml.v3"
+
 	"github.com/mars-base/pgcli/internal/config"
 )
 
@@ -93,5 +95,35 @@ func TestLoadPasswordsFile(t *testing.T) {
 	var p3 config.PatroniPasswords
 	if err := loadPasswordsFile(&p3, filepath.Join(dir, "nope.yml")); err == nil {
 		t.Error("expected error for missing file")
+	}
+}
+
+// TestPasswordsRoundTrip pins the contract of `pg ha passwords`: the YAML it
+// marshals from a stored set must load back losslessly via loadPasswordsFile —
+// the exporter's output format and --passwords-file's input format are the
+// same keys, and a drift (e.g. a renamed yaml tag) would silently brick
+// cross-host auth.
+func TestPasswordsRoundTrip(t *testing.T) {
+	src := config.PatroniPasswords{
+		Superuser:     "su-pass",
+		Replication:   "re-pass",
+		Rewind:        "rw-pass",
+		RestapiUser:   "apiuser",
+		RestapiPasswd: "api-pass",
+	}
+	b, err := yaml.Marshal(&src)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	file := filepath.Join(t.TempDir(), "p.yml")
+	if err := os.WriteFile(file, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var got config.PatroniPasswords
+	if err := loadPasswordsFile(&got, file); err != nil {
+		t.Fatalf("loadPasswordsFile(marshalled): %v", err)
+	}
+	if got != src {
+		t.Errorf("round-trip mismatch: got %+v want %+v", got, src)
 	}
 }

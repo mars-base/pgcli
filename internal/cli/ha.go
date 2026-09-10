@@ -56,6 +56,8 @@ Commands:
   pg ha edit-config <scope> -- [flags]    view/patch the DCS dynamic config
   pg ha start|stop <scope> --member|--all container start/stop (see semantics)
   pg ha remove <scope> --member|--scope-all  remove member(s) and (optionally) DCS
+  pg ha passwords <scope> [--file F]         export the stored password set
+                                             (for --passwords-file on other hosts)
   pg ha ctl <scope> -- <patronictl args>  passthrough to any patronictl command
 
 Linux only (rootless podman host networking), like the etcd addon.`,
@@ -87,7 +89,8 @@ Examples:
   pg ha create app --member node1 --etcd m1
   pg ha create app --member node2 --etcd m1
   pg ha create app --member node1 --etcd-endpoints 10.0.0.9:2379,10.0.0.10:2379
-  pg ha create app --member node2 --advertise-host 10.0.0.12 --host-port 5432 --etcd-endpoints 10.0.0.9:2379 --passwords-file app.yml`,
+  pg ha create app --member node2 --advertise-host 10.0.0.12 --host-port 5432 --etcd-endpoints 10.0.0.9:2379 --passwords-file app.yml
+  pg ha passwords app --file app-passwd.yml   # export the set for other hosts`,
 	Args:      cobra.ExactArgs(1),
 	ValidArgs: nil,
 	RunE:      runHACreate,
@@ -287,6 +290,50 @@ func loadPasswordsFile(p *config.PatroniPasswords, file string) error {
 		p.RestapiUser = "postgres"
 	}
 	return nil
+}
+
+// --- passwords (export) -------------------------------------------------
+
+var haPasswordsCmd = &cobra.Command{
+	Use:   "passwords <scope>",
+	Short: "Export a cluster's stored password set for --passwords-file",
+	Long: `Print the password set that pg ha create generated and stored in pg.yaml
+for the scope, in exactly the YAML format --passwords-file consumes. Use it to
+seed cross-host members with the identical set:
+
+  pg ha passwords app --file app-passwd.yml     # written mode 0600
+  pg ha create app --member node2 --advertise-host 10.0.0.12 \
+    --etcd-endpoints 10.0.0.9:2379 --passwords-file app-passwd.yml
+
+Without --file the YAML goes to stdout; prefer --file so the secrets do not end
+up in shell history or terminal scrollback.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := loadConfigForDSN(); err != nil {
+			return err
+		}
+		cluster, err := lookupHACluster(args[0])
+		if err != nil {
+			return err
+		}
+		if cluster.Passwords.Superuser == "" {
+			return fmt.Errorf("scope %q has no stored password set (no member created yet?)", args[0])
+		}
+		b, err := yaml.Marshal(cluster.Passwords)
+		if err != nil {
+			return fmt.Errorf("marshaling passwords: %w", err)
+		}
+		file, _ := cmd.Flags().GetString("file")
+		if file == "" {
+			os.Stdout.Write(b)
+			return nil
+		}
+		if err := os.WriteFile(file, b, 0600); err != nil {
+			return fmt.Errorf("writing %s: %w", file, err)
+		}
+		fmt.Printf("[OK] passwords for scope %q written to %s (mode 0600)\n", args[0], file)
+		return nil
+	},
 }
 
 // --- ctl (generic patronictl passthrough) -----------------------------
@@ -825,6 +872,7 @@ func init() {
 	haCmd.AddCommand(
 		haCreateCmd, haStatusCmd, haRemoveCmd, haCtlCmd,
 		haSwitchoverCmd, haFailoverCmd, haPauseCmd, haResumeCmd, haEditConfigCmd,
-		haStartCmd, haStopCmd,
+		haStartCmd, haStopCmd, haPasswordsCmd,
 	)
+	haPasswordsCmd.Flags().String("file", "", "write the YAML to this file (mode 0600) instead of stdout")
 }
