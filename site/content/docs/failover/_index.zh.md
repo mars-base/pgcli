@@ -109,7 +109,7 @@ pg replica drop ro1 -i pg01
 
 ```bash
 pg replica repoint ro2 \
-  --primary-dsn "postgres://admin:fbcQx9uIzvTO6dVJ@10.241.21.97:35439/pg01_db" \
+  --primary-dsn "postgres://admin:<password>@10.0.0.11:35439/pg01_db" \
   --primary-name ro1
 ```
 
@@ -139,10 +139,10 @@ FATAL: requested starting point on timeline 1 is not in this server's history
 
 ```bash
 pg status -i ro1
-# Connection: postgres://admin:fbcQx9uIzvTO6dVJ@127.0.0.1:35439/pg01_db
+# Connection: postgres://admin:<password>@127.0.0.1:35439/pg01_db
 ```
 
-将 `127.0.0.1` 替换为从副本主机可达的新主实例主机 IP（例如 `10.241.21.97`）。
+将 `127.0.0.1` 替换为从副本主机可达的新主实例主机 IP（例如 `10.0.0.11`）。
 
 ## 降级旧主实例
 
@@ -151,7 +151,7 @@ pg status -i ro1
 ```bash
 # 在旧主实例主机上
 pg replica repoint pg01 \
-  --primary-dsn "postgres://admin:fbcQx9uIzvTO6dVJ@10.241.21.97:35439/pg01_db" \
+  --primary-dsn "postgres://admin:<password>@10.0.0.11:35439/pg01_db" \
   --primary-name ro1
 ```
 
@@ -222,7 +222,7 @@ $ pg replica drop ro1 -i pg01
 
 # 步骤 3：将 ro2 重新指向新主实例
 $ pg replica repoint ro2 \
-    --primary-dsn "postgres://admin:fbcQx9uIzvTO6dVJ@127.0.0.1:35437/pg01_db" \
+    --primary-dsn "postgres://admin:<password>@127.0.0.1:35437/pg01_db" \
     --primary-name ro1
   [OK] extension image built with pg_cron, pgmq, timescaledb
   [OK] replication slot "pgcli_r_ro2" created on new primary
@@ -231,7 +231,7 @@ $ pg replica repoint ro2 \
 
 # ── pg01 恢复，降级为副本 ──
 $ pg replica repoint pg01 \
-    --primary-dsn "postgres://admin:fbcQx9uIzvTO6dVJ@127.0.0.1:35437/pg01_db" \
+    --primary-dsn "postgres://admin:<password>@127.0.0.1:35437/pg01_db" \
     --primary-name ro1
   [OK] backup stanza removed: pgcli_pg01
   [OK] replication slot "pgcli_r_pg01" created on new primary
@@ -258,9 +258,9 @@ $ pg replica promote ra2
   [OK] PITR initialized (stanza + archive_mode)
 ✓ Replica "ra2" promoted to primary
 
-# 在主机 B（10.241.20.147）上，将 ro2 重新指向新主实例 ra2（主机 A = 10.241.21.97）：
+# 在主机 B（10.0.0.12）上，将 ro2 重新指向新主实例 ra2（主机 A = 10.0.0.11）：
 $ pg replica repoint ro2 \
-    --primary-dsn "postgres://admin:fbcQx9uIzvTO6dVJ@10.241.21.97:35438/pg01_db" \
+    --primary-dsn "postgres://admin:<password>@10.0.0.11:35438/pg01_db" \
     --primary-name ra2
 -> New primary has 3 non-builtin extension(s): pg_cron, pgmq, timescaledb
 -> Extension image already has all required packages

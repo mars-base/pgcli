@@ -100,7 +100,7 @@ Run on **each remaining replica host** to re-point it to the new primary.
 
 ```bash
 pg replica repoint ro2 \
-  --primary-dsn "postgres://admin:fbcQx9uIzvTO6dVJ@10.241.21.97:35439/pg01_db" \
+  --primary-dsn "postgres://admin:<password>@10.0.0.11:35439/pg01_db" \
   --primary-name ro1
 ```
 
@@ -130,10 +130,10 @@ Get the new primary's connection string from `pg status` on the promoted replica
 
 ```bash
 pg status -i ro1
-# Connection: postgres://admin:fbcQx9uIzvTO6dVJ@127.0.0.1:35439/pg01_db
+# Connection: postgres://admin:<password>@127.0.0.1:35439/pg01_db
 ```
 
-Replace `127.0.0.1` with the new primary host's IP reachable from the replica host (e.g. `10.241.21.97`).
+Replace `127.0.0.1` with the new primary host's IP reachable from the replica host (e.g. `10.0.0.11`).
 
 ## Demoting the Old Primary
 
@@ -142,7 +142,7 @@ When the old primary recovers, you can rejoin it as a replica of the new primary
 ```bash
 # On the old primary host
 pg replica repoint pg01 \
-  --primary-dsn "postgres://admin:fbcQx9uIzvTO6dVJ@10.241.21.97:35439/pg01_db" \
+  --primary-dsn "postgres://admin:<password>@10.0.0.11:35439/pg01_db" \
   --primary-name ro1
 ```
 
@@ -210,7 +210,7 @@ $ pg replica drop ro1 -i pg01
 
 # Step 3: Re-point ro2 to new primary
 $ pg replica repoint ro2 \
-    --primary-dsn "postgres://admin:fbcQx9uIzvTO6dVJ@127.0.0.1:35437/pg01_db" \
+    --primary-dsn "postgres://admin:<password>@127.0.0.1:35437/pg01_db" \
     --primary-name ro1
   [OK] extension image built with pg_cron, pgmq, timescaledb
   [OK] replication slot "pgcli_r_ro2" created on new primary
@@ -219,7 +219,7 @@ $ pg replica repoint ro2 \
 
 # ── pg01 recovers, demote to replica ──
 $ pg replica repoint pg01 \
-    --primary-dsn "postgres://admin:fbcQx9uIzvTO6dVJ@127.0.0.1:35437/pg01_db" \
+    --primary-dsn "postgres://admin:<password>@127.0.0.1:35437/pg01_db" \
     --primary-name ro1
   [OK] backup stanza removed: pgcli_pg01
   [OK] replication slot "pgcli_r_pg01" created on new primary
@@ -246,9 +246,9 @@ $ pg replica promote ra2
   [OK] PITR initialized (stanza + archive_mode)
 ✓ Replica "ra2" promoted to primary
 
-# On host B (10.241.20.147), re-point ro2 to new primary ra2 (host A = 10.241.21.97):
+# On host B (10.0.0.12), re-point ro2 to new primary ra2 (host A = 10.0.0.11):
 $ pg replica repoint ro2 \
-    --primary-dsn "postgres://admin:fbcQx9uIzvTO6dVJ@10.241.21.97:35438/pg01_db" \
+    --primary-dsn "postgres://admin:<password>@10.0.0.11:35438/pg01_db" \
     --primary-name ra2
 -> New primary has 3 non-builtin extension(s): pg_cron, pgmq, timescaledb
 -> Extension image already has all required packages

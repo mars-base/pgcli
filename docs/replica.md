@@ -66,10 +66,10 @@ The same-host flow above assumes primary and replica share one server (one podma
 
 ```bash
 # ---- on the PRIMARY host: prepare the primary (run first) ----
-pg replica create ro1 -i pg01 --replica-host 10.241.20.100
+pg replica create ro1 -i pg01 --replica-host 10.0.0.21
 
 # ---- on the REPLICA host: copy data and start the replica (run second) ----
-pg replica create ro1 --primary-dsn "postgres://admin:<password>@10.241.20.50:35432/pg01_db" --primary-name pg01
+pg replica create ro1 --primary-dsn "postgres://admin:<password>@10.0.0.20:35432/pg01_db" --primary-name pg01
 ```
 
 ### Getting the primary DSN
@@ -79,10 +79,10 @@ If the primary is a pgcli-managed instance, get its connection info with `pg sta
 ```bash
 pg status -i pg01
 # ...
-#   Connection: postgres://admin:fbcQx9uIzvTO6dVJ@127.0.0.1:35432/pg01_db
+#   Connection: postgres://admin:<password>@127.0.0.1:35432/pg01_db
 ```
 
-Then replace `127.0.0.1` with the primary host's IP as seen from the replica host (e.g. `10.241.20.50`) — the user, password and database are used as-is. Note the primary host must accept TCP connections on that port from the replica host (firewall/security group).
+Then replace `127.0.0.1` with the primary host's IP as seen from the replica host (e.g. `10.0.0.20`) — the user, password and database are used as-is. Note the primary host must accept TCP connections on that port from the replica host (firewall/security group).
 
 What each side does:
 

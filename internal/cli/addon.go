@@ -84,7 +84,8 @@ Infra addon (haproxy — TCP load balancer in front of a Patroni cluster, Linux 
                            [--mode unified|split] [--rw-port N] [--ro-port N] [--stats-port N]
                            [--max-lag 1MB]
   Members are injected once via --node, or auto-derived from a Patroni scope via
-  --ha. After adding a member with "pg ha create", re-run install to pick it up.
+  --ha. After adding or removing a member ("pg ha create" / "pg ha remove"),
+  re-run install to re-sync the backend list.
 
 Re-running install is idempotent — it re-syncs all users and passwords from
 pg_shadow, regenerates config files and restarts the container.
@@ -240,7 +241,7 @@ func init() {
 	addonInstallCmd.Flags().String("cluster", "", "etcd cluster name (--initial-cluster-token, default \"pgcli-etcd\")")
 	addonInstallCmd.Flags().String("data-dir", "", "etcd data dir root, absolute or relative to base_dir (default <base_dir>/addon/etcd); each member uses <root>/<name>/data")
 	addonInstallCmd.Flags().String("advertise-host", "", "host advertised in this member's peer/client URLs (empty=127.0.0.1 for single-host; set a LAN IP or FQDN for cross-host clusters)")
-	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.241.20.147:2379 (implies --initial-cluster-state existing; requires --advertise-host)")
+	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.0.0.12:2379 (implies --initial-cluster-state existing; requires --advertise-host)")
 	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy or haproxy instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\")")
 
 	// haproxy flags (top-level load balancer in front of a Patroni cluster)
@@ -1262,7 +1263,7 @@ func runAddonInstallHAProxy(cmd *cobra.Command) error {
 	}
 	// The target list is fully replaced by this command's inputs, so
 	// re-running install is a clean re-render (and picks up members that a
-	// later `pg ha create` added to the scope).
+	// later `pg ha create` added to the scope — or `pg ha remove` dropped).
 	existing.Targets = targets
 	if existing.Name == "" {
 		existing.Name = name

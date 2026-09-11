@@ -68,8 +68,8 @@ For replicas on another host, run one command on each side:
 Examples:
   pg replica create ro1 -i proj01
   pg replica create ro2                # replicate the default instance
-  pg replica create ro1 -i proj01 --replica-host 10.241.20.100        # primary host
-  pg replica create ro1 --primary-dsn postgres://admin:pw@10.241.20.50:35432/proj01_db --primary-name proj01  # replica host`,
+  pg replica create ro1 -i proj01 --replica-host 10.0.0.21        # primary host
+  pg replica create ro1 --primary-dsn postgres://admin:pw@10.0.0.20:35432/proj01_db --primary-name proj01  # replica host`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		primaryDSN, _ := cmd.Flags().GetString("primary-dsn")
@@ -155,7 +155,7 @@ replica is streaming from the new primary.
 --primary-name is the name to record as replica_of in the local config.
 
 Examples:
-  pg replica repoint ro2 --primary-dsn "postgres://admin:pw@10.241.20.50:35432/ro1_db" --primary-name ro1`,
+  pg replica repoint ro2 --primary-dsn "postgres://admin:pw@10.0.0.20:35432/ro1_db" --primary-name ro1`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		primaryDSN, _ := cmd.Flags().GetString("primary-dsn")

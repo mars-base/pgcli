@@ -64,7 +64,7 @@ pg addon install pgbouncer -i mypg
 
 # Remote mode: pool a remote PG instance
 pg addon install pgbouncer \
-  --dsn "postgres://admin:pass@10.241.20.50:35432/mypg_db" \
+  --dsn "postgres://admin:pass@10.0.0.20:35432/mypg_db" \
   --pg-name my-remote-pool
 
 # Tune pool parameters
@@ -123,7 +123,7 @@ Local add-ons:
 Remote add-ons:
   pgbouncer (pg-name: my-remote-pool)
     Status:    running
-    Host:      10.241.20.50:56433
+    Host:      10.0.0.20:56433
     Port:      56433
     Pool mode: transaction
     Container: pgcli-pgbouncer-default-my-remote-pool
@@ -189,7 +189,7 @@ addons:
       container_name: pgcli-pgbouncer-default-my-remote-pool
       host_port: 56433
       pool_mode: transaction
-      dsn: "postgres://admin:pass@10.241.20.50:35432/mypg_db"
+      dsn: "postgres://admin:pass@10.0.0.20:35432/mypg_db"
       max_client_conn: 200
       default_pool_size: 30
 ```

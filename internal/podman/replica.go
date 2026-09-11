@@ -327,7 +327,7 @@ func (m *Manager) EnsureReplicationHBA(extraHosts ...string) error {
 		"host replication all 192.168.0.0/16 scram-sha-256",
 	}
 	for _, h := range extraHosts {
-		// An IP already covered by a managed CIDR (e.g. 10.241.20.x inside
+		// An IP already covered by a managed CIDR (e.g. 10.200.30.x inside
 		// 10.0.0.0/8) needs no extra line; hostnames and public IPs do.
 		if ip := net.ParseIP(h); ip != nil && ipCoveredByCIDR(ip, managed) {
 			continue
@@ -412,7 +412,7 @@ func replicationHBALine(host string) string {
 }
 
 // ipCoveredByCIDR reports whether ip falls inside any CIDR-scoped managed hba
-// line (e.g. 10.241.20.147 is inside 10.0.0.0/8). Hostname lines are skipped.
+// line (e.g. 10.200.30.147 is inside 10.0.0.0/8). Hostname lines are skipped.
 func ipCoveredByCIDR(ip net.IP, hbaLines []string) bool {
 	for _, line := range hbaLines {
 		fields := strings.Fields(line)

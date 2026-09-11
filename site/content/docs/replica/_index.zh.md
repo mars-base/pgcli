@@ -75,10 +75,10 @@ pg replica drop ro1 -i <primary>
 
 ```bash
 # ---- 在主实例主机上：准备主实例（首先运行）----
-pg replica create ro1 -i pg01 --replica-host 10.241.20.100
+pg replica create ro1 -i pg01 --replica-host 10.0.0.21
 
 # ---- 在副本主机上：复制数据并启动副本（其次运行）----
-pg replica create ro1 --primary-dsn "postgres://admin:<password>@10.241.20.50:35432/pg01_db" --primary-name pg01
+pg replica create ro1 --primary-dsn "postgres://admin:<password>@10.0.0.20:35432/pg01_db" --primary-name pg01
 ```
 
 ### 获取主实例 DSN
@@ -88,10 +88,10 @@ pg replica create ro1 --primary-dsn "postgres://admin:<password>@10.241.20.50:35
 ```bash
 pg status -i pg01
 # ...
-#   Connection: postgres://admin:fbcQx9uIzvTO6dVJ@127.0.0.1:35432/pg01_db
+#   Connection: postgres://admin:<password>@127.0.0.1:35432/pg01_db
 ```
 
-然后将 `127.0.0.1` 替换为从副本主机看到的主实例主机 IP（例如 `10.241.20.50`）——用户、密码和数据库按原样使用。注意主实例主机必须接受从副本主机到该端口的 TCP 连接（防火墙/安全组）。
+然后将 `127.0.0.1` 替换为从副本主机看到的主实例主机 IP（例如 `10.0.0.20`）——用户、密码和数据库按原样使用。注意主实例主机必须接受从副本主机到该端口的 TCP 连接（防火墙/安全组）。
 
 每一侧的作用：
 
