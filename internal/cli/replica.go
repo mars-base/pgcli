@@ -106,8 +106,8 @@ steps on their respective hosts:
   3. pg replica repoint <other> --primary-dsn <dsn> --primary-name <name>
                                                     (on each other replica host)
 
-Run "pg start -i <name>" afterward to initialize the backup stanza and
-apply archive_mode (requires a restart).
+The backup stanza and archive_mode are initialized automatically — no manual
+"pg start" is needed.
 
 Examples:
   pg replica promote ro1

@@ -209,9 +209,12 @@ $ pg replica promote ro1
   [OK] pg_promote() signaled
   [OK] recovery ended, instance is now read-write
   [OK] primary_conninfo removed from postgresql.auto.conf
+  [OK] config updated (ReplicaOf/PrimaryDSN cleared, PITR re-enabled)
+-> Initializing PITR (backup stanza + archive_mode)...
+  [OK] pgBackRest stanza created
+-> archive_command configured
+  [OK] WAL archiver caught up
 ✓ Replica "ro1" promoted to primary
-
-$ pg start -i ro1           # 启用 PITR + WAL 归档
 
 # 步骤 2：在旧主实例上清理（如果 pg01 永久丢失则跳过）
 $ pg replica drop ro1 -i pg01
@@ -353,7 +356,7 @@ pg replica repoint pg01 \
 
 - **pg_promote()** — PostgreSQL 12+ 原生函数，无需容器重启。实例就地退出恢复并立即变为可读写
 - **时间线分歧** — 提升后，新主实例在新时间线上。其他副本不能用 `ALTER SYSTEM SET primary_conninfo` 重新指向——它们必须通过 `pg_basebackup` 重建
-- **被提升副本上的 PITR** — 提升后，运行 `pg start` 创建 pgBackRest stanza 并启用 WAL 归档。被提升的副本没有先前的备份历史
+- **被提升副本上的 PITR** — 提升后，pgBackRest stanza 和 WAL 归档自动初始化（无需手动执行 `pg start`）。被提升的副本没有先前的备份历史
 - **复制槽** — 旧主实例为被提升副本的槽在提升后变得陈旧。`pg replica drop` 清理它。如果旧主实例被降级为副本，`repoint` 销毁旧数据且陈旧的槽不再被引用
 - **扩展** — 副本容器通过 `postgresql.auto.conf` 从主实例继承 `shared_preload_libraries`。repoint 命令确保本地镜像在重建副本之前具有所需的扩展包
 - **跳过 CREATE EXTENSION** — 副本是只读的；`pg_basebackup` 从主实例复制扩展元数据，因此不需要 `CREATE EXTENSION`（且会失败 "cannot execute CREATE EXTENSION in a read-only transaction"）

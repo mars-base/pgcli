@@ -216,9 +216,12 @@ $ pg replica promote ro1
   [OK] pg_promote() signaled
   [OK] recovery ended, instance is now read-write
   [OK] primary_conninfo removed from postgresql.auto.conf
+  [OK] config updated (ReplicaOf/PrimaryDSN cleared, PITR re-enabled)
+-> Initializing PITR (backup stanza + archive_mode)...
+  [OK] pgBackRest stanza created
+-> archive_command configured
+  [OK] WAL archiver caught up
 ✓ Replica "ro1" promoted to primary
-
-$ pg start -i ro1           # enable PITR + WAL archiving
 
 # Step 2: Clean up on old primary (skip if pg01 is permanently lost)
 $ pg replica drop ro1 -i pg01
@@ -360,7 +363,7 @@ pg replica repoint pg01 \
 
 - **pg_promote()** — PostgreSQL 12+ native function, no container restart required. The instance exits recovery in-place and becomes read-write immediately
 - **Timeline divergence** — After promotion, the new primary is on a new timeline. Other replicas cannot be re-pointed with `ALTER SYSTEM SET primary_conninfo` — they must be rebuilt via `pg_basebackup`
-- **PITR on promoted replica** — After promotion, run `pg start` to create the pgBackRest stanza and enable WAL archiving. The promoted replica has no prior backup history
+- **PITR on promoted replica** — After promotion, the pgBackRest stanza and WAL archiving are initialized automatically (no manual `pg start` needed). The promoted replica has no prior backup history
 - **Replication slots** — The old primary's slot for the promoted replica becomes stale after promotion. `pg replica drop` cleans it up. If the old primary is demoted to a replica, `repoint` destroys the old data and the stale slot is no longer referenced
 - **Extensions** — Replica containers inherit `shared_preload_libraries` from the primary via `postgresql.auto.conf`. The repoint command ensures the local image has the required extension packages before rebuilding the replica
 - **CREATE EXTENSION skipped** — Replicas are read-only; `pg_basebackup` copies the extension metadata from the primary, so `CREATE EXTENSION` is not needed (and would fail with "cannot execute CREATE EXTENSION in a read-only transaction")
