@@ -25,20 +25,36 @@ pg ha status app          # shows pg= and rest= ports for each member
 ### Authentication
 
 pgcli enables basic-auth on the REST API (username `postgres`, auto-generated
-password). All requests require `-u <user>:<password>`:
+password). But authentication is **method-based**, not blanket:
+
+| Method | Auth required? | Endpoints |
+|--------|----------------|-----------|
+| `GET` / `HEAD` / `OPTIONS` | **No** | All read endpoints — `/`, `/primary`, `/replica`, `/health`, `/cluster`, `/config`, `/metrics`, `/patroni`, … |
+| `POST` / `PATCH` / `PUT` / `DELETE` | **Yes** | Write endpoints — `/failover`, `/switchover`, `/config` (modify), `/reload`, `/restart`, … |
+
+This is by design: read-only health checks stay open so a load balancer or
+Prometheus can poll them without credentials, while operations that change
+cluster state (`POST /failover`, `PATCH /config`) require authentication. The
+credentials exist so `patronictl` and other Patroni members can perform writes.
+
+So a load balancer health check needs **no** auth:
 
 ```bash
-curl -u postgres:<restapi-password> http://<host>:<port>/health
+# No -u needed — returns 200 on leader, 503 on replica
+curl -s http://<host>:<port>/primary -w "%{http_code}"
 ```
 
-The password is the same `restapi_password` used in `patroni.yml`'s
-`restapi.authentication` section. Export it with:
+Write operations do require auth. The password is the same `restapi_password`
+used in `patroni.yml`'s `restapi.authentication` section. Export it with:
 
 ```bash
 # Export passwords, then extract the restapi_password
 pg ha passwords app --file app-passwd.yml
 grep restapi_password app-passwd.yml
 # restapi_password: <password>
+
+# Example: a write operation with auth
+curl -u postgres:<restapi-password> -X PATCH http://<host>:<port>/config -d '{"ttl": 60}'
 ```
 
 ## Health Check Endpoints
@@ -259,23 +275,73 @@ curl -u postgres:<pw> "http://<host>:<port>/leader?region=primary"
 
 ### Load balancer routing
 
-Use REST API health checks to route traffic correctly:
+Because `GET` health checks need no auth, a load balancer can poll the REST API
+endpoints directly. The pattern (from [Patroni's example `haproxy.cfg`](https://github.com/patroni/patroni/blob/master/haproxy.cfg)) is: the backend TCP port
+is the PostgreSQL port, but the **health check hits the REST API port** with
+`GET /`, which returns 200 only on the leader.
 
-```
-# Route writes to primary only
-upstream pg_primary {
-    server node1:8008 max_fails=1 fail_timeout=10s;
-    server node2:8009 max_fails=1 fail_timeout=10s;
-    # Check: GET /primary (200 only on leader)
-}
+**Single read-write endpoint** (all traffic → current leader):
 
-# Route reads to replicas
-upstream pg_replica {
-    server node1:8008 max_fails=1 fail_timeout=10s;
-    server node2:8009 max_fails=1 fail_timeout=10s;
-    # Check: GET /replica (200 only on replica)
-}
+```haproxy
+global
+    maxconn 100
+
+defaults
+    log global
+    mode tcp
+    retries 2
+    timeout client 30m
+    timeout connect 4s
+    timeout server 30m
+    timeout check 5s
+
+listen stats
+    mode http
+    bind *:7000
+    stats enable
+    stats uri /
+
+listen app
+    bind *:5000
+    option httpchk
+    http-check expect status 200
+    default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
+    server node1 <ip>:35532 maxconn 100 check port 8008
+    server node2 <ip>:35533 maxconn 100 check port 8009
 ```
+
+- `check port 8008` / `8009` — the HTTP health check goes to the **REST API** port, not the PG port.
+- `GET /` returns 200 only on the leader → HAProxy marks only the leader as `UP`.
+- `on-marked-down shutdown-sessions` — on failover, sessions to the old leader are killed so clients reconnect to the new leader.
+- `fall 3` / `rise 2` with `inter 3s` — ~9s to mark down, ~6s to mark up.
+
+**Read/write split** — add a second listener that uses `GET /replica` (200 only on replicas) for read traffic:
+
+```haproxy
+listen app_rw
+    bind *:5000
+    mode tcp
+    option httpchk GET /
+    http-check expect status 200
+    default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
+    server node1 <ip>:35532 maxconn 100 check port 8008
+    server node2 <ip>:35533 maxconn 100 check port 8009
+
+listen app_ro
+    bind *:5001
+    mode tcp
+    option httpchk GET /replica
+    http-check expect status 200
+    default-server inter 3s fall 3 rise 2
+    server node1 <ip>:35532 maxconn 100 check port 8008
+    server node2 <ip>:35533 maxconn 100 check port 8009
+```
+
+- `app_rw` (`:5000`) — `GET /` → only the leader is `UP` → writes land on the leader.
+- `app_ro` (`:5001`) — `GET /replica` → only replicas are `UP` → reads spread across replicas.
+
+The same `GET /replica?lag=1MB` refinement (from the replica endpoints above)
+keeps a lagging replica out of the read pool.
 
 ### Monitoring with curl
 
@@ -283,21 +349,20 @@ Quick health check script:
 
 ```bash
 #!/bin/bash
-# Check all members
+# Check all members — no auth needed for GET
 for port in 8008 8009; do
-  code=$(curl -s -u postgres:<pw> http://10.0.0.11:$port/health -o /dev/null -w "%{http_code}")
+  code=$(curl -s http://10.0.0.11:$port/health -o /dev/null -w "%{http_code}")
   echo "Port $port: HTTP $code"
 done
 ```
 
 ### Prometheus scrape config
 
+`GET /metrics` needs no auth, so the scrape config works without credentials:
+
 ```yaml
 scrape_configs:
   - job_name: patroni
-    basic_auth:
-      username: postgres
-      password: <restapi-password>
     static_configs:
       - targets:
         - '10.0.0.11:8008'   # node1

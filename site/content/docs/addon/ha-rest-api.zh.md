@@ -24,20 +24,35 @@ pg ha status app          # 显示每个成员的 pg= 和 rest= 端口
 ### 认证
 
 pgcli 在 REST API 上启用了 basic-auth（用户名 `postgres`，自动生成密码）。
-所有请求需要 `-u <user>:<password>`：
+但认证是**按方法区分**的，而非一律要求：
+
+| 方法 | 是否需要认证 | 端点 |
+|------|-------------|------|
+| `GET` / `HEAD` / `OPTIONS` | **不需要** | 所有只读端点 —— `/`、`/primary`、`/replica`、`/health`、`/cluster`、`/config`、`/metrics`、`/patroni` 等 |
+| `POST` / `PATCH` / `PUT` / `DELETE` | **需要** | 写操作端点 —— `/failover`、`/switchover`、`/config`（修改）、`/reload`、`/restart` 等 |
+
+这是有意设计：只读健康检查保持开放，让负载均衡器或 Prometheus 无需凭据即可
+轮询；而改变集群状态的操作（`POST /failover`、`PATCH /config`）需要认证。凭据
+的存在是为了让 `patronictl` 和其他 Patroni 成员能执行写操作。
+
+所以负载均衡器健康检查**不需要**认证：
 
 ```bash
-curl -u postgres:<restapi-密码> http://<host>:<port>/health
+# 无需 -u —— leader 返回 200，replica 返回 503
+curl -s http://<host>:<port>/primary -w "%{http_code}"
 ```
 
-密码与 `patroni.yml` 的 `restapi.authentication` 中使用的 `restapi_password`
-相同。通过导出命令获取：
+写操作才需要认证。密码与 `patroni.yml` 的 `restapi.authentication` 中使用的
+`restapi_password` 相同。通过导出命令获取：
 
 ```bash
 # 导出密码到文件，然后提取 restapi_password
 pg ha passwords app --file app-passwd.yml
 grep restapi_password app-passwd.yml
 # restapi_password: <密码>
+
+# 示例：带认证的写操作
+curl -u postgres:<restapi-密码> -X PATCH http://<host>:<port>/config -d '{"ttl": 60}'
 ```
 
 ## 健康检查端点
@@ -250,23 +265,71 @@ curl -u postgres:<pw> "http://<host>:<port>/leader?region=primary"
 
 ### 负载均衡器路由
 
-使用 REST API 健康检查正确路由流量：
+由于 `GET` 健康检查无需认证，负载均衡器可以直接轮询 REST API 端点。模式
+（源自 [Patroni 官方 `haproxy.cfg` 示例](https://github.com/patroni/patroni/blob/master/haproxy.cfg)）是：后端 TCP 端口是 PostgreSQL 端口，但**健康检查
+走 REST API 端口**，用 `GET /`，仅 leader 返回 200。
 
-```
-# 写操作仅路由到主库
-upstream pg_primary {
-    server node1:8008 max_fails=1 fail_timeout=10s;
-    server node2:8009 max_fails=1 fail_timeout=10s;
-    # 检查: GET /primary（仅 leader 返回 200）
-}
+**单一读写入口**（所有流量 → 当前 leader）：
 
-# 读操作路由到副本
-upstream pg_replica {
-    server node1:8008 max_fails=1 fail_timeout=10s;
-    server node2:8009 max_fails=1 fail_timeout=10s;
-    # 检查: GET /replica（仅 replica 返回 200）
-}
+```haproxy
+global
+    maxconn 100
+
+defaults
+    log global
+    mode tcp
+    retries 2
+    timeout client 30m
+    timeout connect 4s
+    timeout server 30m
+    timeout check 5s
+
+listen stats
+    mode http
+    bind *:7000
+    stats enable
+    stats uri /
+
+listen app
+    bind *:5000
+    option httpchk
+    http-check expect status 200
+    default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
+    server node1 <ip>:35532 maxconn 100 check port 8008
+    server node2 <ip>:35533 maxconn 100 check port 8009
 ```
+
+- `check port 8008` / `8009` —— HTTP 健康检查走 **REST API** 端口，而非 PG 端口。
+- `GET /` 仅在 leader 返回 200 → HAProxy 只把 leader 标记为 `UP`。
+- `on-marked-down shutdown-sessions` —— 故障切换时，旧 leader 的连接被切断，客户端重连到新 leader。
+- `fall 3` / `rise 2` 配合 `inter 3s` —— 约 9 秒标记下线，约 6 秒标记上线。
+
+**读写分离** —— 再加一个用 `GET /replica`（仅 replica 返回 200）的 listener 承接读流量：
+
+```haproxy
+listen app_rw
+    bind *:5000
+    mode tcp
+    option httpchk GET /
+    http-check expect status 200
+    default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
+    server node1 <ip>:35532 maxconn 100 check port 8008
+    server node2 <ip>:35533 maxconn 100 check port 8009
+
+listen app_ro
+    bind *:5001
+    mode tcp
+    option httpchk GET /replica
+    http-check expect status 200
+    default-server inter 3s fall 3 rise 2
+    server node1 <ip>:35532 maxconn 100 check port 8008
+    server node2 <ip>:35533 maxconn 100 check port 8009
+```
+
+- `app_rw`（`:5000`）—— `GET /` → 仅 leader 为 `UP` → 写操作落到 leader。
+- `app_ro`（`:5001`）—— `GET /replica` → 仅 replica 为 `UP` → 读操作分摊到副本。
+
+配合上文副本端点里的 `GET /replica?lag=1MB`，可把延迟过大的副本踢出读池。
 
 ### curl 监控脚本
 
@@ -274,21 +337,20 @@ upstream pg_replica {
 
 ```bash
 #!/bin/bash
-# 检查所有成员
+# 检查所有成员 —— GET 无需认证
 for port in 8008 8009; do
-  code=$(curl -s -u postgres:<pw> http://10.0.0.11:$port/health -o /dev/null -w "%{http_code}")
+  code=$(curl -s http://10.0.0.11:$port/health -o /dev/null -w "%{http_code}")
   echo "端口 $port: HTTP $code"
 done
 ```
 
 ### Prometheus 抓取配置
 
+`GET /metrics` 无需认证，因此抓取配置不带凭据也能工作：
+
 ```yaml
 scrape_configs:
   - job_name: patroni
-    basic_auth:
-      username: postgres
-      password: <restapi-密码>
     static_configs:
       - targets:
         - '10.0.0.11:8008'   # node1
