@@ -58,6 +58,18 @@ up/down 状态：`http://<listen>:<stats-port>/`。
 - **`--ha <scope>`** —— 自动从 `pg ha` 管理的 Patroni scope 中推导所有**本机**
   成员，直接使用各成员的 PostgreSQL 与 REST API 端口。
 
+`--node` 各字段的含义，以 `node1=10.0.0.11:35532:8008` 为例：
+
+| 字段 | 含义 |
+|------|------|
+| `node1` | 成员名——成为 `haproxy.cfg` 中的 `server` 名，也是 stats 页里的标签 |
+| `10.0.0.11` | 本机可访问到该成员的地址（成员的 `advertise-host`；同机可写 `127.0.0.1`） |
+| `35532` | 成员的 PostgreSQL 端口——HAProxy 实际转发连接的目标 |
+| `8008` | 成员的 Patroni REST API 端口——健康检查打这个端口 |
+
+用 `--ha` 时这四个值都来自 `pg.yaml`：Patroni 成员名、其 `advertise-host`
+（默认 `127.0.0.1`）、以及 `host_port` / `restapi_port`。
+
 ```bash
 # 读写一体：单端口全走 leader，后端从 scope "app" 自动推导
 pg addon install haproxy --name lb --ha app
@@ -90,11 +102,14 @@ pg addon install haproxy --name lb --mode split \
     postgres://<user>@127.0.0.1:5000/<database>
 ```
 
-### 之后追加成员
+### 之后增删成员
 
-用 `pg ha create <scope> --member <m>` 扩容集群后，新成员还不在运行中的
-HAProxy 配置里。**重跑同一条 install 命令**即可——它会重新推导完整后端列表并
-重建容器：
+后端列表跟随 `pg.yaml` 中该 scope 的**本机**成员，因此任何拓扑变化——增员或
+移除——都通过**重跑同一条 install 命令**同步：它重新推导完整后端列表并重建
+容器。
+
+用 `pg ha create <scope> --member <m>` 扩容后，新成员还不在运行中的 HAProxy
+配置里：
 
 ```bash
 pg ha create app --member node3 --etcd m1
@@ -102,8 +117,37 @@ pg addon install haproxy --name lb --mode split --ha app --max-lag 1MB
 # Backends: 2 -> 3，haproxy.cfg 新增 server node3 127.0.0.1:35534 ... check port 8011
 ```
 
-显式 `--node` 安装时，在同一条命令里多加一个 `--node` 再重跑即可——目标列表
-每次整体替换，命令里写的就是最终全集。
+对称地，`pg ha remove <scope> --member <m>` 之后，被移除的成员会作为过期后端
+残留在配置里——重跑 install 即可将其剔除：
+
+```bash
+pg ha remove app --member node3
+pg addon install haproxy --name lb --mode split --ha app --max-lag 1MB
+# Backends: 3 -> 2，server node3 一行消失
+```
+
+显式 `--node` 安装时没有自动推导：直接改 `--node` 列表本身（增加或删除某个
+spec）再重跑——目标列表每次整体替换，命令里写的就是最终全集。
+
+### 跨主机集群
+
+`--ha` 只从**本机**的 `pg.yaml` 推导后端，而它只记录本机 `pg ha create` 管理的
+成员。位于**其他主机**的成员从来就不是本机的后端——在**那边**增删成员，本机
+**无需**重新同步（也不会有残留）。若想用一个 HAProxy 前置整个集群，请改用显式
+的 `--node` 列表，逐个填上各成员的 advertise 主机地址：
+
+```bash
+pg addon install haproxy --name lb --mode split \
+  --node node1=10.0.0.11:35532:8008 \
+  --node node2=10.0.0.12:35532:8008 \
+  --node node3=10.0.0.13:35532:8008
+# 之后：再加（或删）一个 --node 再重跑——列表整体替换
+```
+
+注意：在单台主机上用 `--ha` 安装的实例，写流量只会路由到**本机**的 leader——
+一旦故障切换把 leader 提到了远程成员，rw 监听器就没有 UP 的服务器了，直到
+leader 迁回来。对于 leader 可能漂移的跨主机集群，优先用显式的、列出全部成员的
+`--node` 列表（或每台主机各跑一个 HAProxy，再用上层的 VIP / DNS 前置它）。
 
 ## 端口
 

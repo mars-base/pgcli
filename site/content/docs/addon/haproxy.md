@@ -63,6 +63,18 @@ Backend members are supplied one of two ways (mutually exclusive):
 - **`--ha <scope>`** — auto-derive every **local** member of a Patroni scope
   that `pg ha` manages, using each member's PostgreSQL and REST API ports.
 
+What each `--node` field means — for `node1=10.0.0.11:35532:8008`:
+
+| Field | Meaning |
+|-------|---------|
+| `node1` | member name — becomes the `server` name in `haproxy.cfg` and the label in the stats page |
+| `10.0.0.11` | address where this member is reachable from this host (the member's `advertise-host`, or `127.0.0.1` on the same host) |
+| `35532` | the member's PostgreSQL port that HAProxy forwards connections to |
+| `8008` | the member's Patroni REST API port, used for the health check |
+
+With `--ha`, all four come from `pg.yaml`: the Patroni member name, its
+`advertise-host` (default `127.0.0.1`), and its `host_port` / `restapi_port`.
+
 ```bash
 # unified: one port, everything to the leader, backends auto-derived from scope "app"
 pg addon install haproxy --name lb --ha app
@@ -95,11 +107,15 @@ The output reports the assigned ports and a ready-to-use connect URL:
     postgres://<user>@127.0.0.1:5000/<database>
 ```
 
-### Adding members later
+### Adding or removing members later
 
-When you grow the Patroni cluster with `pg ha create <scope> --member <m>`, the
-new member is not in the running HAProxy config yet. Re-run the **same** install
-command — it re-derives the full backend list and recreates the container:
+The backend list follows the scope's **local** members recorded in `pg.yaml`, so
+any topology change — or removal — is picked up by re-running the **same**
+install command: it re-derives the full backend list and recreates the
+container.
+
+Added with `pg ha create <scope> --member <m>`, the new member is not in the
+running HAProxy config yet:
 
 ```bash
 pg ha create app --member node3 --etcd m1
@@ -107,9 +123,41 @@ pg addon install haproxy --name lb --mode split --ha app --max-lag 1MB
 # Backends: 2 -> 3, and haproxy.cfg gains: server node3 127.0.0.1:35534 ... check port 8011
 ```
 
-For an explicit `--node` install, add another `--node` to the same command and
-re-run it — the target list is replaced wholesale each time, so the command
-always reflects the full set you want.
+Symmetrically, after `pg ha remove <scope> --member <m>` the removed member
+would otherwise linger in the config as a stale backend — re-running install
+drops it:
+
+```bash
+pg ha remove app --member node3
+pg addon install haproxy --name lb --mode split --ha app --max-lag 1MB
+# Backends: 3 -> 2, and the server node3 line is gone
+```
+
+For an explicit `--node` install there is no auto-derivation: edit the `--node`
+list itself (add or drop a spec) and re-run — the target list is replaced
+wholesale each time, so the command always reflects the full set you want.
+
+### Cross-host clusters
+
+`--ha` derives backends from **this host's** `pg.yaml`, which lists only the
+members this host's `pg ha create` manages. A member living on another host was
+never a backend here — adding or removing one *there* requires no re-sync on
+*this* host (and leaves nothing stale). To front the whole cluster through one
+HAProxy, use an explicit `--node` list, with each member's advertised host:
+
+```bash
+pg addon install haproxy --name lb --mode split \
+  --node node1=10.0.0.11:35532:8008 \
+  --node node2=10.0.0.12:35532:8008 \
+  --node node3=10.0.0.13:35532:8008
+# later: add one more --node spec (or drop one) and re-run — the list replaces wholesale
+```
+
+Caveat: an instance installed with `--ha` on one host routes writes only to a
+*local* leader — if failover promotes a remote member, the rw listener has no
+UP server until the leader moves back. For cross-host clusters where the leader
+can move, prefer the explicit all-members `--node` list (or run one HAProxy per
+host and front it with a higher-level VIP/DNS).
 
 ## Ports
 
