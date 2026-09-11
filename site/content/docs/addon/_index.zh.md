@@ -52,4 +52,4 @@ pg addon remove <addon> [flags]     # 移除插件、容器与数据
 ```
 
 各插件的具体参数与示例见其独立页面：
-[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [Patroni 高可用](./ha/) · [Patroni 动态配置](./ha-dynamic/)
+[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [Patroni 高可用](./ha/) · [Patroni 动态配置](./ha-dynamic/) · [Patroni REST API](./ha-rest-api/)

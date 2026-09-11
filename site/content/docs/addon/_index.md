@@ -50,4 +50,4 @@ pg addon remove <addon> [flags]     # remove the addon, container, and data
 ```
 
 See each addon's page for its specific flags and examples:
-[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [Patroni HA](./ha/) · [Patroni Dynamic Configuration](./ha-dynamic/)
+[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [Patroni HA](./ha/) · [Patroni Dynamic Configuration](./ha-dynamic/) · [Patroni REST API](./ha-rest-api/)
