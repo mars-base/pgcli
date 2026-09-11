@@ -25,6 +25,7 @@ type Config struct {
 	PgDogStartPort          int                       `yaml:"pgdog_start_port,omitempty"`           // starting PgDog host port, default 7432 (openmetrics gets the next free port)
 	PatroniStartPort        int                       `yaml:"patroni_start_port,omitempty"`         // starting Patroni member PG host port, default 35532
 	PatroniRestapiStartPort int                       `yaml:"patroni_restapi_start_port,omitempty"` // starting Patroni REST API host port, default 8008
+	HaProxyStartPort        int                       `yaml:"haproxy_start_port,omitempty"`         // starting HAProxy listener host port, default 5000 (read port and stats take the next free ports)
 	Postgres                PostgresConfig            `yaml:"postgres"`
 	Podman                  PodmanConfig              `yaml:"podman"`
 	PITR                    PITRConfig                `yaml:"pitr"`
@@ -78,6 +79,7 @@ type TopAddonsConfig struct {
 	Etcd      map[string]EtcdConfig           `yaml:"etcd,omitempty"`
 	PgDog     map[string]PgDogConfig          `yaml:"pgdog,omitempty"`
 	Patroni   map[string]PatroniClusterConfig `yaml:"patroni,omitempty"`
+	HAProxy   map[string]HAProxyConfig        `yaml:"haproxy,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -271,6 +273,57 @@ type PatroniClusterConfig struct {
 	Members map[string]PatroniMemberConfig `yaml:"members,omitempty"` // member name -> config (this host's only)
 }
 
+// HAProxyTarget is one backend server in a HAProxy listener: a Patroni member
+// reached at its PostgreSQL port, health-checked at its REST API port. Patroni's
+// GET health endpoints are unauthenticated by design, so HAProxy's `option
+// httpchk` probes need no credentials — the leader answers 200 to `GET /` and a
+// replica answers 200 to `GET /replica`, which is exactly how the rw / ro
+// listeners split traffic.
+type HAProxyTarget struct {
+	Name     string `yaml:"name"`      // server name in haproxy.cfg (the Patroni member name)
+	Host     string `yaml:"host"`      // backend host to reach the member on
+	PGPort   int    `yaml:"pg_port"`   // PostgreSQL port (the routed backend port)
+	RestPort int    `yaml:"rest_port"` // Patroni REST API port (the health-check port)
+}
+
+// HAProxyConfig holds a standalone HAProxy addon (TCP load balancer in front of
+// a Patroni cluster). Like etcd/pgdog it is shared infrastructure, so it lives
+// at the top level (addons.haproxy.<name>). It supports two routing modes:
+//
+//	unified — one listener routes everything to the current leader (GET /)
+//	split   — a rw listener to the leader (GET /) plus a ro listener spread
+//	          across replicas (GET /replica), giving read/write separation
+//
+// The backend servers are Patroni members; they can be injected once at install
+// (--node NAME=HOST:PGPORT:RESTPORT, repeated) or auto-derived from a --ha
+// scope, and re-run install to pick up members added later.
+type HAProxyConfig struct {
+	ContainerName string `yaml:"container_name"`            // pgcli-haproxy<ns>-<name>
+	Name          string `yaml:"name,omitempty"`            // addon key, defaults to the map key
+	ImageTag      string `yaml:"image_tag,omitempty"`       // docker.io/library/haproxy:3.2.23-alpine (default)
+	HAScope       string `yaml:"ha_scope,omitempty"`        // Patroni scope these backends belong to (for --ha auto-derivation and display)
+	Mode          string `yaml:"mode,omitempty"`            // "unified" (default) | "split" (read/write separation)
+	Listen        string `yaml:"listen,omitempty"`          // bind address, default 127.0.0.1
+	WritePort     int    `yaml:"write_port,omitempty"`      // rw (leader) listener port, 5000+ auto-assigned
+	ReadPort      int    `yaml:"read_port,omitempty"`       // ro (replica) listener port; split mode only, next free port
+	StatsPort     int    `yaml:"stats_port,omitempty"`      // HTTP stats page port, next free port after the others
+	ReplicaMaxLag string `yaml:"replica_max_lag,omitempty"` // GET /replica?lag= threshold (e.g. "1MB"); empty = no lag filter
+
+	// Autostart brings this container up on host boot via the boot service
+	// (pg autostart enable --haproxy). Start-only: it starts the existing
+	// container reading the haproxy.cfg already on disk — install first.
+	Autostart bool            `yaml:"autostart,omitempty"`
+	Targets   []HAProxyTarget `yaml:"targets,omitempty"` // backend Patroni members
+}
+
+// EffectiveMode returns the routing mode, defaulting to "unified".
+func (h HAProxyConfig) EffectiveMode() string {
+	if h.Mode == "split" {
+		return "split"
+	}
+	return "unified"
+}
+
 // PostgresConfig holds PostgreSQL connection settings.
 type PostgresConfig struct {
 	URL      string `yaml:"url"`      // connection string (postgres://user:pass@host:port/db)
@@ -330,6 +383,7 @@ func Default() *Config {
 		PgDogStartPort:          7432,
 		PatroniStartPort:        35532,
 		PatroniRestapiStartPort: 8008,
+		HaProxyStartPort:        5000,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -518,6 +572,7 @@ type displayConfig struct {
 	PgDogStartPort          int                       `yaml:"pgdog_start_port,omitempty"`
 	PatroniStartPort        int                       `yaml:"patroni_start_port,omitempty"`
 	PatroniRestapiStartPort int                       `yaml:"patroni_restapi_start_port,omitempty"`
+	HaProxyStartPort        int                       `yaml:"haproxy_start_port,omitempty"`
 	Logging                 LoggingConfig             `yaml:"logging"`
 	Backup                  BackupConfig              `yaml:"backup"`
 	Pigsty                  PigstyConfig              `yaml:"pigsty"`
@@ -538,6 +593,7 @@ func (c *Config) Display() displayConfig {
 		PgDogStartPort:          c.PgDogStartPort,
 		PatroniStartPort:        c.PatroniStartPort,
 		PatroniRestapiStartPort: c.PatroniRestapiStartPort,
+		HaProxyStartPort:        c.HaProxyStartPort,
 		Logging:                 c.Logging,
 		Backup:                  c.Backup,
 		Pigsty:                  c.Pigsty,
@@ -617,6 +673,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.PatroniRestapiStartPort == 0 {
 		c.PatroniRestapiStartPort = d.PatroniRestapiStartPort
+	}
+	if c.HaProxyStartPort == 0 {
+		c.HaProxyStartPort = d.HaProxyStartPort
 	}
 
 	// Postgres
@@ -847,6 +906,25 @@ func (c *Config) ApplyDefaults() {
 			}
 			c.Addons.Patroni[scope] = cluster
 		}
+	}
+
+	// Top-level addons defaults (HAProxy load balancers in front of Patroni
+	// clusters). Container name and image are filled here so `pg addon install
+	// haproxy` need only set the flags.
+	for name, addon := range c.Addons.HAProxy {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-haproxy" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = "docker.io/library/haproxy:3.2.23-alpine"
+		}
+		if addon.Listen == "" {
+			addon.Listen = "127.0.0.1"
+		}
+		c.Addons.HAProxy[name] = addon
 	}
 
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
@@ -1110,6 +1188,59 @@ func (c *Config) autoAssignPorts() {
 				cluster.Members[m] = mb
 			}
 			c.Addons.Patroni[scope] = cluster
+		}
+	}
+
+	// Allocate ports for top-level addons (HAProxy load balancers). Each
+	// instance takes up to three ports from one pool (haproxy_start_port base,
+	// default 5000): the rw listener, the ro listener (split mode only), and
+	// the stats page. They are allocated together so one instance's ports never
+	// overlap another's or any other service's. Names are sorted for a
+	// deterministic, map-order-independent assignment.
+	haBase := c.HaProxyStartPort
+	assignedHA := map[int]bool{}
+	for _, addon := range c.Addons.HAProxy {
+		for _, p := range []int{addon.WritePort, addon.ReadPort, addon.StatsPort} {
+			if p != 0 {
+				assignedHA[p] = true
+			}
+		}
+	}
+	{
+		names := make([]string, 0, len(c.Addons.HAProxy))
+		for name := range c.Addons.HAProxy {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		next := haBase
+		// nextFree returns the next unused port at or above `next`, advancing
+		// `next` past it. Only real (non-zero) ports are consumed.
+		nextFree := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedHA[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		for _, name := range names {
+			addon := c.Addons.HAProxy[name]
+			if addon.WritePort == 0 && haBase > 0 {
+				addon.WritePort = nextFree()
+			} else if addon.WritePort >= next {
+				next = addon.WritePort + 1
+			}
+			if addon.EffectiveMode() == "split" && addon.ReadPort == 0 && haBase > 0 {
+				addon.ReadPort = nextFree()
+			} else if addon.ReadPort >= next {
+				next = addon.ReadPort + 1
+			}
+			if addon.StatsPort == 0 && haBase > 0 {
+				addon.StatsPort = nextFree()
+			} else if addon.StatsPort >= next {
+				next = addon.StatsPort + 1
+			}
+			c.Addons.HAProxy[name] = addon
 		}
 	}
 }

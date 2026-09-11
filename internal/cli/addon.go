@@ -40,6 +40,8 @@ Infra addons (shared, not tied to one instance):
           Stored under top-level addons.etcd in config.
   pg addon install pgdog
           Stored under top-level addons.pgdog in config.
+  pg addon install haproxy
+          Stored under top-level addons.haproxy in config (Linux only).
 
 Commands:
   pg addon install <addon>   install an add-on
@@ -62,6 +64,7 @@ Currently supported add-ons:
   pgbouncer   connection pooler (transaction mode)
   etcd        standalone key-value store (HA cluster DCS)
   pgdog       Postgres proxy (pooling, load balancing, sharding)
+  haproxy     TCP load balancer in front of a Patroni cluster (unified or read/write split)
 
 Two modes (pgbouncer):
   Local:  pg addon install pgbouncer -i <instance>
@@ -76,6 +79,13 @@ Infra addon (pgdog — shared Postgres proxy):
                          [--user NAME:PASSWORD[:DBNAME]] [--sharded-table DB:TABLE:COLUMN:TYPE]
                          [--port N] [--pool-mode ...] [--workers N] [--default-pool-size N]
 
+Infra addon (haproxy — TCP load balancer in front of a Patroni cluster, Linux only):
+  pg addon install haproxy [--name lb] [--ha <scope>] [--node NAME=HOST:PGPORT:RESTPORT]
+                           [--mode unified|split] [--rw-port N] [--ro-port N] [--stats-port N]
+                           [--max-lag 1MB]
+  Members are injected once via --node, or auto-derived from a Patroni scope via
+  --ha. After adding a member with "pg ha create", re-run install to pick it up.
+
 Re-running install is idempotent — it re-syncs all users and passwords from
 pg_shadow, regenerates config files and restarts the container.
 
@@ -85,7 +95,10 @@ Examples:
   pg addon install etcd
   pg addon install etcd --name ha --client-port 2379 --peer-port 2380
   pg addon install pgdog --backend app=127.0.0.1:5432:appdb
-  pg addon install pgdog --backend app=127.0.0.1:5432:shard0:0 --backend app=127.0.0.1:5433:shard1:1 --user alice:s3cret:app`,
+  pg addon install pgdog --backend app=127.0.0.1:5432:shard0:0 --backend app=127.0.0.1:5433:shard1:1 --user alice:s3cret:app
+  pg addon install haproxy --ha app
+  pg addon install haproxy --name lb --mode split --ha app --max-lag 1MB
+  pg addon install haproxy --node node1=10.0.0.11:35532:8008 --node node2=10.0.0.11:35533:8009`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonInstall(args[0], cmd)
@@ -140,12 +153,14 @@ regenerating config or re-registering cluster members.
 Supported add-ons:
   etcd       pg addon start etcd [--name m1]
   pgdog      pg addon start pgdog [--name proxy]
+  haproxy    pg addon start haproxy [--name lb]
   pgbouncer  pg addon start pgbouncer -i <instance>
              pg addon start pgbouncer --pg-name <remote-name>
 
 Examples:
   pg addon start etcd --name m1
   pg addon start pgdog
+  pg addon start haproxy --name lb
   pg addon start pgbouncer -i proj01`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -162,12 +177,14 @@ back up later with 'pg addon start <addon>'.
 Supported add-ons:
   etcd       pg addon stop etcd [--name m1]
   pgdog      pg addon stop pgdog [--name proxy]
+  haproxy    pg addon stop haproxy [--name lb]
   pgbouncer  pg addon stop pgbouncer -i <instance>
              pg addon stop pgbouncer --pg-name <remote-name>
 
 Examples:
   pg addon stop etcd --name m1
   pg addon stop pgdog
+  pg addon stop haproxy --name lb
   pg addon stop pgbouncer -i proj01`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -224,12 +241,21 @@ func init() {
 	addonInstallCmd.Flags().String("data-dir", "", "etcd data dir root, absolute or relative to base_dir (default <base_dir>/addon/etcd); each member uses <root>/<name>/data")
 	addonInstallCmd.Flags().String("advertise-host", "", "host advertised in this member's peer/client URLs (empty=127.0.0.1 for single-host; set a LAN IP or FQDN for cross-host clusters)")
 	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.241.20.147:2379 (implies --initial-cluster-state existing; requires --advertise-host)")
-	addonRemoveCmd.Flags().String("name", "", "name of the etcd member or pgdog proxy to remove (default \"etcd\"/\"pgdog\")")
+	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy or haproxy instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\")")
+
+	// haproxy flags (top-level load balancer in front of a Patroni cluster)
+	addonInstallCmd.Flags().String("mode", "", "HAProxy routing mode: unified (default, all traffic to the leader) or split (separate read listener for replicas)")
+	addonInstallCmd.Flags().String("ha", "", "Patroni scope to derive backend members from (auto: every local member's pg + restapi port); mutually exclusive with --node")
+	addonInstallCmd.Flags().StringArray("node", nil, "HAProxy backend node NAME=HOST:PGPORT:RESTPORT (repeatable; PGPORT is the routed backend, RESTPORT the health-check port)")
+	addonInstallCmd.Flags().Int("rw-port", 0, "HAProxy read-write listener host port (0=auto-assign from haproxy_start_port)")
+	addonInstallCmd.Flags().Int("ro-port", 0, "HAProxy read-only listener host port, split mode only (0=auto-assign, next free port)")
+	addonInstallCmd.Flags().Int("stats-port", 0, "HAProxy stats page host port (0=auto-assign, next free port)")
+	addonInstallCmd.Flags().String("max-lag", "", "replica lag threshold for the read listener, e.g. 1MB (split mode; empty=no filter)")
 
 	// start / stop flags
-	addonStartCmd.Flags().String("name", "", "name of the etcd member or pgdog proxy to start (default \"etcd\"/\"pgdog\")")
+	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy or haproxy instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\")")
 	addonStartCmd.Flags().String("pg-name", "", "name of a remote PgBouncer to start")
-	addonStopCmd.Flags().String("name", "", "name of the etcd member or pgdog proxy to stop (default \"etcd\"/\"pgdog\")")
+	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy or haproxy instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\")")
 	addonStopCmd.Flags().String("pg-name", "", "name of a remote PgBouncer to stop")
 
 	// pgdog flags (top-level shared Postgres proxy addon)
@@ -252,10 +278,12 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallEtcd(cmd)
 	case "pgdog":
 		return runAddonInstallPgDog(cmd)
+	case "haproxy":
+		return runAddonInstallHAProxy(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -1082,6 +1110,214 @@ func runAddonInstallPgDog(cmd *cobra.Command) error {
 }
 
 // ---------------------------------------------------------------------------
+// install logic — haproxy
+// ---------------------------------------------------------------------------
+
+// parseHAProxyNode parses a --node value of the form NAME=HOST:PGPORT:RESTPORT:
+// a Patroni member's server name, the host to reach it on, its PostgreSQL port
+// (the routed backend) and its REST API port (the health-check target).
+func parseHAProxyNode(spec string) (config.HAProxyTarget, error) {
+	var t config.HAProxyTarget
+	name, rest, ok := strings.Cut(spec, "=")
+	if !ok || name == "" {
+		return t, fmt.Errorf("node %q must be NAME=HOST:PGPORT:RESTPORT", spec)
+	}
+	parts := strings.Split(rest, ":")
+	if len(parts) != 3 {
+		return t, fmt.Errorf("node %q: expected HOST:PGPORT:RESTPORT after the name", spec)
+	}
+	pgPort, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return t, fmt.Errorf("node %q: invalid PG port %q", spec, parts[1])
+	}
+	restPort, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return t, fmt.Errorf("node %q: invalid REST port %q", spec, parts[2])
+	}
+	if parts[0] == "" {
+		return t, fmt.Errorf("node %q: host must not be empty", spec)
+	}
+	t.Name, t.Host, t.PGPort, t.RestPort = name, parts[0], pgPort, restPort
+	return t, nil
+}
+
+// haScopeTargets derives HAProxy backends from every member of a Patroni scope
+// in the local config: name, advertised host (loopback when not advertised),
+// PG port and REST API port — exactly the coordinates `pg ha status` prints.
+func haScopeTargets(cfg *config.Config, scope string) ([]config.HAProxyTarget, error) {
+	cluster, ok := cfg.Addons.Patroni[scope]
+	if !ok {
+		return nil, fmt.Errorf("patroni scope %q not found (run 'pg ha create %s --member <m>' first)", scope, scope)
+	}
+	names := make([]string, 0, len(cluster.Members))
+	for m := range cluster.Members {
+		names = append(names, m)
+	}
+	sort.Strings(names)
+	targets := make([]config.HAProxyTarget, 0, len(names))
+	for _, m := range names {
+		mb := cluster.Members[m]
+		targets = append(targets, config.HAProxyTarget{
+			Name:     m,
+			Host:     pgConnectHost(mb),
+			PGPort:   mb.HostPort,
+			RestPort: mb.RestapiPort,
+		})
+	}
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("patroni scope %q has no members on this host — create one with 'pg ha create %s --member <m>' or pass --node explicitly", scope, scope)
+	}
+	return targets, nil
+}
+
+// runAddonInstallHAProxy installs a standalone HAProxy container fronting a
+// Patroni cluster. The backend nodes come either from --node specs (repeatable,
+// explicit) or are auto-derived from a --ha scope. Re-running install re-derives
+// / re-renders everything (clean re-render), which is also how members added
+// later to the Patroni cluster join the load balancer.
+func runAddonInstallHAProxy(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "haproxy"
+	}
+	imageTag, _ := cmd.Flags().GetString("image")
+	mode, _ := cmd.Flags().GetString("mode")
+	haScope, _ := cmd.Flags().GetString("ha")
+	nodeSpecs, _ := cmd.Flags().GetStringArray("node")
+	rwPort, _ := cmd.Flags().GetInt("rw-port")
+	roPort, _ := cmd.Flags().GetInt("ro-port")
+	statsPort, _ := cmd.Flags().GetInt("stats-port")
+	maxLag, _ := cmd.Flags().GetString("max-lag")
+
+	if mode == "" {
+		mode = "unified"
+	}
+	if mode != "unified" && mode != "split" {
+		return fmt.Errorf("--mode must be \"unified\" (read-write through the leader) or \"split\" (separate read listener), got %q", mode)
+	}
+	if len(nodeSpecs) == 0 && haScope == "" {
+		return fmt.Errorf("either --node NAME=HOST:PGPORT:RESTPORT (repeatable) or --ha <scope> is required to define the backend members")
+	}
+	if len(nodeSpecs) > 0 && haScope != "" {
+		return fmt.Errorf("--node and --ha are mutually exclusive: --ha auto-derives every local member of the scope, --node lists them explicitly")
+	}
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	targets := make([]config.HAProxyTarget, 0, len(nodeSpecs))
+	if haScope != "" {
+		derived, err := haScopeTargets(cfg, haScope)
+		if err != nil {
+			return err
+		}
+		targets = derived
+	} else {
+		for _, s := range nodeSpecs {
+			t, err := parseHAProxyNode(s)
+			if err != nil {
+				return err
+			}
+			targets = append(targets, t)
+		}
+	}
+
+	if cfg.Addons.HAProxy == nil {
+		cfg.Addons.HAProxy = make(map[string]config.HAProxyConfig)
+	}
+	existing, ok := cfg.Addons.HAProxy[name]
+	if !ok {
+		existing = config.HAProxyConfig{
+			ContainerName: "pgcli-haproxy" + nsSuffixCLI(cfg.Namespace) + "-" + name,
+			Name:          name,
+		}
+	}
+	if imageTag != "" {
+		existing.ImageTag = imageTag
+	}
+	existing.Mode = mode
+	if haScope != "" {
+		existing.HAScope = haScope
+	}
+	if rwPort != 0 {
+		existing.WritePort = rwPort
+	}
+	if roPort != 0 {
+		existing.ReadPort = roPort
+	}
+	if statsPort != 0 {
+		existing.StatsPort = statsPort
+	}
+	if cmd.Flags().Changed("max-lag") {
+		existing.ReplicaMaxLag = maxLag
+	}
+	// The target list is fully replaced by this command's inputs, so
+	// re-running install is a clean re-render (and picks up members that a
+	// later `pg ha create` added to the scope).
+	existing.Targets = targets
+	if existing.Name == "" {
+		existing.Name = name
+	}
+	cfg.Addons.HAProxy[name] = existing
+
+	cfg.ApplyDefaults()
+	hc := cfg.Addons.HAProxy[name]
+
+	hm, err := podman.NewHAProxyManager(cfg)
+	if err != nil {
+		return fmt.Errorf("haproxy manager: %w", err)
+	}
+
+	cfgPathOut, err := hm.WriteConfigs(&hc)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("-> Starting HAProxy container...")
+	if err := hm.EnsureContainer(&hc); err != nil {
+		return err
+	}
+
+	cfg.Addons.HAProxy[name] = hc
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Printf("✓ haproxy installed: %q\n", name)
+	fmt.Printf("  Container:    %s\n", hc.ContainerName)
+	fmt.Printf("  Image:        %s\n", hc.ImageTag)
+	fmt.Printf("  Mode:         %s\n", hc.EffectiveMode())
+	if hc.HAScope != "" {
+		fmt.Printf("  Patroni:      %s\n", hc.HAScope)
+	}
+	fmt.Printf("  Backends:     %d\n", len(hc.Targets))
+	fmt.Printf("  Read-write:   %s:%d\n", hc.Listen, hc.WritePort)
+	if hc.EffectiveMode() == "split" {
+		lag := ""
+		if hc.ReplicaMaxLag != "" {
+			lag = fmt.Sprintf(" (lag ≤ %s)", hc.ReplicaMaxLag)
+		}
+		fmt.Printf("  Read-only:    %s:%d%s\n", hc.Listen, hc.ReadPort, lag)
+	}
+	fmt.Printf("  Stats:        http://%s:%d/\n", hc.Listen, hc.StatsPort)
+	fmt.Printf("  Config:       %s\n", cfgPathOut)
+	fmt.Println()
+	fmt.Printf("  Connect via HAProxy:\n")
+	fmt.Printf("    postgres://<user>@%s:%d/<database>\n", hc.Listen, hc.WritePort)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // list logic
 // ---------------------------------------------------------------------------
 
@@ -1207,6 +1443,54 @@ func runAddonList() error {
 		fmt.Println("  (none)")
 	}
 
+	// haproxy (Patroni load balancer, top-level addon; Linux-only manager)
+	fmt.Println()
+	fmt.Println("Infra add-ons (haproxy):")
+	hasHAProxy := false
+	if hm, err := podman.NewHAProxyManager(cfg); err == nil {
+		for name, hc := range cfg.Addons.HAProxy {
+			hasHAProxy = true
+			status := "stopped"
+			if running, err := hm.ContainerRunning(hc.ContainerName); err == nil && running {
+				status = "running"
+			}
+			fmt.Printf("  %s (name: %s)\n", "haproxy", name)
+			fmt.Printf("    Status:      %s\n", status)
+			fmt.Printf("    Mode:        %s\n", hc.EffectiveMode())
+			if hc.HAScope != "" {
+				fmt.Printf("    Patroni:     %s\n", hc.HAScope)
+			}
+			fmt.Printf("    Read-write:  %s:%d\n", hc.Listen, hc.WritePort)
+			if hc.EffectiveMode() == "split" {
+				fmt.Printf("    Read-only:   %s:%d\n", hc.Listen, hc.ReadPort)
+			}
+			fmt.Printf("    Stats:       http://%s:%d/\n", hc.Listen, hc.StatsPort)
+			fmt.Printf("    Backends:    %d\n", len(hc.Targets))
+			for _, t := range hc.Targets {
+				fmt.Printf("      - %-12s %s:%d (check :%d)\n", t.Name, t.Host, t.PGPort, t.RestPort)
+			}
+			fmt.Printf("    Image:       %s\n", hc.ImageTag)
+			fmt.Printf("    Container:   %s\n", hc.ContainerName)
+		}
+	} else if len(cfg.Addons.HAProxy) > 0 {
+		// Configured but the manager is unavailable (macOS): still show them.
+		for name, hc := range cfg.Addons.HAProxy {
+			hasHAProxy = true
+			fmt.Printf("  %s (name: %s)\n", "haproxy", name)
+			fmt.Printf("    Status:      n/a (%v)\n", err)
+			fmt.Printf("    Mode:        %s\n", hc.EffectiveMode())
+			fmt.Printf("    Read-write:  %s:%d\n", hc.Listen, hc.WritePort)
+			if hc.EffectiveMode() == "split" {
+				fmt.Printf("    Read-only:   %s:%d\n", hc.Listen, hc.ReadPort)
+			}
+			fmt.Printf("    Backends:    %d\n", len(hc.Targets))
+			fmt.Printf("    Container:   %s\n", hc.ContainerName)
+		}
+	}
+	if !hasHAProxy {
+		fmt.Println("  (none)")
+	}
+
 	return nil
 }
 
@@ -1220,10 +1504,12 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemoveEtcd(cmd)
 	case "pgdog":
 		return runAddonRemovePgDog(cmd)
+	case "haproxy":
+		return runAddonRemoveHAProxy(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -1434,10 +1720,12 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartEtcd(cmd)
 	case "pgdog":
 		return runAddonStartPgDog(cmd)
+	case "haproxy":
+		return runAddonStartHAProxy(cmd)
 	case "pgbouncer":
 		return runAddonStartPgBouncer(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy)", addonName)
 	}
 }
 
@@ -1447,10 +1735,12 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopEtcd(cmd)
 	case "pgdog":
 		return runAddonStopPgDog(cmd)
+	case "haproxy":
+		return runAddonStopHAProxy(cmd)
 	case "pgbouncer":
 		return runAddonStopPgBouncer(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy)", addonName)
 	}
 }
 
@@ -1585,6 +1875,108 @@ func runAddonStopPgDog(cmd *cobra.Command) error {
 	}
 	fmt.Printf("-> Stopping pgdog %q...\n", name)
 	_, err = dm.Stop(pd.ContainerName)
+	return err
+}
+
+// ---------------------------------------------------------------------------
+// remove / start / stop logic — haproxy
+// ---------------------------------------------------------------------------
+
+func runAddonRemoveHAProxy(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "haproxy"
+	}
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.HAProxy == nil {
+		return fmt.Errorf("no haproxy add-ons configured")
+	}
+	hc, ok := cfg.Addons.HAProxy[name]
+	if !ok {
+		return fmt.Errorf("haproxy %q not found", name)
+	}
+
+	hm, err := podman.NewHAProxyManager(cfg)
+	if err != nil {
+		return fmt.Errorf("haproxy manager: %w", err)
+	}
+
+	fmt.Printf("-> Removing haproxy %q...\n", name)
+	if err := hm.Remove(&hc); err != nil {
+		return err
+	}
+
+	delete(cfg.Addons.HAProxy, name)
+	if len(cfg.Addons.HAProxy) == 0 {
+		cfg.Addons.HAProxy = nil
+	}
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	fmt.Printf("✓ haproxy %q removed\n", name)
+	return nil
+}
+
+func runAddonStartHAProxy(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "haproxy"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	if cfg.Addons.HAProxy == nil {
+		return fmt.Errorf("no haproxy add-ons configured (run 'pg addon install haproxy')")
+	}
+	hc, ok := cfg.Addons.HAProxy[name]
+	if !ok {
+		return fmt.Errorf("haproxy %q not found (run 'pg addon install haproxy --name %s')", name, name)
+	}
+	hm, err := podman.NewHAProxyManager(cfg)
+	if err != nil {
+		return fmt.Errorf("haproxy manager: %w", err)
+	}
+	fmt.Printf("-> Starting haproxy %q...\n", name)
+	return hm.StartContainer(&hc)
+}
+
+func runAddonStopHAProxy(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "haproxy"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	hc, ok := cfg.Addons.HAProxy[name]
+	if !ok {
+		return fmt.Errorf("haproxy %q not found", name)
+	}
+	hm, err := podman.NewHAProxyManager(cfg)
+	if err != nil {
+		return fmt.Errorf("haproxy manager: %w", err)
+	}
+	running, _ := hm.ContainerRunning(hc.ContainerName)
+	if !running {
+		fmt.Printf("haproxy %q is not running\n", name)
+		return nil
+	}
+	fmt.Printf("-> Stopping haproxy %q...\n", name)
+	_, err = hm.Stop(hc.ContainerName)
 	return err
 }
 

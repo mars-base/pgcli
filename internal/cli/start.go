@@ -75,8 +75,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --etcd / --pgdog / --ha)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --etcd / --pgdog / --ha / --haproxy)")
 		return nil
 	}
 
@@ -133,6 +133,13 @@ func startAutostart() error {
 
 	// Patroni HA members (top-level infra addon).
 	if err := startAutostartPatroni(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// HAProxy load balancers (top-level infra addon). Last: they front the
+	// Patroni members above, so their backends exist by the time the listeners
+	// come up (HAProxy tolerates backends being down anyway).
+	if err := startAutostartHAProxies(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -315,6 +322,49 @@ func startAutostartPatroni(c *config.Config) error {
 				if firstErr == nil {
 					firstErr = err
 				}
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartHAProxy reports whether any HAProxy instance is autostart-enabled.
+func hasAutostartHAProxy(c *config.Config) bool {
+	for _, hc := range c.Addons.HAProxy {
+		if hc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartHAProxies starts each autostart-enabled HAProxy instance. Like
+// the other infra autostarts this is start-only: the container comes up reading
+// the haproxy.cfg already on disk; nothing is re-rendered or re-derived. Order
+// is sorted by instance name for deterministic, readable boot logs.
+func startAutostartHAProxies(c *config.Config) error {
+	var names []string
+	for name, hc := range c.Addons.HAProxy {
+		if hc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	hm, err := podman.NewHAProxyManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		hc := c.Addons.HAProxy[name]
+		if err := hm.StartContainer(&hc); err != nil {
+			fmt.Printf("  [X] haproxy autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
 			}
 		}
 	}

@@ -91,6 +91,19 @@ pg logs addon pgdog --name pgdog -f    # Follow
 PgDog logs connection-pool events (new server connections, auth, client
 connect/disconnect) as structured INFO lines.
 
+### HAProxy instances
+
+HAProxy is also a top-level infra addon — select the instance with `--name`
+(defaults to `haproxy`):
+
+```bash
+pg logs addon haproxy --name lb        # Instance logs
+pg logs addon haproxy --name lb -f     # Follow
+```
+
+HAProxy logs health-check transitions (`Server lb_rw/node2 is UP/DOWN, reason:
+...`) and connection events — useful for watching failovers live.
+
 ## Options
 
 | Option | Short | Description |
@@ -99,7 +112,7 @@ connect/disconnect) as structured INFO lines.
 | `--tail N` | `-n N` | Show last N lines (default: 50, use 0 for all) |
 | `--instance NAME` | `-i NAME` | Instance name (default: `default`) |
 | `--pg-name NAME` | | Remote addon name (for remote PgBouncer) |
-| `--name NAME` | | etcd member / PgDog proxy name (default: `etcd` / `pgdog`) |
+| `--name NAME` | | etcd member / PgDog proxy / HAProxy instance name (default: `etcd` / `pgdog` / `haproxy`) |
 
 ## Examples
 
@@ -121,6 +134,9 @@ pg logs addon etcd --name m1 -f
 
 # Watch PgDog pool activity
 pg logs addon pgdog --name pgdog -f
+
+# Watch HAProxy health-check / failover transitions
+pg logs addon haproxy --name lb -f
 ```
 
 ## Notes
@@ -129,5 +145,6 @@ pg logs addon pgdog --name pgdog -f
 - Addon logs show connection pooler activity (connections, disconnections, pool stats)
 - etcd member logs are JSON-formatted raft/leader/peer events — useful for debugging quorum issues
 - PgDog proxy logs are structured INFO lines for connection-pool events (server connections, auth, client connect/disconnect)
+- HAProxy logs health-check transitions and connection events — watch a failover happen in real time
 - Follow mode (`-f`) keeps the connection open until interrupted with Ctrl+C
-- Remote addons use `--pg-name` instead of `-i` to identify the target pooler; etcd members and PgDog proxies use `--name`
+- Remote addons use `--pg-name` instead of `-i` to identify the target pooler; etcd members, PgDog proxies, and HAProxy instances use `--name`
