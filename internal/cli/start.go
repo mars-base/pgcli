@@ -612,9 +612,13 @@ func doStart(c *config.Config) error {
 	}
 
 	fmt.Println("\nOK started")
-	fmt.Printf("  PostgreSQL: postgres://%s:%s@localhost:%d/%s\n",
-		c.Postgres.User, c.Postgres.Password,
-		c.Postgres.Port, c.Postgres.Database)
+	// Password redacted but the DSN shape kept: `start` runs under the boot
+	// service, so anything printed here lands in the (persistent, readable)
+	// systemd journal. A passwordless "user@host" URI would read as "no
+	// password needed", so mask it as :***@ instead. Get the real DSN from
+	// `pg status` or pg.yaml.
+	fmt.Printf("  PostgreSQL: postgres://%s:***@localhost:%d/%s\n",
+		c.Postgres.User, c.Postgres.Port, c.Postgres.Database)
 	return nil
 }
 
