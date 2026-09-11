@@ -463,7 +463,13 @@ var haRemoveCmd = &cobra.Command{
   --force          skip the interactive confirmation.
 
 Order for --scope-all: stop → rm container → patronictl remove (DCS) → prune
-config entry.`,
+config entry.
+
+Examples:
+  pg ha remove app --member node2
+  pg ha remove app --member node2 --clean-data
+  pg ha remove app --scope-all
+  pg ha remove app --scope-all --clean-data --force`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		scope := args[0]
