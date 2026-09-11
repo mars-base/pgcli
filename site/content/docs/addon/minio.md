@@ -32,7 +32,8 @@ Credentials are handled like Patroni's:
 
 - `root_user` defaults to `admin`;
 - `root_password` is **generated on first install** and stored in `pg.yaml`
-  (`addons.minio.<name>.root_password`) — the install summary only points at it.
+  (`addons.minio.<name>.root_password`) and **printed once** in the install
+  summary for convenience.
 
 The container runs `--ulimit nofile=1048576:1048576` and `--stop-timeout 60` as
 MinIO's deployment docs recommend. Note that root credentials passed as `-e`
@@ -50,9 +51,12 @@ pg addon install minio --name store --data-dir /srv/minio
 
 # fixed ports and a different root user
 pg addon install minio --name store --api-port 9000 --console-port 9001 --root-user admin
+
+# expose the store on the network instead of loopback only
+pg addon install minio --name store --listen 0.0.0.0
 ```
 
-The output reports endpoints and where the credentials live:
+The output reports endpoints and the root credentials:
 
 ```
 ✓ minio installed: "store"
@@ -63,20 +67,23 @@ The output reports endpoints and where the credentials live:
   Console:      http://127.0.0.1:9001
 
   Root user:     admin
-  Root password: stored in ~/.pgcli/pg.yaml (addons.minio.store.root_password)
+  Root password: <generated>
+                 (also stored in ~/.pgcli/pg.yaml, addons.minio.store.root_password)
 ```
 
-Sign in to the console at the `Console:` URL with the root user and the password
-from `pg.yaml`. Point S3 clients (including pgBackRest) at the `S3 API:` URL.
+Sign in to the console at the `Console:` URL with the printed root user and
+password. Point S3 clients (including pgBackRest) at the `S3 API:` URL.
 
-Re-running install is idempotent: flags are merged into the stored config, the
-**existing** root password is kept, and the container is recreated so changes
-take effect.
+Re-running install against a **live** instance is a no-op: the container is not
+recreated (a stopped one is simply started, with a notice), the flags are
+merged into the stored config, and the existing root password is kept. Pass
+`--force` to recreate the container so changed ports, listen address, or
+credentials take effect — without losing the data directory.
 
-> **Bind address:** the default `127.0.0.1` keeps the store local. Setting
-> `listen: 0.0.0.0` in `pg.yaml` (or per `--listen`-style edits) exposes it on
-> the network — anyone who can reach the port can attempt the root credentials,
-> so only do this behind a firewall or TLS-terminating proxy.
+> **Bind address:** the default `127.0.0.1` keeps the store local. `--listen
+> 0.0.0.0` (or the `listen` key in `pg.yaml`) exposes it on the network. Anyone
+> who can reach the port can then attempt the root credentials, so only do this
+> behind a firewall or a TLS-terminating proxy.
 
 ## Ports
 
@@ -113,9 +120,10 @@ addons:
       autostart: false             # pg autostart enable --minio --name store
 ```
 
-Edits to `listen`, ports, `root_user`, `image_tag`, or `data_dir` apply on the
-next `pg addon install minio --name store` (which recreates the container).
-Changing `root_password` here rotates it the same way.
+Edits to `listen`, ports, `root_user`, `root_password`, `image_tag`, or
+`data_dir` take effect after the next `pg addon install minio --name store
+--force` — the plain install skips a still-present container, `--force`
+recreates it (the data directory is never touched).
 
 ### List
 
@@ -148,9 +156,9 @@ pg addon start minio --name store
 pg addon stop  minio --name store
 ```
 
-`install` always recreates the container so config changes take effect;
-`start` only starts an existing one (and self-heals an improper state by
-recreating it from the config).
+`install` skips a still-present container (starting it if stopped); `start` only
+starts an existing one (and self-heals an improper state by recreating it from
+the config).
 
 ## Auto-start on Boot
 

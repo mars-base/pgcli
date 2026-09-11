@@ -229,6 +229,13 @@ func (m *MinioManager) ContainerRunning(name string) (bool, error) {
 	return m.containerRunning(name)
 }
 
+// ContainerExists reports whether a container with the given name exists
+// (running or not) — the install path uses it to skip recreation of a live
+// instance.
+func (m *MinioManager) ContainerExists(name string) (bool, error) {
+	return m.containerExists(name)
+}
+
 // Stop stops a MinIO container.
 func (m *MinioManager) Stop(name string) (string, error) {
 	return m.run("stop", name)

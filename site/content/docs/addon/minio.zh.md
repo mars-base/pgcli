@@ -28,8 +28,8 @@ pgBackRest `repo1-type=s3` 目标），但它本身就是通用对象存储。
 凭据的处理方式与 Patroni 相同：
 
 - `root_user` 默认 `admin`；
-- `root_password` **首次 install 时自动生成**并存入 `pg.yaml`
-  （`addons.minio.<name>.root_password`）——安装摘要只指出它的位置。
+- `root_password` **首次 install 时自动生成**，存入 `pg.yaml`
+  （`addons.minio.<name>.root_password`），并在安装摘要中**打印一次**方便记录。
 
 容器按 MinIO 官方部署建议带上 `--ulimit nofile=1048576:1048576` 和
 `--stop-timeout 60`。注意 root 凭据通过 `-e` 传入，会出现在 `podman inspect`
@@ -47,9 +47,12 @@ pg addon install minio --name store --data-dir /srv/minio
 
 # 固定端口、指定 root 用户
 pg addon install minio --name store --api-port 9000 --console-port 9001 --root-user admin
+
+# 绑定到所有网卡，暴露到网络
+pg addon install minio --name store --listen 0.0.0.0
 ```
 
-输出会报告端点与凭据存放位置：
+输出会报告端点与 root 凭据：
 
 ```
 ✓ minio installed: "store"
@@ -60,18 +63,21 @@ pg addon install minio --name store --api-port 9000 --console-port 9001 --root-u
   Console:      http://127.0.0.1:9001
 
   Root user:     admin
-  Root password: stored in ~/.pgcli/pg.yaml (addons.minio.store.root_password)
+  Root password: <generated>
+                 (also stored in ~/.pgcli/pg.yaml, addons.minio.store.root_password)
 ```
 
-用 root 用户和 `pg.yaml` 里的密码登录 `Console:` 地址的控制台。S3 客户端
+用打印出的 root 用户与密码登录 `Console:` 地址的控制台。S3 客户端
 （包括 pgBackRest）指向 `S3 API:` 地址即可。
 
-重复执行 install 是幂等的：命令行参数会合并进已存配置，**已有的** root 密码
-保持不变，容器重建以使变更生效。
+对**已存在**的实例重复执行 install 是无损的：不会重建容器（处于停止状态的会
+直接启动并给出提示），命令行参数会合并进已存配置，**已有的** root 密码保持
+不变。要让改过的端口、监听地址或凭据生效，加 `--force` 重建容器（数据目录不受
+影响）。
 
-> **绑定地址：** 默认 `127.0.0.1`，存储仅本机可见。把 `pg.yaml` 里的 `listen`
-> 改成 `0.0.0.0` 会把它暴露到网络上——能访问该端口的任何人都可尝试 root 凭据，
-> 因此只应在防火墙后或 TLS 终结代理之后这样暴露。
+> **绑定地址：** 默认 `127.0.0.1`，存储仅本机可见。`--listen 0.0.0.0`（或
+> `pg.yaml` 里的 `listen` 键）会把它暴露到网络上——能访问该端口的任何人都可尝试
+> root 凭据，因此只应在防火墙后或 TLS 终结代理之后这样暴露。
 
 ## 端口
 
@@ -106,9 +112,9 @@ addons:
       autostart: false             # pg autostart enable --minio --name store
 ```
 
-修改 `listen`、端口、`root_user`、`image_tag` 或 `data_dir` 后，再次执行
-`pg addon install minio --name store`（会重建容器）即生效。在这里改
-`root_password` 同样是轮换密码。
+修改 `listen`、端口、`root_user`、`root_password`、`image_tag` 或 `data_dir`
+后，执行 `pg addon install minio --name store --force` 即生效——普通 install 会
+跳过已存在的容器，`--force` 会重建它（数据目录永不受影响）。
 
 ### 查看列表
 
@@ -141,8 +147,8 @@ pg addon start minio --name store
 pg addon stop  minio --name store
 ```
 
-`install` 总是重建容器以让配置生效；`start` 只启动已有容器（状态异常时依据
-配置自动重建）。
+`install` 会跳过已存在的容器（处于停止状态的直接启动）；`start` 只启动已有
+容器（状态异常时依据配置自动重建）。
 
 ## 开机自启
 

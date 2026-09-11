@@ -92,10 +92,12 @@ Infra addon (haproxy — TCP load balancer in front of a Patroni cluster, Linux 
 
 Infra addon (minio — single-node S3-compatible object storage, Linux amd64 only):
   pg addon install minio [--name store] [--api-port N] [--console-port N]
-                         [--root-user admin] [--data-dir ...]
-  Root credentials are generated on first install and stored in the config
-  (root_user / root_password under addons.minio.<name>); the web console is at
-  http://<listen>:<console-port>/.
+                         [--listen 127.0.0.1] [--root-user admin] [--data-dir ...] [--force]
+  Root credentials are generated on first install, printed once for the record,
+  and stored in the config (root_user / root_password under addons.minio.<name>);
+  the web console is at http://<listen>:<console-port>/. An already-present
+  container is reused (a stopped one is started); pass --force to recreate it
+  after changing ports, listen, or credentials.
 
 Re-running install is idempotent — it re-syncs all users and passwords from
 pg_shadow, regenerates config files and restarts the container.
@@ -272,7 +274,9 @@ func init() {
 	// minio flags (top-level single-node S3-compatible object storage)
 	addonInstallCmd.Flags().Int("api-port", 0, "MinIO S3 API host port (0=auto-assign from minio_start_port)")
 	addonInstallCmd.Flags().Int("console-port", 0, "MinIO web console host port (0=auto-assign, next free port)")
-	addonInstallCmd.Flags().String("root-user", "", "MinIO root user (default \"admin\"; the root password is generated on first install and stored in the config)")
+	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network)")
+	addonInstallCmd.Flags().String("root-user", "", "MinIO root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config)")
+	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO container even if one already exists (to apply changed ports/listen/credentials)")
 
 	// start / stop flags
 	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy or minio instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\")")
@@ -1284,6 +1288,9 @@ func runAddonInstallHAProxy(cmd *cobra.Command) error {
 	if cmd.Flags().Changed("max-lag") {
 		existing.ReplicaMaxLag = maxLag
 	}
+	if listenAddr, _ := cmd.Flags().GetString("listen"); listenAddr != "" {
+		existing.Listen = listenAddr
+	}
 	// The target list is fully replaced by this command's inputs, so
 	// re-running install is a clean re-render (and picks up members that a
 	// later `pg ha create` added to the scope — or `pg ha remove` dropped).
@@ -1356,7 +1363,9 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	dataDir, _ := cmd.Flags().GetString("data-dir")
 	apiPort, _ := cmd.Flags().GetInt("api-port")
 	consolePort, _ := cmd.Flags().GetInt("console-port")
+	listenAddr, _ := cmd.Flags().GetString("listen")
 	rootUser, _ := cmd.Flags().GetString("root-user")
+	force, _ := cmd.Flags().GetBool("force")
 
 	path := cfgPath
 	if path == "" {
@@ -1395,6 +1404,9 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	if rootUser != "" {
 		existing.RootUser = rootUser
 	}
+	if listenAddr != "" {
+		existing.Listen = listenAddr
+	}
 	if existing.Name == "" {
 		existing.Name = name
 	}
@@ -1406,29 +1418,48 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	cfg.ApplyDefaults()
 	mc := cfg.Addons.Minio[name]
 
-	// Generate the root password once, on first install. An existing instance
-	// keeps its stored password so the bound data dir stays readable.
-	if mc.RootPassword == "" {
-		pw, err := generatePassword(20)
-		if err != nil {
-			return fmt.Errorf("generating MinIO root password: %w", err)
-		}
-		mc.RootPassword = pw
-	}
-
 	mm, err := podman.NewMinioManager(cfg)
 	if err != nil {
 		return fmt.Errorf("minio manager: %w", err)
 	}
 
-	fmt.Printf("-> Preparing MinIO image %s...\n", mc.ImageTag)
-	if err := mm.EnsureImage(mc.ImageTag); err != nil {
+	// If a same-named container is already present, don't recreate it — reuse
+	// it (starting it if it's stopped). Reinstall is then a no-op against a
+	// live instance; --force recreates it so changed ports/listen/credentials
+	// take effect.
+	exists, err := mm.ContainerExists(mc.ContainerName)
+	if err != nil {
 		return err
 	}
-
-	fmt.Println("-> Starting MinIO container...")
-	if err := mm.EnsureContainer(&mc); err != nil {
-		return err
+	skipped := false
+	if exists && !force {
+		skipped = true
+		if running, _ := mm.ContainerRunning(mc.ContainerName); running {
+			fmt.Printf("-> MinIO container %q already running; skipping creation\n", mc.ContainerName)
+		} else {
+			fmt.Printf("-> MinIO container %q exists but is stopped; starting it\n", mc.ContainerName)
+			if err := mm.StartContainer(&mc); err != nil {
+				return err
+			}
+		}
+	} else {
+		// Fresh install (or the config survived a `remove` that kept it):
+		// generate the root password once so the data dir stays readable.
+		if mc.RootPassword == "" {
+			pw, err := generatePassword(20)
+			if err != nil {
+				return fmt.Errorf("generating MinIO root password: %w", err)
+			}
+			mc.RootPassword = pw
+		}
+		fmt.Printf("-> Preparing MinIO image %s...\n", mc.ImageTag)
+		if err := mm.EnsureImage(mc.ImageTag); err != nil {
+			return err
+		}
+		fmt.Println("-> Starting MinIO container...")
+		if err := mm.EnsureContainer(&mc); err != nil {
+			return err
+		}
 	}
 
 	cfg.Addons.Minio[name] = mc
@@ -1436,8 +1467,13 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
-	fmt.Println()
-	fmt.Printf("✓ minio installed: %q\n", name)
+	if skipped {
+		fmt.Println()
+		fmt.Printf("✓ minio already present: %q\n", name)
+	} else {
+		fmt.Println()
+		fmt.Printf("✓ minio installed: %q\n", name)
+	}
 	fmt.Printf("  Container:    %s\n", mc.ContainerName)
 	fmt.Printf("  Image:        %s\n", mc.ImageTag)
 	fmt.Printf("  Data:         %s\n", mm.DataDir(&mc))
@@ -1445,7 +1481,8 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	fmt.Printf("  Console:      http://%s:%d\n", mc.Listen, mc.ConsolePort)
 	fmt.Println()
 	fmt.Printf("  Root user:     %s\n", mc.RootUser)
-	fmt.Printf("  Root password: stored in %s (addons.minio.%s.root_password)\n", path, name)
+	fmt.Printf("  Root password: %s\n", mc.RootPassword)
+	fmt.Printf("                 (also stored in %s, addons.minio.%s.root_password)\n", path, name)
 	return nil
 }
 
