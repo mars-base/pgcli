@@ -42,6 +42,8 @@ Infra addons (shared, not tied to one instance):
           Stored under top-level addons.pgdog in config.
   pg addon install haproxy
           Stored under top-level addons.haproxy in config (Linux only).
+  pg addon install minio
+          Stored under top-level addons.minio in config (Linux amd64 only).
 
 Commands:
   pg addon install <addon>   install an add-on
@@ -65,6 +67,7 @@ Currently supported add-ons:
   etcd        standalone key-value store (HA cluster DCS)
   pgdog       Postgres proxy (pooling, load balancing, sharding)
   haproxy     TCP load balancer in front of a Patroni cluster (unified or read/write split)
+  minio       single-node S3-compatible object storage (web console included; Linux amd64 only)
 
 Two modes (pgbouncer):
   Local:  pg addon install pgbouncer -i <instance>
@@ -87,6 +90,13 @@ Infra addon (haproxy — TCP load balancer in front of a Patroni cluster, Linux 
   --ha. After adding or removing a member ("pg ha create" / "pg ha remove"),
   re-run install to re-sync the backend list.
 
+Infra addon (minio — single-node S3-compatible object storage, Linux amd64 only):
+  pg addon install minio [--name store] [--api-port N] [--console-port N]
+                         [--root-user admin] [--data-dir ...]
+  Root credentials are generated on first install and stored in the config
+  (root_user / root_password under addons.minio.<name>); the web console is at
+  http://<listen>:<console-port>/.
+
 Re-running install is idempotent — it re-syncs all users and passwords from
 pg_shadow, regenerates config files and restarts the container.
 
@@ -99,7 +109,8 @@ Examples:
   pg addon install pgdog --backend app=127.0.0.1:5432:shard0:0 --backend app=127.0.0.1:5433:shard1:1 --user alice:s3cret:app
   pg addon install haproxy --ha app
   pg addon install haproxy --name lb --mode split --ha app --max-lag 1MB
-  pg addon install haproxy --node node1=10.0.0.11:35532:8008 --node node2=10.0.0.11:35533:8009`,
+  pg addon install haproxy --node node1=10.0.0.11:35532:8008 --node node2=10.0.0.11:35533:8009
+  pg addon install minio --name store --data-dir /srv/minio`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonInstall(args[0], cmd)
@@ -155,6 +166,7 @@ Supported add-ons:
   etcd       pg addon start etcd [--name m1]
   pgdog      pg addon start pgdog [--name proxy]
   haproxy    pg addon start haproxy [--name lb]
+  minio      pg addon start minio [--name store]
   pgbouncer  pg addon start pgbouncer -i <instance>
              pg addon start pgbouncer --pg-name <remote-name>
 
@@ -162,6 +174,7 @@ Examples:
   pg addon start etcd --name m1
   pg addon start pgdog
   pg addon start haproxy --name lb
+  pg addon start minio --name store
   pg addon start pgbouncer -i proj01`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -179,6 +192,7 @@ Supported add-ons:
   etcd       pg addon stop etcd [--name m1]
   pgdog      pg addon stop pgdog [--name proxy]
   haproxy    pg addon stop haproxy [--name lb]
+  minio      pg addon stop minio [--name store]
   pgbouncer  pg addon stop pgbouncer -i <instance>
              pg addon stop pgbouncer --pg-name <remote-name>
 
@@ -186,6 +200,7 @@ Examples:
   pg addon stop etcd --name m1
   pg addon stop pgdog
   pg addon stop haproxy --name lb
+  pg addon stop minio --name store
   pg addon stop pgbouncer -i proj01`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -239,10 +254,11 @@ func init() {
 	addonInstallCmd.Flags().Int("peer-port", 0, "etcd peer host port (0=auto-assign, next free port after client)")
 	addonInstallCmd.Flags().String("image", "", "etcd image tag (default quay.io/coreos/etcd:v3.5.30)")
 	addonInstallCmd.Flags().String("cluster", "", "etcd cluster name (--initial-cluster-token, default \"pgcli-etcd\")")
-	addonInstallCmd.Flags().String("data-dir", "", "etcd data dir root, absolute or relative to base_dir (default <base_dir>/addon/etcd); each member uses <root>/<name>/data")
+	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root or a MinIO instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data)")
 	addonInstallCmd.Flags().String("advertise-host", "", "host advertised in this member's peer/client URLs (empty=127.0.0.1 for single-host; set a LAN IP or FQDN for cross-host clusters)")
 	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.0.0.12:2379 (implies --initial-cluster-state existing; requires --advertise-host)")
-	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy or haproxy instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\")")
+	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy or minio instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\")")
+	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO data directory (object storage / backup repository)")
 
 	// haproxy flags (top-level load balancer in front of a Patroni cluster)
 	addonInstallCmd.Flags().String("mode", "", "HAProxy routing mode: unified (default, all traffic to the leader) or split (separate read listener for replicas)")
@@ -253,10 +269,15 @@ func init() {
 	addonInstallCmd.Flags().Int("stats-port", 0, "HAProxy stats page host port (0=auto-assign, next free port)")
 	addonInstallCmd.Flags().String("max-lag", "", "replica lag threshold for the read listener, e.g. 1MB (split mode; empty=no filter)")
 
+	// minio flags (top-level single-node S3-compatible object storage)
+	addonInstallCmd.Flags().Int("api-port", 0, "MinIO S3 API host port (0=auto-assign from minio_start_port)")
+	addonInstallCmd.Flags().Int("console-port", 0, "MinIO web console host port (0=auto-assign, next free port)")
+	addonInstallCmd.Flags().String("root-user", "", "MinIO root user (default \"admin\"; the root password is generated on first install and stored in the config)")
+
 	// start / stop flags
-	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy or haproxy instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\")")
+	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy or minio instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\")")
 	addonStartCmd.Flags().String("pg-name", "", "name of a remote PgBouncer to start")
-	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy or haproxy instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\")")
+	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy or minio instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\")")
 	addonStopCmd.Flags().String("pg-name", "", "name of a remote PgBouncer to stop")
 
 	// pgdog flags (top-level shared Postgres proxy addon)
@@ -281,10 +302,12 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallPgDog(cmd)
 	case "haproxy":
 		return runAddonInstallHAProxy(cmd)
+	case "minio":
+		return runAddonInstallMinio(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -1318,6 +1341,114 @@ func runAddonInstallHAProxy(cmd *cobra.Command) error {
 	return nil
 }
 
+// runAddonInstallMinio installs a standalone single-node MinIO container:
+// S3-compatible object storage shared across the host (e.g. a pgBackRest
+// repository for a Patroni cluster). The image is pull-only from the public
+// ghcr repo. Root credentials are generated on first install and persisted to
+// pg.yaml under addons.minio.<name>; a re-install keeps the stored set so the
+// data directory stays readable with the same keys.
+func runAddonInstallMinio(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "minio"
+	}
+	imageTag, _ := cmd.Flags().GetString("image")
+	dataDir, _ := cmd.Flags().GetString("data-dir")
+	apiPort, _ := cmd.Flags().GetInt("api-port")
+	consolePort, _ := cmd.Flags().GetInt("console-port")
+	rootUser, _ := cmd.Flags().GetString("root-user")
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.Minio == nil {
+		cfg.Addons.Minio = make(map[string]config.MinioConfig)
+	}
+	existing, ok := cfg.Addons.Minio[name]
+	if !ok {
+		existing = config.MinioConfig{
+			ContainerName: "pgcli-minio" + nsSuffixCLI(cfg.Namespace) + "-" + name,
+			Name:          name,
+		}
+	}
+	if imageTag != "" {
+		existing.ImageTag = imageTag
+	}
+	if dataDir != "" {
+		existing.DataDir = dataDir
+	}
+	if apiPort != 0 {
+		existing.APIPort = apiPort
+	}
+	if consolePort != 0 {
+		existing.ConsolePort = consolePort
+	}
+	if rootUser != "" {
+		existing.RootUser = rootUser
+	}
+	if existing.Name == "" {
+		existing.Name = name
+	}
+	cfg.Addons.Minio[name] = existing
+
+	// ApplyDefaults fills ContainerName/ImageTag/Listen/RootUser and assigns
+	// the two ports from the minio_start_port pool. Credentials are NOT managed
+	// there — they are a secret the install path owns.
+	cfg.ApplyDefaults()
+	mc := cfg.Addons.Minio[name]
+
+	// Generate the root password once, on first install. An existing instance
+	// keeps its stored password so the bound data dir stays readable.
+	if mc.RootPassword == "" {
+		pw, err := generatePassword(20)
+		if err != nil {
+			return fmt.Errorf("generating MinIO root password: %w", err)
+		}
+		mc.RootPassword = pw
+	}
+
+	mm, err := podman.NewMinioManager(cfg)
+	if err != nil {
+		return fmt.Errorf("minio manager: %w", err)
+	}
+
+	fmt.Printf("-> Preparing MinIO image %s...\n", mc.ImageTag)
+	if err := mm.EnsureImage(mc.ImageTag); err != nil {
+		return err
+	}
+
+	fmt.Println("-> Starting MinIO container...")
+	if err := mm.EnsureContainer(&mc); err != nil {
+		return err
+	}
+
+	cfg.Addons.Minio[name] = mc
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Printf("✓ minio installed: %q\n", name)
+	fmt.Printf("  Container:    %s\n", mc.ContainerName)
+	fmt.Printf("  Image:        %s\n", mc.ImageTag)
+	fmt.Printf("  Data:         %s\n", mm.DataDir(&mc))
+	fmt.Printf("  S3 API:       http://%s:%d\n", mc.Listen, mc.APIPort)
+	fmt.Printf("  Console:      http://%s:%d\n", mc.Listen, mc.ConsolePort)
+	fmt.Println()
+	fmt.Printf("  Root user:     %s\n", mc.RootUser)
+	fmt.Printf("  Root password: stored in %s (addons.minio.%s.root_password)\n", path, name)
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // list logic
 // ---------------------------------------------------------------------------
@@ -1492,6 +1623,44 @@ func runAddonList() error {
 		fmt.Println("  (none)")
 	}
 
+	// minio (single-node object storage, top-level addon; Linux/amd64-only manager)
+	fmt.Println()
+	fmt.Println("Infra add-ons (minio):")
+	hasMinio := false
+	if mm, err := podman.NewMinioManager(cfg); err == nil {
+		for name, mc := range cfg.Addons.Minio {
+			hasMinio = true
+			status := "stopped"
+			if running, err := mm.ContainerRunning(mc.ContainerName); err == nil && running {
+				status = "running"
+			}
+			fmt.Printf("  %s (name: %s)\n", "minio", name)
+			fmt.Printf("    Status:      %s\n", status)
+			fmt.Printf("    Listen:      %s\n", mc.Listen)
+			fmt.Printf("    API port:    %d\n", mc.APIPort)
+			fmt.Printf("    Console port: %d\n", mc.ConsolePort)
+			fmt.Printf("    Console URL: http://%s:%d/\n", mc.Listen, mc.ConsolePort)
+			fmt.Printf("    Data:        %s\n", mm.DataDir(&mc))
+			fmt.Printf("    Root user:   %s\n", mc.RootUser)
+			fmt.Printf("    Image:       %s\n", mc.ImageTag)
+			fmt.Printf("    Container:   %s\n", mc.ContainerName)
+		}
+	} else if len(cfg.Addons.Minio) > 0 {
+		// Configured but the manager is unavailable (macOS/arm): still show them.
+		for name, mc := range cfg.Addons.Minio {
+			hasMinio = true
+			fmt.Printf("  %s (name: %s)\n", "minio", name)
+			fmt.Printf("    Status:      n/a (%v)\n", err)
+			fmt.Printf("    Listen:      %s\n", mc.Listen)
+			fmt.Printf("    API port:    %d\n", mc.APIPort)
+			fmt.Printf("    Console port: %d\n", mc.ConsolePort)
+			fmt.Printf("    Container:   %s\n", mc.ContainerName)
+		}
+	}
+	if !hasMinio {
+		fmt.Println("  (none)")
+	}
+
 	return nil
 }
 
@@ -1507,10 +1676,12 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemovePgDog(cmd)
 	case "haproxy":
 		return runAddonRemoveHAProxy(cmd)
+	case "minio":
+		return runAddonRemoveMinio(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -1723,10 +1894,12 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartPgDog(cmd)
 	case "haproxy":
 		return runAddonStartHAProxy(cmd)
+	case "minio":
+		return runAddonStartMinio(cmd)
 	case "pgbouncer":
 		return runAddonStartPgBouncer(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio)", addonName)
 	}
 }
 
@@ -1738,10 +1911,12 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopPgDog(cmd)
 	case "haproxy":
 		return runAddonStopHAProxy(cmd)
+	case "minio":
+		return runAddonStopMinio(cmd)
 	case "pgbouncer":
 		return runAddonStopPgBouncer(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio)", addonName)
 	}
 }
 
@@ -1978,6 +2153,109 @@ func runAddonStopHAProxy(cmd *cobra.Command) error {
 	}
 	fmt.Printf("-> Stopping haproxy %q...\n", name)
 	_, err = hm.Stop(hc.ContainerName)
+	return err
+}
+
+// ---------------------------------------------------------------------------
+// remove / start / stop logic — minio
+// ---------------------------------------------------------------------------
+
+func runAddonRemoveMinio(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "minio"
+	}
+	cleanData, _ := cmd.Flags().GetBool("clean-data")
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.Minio == nil {
+		return fmt.Errorf("no minio add-ons configured")
+	}
+	mc, ok := cfg.Addons.Minio[name]
+	if !ok {
+		return fmt.Errorf("minio %q not found", name)
+	}
+
+	mm, err := podman.NewMinioManager(cfg)
+	if err != nil {
+		return fmt.Errorf("minio manager: %w", err)
+	}
+
+	fmt.Printf("-> Removing minio %q...\n", name)
+	if err := mm.Remove(&mc, cleanData); err != nil {
+		return err
+	}
+
+	delete(cfg.Addons.Minio, name)
+	if len(cfg.Addons.Minio) == 0 {
+		cfg.Addons.Minio = nil
+	}
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	fmt.Printf("✓ minio %q removed\n", name)
+	return nil
+}
+
+func runAddonStartMinio(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "minio"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	if cfg.Addons.Minio == nil {
+		return fmt.Errorf("no minio add-ons configured (run 'pg addon install minio')")
+	}
+	mc, ok := cfg.Addons.Minio[name]
+	if !ok {
+		return fmt.Errorf("minio %q not found (run 'pg addon install minio --name %s')", name, name)
+	}
+	mm, err := podman.NewMinioManager(cfg)
+	if err != nil {
+		return fmt.Errorf("minio manager: %w", err)
+	}
+	fmt.Printf("-> Starting minio %q...\n", name)
+	return mm.StartContainer(&mc)
+}
+
+func runAddonStopMinio(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "minio"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	mc, ok := cfg.Addons.Minio[name]
+	if !ok {
+		return fmt.Errorf("minio %q not found", name)
+	}
+	mm, err := podman.NewMinioManager(cfg)
+	if err != nil {
+		return fmt.Errorf("minio manager: %w", err)
+	}
+	running, _ := mm.ContainerRunning(mc.ContainerName)
+	if !running {
+		fmt.Printf("minio %q is not running\n", name)
+		return nil
+	}
+	fmt.Printf("-> Stopping minio %q...\n", name)
+	_, err = mm.Stop(mc.ContainerName)
 	return err
 }
 

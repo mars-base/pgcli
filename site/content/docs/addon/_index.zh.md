@@ -28,6 +28,7 @@ pgcli 支持通过插件系统扩展 PostgreSQL 功能。插件是独立的容�
 | [`etcd`](./etcd/) | 分布式键值存储——独立运行、可组集群，用于 HA / DCS |
 | [`pgdog`](./pgdog/) | Postgres 代理——连接池化、负载均衡与分片 |
 | [`haproxy`](./haproxy/) | Patroni 集群前的 TCP 负载均衡——读写一体或读写分离（仅 Linux） |
+| [`minio`](./minio/) | 单机 S3 兼容对象存储，含 Web 控制台——典型用作共享的 pgBackRest 备份仓库（仅 Linux amd64） |
 | [`ha`](./ha/) | Patroni 高可用——自动故障切换。**不通过 `pg addon` 安装**：它是独立的顶层命令 `pg ha` |
 
 每个插件都有独立页面，包含命令、参数与故障排除说明。
@@ -53,4 +54,4 @@ pg addon remove <addon> [flags]     # 移除插件、容器与数据
 ```
 
 各插件的具体参数与示例见其独立页面：
-[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [HAProxy](./haproxy/) · [Patroni 高可用](./ha/) · [Patroni 动态配置](./ha-dynamic/) · [Patroni REST API](./ha-rest-api/)
+[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [HAProxy](./haproxy/) · [MinIO](./minio/) · [Patroni 高可用](./ha/) · [Patroni 动态配置](./ha-dynamic/) · [Patroni REST API](./ha-rest-api/)

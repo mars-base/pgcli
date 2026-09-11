@@ -104,6 +104,19 @@ pg logs addon haproxy --name lb -f     # Follow
 HAProxy logs health-check transitions (`Server lb_rw/node2 is UP/DOWN, reason:
 ...`) and connection events — useful for watching failovers live.
 
+### MinIO instances
+
+MinIO is also a top-level infra addon — select the instance with `--name`
+(defaults to `minio`):
+
+```bash
+pg logs addon minio --name store       # Instance logs
+pg logs addon minio --name store -f    # Follow
+```
+
+MinIO logs to stdout: startup lines (the `API:` / `Console:` addresses it is
+serving) and request errors.
+
 ## Options
 
 | Option | Short | Description |
@@ -112,7 +125,7 @@ HAProxy logs health-check transitions (`Server lb_rw/node2 is UP/DOWN, reason:
 | `--tail N` | `-n N` | Show last N lines (default: 50, use 0 for all) |
 | `--instance NAME` | `-i NAME` | Instance name (default: `default`) |
 | `--pg-name NAME` | | Remote addon name (for remote PgBouncer) |
-| `--name NAME` | | etcd member / PgDog proxy / HAProxy instance name (default: `etcd` / `pgdog` / `haproxy`) |
+| `--name NAME` | | etcd member / PgDog proxy / HAProxy / MinIO instance name (default: `etcd` / `pgdog` / `haproxy` / `minio`) |
 
 ## Examples
 
@@ -137,6 +150,9 @@ pg logs addon pgdog --name pgdog -f
 
 # Watch HAProxy health-check / failover transitions
 pg logs addon haproxy --name lb -f
+
+# Watch MinIO request errors
+pg logs addon minio --name store -f
 ```
 
 ## Notes
@@ -146,5 +162,6 @@ pg logs addon haproxy --name lb -f
 - etcd member logs are JSON-formatted raft/leader/peer events — useful for debugging quorum issues
 - PgDog proxy logs are structured INFO lines for connection-pool events (server connections, auth, client connect/disconnect)
 - HAProxy logs health-check transitions and connection events — watch a failover happen in real time
+- MinIO logs startup lines and request errors to stdout
 - Follow mode (`-f`) keeps the connection open until interrupted with Ctrl+C
-- Remote addons use `--pg-name` instead of `-i` to identify the target pooler; etcd members, PgDog proxies, and HAProxy instances use `--name`
+- Remote addons use `--pg-name` instead of `-i` to identify the target pooler; etcd members, PgDog proxies, HAProxy instances, and MinIO instances use `--name`

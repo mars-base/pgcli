@@ -26,6 +26,7 @@ type Config struct {
 	PatroniStartPort        int                       `yaml:"patroni_start_port,omitempty"`         // starting Patroni member PG host port, default 35532
 	PatroniRestapiStartPort int                       `yaml:"patroni_restapi_start_port,omitempty"` // starting Patroni REST API host port, default 8008
 	HaProxyStartPort        int                       `yaml:"haproxy_start_port,omitempty"`         // starting HAProxy listener host port, default 5000 (read port and stats take the next free ports)
+	MinioStartPort          int                       `yaml:"minio_start_port,omitempty"`           // starting MinIO API host port, default 9000 (console takes the next free port)
 	Postgres                PostgresConfig            `yaml:"postgres"`
 	Podman                  PodmanConfig              `yaml:"podman"`
 	PITR                    PITRConfig                `yaml:"pitr"`
@@ -80,6 +81,7 @@ type TopAddonsConfig struct {
 	PgDog     map[string]PgDogConfig          `yaml:"pgdog,omitempty"`
 	Patroni   map[string]PatroniClusterConfig `yaml:"patroni,omitempty"`
 	HAProxy   map[string]HAProxyConfig        `yaml:"haproxy,omitempty"`
+	Minio     map[string]MinioConfig          `yaml:"minio,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -324,6 +326,40 @@ func (h HAProxyConfig) EffectiveMode() string {
 	return "unified"
 }
 
+// DefaultMinioImageTag is the public pre-built single-node MinIO image
+// (upstream .deb binary on Alpine, web console included). It is a const here,
+// the single source of truth, so ApplyDefaults and the podman manager agree.
+const DefaultMinioImageTag = "ghcr.io/mars-base/pgcli/pgcli-minio:20250422221226"
+
+// MinioConfig holds a standalone MinIO addon (single-node S3-compatible object
+// storage). Like etcd/pgdog/haproxy it is shared infrastructure, so it lives at
+// the top level (addons.minio.<name>). The typical use is a pgBackRest repository
+// reachable by every host of a Patroni cluster, which local per-host backup dirs
+// cannot be.
+//
+// The image is pulled from the public ghcr.io/mars-base/pgcli registry; MinIO's
+// official image no longer ships the web console, so this one is built from the
+// upstream .deb binary on Alpine.
+type MinioConfig struct {
+	ContainerName string `yaml:"container_name"`      // pgcli-minio<ns>-<name>
+	Name          string `yaml:"name,omitempty"`      // addon key, defaults to the map key
+	ImageTag      string `yaml:"image_tag,omitempty"` // ghcr.io/mars-base/pgcli/pgcli-minio:... (default)
+	DataDir       string `yaml:"data_dir,omitempty"`  // host dir bound to /data; default <base-dir>/addon/minio/<name>/data
+	Listen        string `yaml:"listen,omitempty"`    // bind address, default 127.0.0.1
+	APIPort       int    `yaml:"api_port,omitempty"`  // S3 API host port, 9000+ auto-assigned
+	ConsolePort   int    `yaml:"console_port,omitempty"`
+	// RootUser / RootPassword become MINIO_ROOT_USER / MINIO_ROOT_PASSWORD.
+	// The password is generated at first install and persisted here (same route
+	// as the Patroni password set); it is never printed by pg addon list.
+	RootUser     string `yaml:"root_user,omitempty"`     // default admin
+	RootPassword string `yaml:"root_password,omitempty"` // generated on first install
+
+	// Autostart brings this container up on host boot via the boot service
+	// (pg autostart enable --minio). Start-only: it starts the existing
+	// container, so install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
 // PostgresConfig holds PostgreSQL connection settings.
 type PostgresConfig struct {
 	URL      string `yaml:"url"`      // connection string (postgres://user:pass@host:port/db)
@@ -384,6 +420,7 @@ func Default() *Config {
 		PatroniStartPort:        35532,
 		PatroniRestapiStartPort: 8008,
 		HaProxyStartPort:        5000,
+		MinioStartPort:          9000,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -573,6 +610,7 @@ type displayConfig struct {
 	PatroniStartPort        int                       `yaml:"patroni_start_port,omitempty"`
 	PatroniRestapiStartPort int                       `yaml:"patroni_restapi_start_port,omitempty"`
 	HaProxyStartPort        int                       `yaml:"haproxy_start_port,omitempty"`
+	MinioStartPort          int                       `yaml:"minio_start_port,omitempty"`
 	Logging                 LoggingConfig             `yaml:"logging"`
 	Backup                  BackupConfig              `yaml:"backup"`
 	Pigsty                  PigstyConfig              `yaml:"pigsty"`
@@ -594,6 +632,7 @@ func (c *Config) Display() displayConfig {
 		PatroniStartPort:        c.PatroniStartPort,
 		PatroniRestapiStartPort: c.PatroniRestapiStartPort,
 		HaProxyStartPort:        c.HaProxyStartPort,
+		MinioStartPort:          c.MinioStartPort,
 		Logging:                 c.Logging,
 		Backup:                  c.Backup,
 		Pigsty:                  c.Pigsty,
@@ -676,6 +715,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.HaProxyStartPort == 0 {
 		c.HaProxyStartPort = d.HaProxyStartPort
+	}
+	if c.MinioStartPort == 0 {
+		c.MinioStartPort = d.MinioStartPort
 	}
 
 	// Postgres
@@ -925,6 +967,28 @@ func (c *Config) ApplyDefaults() {
 			addon.Listen = "127.0.0.1"
 		}
 		c.Addons.HAProxy[name] = addon
+	}
+
+	// Top-level addons defaults (MinIO single-node object storage). DataDir is
+	// intentionally left empty here — the manager resolves it relative to the
+	// base dir at container-creation time.
+	for name, addon := range c.Addons.Minio {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-minio" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultMinioImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "127.0.0.1"
+		}
+		if addon.RootUser == "" {
+			addon.RootUser = "admin"
+		}
+		c.Addons.Minio[name] = addon
 	}
 
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
@@ -1241,6 +1305,51 @@ func (c *Config) autoAssignPorts() {
 				next = addon.StatsPort + 1
 			}
 			c.Addons.HAProxy[name] = addon
+		}
+	}
+
+	// Allocate ports for top-level addons (MinIO). Each instance takes two
+	// consecutive ports from one pool (minio_start_port base, default 9000):
+	// the S3 API and the web console. Same four-part discipline as HAProxy —
+	// reserve explicit ports, sort names, advance a shared cursor past both
+	// real listeners and already-taken ports.
+	minioBase := c.MinioStartPort
+	assignedMinio := map[int]bool{}
+	for _, addon := range c.Addons.Minio {
+		for _, p := range []int{addon.APIPort, addon.ConsolePort} {
+			if p != 0 {
+				assignedMinio[p] = true
+			}
+		}
+	}
+	{
+		names := make([]string, 0, len(c.Addons.Minio))
+		for name := range c.Addons.Minio {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		next := minioBase
+		nextFree := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedMinio[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		for _, name := range names {
+			addon := c.Addons.Minio[name]
+			if addon.APIPort == 0 && minioBase > 0 {
+				addon.APIPort = nextFree()
+			} else if addon.APIPort >= next {
+				next = addon.APIPort + 1
+			}
+			if addon.ConsolePort == 0 && minioBase > 0 {
+				addon.ConsolePort = nextFree()
+			} else if addon.ConsolePort >= next {
+				next = addon.ConsolePort + 1
+			}
+			c.Addons.Minio[name] = addon
 		}
 	}
 }

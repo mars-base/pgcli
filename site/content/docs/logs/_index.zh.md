@@ -100,6 +100,17 @@ pg logs addon haproxy --name lb -f     # 持续跟踪
 HAProxy 会记录健康检查状态变化（`Server lb_rw/node2 is UP/DOWN, reason: ...`）
 与连接事件，适合实时观察故障切换。
 
+### MinIO 实例
+
+minio 同样属于顶层 infra 插件，用 `--name` 指定实例（省略时默认为 `minio`）：
+
+```bash
+pg logs addon minio --name store       # 实例日志
+pg logs addon minio --name store -f    # 持续跟踪
+```
+
+MinIO 日志走 stdout：启动行（其服务的 `API:` / `Console:` 地址）与请求错误。
+
 ## 选项说明
 
 | 选项 | 简写 | 描述 |
@@ -108,7 +119,7 @@ HAProxy 会记录健康检查状态变化（`Server lb_rw/node2 is UP/DOWN, reas
 | `--tail N` | `-n N` | 显示最后 N 行（默认：50，0 表示全部） |
 | `--instance NAME` | `-i NAME` | 实例名称（默认：`default`） |
 | `--pg-name NAME` | | 远程插件名称（用于远程 PgBouncer） |
-| `--name NAME` | | etcd 成员 / PgDog 代理 / HAProxy 实例名称（默认：`etcd` / `pgdog` / `haproxy`） |
+| `--name NAME` | | etcd 成员 / PgDog 代理 / HAProxy / MinIO 实例名称（默认：`etcd` / `pgdog` / `haproxy` / `minio`） |
 
 ## 示例
 
@@ -133,6 +144,9 @@ pg logs addon pgdog --name pgdog -f
 
 # 观察 HAProxy 健康检查 / 故障切换状态变化
 pg logs addon haproxy --name lb -f
+
+# 观察 MinIO 请求错误
+pg logs addon minio --name store -f
 ```
 
 ## 注意事项
@@ -142,5 +156,6 @@ pg logs addon haproxy --name lb -f
 - etcd 成员日志为 JSON 格式的 raft/选主/peer 事件，适合排查 quorum 问题
 - PgDog 代理日志为结构化 INFO 行，记录连接池事件（服务器连接、认证、客户端连接 / 断开）
 - HAProxy 日志记录健康检查状态变化与连接事件——可实时观察故障切换过程
+- MinIO 日志走 stdout，输出启动行与请求错误
 - 跟踪模式（`-f`）会保持连接直到按 Ctrl+C 中断
-- 远程插件使用 `--pg-name` 而不是 `-i` 来标识目标连接池；etcd 成员、PgDog 代理和 HAProxy 实例使用 `--name`
+- 远程插件使用 `--pg-name` 而不是 `-i` 来标识目标连接池；etcd 成员、PgDog 代理、HAProxy 实例和 MinIO 实例使用 `--name`

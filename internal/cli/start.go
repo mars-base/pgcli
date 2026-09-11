@@ -75,8 +75,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --etcd / --pgdog / --ha / --haproxy)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --etcd / --pgdog / --ha / --haproxy / --minio)")
 		return nil
 	}
 
@@ -136,10 +136,17 @@ func startAutostart() error {
 		firstErr = err
 	}
 
-	// HAProxy load balancers (top-level infra addon). Last: they front the
-	// Patroni members above, so their backends exist by the time the listeners
-	// come up (HAProxy tolerates backends being down anyway).
+	// HAProxy load balancers (top-level infra addon). Last among the
+	// PostgreSQL-facing addons: they front the Patroni members above, so their
+	// backends exist by the time the listeners come up (HAProxy tolerates
+	// backends being down anyway).
 	if err := startAutostartHAProxies(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// MinIO instances (top-level infra addon). Independent of the PostgreSQL
+	// stack — typically the backup repository, so bringing it up last is fine.
+	if err := startAutostartMinios(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -363,6 +370,50 @@ func startAutostartHAProxies(c *config.Config) error {
 		hc := c.Addons.HAProxy[name]
 		if err := hm.StartContainer(&hc); err != nil {
 			fmt.Printf("  [X] haproxy autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartMinio reports whether any MinIO instance is autostart-enabled.
+func hasAutostartMinio(c *config.Config) bool {
+	for _, mc := range c.Addons.Minio {
+		if mc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartMinios starts each autostart-enabled MinIO instance. Start-only
+// semantics like the other infra autostarts: the container comes up with the
+// ports/credentials already in the config, recreating it if the container was
+// removed. Order is sorted by instance name for deterministic, readable boot
+// logs.
+func startAutostartMinios(c *config.Config) error {
+	var names []string
+	for name, mc := range c.Addons.Minio {
+		if mc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	mm, err := podman.NewMinioManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		mc := c.Addons.Minio[name]
+		if err := mm.StartContainer(&mc); err != nil {
+			fmt.Printf("  [X] minio autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}

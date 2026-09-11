@@ -39,3 +39,8 @@ site/resources/
 
 # Claude Code
 .claude/
+
+# MinIO: extracted static binary staged by `make container-build-minio` right
+# before the image build; only embed/minio.Containerfile is committed, never the
+# binary itself. (Exact path match — embed/minio.Containerfile stays tracked.)
+embed/minio
