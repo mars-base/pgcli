@@ -14,7 +14,8 @@ target for a Patroni cluster), but it is a general-purpose object store.
 > networking, which the macOS `podman machine` does not expose to containers, so
 > it fails fast there with a clear message. The public image is dual-arch
 > (amd64 + arm64), so any Linux host architecture works; `pg addon list` on
-> macOS still shows configured instances without live status.
+> macOS still shows configured instances without live status. The [`pg mc`
+> client](#using-the-mc-client) is a different story — it works on macOS too.
 
 ## How It Works
 
@@ -73,7 +74,8 @@ The output reports endpoints and the root credentials:
 ```
 
 Sign in to the console at the `Console:` URL with the printed root user and
-password. Point S3 clients (including pgBackRest) at the `S3 API:` URL.
+password. Point S3 clients (including pgBackRest) at the `S3 API:` URL, or
+drive them from the terminal with [`pg mc`](#using-the-mc-client) below.
 
 Re-running install against a **live** instance is a no-op: the container is not
 recreated (a stopped one is simply started, with a notice), the flags are
@@ -272,6 +274,7 @@ and request errors. An `API: http://...` block confirms the listeners came up.
   built from `listen` + API port; if you serve on `127.0.0.1` but access from
   another host, clients get redirected to the loopback URL. Set `listen` to the
   address clients can actually reach.
-- **macOS.** Not supported — the addon serves over host networking, which the
-  `podman machine` does not expose. Linux (amd64 and arm64) is fine; see
-  Platform support above.
+- **macOS.** The addon is not supported there — it serves over host
+  networking, which the `podman machine` does not expose. Linux (amd64 and
+  arm64) is fine; see Platform support above. `pg mc` still works on macOS
+  against a remote endpoint.

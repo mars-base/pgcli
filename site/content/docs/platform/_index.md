@@ -51,6 +51,7 @@ across machines, or that depend on Linux-only container internals, stay
 | Addon — **etcd** | ✅ incl. cross-host clusters | ❌ Linux only |
 | Addon — **HAProxy** | ✅ | ❌ Linux only |
 | Addon — **MinIO** | ✅ amd64 + arm64 | ❌ Linux only |
+| Client — **`pg mc`** (MinIO client) | ✅ host network | ✅ bridge, remote endpoints only (see below) |
 | HA — **Patroni** (`pg ha`) | ✅ incl. cross-host | ❌ Linux only |
 
 Legend: ✅ supported · ✅ *note* supported with the stated caveat · ❌ not supported.
@@ -101,6 +102,11 @@ Addon networking differs per component:
 - **[MinIO](/docs/addon/minio/)** — **Linux only.** Single-node object
   storage served over host networking (same macOS limitation as HAProxy); the
   public image is dual-arch (amd64 + arm64).
+- **[`pg mc`](/docs/addon/minio/#using-the-mc-client)** (MinIO client) — **both
+  platforms**, unlike the addon itself. It is just a client run from a
+  throwaway container, so on macOS it reaches a remote or LAN MinIO/S3 endpoint
+  over the bridge network (point aliases at a routable address, not
+  `127.0.0.1`); aliases persist at `~/.mc/config.json` on both platforms.
 
 ## Confirming your platform
 

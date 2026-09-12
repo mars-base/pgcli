@@ -47,6 +47,7 @@ pgcli 在 Linux 和 macOS 上都是驱动 [Podman](https://podman.io) 容器运�
 | 插件 —— **etcd** | ✅ 含跨主机集群 | ❌ 仅 Linux |
 | 插件 —— **HAProxy** | ✅ | ❌ 仅 Linux |
 | 插件 —— **MinIO** | ✅ amd64 + arm64 | ❌ 仅 Linux |
+| 客户端 —— **`pg mc`**（MinIO 客户端） | ✅ host 网络 | ✅ bridge，仅远端端点（见下） |
 | 高可用 —— **Patroni**（`pg ha`） | ✅ 含跨主机 | ❌ 仅 Linux |
 
 图例：✅ 支持 · ✅ *备注* 支持但有所述限制 · ❌ 不支持。
@@ -92,6 +93,11 @@ macOS 上这些都是**单主机**：跨主机副本、跨多机的连接池属�
 - **[MinIO](/docs/addon/minio/)** —— **仅 Linux**。单机对象存储，经
   主机网络提供服务（与 HAProxy 同样的 macOS 限制）；公开镜像为双架构
   （amd64 + arm64）。
+- **[`pg mc`](/docs/addon/minio/#使用-mc-客户端)**（MinIO 客户端）——
+  **两个平台都可用**，与插件本身不同。它只是跑在一次性容器里的客户端，
+  所以 macOS 上可以通过 bridge 网络访问远端或局域网的 MinIO/S3 端点
+  （别名请指向可路由地址，而不是 `127.0.0.1`）；别名在两个平台上都持久化
+  在 `~/.mc/config.json`。
 
 ## 确认当前平台
 

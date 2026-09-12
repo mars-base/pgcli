@@ -12,7 +12,8 @@ pgBackRest `repo1-type=s3` 目标），但它本身就是通用对象存储。
 > **平台支持：** MinIO 插件**仅支持 Linux**。它通过主机网络提供服务，而 macOS
 > 的 `podman machine` 不会把主机网络暴露给容器，因此在该平台上会快速失败并给出
 > 明确提示。公开镜像为双架构（amd64 + arm64），任意 Linux 主机架构均可运行；
-> macOS 上 `pg addon list` 仍可显示已配置实例，但没有实时状态。
+> macOS 上 `pg addon list` 仍可显示已配置实例，但没有实时状态。[`pg mc`
+> 客户端](#使用-mc-客户端)不同——它在 macOS 上同样可用。
 
 ## 工作原理
 
@@ -69,7 +70,8 @@ pg addon install minio --name store --listen 0.0.0.0
 ```
 
 用打印出的 root 用户与密码登录 `Console:` 地址的控制台。S3 客户端
-（包括 pgBackRest）指向 `S3 API:` 地址即可。
+（包括 pgBackRest）指向 `S3 API:` 地址即可，也可以在终端用下文的
+[`pg mc`](#使用-mc-客户端)直接操作。
 
 对**已存在**的实例重复执行 install 是无损的：不会重建容器（处于停止状态的会
 直接启动并给出提示），命令行参数会合并进已存配置，**已有的** root 密码保持
@@ -254,5 +256,6 @@ MinIO 日志走 stdout：启动行（`API:`/`Console:` 地址、`Documentation:`
 - **控制台能打开，但 S3 客户端超时。** `MINIO_SERVER_URL` 由 `listen` + API
   端口拼成；若绑在 `127.0.0.1` 却从其他主机访问，客户端会被重定向到回环地址。
   把 `listen` 设为客户端真正可达的地址。
-- **macOS。** 暂不支持——该插件通过主机网络提供服务，而 `podman machine` 不会
-  把它暴露给容器。Linux（amd64 与 arm64）均可用；见上文平台支持。
+- **macOS。** 该插件不支持——它通过主机网络提供服务，而 `podman machine` 不会
+  把它暴露给容器。Linux（amd64 与 arm64）均可用；见上文平台支持。`pg mc` 在
+  macOS 上仍可对接远端端点使用。
