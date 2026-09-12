@@ -85,6 +85,74 @@ credentials take effect — without losing the data directory.
 > who can reach the port can then attempt the root credentials, so only do this
 > behind a firewall or a TLS-terminating proxy.
 
+## Using the mc Client
+
+MinIO speaks S3, so any S3 client works. A ready-made `mc` lives in the
+pre-built tag `ghcr.io/mars-base/pgcli/pgcli-mc:20250813083541` — the static
+upstream binary on `scratch` plus a CA bundle (~29 MB, multi-arch). Set it once:
+
+```bash
+MC=ghcr.io/mars-base/pgcli/pgcli-mc:20250813083541
+```
+
+### One command at a time (`MC_HOST_*`)
+
+`mc` accepts an alias defined entirely through the environment —
+`MC_HOST_<name>=<scheme>://<user>:<password>@<host>:<port>` — so each
+invocation is stateless: no config file, no volume, and the password stays out
+of the command line (and your shell history):
+
+```bash
+PASS=$(yq '.addons.minio.store.root_password' ~/.pgcli/pg.yaml)
+
+podman run --rm --network host \
+  -e MC_HOST_store="http://admin:${PASS}@127.0.0.1:9000" \
+  "$MC" mb store/backups
+
+podman run --rm --network host \
+  -e MC_HOST_store="http://admin:${PASS}@127.0.0.1:9000" \
+  "$MC" ls store
+```
+
+### Many commands (a persistent alias)
+
+To avoid repeating `-e` on every run, `alias set` once and mount the config
+directory on **every** run. The image pins `HOME=/data`, so the mount is what
+`mc` reads and writes:
+
+```bash
+mkdir -p ~/.mc-config
+podman run --rm -v ~/.mc-config:/data --network host "$MC" \
+  alias set store http://127.0.0.1:9000 admin \
+  "$(yq '.addons.minio.store.root_password' ~/.pgcli/pg.yaml)"
+
+podman run --rm -v ~/.mc-config:/data --network host "$MC" ls store
+podman run --rm -v ~/.mc-config:/data --network host "$MC" cp ./dump.pglz store/backups/
+```
+
+Without the `-v`, `alias set` still succeeds — but the container exits with the
+alias, and the next run cannot see it.
+
+> **`--network host` on Linux:** MinIO serves on the host network, and
+> `127.0.0.1` inside a bridge-networked container is the container itself, not
+> the host. If you bind the store to a routable address with `--listen`, point
+> the alias at that address instead and drop `--network host`.
+
+### Common commands
+
+| Command | Purpose |
+|-------|---------|
+| `mc ls store` / `mc ls store/backups` | list buckets / objects |
+| `mc mb store/backups` | create a bucket |
+| `mc cp ./file store/backups/` | upload (add `--recursive` for a tree) |
+| `mc cp store/backups/file ./` | download |
+| `mc find store --name '*.pglz'` | search objects by name |
+| `mc du store` | size per bucket |
+| `mc rm store/backups/file` | delete one object |
+
+The same root credentials work for any S3 SDK — including pgBackRest against a
+`repo1-type=s3` repository.
+
 ## Ports
 
 Each instance takes **two consecutive ports** from one pool, starting at

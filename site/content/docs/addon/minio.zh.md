@@ -79,6 +79,70 @@ pg addon install minio --name store --listen 0.0.0.0
 > `pg.yaml` 里的 `listen` 键）会把它暴露到网络上——能访问该端口的任何人都可尝试
 > root 凭据，因此只应在防火墙后或 TLS 终结代理之后这样暴露。
 
+## 使用 mc 客户端
+
+MinIO 说 S3 协议，任何 S3 客户端都能用。`mc` 有现成的公开镜像
+`ghcr.io/mars-base/pgcli/pgcli-mc:20250813083541`——上游静态二进制 + CA
+证书放在 `scratch` 上（约 29 MB，多架构）。先设一个变量省事：
+
+```bash
+MC=ghcr.io/mars-base/pgcli/pgcli-mc:20250813083541
+```
+
+### 单次命令（`MC_HOST_*`）
+
+`mc` 支持完全用环境变量定义别名——
+`MC_HOST_<name>=<scheme>://<user>:<password>@<host>:<port>`——每次调用都无状态：
+不写配置文件、不挂 volume，密码也不出现在命令行（以及 shell 历史）里：
+
+```bash
+PASS=$(yq '.addons.minio.store.root_password' ~/.pgcli/pg.yaml)
+
+podman run --rm --network host \
+  -e MC_HOST_store="http://admin:${PASS}@127.0.0.1:9000" \
+  "$MC" mb store/backups
+
+podman run --rm --network host \
+  -e MC_HOST_store="http://admin:${PASS}@127.0.0.1:9000" \
+  "$MC" ls store
+```
+
+### 多次命令（持久化别名）
+
+不想每条命令都重复 `-e`，可以 `alias set` 一次，然后在**每次**运行时挂载配置
+目录。镜像把 `HOME` 固定在 `/data`，所以这个挂载才是 `mc` 实际读写的地方：
+
+```bash
+mkdir -p ~/.mc-config
+podman run --rm -v ~/.mc-config:/data --network host "$MC" \
+  alias set store http://127.0.0.1:9000 admin \
+  "$(yq '.addons.minio.store.root_password' ~/.pgcli/pg.yaml)"
+
+podman run --rm -v ~/.mc-config:/data --network host "$MC" ls store
+podman run --rm -v ~/.mc-config:/data --network host "$MC" cp ./dump.pglz store/backups/
+```
+
+不加 `-v` 时 `alias set` 也会显示成功——但别名随容器一起销毁，下次运行看不到它。
+
+> **Linux 上的 `--network host`：** MinIO 走主机网络提供服务，而桥接网络容器里的
+> `127.0.0.1` 是容器自己，不是主机。如果你用 `--listen` 把存储绑到了可路由地址，
+> 就把别名指向那个地址，并去掉 `--network host`。
+
+### 常用命令
+
+| 命令 | 用途 |
+|------|------|
+| `mc ls store` / `mc ls store/backups` | 列出桶 / 对象 |
+| `mc mb store/backups` | 创建桶 |
+| `mc cp ./file store/backups/` | 上传（整个目录加 `--recursive`） |
+| `mc cp store/backups/file ./` | 下载 |
+| `mc find store --name '*.pglz'` | 按名字搜索对象 |
+| `mc du store` | 统计各桶大小 |
+| `mc rm store/backups/file` | 删除单个对象 |
+
+同一套 root 凭据适用于任何 S3 SDK——包括 pgBackRest 的 `repo1-type=s3`
+仓库（见[备份](/docs/backup/)、[恢复](/docs/restore/)）。
+
 ## 端口
 
 每个实例从同一个端口池取**两个连续端口**，基址为 `minio_start_port`（默认
