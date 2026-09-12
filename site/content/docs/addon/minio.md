@@ -88,68 +88,59 @@ credentials take effect — without losing the data directory.
 
 ## Using the mc Client
 
-MinIO speaks S3, so any S3 client works. A ready-made `mc` lives in the
-pre-built tag `ghcr.io/mars-base/pgcli/pgcli-mc:20250813083541` — the static
-upstream binary on `scratch` plus a CA bundle (~29 MB, multi-arch). Set it once:
+`pg mc` runs MinIO's own `mc` client from a throwaway container — no local
+install, no manual `podman run` invocation:
 
 ```bash
-MC=ghcr.io/mars-base/pgcli/pgcli-mc:20250813083541
+pg mc alias set store http://127.0.0.1:9000 admin \
+  "$(yq '.addons.minio.store.root_password' ~/.pgcli/pg.yaml)"
+pg mc mb store/backups
+pg mc ls store
+pg mc cp ./dump.pglz store/backups/
 ```
 
-### One command at a time (`MC_HOST_*`)
+Aliases persist on the host at `~/.mc/config.json` — mc's own default path,
+the same on Linux and macOS — so `alias set` once and every later `pg mc`
+invocation (and a native `mc` install, on Linux) sees the same aliases.
+Under the hood `pg mc` mounts your `~/.mc` into the container and runs
+`ghcr.io/mars-base/pgcli/pgcli-mc` (the static upstream binary on `scratch`,
+pulled on first use); nothing else about it is magic.
 
-`mc` accepts an alias defined entirely through the environment —
-`MC_HOST_<name>=<scheme>://<user>:<password>@<host>:<port>` — so each
-invocation is stateless: no config file, no volume, and the password stays out
-of the command line (and your shell history):
+Any `mc` flag that `pg`'s own flag parser would reject (`--all`, `--json`, …)
+goes after `--`, exactly like `pg etcdctl`:
+
+```bash
+pg mc ls store -- --all
+```
+
+`MC_HOST_<name>` environment aliases — mc's stateless form, no config file
+touched — work through `pg mc` too, since the variable is forwarded into the
+container:
 
 ```bash
 PASS=$(yq '.addons.minio.store.root_password' ~/.pgcli/pg.yaml)
-
-podman run --rm --network host \
-  -e MC_HOST_store="http://admin:${PASS}@127.0.0.1:9000" \
-  "$MC" mb store/backups
-
-podman run --rm --network host \
-  -e MC_HOST_store="http://admin:${PASS}@127.0.0.1:9000" \
-  "$MC" ls store
+MC_HOST_store="http://admin:${PASS}@127.0.0.1:9000" pg mc ls store
 ```
 
-### Many commands (a persistent alias)
-
-To avoid repeating `-e` on every run, `alias set` once and mount the config
-directory on **every** run. The image pins `HOME=/data`, so the mount is what
-`mc` reads and writes:
-
-```bash
-mkdir -p ~/.mc-config
-podman run --rm -v ~/.mc-config:/data --network host "$MC" \
-  alias set store http://127.0.0.1:9000 admin \
-  "$(yq '.addons.minio.store.root_password' ~/.pgcli/pg.yaml)"
-
-podman run --rm -v ~/.mc-config:/data --network host "$MC" ls store
-podman run --rm -v ~/.mc-config:/data --network host "$MC" cp ./dump.pglz store/backups/
-```
-
-Without the `-v`, `alias set` still succeeds — but the container exits with the
-alias, and the next run cannot see it.
-
-> **`--network host` on Linux:** MinIO serves on the host network, and
-> `127.0.0.1` inside a bridge-networked container is the container itself, not
-> the host. If you bind the store to a routable address with `--listen`, point
-> the alias at that address instead and drop `--network host`.
+> **Platform:** the MinIO *addon* is Linux (amd64) only (see above), but
+> `pg mc` is just a client — it works on macOS too, pointed at a remote or
+> LAN endpoint. There, an alias URL of `127.0.0.1` / `localhost` is the
+> container's own loopback, not your Mac's; use a routable address (or
+> `host.containers.internal`) instead. On Linux, `pg mc` runs on the host
+> network, so a loopback alias reaches a local `pg addon install minio`
+> instance directly.
 
 ### Common commands
 
 | Command | Purpose |
 |-------|---------|
-| `mc ls store` / `mc ls store/backups` | list buckets / objects |
-| `mc mb store/backups` | create a bucket |
-| `mc cp ./file store/backups/` | upload (add `--recursive` for a tree) |
-| `mc cp store/backups/file ./` | download |
-| `mc find store --name '*.pglz'` | search objects by name |
-| `mc du store` | size per bucket |
-| `mc rm store/backups/file` | delete one object |
+| `pg mc ls store` / `pg mc ls store/backups` | list buckets / objects |
+| `pg mc mb store/backups` | create a bucket |
+| `pg mc cp ./file store/backups/` | upload (add `--recursive` for a tree) |
+| `pg mc cp store/backups/file ./` | download |
+| `pg mc find store -- --name '*.pglz'` | search objects by name |
+| `pg mc du store` | size per bucket |
+| `pg mc rm store/backups/file` | delete one object |
 
 The same root credentials work for any S3 SDK — including pgBackRest against a
 `repo1-type=s3` repository.

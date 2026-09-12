@@ -331,6 +331,13 @@ func (h HAProxyConfig) EffectiveMode() string {
 // the single source of truth, so ApplyDefaults and the podman manager agree.
 const DefaultMinioImageTag = "ghcr.io/mars-base/pgcli/pgcli-minio:20250422221226"
 
+// DefaultMCImageTag is the public pre-built MinIO client (mc) image: the
+// static upstream binary on scratch with a CA bundle. `pg mc` runs it in a
+// throwaway container. Not a yaml field — mc is a client, not an addon — so
+// the const is the single source of truth; keep it in sync with the Makefile's
+// MC_IMAGE ($(MC_TS) is derived from MC_VERSION).
+const DefaultMCImageTag = "ghcr.io/mars-base/pgcli/pgcli-mc:20250813083541"
+
 // MinioConfig holds a standalone MinIO addon (single-node S3-compatible object
 // storage). Like etcd/pgdog/haproxy it is shared infrastructure, so it lives at
 // the top level (addons.minio.<name>). The typical use is a pgBackRest repository

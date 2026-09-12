@@ -82,64 +82,55 @@ pg addon install minio --name store --listen 0.0.0.0
 
 ## 使用 mc 客户端
 
-MinIO 说 S3 协议，任何 S3 客户端都能用。`mc` 有现成的公开镜像
-`ghcr.io/mars-base/pgcli/pgcli-mc:20250813083541`——上游静态二进制 + CA
-证书放在 `scratch` 上（约 29 MB，多架构）。先设一个变量省事：
+`pg mc` 在一次性容器里运行 MinIO 自家的 `mc` 客户端——不用本地安装，也不用
+手敲 `podman run`：
 
 ```bash
-MC=ghcr.io/mars-base/pgcli/pgcli-mc:20250813083541
+pg mc alias set store http://127.0.0.1:9000 admin \
+  "$(yq '.addons.minio.store.root_password' ~/.pgcli/pg.yaml)"
+pg mc mb store/backups
+pg mc ls store
+pg mc cp ./dump.pglz store/backups/
 ```
 
-### 单次命令（`MC_HOST_*`）
+别名持久化保存在宿主的 `~/.mc/config.json`——这是 `mc` 自己的默认路径，
+Linux 和 macOS 都一样——`alias set` 一次，之后每次 `pg mc`（以及 Linux 上
+原生安装的 `mc`）都能看到同一批别名。`pg mc` 底层做的事只是把你的 `~/.mc`
+挂载进容器，然后运行 `ghcr.io/mars-base/pgcli/pgcli-mc`（静态上游二进制 +
+`scratch`，首次使用时自动拉取）；没有别的魔法。
 
-`mc` 支持完全用环境变量定义别名——
-`MC_HOST_<name>=<scheme>://<user>:<password>@<host>:<port>`——每次调用都无状态：
-不写配置文件、不挂 volume，密码也不出现在命令行（以及 shell 历史）里：
+任何会被 `pg` 自己的参数解析器拒绝的 `mc` 标志（`--all`、`--json` 等）放到
+`--` 之后，与 `pg etcdctl` 的约定完全一致：
+
+```bash
+pg mc ls store -- --all
+```
+
+`MC_HOST_<name>` 环境变量形式的别名——`mc` 的无状态用法，不碰配置文件——同样
+适用于 `pg mc`，因为该变量会被转发进容器：
 
 ```bash
 PASS=$(yq '.addons.minio.store.root_password' ~/.pgcli/pg.yaml)
-
-podman run --rm --network host \
-  -e MC_HOST_store="http://admin:${PASS}@127.0.0.1:9000" \
-  "$MC" mb store/backups
-
-podman run --rm --network host \
-  -e MC_HOST_store="http://admin:${PASS}@127.0.0.1:9000" \
-  "$MC" ls store
+MC_HOST_store="http://admin:${PASS}@127.0.0.1:9000" pg mc ls store
 ```
 
-### 多次命令（持久化别名）
-
-不想每条命令都重复 `-e`，可以 `alias set` 一次，然后在**每次**运行时挂载配置
-目录。镜像把 `HOME` 固定在 `/data`，所以这个挂载才是 `mc` 实际读写的地方：
-
-```bash
-mkdir -p ~/.mc-config
-podman run --rm -v ~/.mc-config:/data --network host "$MC" \
-  alias set store http://127.0.0.1:9000 admin \
-  "$(yq '.addons.minio.store.root_password' ~/.pgcli/pg.yaml)"
-
-podman run --rm -v ~/.mc-config:/data --network host "$MC" ls store
-podman run --rm -v ~/.mc-config:/data --network host "$MC" cp ./dump.pglz store/backups/
-```
-
-不加 `-v` 时 `alias set` 也会显示成功——但别名随容器一起销毁，下次运行看不到它。
-
-> **Linux 上的 `--network host`：** MinIO 走主机网络提供服务，而桥接网络容器里的
-> `127.0.0.1` 是容器自己，不是主机。如果你用 `--listen` 把存储绑到了可路由地址，
-> 就把别名指向那个地址，并去掉 `--network host`。
+> **平台：** MinIO **插件**本身仍仅支持 Linux (amd64)（见上文）；`pg mc`
+> 只是一个客户端，macOS 上同样可用，指向远端或局域网端点即可。macOS 上别名
+> 里的 `127.0.0.1` / `localhost` 是容器自己的回环，不是宿主机的；请改用可路由
+> 地址（或 `host.containers.internal`）。Linux 上 `pg mc` 走主机网络，回环
+> 别名可以直达本机 `pg addon install minio` 起的实例。
 
 ### 常用命令
 
 | 命令 | 用途 |
 |------|------|
-| `mc ls store` / `mc ls store/backups` | 列出桶 / 对象 |
-| `mc mb store/backups` | 创建桶 |
-| `mc cp ./file store/backups/` | 上传（整个目录加 `--recursive`） |
-| `mc cp store/backups/file ./` | 下载 |
-| `mc find store --name '*.pglz'` | 按名字搜索对象 |
-| `mc du store` | 统计各桶大小 |
-| `mc rm store/backups/file` | 删除单个对象 |
+| `pg mc ls store` / `pg mc ls store/backups` | 列出桶 / 对象 |
+| `pg mc mb store/backups` | 创建桶 |
+| `pg mc cp ./file store/backups/` | 上传（整个目录加 `--recursive`） |
+| `pg mc cp store/backups/file ./` | 下载 |
+| `pg mc find store -- --name '*.pglz'` | 按名字搜索对象 |
+| `pg mc du store` | 统计各桶大小 |
+| `pg mc rm store/backups/file` | 删除单个对象 |
 
 同一套 root 凭据适用于任何 S3 SDK——包括 pgBackRest 的 `repo1-type=s3`
 仓库（见[备份](/docs/backup/)、[恢复](/docs/restore/)）。
