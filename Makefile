@@ -9,7 +9,7 @@ LDFLAGS = -s -w \
 
 PLATFORMS = linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
-.PHONY: build clean test lint install build-all container-build container-push container-build-minio container-push-minio
+.PHONY: build clean test lint install build-all container-build container-push container-build-minio container-push-minio container-build-mc container-push-mc
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) .
@@ -75,3 +75,32 @@ container-build-minio:
 
 container-push-minio:
 	podman push $(MINIO_IMAGE)
+
+# MinIO client image — a single static binary on scratch, ~30 MB per arch. The
+# upstream binaries (minio/mc GitHub releases) are statically linked and
+# stripped, so nothing to layer; only a TLS CA bundle is copied from the build
+# host. Dual-arch (amd64+arm64) with a manifest tag — arm64 gives Apple Silicon
+# hosts (podman machine VMs) native execution. Binaries are downloaded and
+# sha256-verified by the target, never committed.
+MC_VERSION ?= RELEASE.2025-08-13T08-35-41Z
+# Compact timestamp tag, same style as the minio image (20250422221226):
+# strip letters/dots/colons/dashes from RELEASE.2025-08-13T08-35-41Z.
+MC_TS   := $(shell echo $(MC_VERSION) | tr -d 'A-Z.:-')
+MC_IMAGE = ghcr.io/mars-base/pgcli/pgcli-mc:$(MC_TS)
+MC_BASE  = https://github.com/minio/mc/releases/download/$(MC_VERSION)
+
+container-build-mc:
+	cp /etc/ssl/certs/ca-certificates.crt embed/ca-certificates.crt
+	@for a in amd64 arm64; do \
+	  curl -sfL --retry 3 -o embed/mc.linux-$$a $(MC_BASE)/mc.linux-$$a.$(MC_VERSION) || exit 1; \
+	  curl -sfL --retry 3 -o /tmp/mc.linux-$$a.sha256sum $(MC_BASE)/mc.linux-$$a.$(MC_VERSION).sha256sum || exit 1; \
+	  ( cd embed && echo "$$(awk '{print $$1}' /tmp/mc.linux-$$a.sha256sum)  mc.linux-$$a" | sha256sum -c ) || exit 1; \
+	  chmod 0755 embed/mc.linux-$$a; \
+	  mv embed/mc.linux-$$a embed/mc; \
+	  podman build --platform linux/$$a --manifest $(MC_IMAGE) -t $(MC_IMAGE)-$$a -f embed/mc.Containerfile embed/ || exit 1; \
+	  rm -f embed/mc; \
+	done
+	rm -f embed/ca-certificates.crt
+
+container-push-mc:
+	podman manifest push $(MC_IMAGE) $(MC_IMAGE) --all

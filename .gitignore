@@ -44,3 +44,9 @@ site/resources/
 # before the image build; only embed/minio.Containerfile is committed, never the
 # binary itself. (Exact path match — embed/minio.Containerfile stays tracked.)
 embed/minio
+
+# mc client: per-arch release binary staged as embed/mc and the CA file, put in
+# embed/ by `make container-build-mc` right before each image build and deleted
+# after. (Exact paths — embed/mc.Containerfile stays tracked.)
+embed/mc
+embed/ca-certificates.crt
