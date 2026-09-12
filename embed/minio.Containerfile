@@ -1,10 +1,12 @@
-# Single-node MinIO with the web console. Built from the upstream .deb's static
-# binary on Alpine because MinIO's official image dropped the bundled console.
+# Single-node MinIO with the web console. Built from the upstream static
+# binaries (minio/minio GitHub releases, per-arch, sha256-verified by the
+# Makefile) on Alpine because MinIO's official image dropped the bundled
+# console. Dual-arch: see `make container-build-minio`.
 #
-# `minio` (the extracted binary, ~118 MB) is NOT in git: `make container-build-minio`
-# pulls it out of the .deb right before building. It is COPY'd from this build
-# context (embed/). Runtime is pull-only from the public ghcr tag; pgcli never
-# builds this image.
+# `minio` (the staged binary, ~118 MB) is NOT in git: `make container-build-minio`
+# downloads it right before building each arch and deletes it after. It is
+# COPY'd from this build context (embed/). Runtime is pull-only from the public
+# ghcr tag; pgcli never builds this image.
 FROM docker.io/library/alpine:3.22
 
 RUN apk add --no-cache ca-certificates

@@ -46,7 +46,7 @@ pgcli 在 Linux 和 macOS 上都是驱动 [Podman](https://podman.io) 容器运�
 | 插件 —— **PgDog** | ✅ | ✅ 单主机 dev/test |
 | 插件 —— **etcd** | ✅ 含跨主机集群 | ❌ 仅 Linux |
 | 插件 —— **HAProxy** | ✅ | ❌ 仅 Linux |
-| 插件 —— **MinIO** | ✅ 仅 amd64 | ❌ 仅 Linux amd64 |
+| 插件 —— **MinIO** | ✅ amd64 + arm64 | ❌ 仅 Linux |
 | 高可用 —— **Patroni**（`pg ha`） | ✅ 含跨主机 | ❌ 仅 Linux |
 
 图例：✅ 支持 · ✅ *备注* 支持但有所述限制 · ❌ 不支持。
@@ -89,9 +89,9 @@ macOS 上这些都是**单主机**：跨主机副本、跨多机的连接池属�
 - **[HAProxy](/docs/addon/haproxy/)** —— **仅 Linux**。它通过主机网络代理
   Patroni 成员，而 podman machine 虚拟机不提供该能力；manager 在 macOS 上快速
   失败。
-- **[MinIO](/docs/addon/minio/)** —— **仅 Linux (amd64)**。单机对象存储，经
-  主机网络提供服务（与 HAProxy 同样的 macOS 限制），且公开镜像基于上游 amd64
-  二进制构建。
+- **[MinIO](/docs/addon/minio/)** —— **仅 Linux**。单机对象存储，经
+  主机网络提供服务（与 HAProxy 同样的 macOS 限制）；公开镜像为双架构
+  （amd64 + arm64）。
 
 ## 确认当前平台
 

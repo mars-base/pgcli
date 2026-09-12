@@ -9,10 +9,10 @@ weight: 49
 Web 控制台。典型用途是所有主机都能访问的备份仓库（例如 Patroni 集群的
 pgBackRest `repo1-type=s3` 目标），但它本身就是通用对象存储。
 
-> **平台支持：** MinIO 插件目前**仅支持 Linux (amd64)**。它通过主机网络提供服务，
-> 而 macOS 的 `podman machine` 不会把主机网络暴露给容器；公开镜像也是从上游
-> amd64 二进制构建的。其他平台上 manager 会快速失败并给出明确提示；
-> `pg addon list` 仍可显示已配置实例，但没有实时状态。
+> **平台支持：** MinIO 插件**仅支持 Linux**。它通过主机网络提供服务，而 macOS
+> 的 `podman machine` 不会把主机网络暴露给容器，因此在该平台上会快速失败并给出
+> 明确提示。公开镜像为双架构（amd64 + arm64），任意 Linux 主机架构均可运行；
+> macOS 上 `pg addon list` 仍可显示已配置实例，但没有实时状态。
 
 ## 工作原理
 
@@ -22,8 +22,9 @@ pgBackRest `repo1-type=s3` 目标），但它本身就是通用对象存储。
 都在这个目录里，因此它的生命周期长于容器。
 
 镜像是公开的预构建 tag `ghcr.io/mars-base/pgcli/pgcli-minio:20250422221226`——
-上游 `.deb` 里的静态二进制跑在 Alpine 上，因为 MinIO 官方镜像移除了内置的 Web
-控制台。`pg addon install` 只负责拉取；pgcli 运行时从不构建镜像。
+上游静态二进制（双架构 amd64 + arm64，来自 minio/minio 的 GitHub release）跑在
+Alpine 上，因为 MinIO 官方镜像移除了内置的 Web 控制台。`pg addon install`
+只负责拉取；pgcli 运行时从不构建镜像。
 
 凭据的处理方式与 Patroni 相同：
 
@@ -262,4 +263,5 @@ MinIO 日志走 stdout：启动行（`API:`/`Console:` 地址、`Documentation:`
 - **控制台能打开，但 S3 客户端超时。** `MINIO_SERVER_URL` 由 `listen` + API
   端口拼成；若绑在 `127.0.0.1` 却从其他主机访问，客户端会被重定向到回环地址。
   把 `listen` 设为客户端真正可达的地址。
-- **macOS / arm。** 暂不支持——见上文平台支持。
+- **macOS。** 暂不支持——该插件通过主机网络提供服务，而 `podman machine` 不会
+  把它暴露给容器。Linux（amd64 与 arm64）均可用；见上文平台支持。

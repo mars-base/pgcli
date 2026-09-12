@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/mars-base/pgcli/internal/config"
@@ -16,24 +15,22 @@ import (
 // MinioManager manages standalone single-node MinIO containers: S3-compatible
 // object storage as shared infrastructure (top-level addons.minio.<name>),
 // the intended use being a pgBackRest repository every host of a Patroni
-// cluster can reach. The image is the public pre-built ghcr tag (upstream
-// .deb binary on Alpine — MinIO's official image dropped the web console);
-// runtime image handling is pull-only, like etcd.
+// cluster can reach. The image is the public pre-built ghcr tag (dual-arch:
+// upstream static binaries on Alpine — MinIO's official image dropped the web
+// console); runtime image handling is pull-only, like etcd.
 type MinioManager struct {
 	cfg     *config.Config
 	podman  string // podman binary path
 	dataDir string // base data directory (e.g. ~/.pgcli/)
 }
 
-// NewMinioManager creates a MinioManager. The addon is Linux/amd64-only for
-// now: the public image is built from the upstream amd64 .deb, and the macOS
-// podman machine does not expose host networking to containers.
+// NewMinioManager creates a MinioManager. The addon is Linux-only: it serves
+// over host networking, which the macOS podman machine does not expose to
+// containers. The public image is dual-arch (amd64+arm64), so any Linux host
+// architecture works.
 func NewMinioManager(cfg *config.Config) (*MinioManager, error) {
 	if platform.Detect() == platform.MacOS {
 		return nil, fmt.Errorf("the minio addon is not supported on macOS yet: it serves over host networking, which the podman machine does not provide")
-	}
-	if runtime.GOARCH != "amd64" {
-		return nil, fmt.Errorf("the minio addon supports amd64 hosts only: the public image is built from the upstream amd64 binary")
 	}
 	path, err := findPodman()
 	if err != nil {

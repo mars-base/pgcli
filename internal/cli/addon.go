@@ -43,7 +43,7 @@ Infra addons (shared, not tied to one instance):
   pg addon install haproxy
           Stored under top-level addons.haproxy in config (Linux only).
   pg addon install minio
-          Stored under top-level addons.minio in config (Linux amd64 only).
+          Stored under top-level addons.minio in config (Linux only).
 
 Commands:
   pg addon install <addon>   install an add-on
@@ -67,7 +67,7 @@ Currently supported add-ons:
   etcd        standalone key-value store (HA cluster DCS)
   pgdog       Postgres proxy (pooling, load balancing, sharding)
   haproxy     TCP load balancer in front of a Patroni cluster (unified or read/write split)
-  minio       single-node S3-compatible object storage (web console included; Linux amd64 only)
+  minio       single-node S3-compatible object storage (web console included; Linux only)
 
 Two modes (pgbouncer):
   Local:  pg addon install pgbouncer -i <instance>
@@ -90,7 +90,7 @@ Infra addon (haproxy — TCP load balancer in front of a Patroni cluster, Linux 
   --ha. After adding or removing a member ("pg ha create" / "pg ha remove"),
   re-run install to re-sync the backend list.
 
-Infra addon (minio — single-node S3-compatible object storage, Linux amd64 only):
+Infra addon (minio — single-node S3-compatible object storage, Linux only):
   pg addon install minio [--name store] [--api-port N] [--console-port N]
                          [--listen 127.0.0.1] [--root-user admin] [--data-dir ...] [--force]
   Root credentials are generated on first install, printed once for the record,
@@ -1660,7 +1660,7 @@ func runAddonList() error {
 		fmt.Println("  (none)")
 	}
 
-	// minio (single-node object storage, top-level addon; Linux/amd64-only manager)
+	// minio (single-node object storage, top-level addon; Linux-only manager)
 	fmt.Println()
 	fmt.Println("Infra add-ons (minio):")
 	hasMinio := false

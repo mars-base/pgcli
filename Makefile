@@ -57,24 +57,32 @@ container-push:
 	podman manifest push ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 --all
 
 # Single-node MinIO image (public, referenced by config.DefaultMinioImageTag).
-# Built from the upstream .deb's static binary on Alpine — the official MinIO
-# image dropped the web console. amd64 only, no manifest. The deb is not in the
-# repo; place it at MINIO_DEB (default below) or override:
-#   make container-build-minio MINIO_DEB=/path/to/minio_<version>_amd64.deb
-# `embed/minio` is gitignored scratch: extracted before the build, deleted after.
-# The apk step needs outbound network: prefix with HTTP_PROXY/HTTPS_PROXY if the
-# build host routes through a proxy.
-MINIO_DEB   ?= /tmp/minio_20250422221226.0.0_amd64.deb
-MINIO_IMAGE  = ghcr.io/mars-base/pgcli/pgcli-minio:20250422221226
+# Built from the upstream static binaries (minio/minio GitHub releases) on
+# Alpine — the official MinIO image dropped the web console. Dual-arch
+# (amd64+arm64) with a manifest list, so a pull-only install works on arm64
+# hosts too (e.g. Apple Silicon podman VMs). The tag mirrors the release date;
+# binaries are downloaded and sha256-verified by the target, never committed.
+# The apk step and the alpine arm64 base pull need outbound network: prefix
+# with HTTP_PROXY/HTTPS_PROXY if the build host routes through a proxy.
+MINIO_VERSION ?= RELEASE.2025-04-22T22-12-26Z
+# Compact timestamp tag (20250422221226): strip letters/dots/colons/dashes.
+MINIO_TS    := $(shell echo $(MINIO_VERSION) | tr -d 'A-Z.:-')
+MINIO_IMAGE  = ghcr.io/mars-base/pgcli/pgcli-minio:$(MINIO_TS)
+MINIO_BASE   = https://github.com/minio/minio/releases/download/$(MINIO_VERSION)
 
 container-build-minio:
-	dpkg-deb --fsys-tarfile $(MINIO_DEB) | tar -xO ./usr/local/bin/minio > embed/minio
-	chmod 0755 embed/minio
-	podman build --platform linux/amd64 -t $(MINIO_IMAGE) -f embed/minio.Containerfile embed/
-	rm -f embed/minio
+	@for a in amd64 arm64; do \
+	  curl -sfL --retry 3 -o embed/minio.linux-$$a $(MINIO_BASE)/minio.linux-$$a.$(MINIO_VERSION) || exit 1; \
+	  curl -sfL --retry 3 -o /tmp/minio.linux-$$a.sha256sum $(MINIO_BASE)/minio.linux-$$a.$(MINIO_VERSION).sha256sum || exit 1; \
+	  ( cd embed && echo "$$(awk '{print $$1}' /tmp/minio.linux-$$a.sha256sum)  minio.linux-$$a" | sha256sum -c ) || exit 1; \
+	  chmod 0755 embed/minio.linux-$$a; \
+	  mv embed/minio.linux-$$a embed/minio; \
+	  podman build --platform linux/$$a --manifest $(MINIO_IMAGE) -t $(MINIO_IMAGE)-$$a -f embed/minio.Containerfile embed/ || exit 1; \
+	  rm -f embed/minio; \
+	done
 
 container-push-minio:
-	podman push $(MINIO_IMAGE)
+	podman manifest push $(MINIO_IMAGE) $(MINIO_IMAGE) --all
 
 # MinIO client image — a single static binary on scratch, ~30 MB per arch. The
 # upstream binaries (minio/mc GitHub releases) are statically linked and

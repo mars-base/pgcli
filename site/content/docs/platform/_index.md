@@ -50,7 +50,7 @@ across machines, or that depend on Linux-only container internals, stay
 | Addon — **PgDog** | ✅ | ✅ single-host dev/test |
 | Addon — **etcd** | ✅ incl. cross-host clusters | ❌ Linux only |
 | Addon — **HAProxy** | ✅ | ❌ Linux only |
-| Addon — **MinIO** | ✅ amd64 only | ❌ Linux amd64 only |
+| Addon — **MinIO** | ✅ amd64 + arm64 | ❌ Linux only |
 | HA — **Patroni** (`pg ha`) | ✅ incl. cross-host | ❌ Linux only |
 
 Legend: ✅ supported · ✅ *note* supported with the stated caveat · ❌ not supported.
@@ -98,9 +98,9 @@ Addon networking differs per component:
 - **[HAProxy](/docs/addon/haproxy/)** — **Linux only.** It fronts Patroni
   members over host networking, which the podman machine VM does not provide to
   containers; the manager fails fast on macOS.
-- **[MinIO](/docs/addon/minio/)** — **Linux (amd64) only.** Single-node object
-  storage served over host networking (same macOS limitation as HAProxy), and
-  the public image is built from the upstream amd64 binary.
+- **[MinIO](/docs/addon/minio/)** — **Linux only.** Single-node object
+  storage served over host networking (same macOS limitation as HAProxy); the
+  public image is dual-arch (amd64 + arm64).
 
 ## Confirming your platform
 

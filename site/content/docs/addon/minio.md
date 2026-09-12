@@ -10,11 +10,11 @@ sidecar — in **single-node** mode, with the web console included. The intended
 use is a backup repository every host can reach (e.g. a pgBackRest `repo1-type=s3`
 target for a Patroni cluster), but it is a general-purpose object store.
 
-> **Platform support:** the MinIO addon is **Linux (amd64) only** for now. It
-> serves over host networking, which the macOS `podman machine` does not expose
-> to containers, and the public image is built from the upstream amd64 binary.
-> Elsewhere the manager fails fast with a clear message; `pg addon list` still
-> shows configured instances without live status.
+> **Platform support:** the MinIO addon is **Linux only**. It serves over host
+> networking, which the macOS `podman machine` does not expose to containers, so
+> it fails fast there with a clear message. The public image is dual-arch
+> (amd64 + arm64), so any Linux host architecture works; `pg addon list` on
+> macOS still shows configured instances without live status.
 
 ## How It Works
 
@@ -24,9 +24,10 @@ instance's host data directory (default `<base-dir>/addon/minio/<name>/data`).
 Everything MinIO stores lives there, so it outlives the container.
 
 The image is the public pre-built tag
-`ghcr.io/mars-base/pgcli/pgcli-minio:20250422221226` — the upstream `.deb`'s
-static binary on Alpine, because MinIO's official image dropped the bundled web
-console. `pg addon install` pulls it; pgcli never builds the image at run time.
+`ghcr.io/mars-base/pgcli/pgcli-minio:20250422221226` — the upstream static
+binaries (dual-arch amd64 + arm64, from the minio/minio GitHub releases) on
+Alpine, because MinIO's official image dropped the bundled web console. `pg
+addon install` pulls it; pgcli never builds the image at run time.
 
 Credentials are handled like Patroni's:
 
@@ -280,4 +281,6 @@ and request errors. An `API: http://...` block confirms the listeners came up.
   built from `listen` + API port; if you serve on `127.0.0.1` but access from
   another host, clients get redirected to the loopback URL. Set `listen` to the
   address clients can actually reach.
-- **macOS / arm.** Not supported yet — see Platform support above.
+- **macOS.** Not supported — the addon serves over host networking, which the
+  `podman machine` does not expose. Linux (amd64 and arm64) is fine; see
+  Platform support above.
