@@ -114,7 +114,7 @@ PASS=$(yq '.addons.minio.store.root_password' ~/.pgcli/pg.yaml)
 MC_HOST_store="http://admin:${PASS}@127.0.0.1:9000" pg mc ls store
 ```
 
-> **平台：** MinIO **插件**本身仍仅支持 Linux (amd64)（见上文）；`pg mc`
+> **平台：** MinIO **插件**本身仍仅支持 Linux（见上文）；`pg mc`
 > 只是一个客户端，macOS 上同样可用，指向远端或局域网端点即可。macOS 上别名
 > 里的 `127.0.0.1` / `localhost` 是容器自己的回环，不是宿主机的；请改用可路由
 > 地址（或 `host.containers.internal`）。Linux 上 `pg mc` 走主机网络，回环

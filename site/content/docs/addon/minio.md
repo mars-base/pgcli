@@ -122,7 +122,7 @@ PASS=$(yq '.addons.minio.store.root_password' ~/.pgcli/pg.yaml)
 MC_HOST_store="http://admin:${PASS}@127.0.0.1:9000" pg mc ls store
 ```
 
-> **Platform:** the MinIO *addon* is Linux (amd64) only (see above), but
+> **Platform:** the MinIO *addon* is Linux only (see above), but
 > `pg mc` is just a client — it works on macOS too, pointed at a remote or
 > LAN endpoint. There, an alias URL of `127.0.0.1` / `localhost` is the
 > container's own loopback, not your Mac's; use a routable address (or
