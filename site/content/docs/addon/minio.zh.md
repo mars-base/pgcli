@@ -66,7 +66,6 @@ pg addon install minio --name store --listen 0.0.0.0
 
   Root user:     admin
   Root password: <generated>
-                 (also stored in ~/.pgcli/pg.yaml, addons.minio.store.root_password)
 ```
 
 用打印出的 root 用户与密码登录 `Console:` 地址的控制台。S3 客户端
@@ -88,8 +87,7 @@ pg addon install minio --name store --listen 0.0.0.0
 手敲 `podman run`：
 
 ```bash
-pg mc alias set store http://127.0.0.1:9000 admin \
-  "$(yq '.addons.minio.store.root_password' ~/.pgcli/pg.yaml)"
+pg mc alias set store http://127.0.0.1:9000 admin <密码>
 pg mc mb store/backups
 pg mc ls store
 pg mc cp ./dump.pglz store/backups/
@@ -112,8 +110,7 @@ pg mc ls store -- --all
 适用于 `pg mc`，因为该变量会被转发进容器：
 
 ```bash
-PASS=$(yq '.addons.minio.store.root_password' ~/.pgcli/pg.yaml)
-MC_HOST_store="http://admin:${PASS}@127.0.0.1:9000" pg mc ls store
+MC_HOST_store="http://admin:<密码>@127.0.0.1:9000" pg mc ls store
 ```
 
 > **平台：** MinIO **插件**本身仍仅支持 Linux（见上文）；`pg mc`

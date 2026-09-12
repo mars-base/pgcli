@@ -70,7 +70,6 @@ The output reports endpoints and the root credentials:
 
   Root user:     admin
   Root password: <generated>
-                 (also stored in ~/.pgcli/pg.yaml, addons.minio.store.root_password)
 ```
 
 Sign in to the console at the `Console:` URL with the printed root user and
@@ -94,8 +93,7 @@ credentials take effect — without losing the data directory.
 install, no manual `podman run` invocation:
 
 ```bash
-pg mc alias set store http://127.0.0.1:9000 admin \
-  "$(yq '.addons.minio.store.root_password' ~/.pgcli/pg.yaml)"
+pg mc alias set store http://127.0.0.1:9000 admin <password>
 pg mc mb store/backups
 pg mc ls store
 pg mc cp ./dump.pglz store/backups/
@@ -120,8 +118,7 @@ touched — work through `pg mc` too, since the variable is forwarded into the
 container:
 
 ```bash
-PASS=$(yq '.addons.minio.store.root_password' ~/.pgcli/pg.yaml)
-MC_HOST_store="http://admin:${PASS}@127.0.0.1:9000" pg mc ls store
+MC_HOST_store="http://admin:<password>@127.0.0.1:9000" pg mc ls store
 ```
 
 > **Platform:** the MinIO *addon* is Linux only (see above), but

@@ -1482,7 +1482,6 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	fmt.Println()
 	fmt.Printf("  Root user:     %s\n", mc.RootUser)
 	fmt.Printf("  Root password: %s\n", mc.RootPassword)
-	fmt.Printf("                 (also stored in %s, addons.minio.%s.root_password)\n", path, name)
 	return nil
 }
 
