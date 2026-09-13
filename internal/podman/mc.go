@@ -1,6 +1,7 @@
 package podman
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -62,7 +63,38 @@ func (m *MCRunner) Run(args []string) error {
 		return err
 	}
 
-	runArgs := mcRunArgs(m.imageTag, m.configDir, m.useHostNet, isTerminal(os.Stdin), forwardMCHostEnv(), args)
+	envs := forwardMCHostEnv()
+	aliases := mcKnownAliases(m.configDir, envs)
+
+	// The container cannot see the host filesystem except through mounts, so a
+	// local-path operand of `cp` / `mirror` / `diff` would fail with
+	// "Requested path not found". Resolve each such operand to its absolute
+	// path and mount that exact path (realpath semantics: same path inside the
+	// container), rewriting the argument to match. The whole home directory is
+	// not an option — on macOS its .Trash is TCC-protected, and mounting $HOME
+	// fails outright.
+	args, mounts := mcLocalFiles(args, aliases)
+
+	// macOS: the podman machine shares only the home tree over virtiofs, so a
+	// mount outside it fails with an opaque error — drop it with a clear note.
+	if !m.useHostNet && len(mounts) > 0 {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			slog.Debug("mc: home for mount filter unavailable", "err", err)
+		} else {
+			kept := mounts[:0]
+			for _, dir := range mounts {
+				if mcWithin(home, dir) {
+					kept = append(kept, dir)
+					continue
+				}
+				fmt.Fprintf(os.Stderr, "[!] pg mc cannot publish %s on macOS: the podman machine shares only %s — keep local files under your home directory\n", dir, home)
+			}
+			mounts = kept
+		}
+	}
+
+	runArgs := mcRunArgs(m.imageTag, m.configDir, mounts, m.useHostNet, isTerminal(os.Stdin), envs, args)
 	slog.Debug("podman mc", "args", runArgs)
 	cmd := podmanCommand(m.podman, runArgs...)
 	cmd.Stdin = os.Stdin
@@ -106,11 +138,150 @@ func forwardMCHostEnv() []string {
 	return envs
 }
 
+// mcFileCommands are the mc subcommands that take host filesystem operands
+// (every other subcommand's arguments are alias/bucket URLs only, or flags).
+var mcFileCommands = map[string]bool{"cp": true, "mirror": true, "diff": true}
+
+// mcKnownAliases returns the set of names mc already treats as remote — the
+// ones stored in ~/.mc/config.json plus MC_HOST_* env aliases — so an operand
+// like "store/backups" is left alone while "./LICENSE" is a local path.
+func mcKnownAliases(configDir string, envs []string) map[string]bool {
+	names := map[string]bool{}
+
+	if data, err := os.ReadFile(filepath.Join(configDir, "config.json")); err == nil {
+		var cfg struct {
+			Aliases []struct {
+				Name string `json:"name"`
+			} `json:"aliases"`
+		}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			slog.Debug("mc: parsing config.json for alias detection, treating all bare names as local", "err", err)
+		}
+		for _, a := range cfg.Aliases {
+			if a.Name != "" {
+				names[a.Name] = true
+			}
+		}
+	}
+
+	for _, kv := range envs {
+		if name := strings.TrimPrefix(kv[:strings.Index(kv, "=")], "MC_HOST_"); name != "" {
+			names[name] = true
+		}
+	}
+	return names
+}
+
+// mcLocalFiles rewrites the host-path operands of a file-taking mc subcommand
+// (cp/mirror/diff) to absolute paths and returns the mount sources needed to
+// make them visible in the container. A token is a host path when it is not a
+// URL (no scheme) and its first segment is not a known mc alias — the same
+// test mc itself applies to decide local vs remote.
+func mcLocalFiles(args []string, aliases map[string]bool) (newArgs, mounts []string) {
+	seen := map[string]bool{}
+	addMount := func(dir string) {
+		if seen[dir] {
+			return
+		}
+		seen[dir] = true
+		mounts = append(mounts, dir)
+	}
+
+	inFileCmd := false
+	newArgs = make([]string, 0, len(args))
+	for _, arg := range args {
+		switch {
+		case !inFileCmd && !strings.HasPrefix(arg, "-") && mcFileCommands[arg]:
+			inFileCmd = true
+			newArgs = append(newArgs, arg)
+		case inFileCmd && !isMCLocalOperand(arg, aliases):
+			newArgs = append(newArgs, arg)
+		case inFileCmd:
+			abs := hostMountPath(mcExpandHome(arg))
+			mount, rewritten := mcOperandMount(abs)
+			addMount(mount)
+			newArgs = append(newArgs, rewritten)
+		default:
+			newArgs = append(newArgs, arg)
+		}
+	}
+	return newArgs, mounts
+}
+
+// isMCLocalOperand reports whether an operand of a file-taking mc subcommand
+// names a host path rather than an alias/bucket URL.
+func isMCLocalOperand(arg string, aliases map[string]bool) bool {
+	if arg == "" || strings.HasPrefix(arg, "-") {
+		return false
+	}
+	if strings.HasPrefix(arg, "~") || strings.HasPrefix(arg, "/") || strings.HasPrefix(arg, "./") || strings.HasPrefix(arg, "../") {
+		return true
+	}
+	if i := strings.Index(arg, "://"); i >= 0 && i <= 8 {
+		return false // s3://, https://, file:// (explicit URL form mc also accepts)
+	}
+	first := arg
+	if j := strings.Index(arg, "/"); j >= 0 {
+		first = arg[:j]
+	}
+	return !aliases[first]
+}
+
+// mcExpandHome resolves a leading ~ (the shell does this for unquoted paths;
+// a quoted "~/file" reaches us verbatim, and mc itself understands it, but the
+// bind mount needs a real host path).
+func mcExpandHome(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		slog.Debug("mc: home for ~ expansion unavailable", "err", err)
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	return filepath.Join(home, path[2:])
+}
+
+// mcOperandMount resolves one local-path operand to (mountSource, arg) with
+// realpath semantics: a file that exists is mounted at its own absolute path;
+// a path that does not exist yet (a download target — mc has not written it
+// yet, or cp'ing to a fresh filename) mounts its nearest existing ancestor
+// directory instead, so the file mc creates lands back on the host too.
+func mcOperandMount(abs string) (mount, arg string) {
+	// EvalSymlinks resolves a symlinked path to its real target, which is what
+	// the bind mount needs to expose; a nonexistent path just fails here.
+	real := abs
+	if r, err := filepath.EvalSymlinks(abs); err == nil {
+		real = r
+	}
+	if _, err := os.Stat(real); err == nil {
+		return real, real
+	}
+	for dir := filepath.Dir(abs); ; dir = filepath.Dir(dir) {
+		if _, err := os.Stat(dir); err == nil {
+			return dir, abs
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return abs, abs // reached the root without finding an existing ancestor (unreachable in practice)
+		}
+	}
+}
+
+// mcWithin reports whether path is at or below root.
+func mcWithin(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
 // mcRunArgs builds the `podman run` argv for a one-shot mc invocation. It is a
 // pure function driven by useHostNet and interactive because platform.Detect()
 // reads runtime.GOOS and os.Stdin is not controllable in unit tests that run
 // on Linux.
-func mcRunArgs(imageTag, configDir string, useHostNet, interactive bool, envs, args []string) []string {
+func mcRunArgs(imageTag, configDir string, mounts []string, useHostNet, interactive bool, envs, args []string) []string {
 	runArgs := []string{"run", "--rm"}
 	if interactive {
 		runArgs = append(runArgs, "-it")
@@ -130,6 +301,12 @@ func mcRunArgs(imageTag, configDir string, useHostNet, interactive bool, envs, a
 		"--http-proxy=false",
 		"-v", fmt.Sprintf("%s:%s:z", hostMountPath(configDir), mcContainerConfigDir),
 	)
+	// Host-path operands mount at their own absolute path (see mcLocalFiles),
+	// so the rewritten argument resolves identically inside and outside the
+	// container.
+	for _, dir := range mounts {
+		runArgs = append(runArgs, "-v", fmt.Sprintf("%s:%s:z", hostMountPath(dir), hostMountPath(dir)))
+	}
 	for _, kv := range envs {
 		runArgs = append(runArgs, "-e", kv)
 	}

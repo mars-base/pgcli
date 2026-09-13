@@ -25,10 +25,12 @@ Aliases persist on the host at ~/.mc/config.json — mc's native default path
 install sharing the same file. ` + "`MC_HOST_<name>`" + ` environment variables are
 forwarded too, so stateless (no-config) invocations keep working.
 
-On macOS the MinIO addon itself is not supported (Linux only), but pg mc
-still works against remote or LAN endpoints — point aliases at a routable
-address (or host.containers.internal), not 127.0.0.1, which inside the
-container's bridge network is the container itself.
+On macOS the container sits on the bridge network, where a 127.0.0.1 alias is
+the container's own loopback — point an alias at a local pg addon minio
+instance via host.containers.internal:<port>, or at a remote store via its
+routable address. Local file operands of cp/mirror/diff are mounted into the
+container at their real (absolute) paths, so uploads and downloads work as
+expected; on macOS the path must be under your home directory.
 
 Any mc flag that pg's own flag parser would otherwise reject (for example
 --all or --json) goes after -- .

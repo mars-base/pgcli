@@ -43,7 +43,7 @@ Infra addons (shared, not tied to one instance):
   pg addon install haproxy
           Stored under top-level addons.haproxy in config (Linux only).
   pg addon install minio
-          Stored under top-level addons.minio in config (Linux only).
+          Stored under top-level addons.minio in config (Linux and macOS).
 
 Commands:
   pg addon install <addon>   install an add-on
@@ -67,7 +67,7 @@ Currently supported add-ons:
   etcd        standalone key-value store (HA cluster DCS)
   pgdog       Postgres proxy (pooling, load balancing, sharding)
   haproxy     TCP load balancer in front of a Patroni cluster (unified or read/write split)
-  minio       single-node S3-compatible object storage (web console included; Linux only)
+  minio       single-node S3-compatible object storage (web console included; Linux host network, macOS bridge)
 
 Two modes (pgbouncer):
   Local:  pg addon install pgbouncer -i <instance>
@@ -90,14 +90,16 @@ Infra addon (haproxy — TCP load balancer in front of a Patroni cluster, Linux 
   --ha. After adding or removing a member ("pg ha create" / "pg ha remove"),
   re-run install to re-sync the backend list.
 
-Infra addon (minio — single-node S3-compatible object storage, Linux only):
+Infra addon (minio — single-node S3-compatible object storage, Linux and macOS):
   pg addon install minio [--name store] [--api-port N] [--console-port N]
                          [--listen 127.0.0.1] [--root-user admin] [--data-dir ...] [--force]
   Root credentials are generated on first install, printed once for the record,
   and stored in the config (root_user / root_password under addons.minio.<name>);
-  the web console is at http://<listen>:<console-port>/. An already-present
-  container is reused (a stopped one is started); pass --force to recreate it
-  after changing ports, listen, or credentials.
+  the web console is at http://<listen>:<console-port>/ (on macOS the store
+  serves on the bridge with the ports published, so the Mac reaches both on
+  127.0.0.1). An already-present container is reused (a stopped one is
+  started); pass --force to recreate it after changing ports, listen, or
+  credentials.
 
 Re-running install is idempotent — it re-syncs all users and passwords from
 pg_shadow, regenerates config files and restarts the container.
@@ -1417,6 +1419,13 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	// there — they are a secret the install path owns.
 	cfg.ApplyDefaults()
 	mc := cfg.Addons.Minio[name]
+
+	// macOS: the store serves on the pgcli-net bridge with published ports, so
+	// bring up the machine and the bridge first (no-ops on Linux, where MinIO
+	// uses host networking).
+	if err := ensureProxyBridge(cfg); err != nil {
+		return err
+	}
 
 	mm, err := podman.NewMinioManager(cfg)
 	if err != nil {

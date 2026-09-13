@@ -22,16 +22,15 @@ type MinioManager struct {
 	cfg     *config.Config
 	podman  string // podman binary path
 	dataDir string // base data directory (e.g. ~/.pgcli/)
+	bridge  bool   // macOS: serve on the pgcli-net bridge with published ports (host networking binds the VM loopback, invisible to the Mac)
 }
 
-// NewMinioManager creates a MinioManager. The addon is Linux-only: it serves
-// over host networking, which the macOS podman machine does not expose to
-// containers. The public image is dual-arch (amd64+arm64), so any Linux host
-// architecture works.
+// NewMinioManager creates a MinioManager. It works on both platforms: Linux
+// serves over host networking, macOS over the pgcli-net bridge with each port
+// published (the same path the instance and the proxy addons use), so the
+// Mac's 127.0.0.1:<port> reaches it. The public image is dual-arch
+// (amd64+arm64), so any host architecture works.
 func NewMinioManager(cfg *config.Config) (*MinioManager, error) {
-	if platform.Detect() == platform.MacOS {
-		return nil, fmt.Errorf("the minio addon is not supported on macOS yet: it serves over host networking, which the podman machine does not provide")
-	}
 	path, err := findPodman()
 	if err != nil {
 		return nil, fmt.Errorf("podman is not installed: %w", err)
@@ -41,7 +40,12 @@ func NewMinioManager(cfg *config.Config) (*MinioManager, error) {
 		dataDir = platform.DefaultConfigDir()
 	}
 	ensurePodmanStateReady(path)
-	return &MinioManager{cfg: cfg, podman: path, dataDir: dataDir}, nil
+	return &MinioManager{
+		cfg:     cfg,
+		podman:  path,
+		dataDir: dataDir,
+		bridge:  platform.Detect() == platform.MacOS,
+	}, nil
 }
 
 // resolveDataDir returns the instance's host data dir: the explicit DataDir
@@ -154,14 +158,30 @@ func (m *MinioManager) StartContainer(mc *config.MinioConfig) error {
 }
 
 // createContainer runs a single-node MinIO serving /data (the bind-mounted
-// data dir) on host networking, bound to mc.Listen:APIPort (S3 API) and
-// mc.Listen:ConsolePort (web console). Credentials are passed as env, which
-// makes them visible in `podman inspect` — the same exposure as a hand-run
-// container with -e, acceptable for a rootless single-host deployment.
+// data dir). Linux: host networking, bound to mc.Listen:APIPort (S3 API) and
+// mc.Listen:ConsolePort (web console). macOS: the same ports on the pgcli-net
+// bridge, published -p N:N so the Mac reaches them on 127.0.0.1 — which needs
+// the server bound to 0.0.0.0 inside the container (proxyBindHost) and
+// MINIO_SERVER_URL pointing at the address clients use. Credentials are
+// passed as env, which makes them visible in `podman inspect` — the same
+// exposure as a hand-run container with -e, acceptable for a rootless
+// single-host deployment.
 func (m *MinioManager) createContainer(mc *config.MinioConfig) error {
 	dataDir := m.resolveDataDir(mc)
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return fmt.Errorf("creating MinIO data dir: %w", err)
+	}
+
+	bind := proxyBindHost(m.bridge, mc.Listen)
+
+	// MinIO's deployment docs recommend nofile=1048576. The podman machine VM
+	// caps RLIMIT_NOFILE at its host's hard limit (524288 on the current
+	// applehv image), and crun refuses to set soft > hard outright, so macOS
+	// raises a lower, comfortably-allowed value: plenty for single-host
+	// dev/test. The Linux path keeps the upstream recommendation.
+	nofile := "1048576"
+	if m.bridge {
+		nofile = "65536"
 	}
 
 	// --http-proxy=false: podman would otherwise inject the host's HTTP(S)_PROXY
@@ -170,25 +190,39 @@ func (m *MinioManager) createContainer(mc *config.MinioConfig) error {
 	args := []string{
 		"run", "-d",
 		"--name", mc.ContainerName,
-		"--network", "host",
+	}
+	args = append(args, netFlags(m.bridge, m.cfg.Podman.Network, mc.APIPort, mc.ConsolePort)...)
+	args = append(args,
 		"--http-proxy=false",
 		"--restart", "unless-stopped",
-		"--ulimit", "nofile=1048576:1048576",
+		"--ulimit", "nofile="+nofile+":"+nofile,
 		"--stop-timeout", "60",
 		"-v", fmt.Sprintf("%s:/data:z", hostMountPath(dataDir)),
-		"-e", "MINIO_ROOT_USER=" + mc.RootUser,
-		"-e", "MINIO_ROOT_PASSWORD=" + mc.RootPassword,
-		"-e", fmt.Sprintf("MINIO_SERVER_URL=http://%s:%d", mc.Listen, mc.APIPort),
+		"-e", "MINIO_ROOT_USER="+mc.RootUser,
+		"-e", "MINIO_ROOT_PASSWORD="+mc.RootPassword,
+		"-e", "MINIO_SERVER_URL="+m.serverURL(mc),
 		mc.ImageTag,
 		"server", "/data",
-		"--address", fmt.Sprintf("%s:%d", mc.Listen, mc.APIPort),
-		"--console-address", fmt.Sprintf("%s:%d", mc.Listen, mc.ConsolePort),
-	}
+		"--address", fmt.Sprintf("%s:%d", bind, mc.APIPort),
+		"--console-address", fmt.Sprintf("%s:%d", bind, mc.ConsolePort),
+	)
 
 	if _, err := m.run(args...); err != nil {
 		return fmt.Errorf("creating MinIO container: %w", err)
 	}
 	return nil
+}
+
+// serverURL returns the MINIO_SERVER_URL — the address S3 clients are told to
+// use. On Linux that is the configured listen + API port. On macOS the store
+// is published on the bridge and the Mac reaches it on its own loopback, so
+// the URL must say 127.0.0.1, not the container's internal bind.
+func (m *MinioManager) serverURL(mc *config.MinioConfig) string {
+	host := mc.Listen
+	if m.bridge {
+		host = "127.0.0.1"
+	}
+	return fmt.Sprintf("http://%s:%d", host, mc.APIPort)
 }
 
 // Remove stops and removes the MinIO container. The data dir is kept by
