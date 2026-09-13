@@ -50,8 +50,8 @@ across machines, or that depend on Linux-only container internals, stay
 | Addon — **PgDog** | ✅ | ✅ single-host dev/test |
 | Addon — **etcd** | ✅ incl. cross-host clusters | ❌ Linux only |
 | Addon — **HAProxy** | ✅ | ❌ Linux only |
-| Addon — **MinIO** | ✅ amd64 + arm64 | ❌ Linux only |
-| Client — **`pg mc`** (MinIO client) | ✅ host network | ✅ bridge, remote endpoints only (see below) |
+| Addon — **MinIO** | ✅ host network | ✅ bridge, published ports |
+| Client — **`pg mc`** (MinIO client) | ✅ host network | ✅ bridge (see below) |
 | HA — **Patroni** (`pg ha`) | ✅ incl. cross-host | ❌ Linux only |
 
 Legend: ✅ supported · ✅ *note* supported with the stated caveat · ❌ not supported.
@@ -99,14 +99,21 @@ Addon networking differs per component:
 - **[HAProxy](/docs/addon/haproxy/)** — **Linux only.** It fronts Patroni
   members over host networking, which the podman machine VM does not provide to
   containers; the manager fails fast on macOS.
-- **[MinIO](/docs/addon/minio/)** — **Linux only.** Single-node object
-  storage served over host networking (same macOS limitation as HAProxy); the
-  public image is dual-arch (amd64 + arm64).
+- **[MinIO](/docs/addon/minio/)** — **both platforms.** Single-node object
+  storage. On Linux it serves over host networking; on macOS it joins
+  `pgcli-net` with its API and console ports published, so the Mac reaches both
+  on `127.0.0.1:<port>` (the same path the proxy addons use). The public image
+  is dual-arch (amd64 + arm64).
 - **[`pg mc`](/docs/addon/minio/#using-the-mc-client)** (MinIO client) — **both
-  platforms**, unlike the addon itself. It is just a client run from a
-  throwaway container, so on macOS it reaches a remote or LAN MinIO/S3 endpoint
-  over the bridge network (point aliases at a routable address, not
-  `127.0.0.1`); aliases persist at `~/.mc/config.json` on both platforms.
+  platforms.** It runs the `mc` binary from a throwaway container, with your
+  `~/.mc/config.json` mounted as its own default config path and local file
+  operands (for `cp`/`mirror`/`diff`) mounted at their real paths — on macOS
+  that means under the home directory, the only tree the podman machine shares.
+  On Linux it uses host networking, so a `127.0.0.1` alias reaches a local
+  addon instance; on macOS the container sits on the bridge, where a
+  `127.0.0.1` alias is the container's own loopback — point aliases at
+  `host.containers.internal:<port>` for a local Mac addon, or a routable
+  address for a remote store.
 
 ## Confirming your platform
 

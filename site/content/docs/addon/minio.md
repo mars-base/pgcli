@@ -10,12 +10,12 @@ sidecar — in **single-node** mode, with the web console included. The intended
 use is a backup repository every host can reach (e.g. a pgBackRest `repo1-type=s3`
 target for a Patroni cluster), but it is a general-purpose object store.
 
-> **Platform support:** the MinIO addon is **Linux only**. It serves over host
-> networking, which the macOS `podman machine` does not expose to containers, so
-> it fails fast there with a clear message. The public image is dual-arch
-> (amd64 + arm64), so any Linux host architecture works; `pg addon list` on
-> macOS still shows configured instances without live status. The [`pg mc`
-> client](#using-the-mc-client) is a different story — it works on macOS too.
+> **Platform support:** the MinIO addon works on **both platforms**. Linux
+> serves over host networking; macOS joins the `pgcli-net` bridge with its two
+> ports published, so the Mac reaches the API and console on `127.0.0.1:<port>`
+> like any other addon. The public image is dual-arch (amd64 + arm64), so any
+> host architecture works. [`pg mc`](#using-the-mc-client), the client, works on
+> both platforms too.
 
 ## How It Works
 
@@ -38,9 +38,11 @@ Credentials are handled like Patroni's:
   summary for convenience.
 
 The container runs `--ulimit nofile=1048576:1048576` and `--stop-timeout 60` as
-MinIO's deployment docs recommend. Note that root credentials passed as `-e`
-are visible in `podman inspect` — the same exposure as any hand-run container;
-fine for a rootless single-host deployment, which is what this is.
+MinIO's deployment docs recommend. On macOS the `podman machine` VM caps
+`RLIMIT_NOFILE` lower, so the value used there is `65536` — plenty for a
+single-host dev/test store. Note that root credentials passed as `-e` are
+visible in `podman inspect` — the same exposure as any hand-run container; fine
+for a rootless single-host deployment, which is what this is.
 
 ## Install
 
@@ -106,6 +108,19 @@ Under the hood `pg mc` mounts your `~/.mc` into the container and runs
 `ghcr.io/mars-base/pgcli/pgcli-mc` (the static upstream binary on `scratch`,
 pulled on first use); nothing else about it is magic.
 
+Local file operands of `cp` / `mirror` / `diff` work too: `pg mc` resolves each
+one (like `realpath`) and mounts that exact absolute path into the container, so
+
+```bash
+pg mc cp ./dump.pglz store/backups/        # upload a file from the cwd
+pg mc cp store/backups/dump.pglz ./        # download into the cwd
+pg mc mirror ./repo store/backups/         # or mirror a whole tree
+```
+
+just does what it looks like. On macOS the path must live under your home
+directory — that is the only tree the `podman machine` VM shares; `pg mc` says
+so and skips any mount outside it.
+
 Any `mc` flag that `pg`'s own flag parser would reject (`--all`, `--json`, …)
 goes after `--`, exactly like `pg etcdctl`:
 
@@ -121,13 +136,12 @@ container:
 MC_HOST_store="http://admin:<password>@127.0.0.1:9000" pg mc ls store
 ```
 
-> **Platform:** the MinIO *addon* is Linux only (see above), but
-> `pg mc` is just a client — it works on macOS too, pointed at a remote or
-> LAN endpoint. There, an alias URL of `127.0.0.1` / `localhost` is the
-> container's own loopback, not your Mac's; use a routable address (or
-> `host.containers.internal`) instead. On Linux, `pg mc` runs on the host
-> network, so a loopback alias reaches a local `pg addon install minio`
-> instance directly.
+> **Endpoints by platform:** on Linux `pg mc` runs on the host network, so a
+> `127.0.0.1` alias reaches a local addon instance directly. On macOS the
+> container sits on the bridge network, where `127.0.0.1` is the container's
+> own loopback — point an alias at a local Mac addon via
+> `http://admin:<password>@host.containers.internal:9000`, or at a remote store
+> via its routable address. `pg mc` itself works identically on both.
 
 ### Common commands
 
@@ -271,7 +285,9 @@ and request errors. An `API: http://...` block confirms the listeners came up.
   built from `listen` + API port; if you serve on `127.0.0.1` but access from
   another host, clients get redirected to the loopback URL. Set `listen` to the
   address clients can actually reach.
-- **macOS.** The addon is not supported there — it serves over host
-  networking, which the `podman machine` does not expose. Linux (amd64 and
-  arm64) is fine; see Platform support above. `pg mc` still works on macOS
-  against a remote endpoint.
+- **macOS.** Supported: the addon serves on the `pgcli-net` bridge with both
+  ports published, so the Mac's `127.0.0.1:<port>` reaches them (the container
+  binds `0.0.0.0` internally and `MINIO_SERVER_URL` advertises the loopback the
+  Mac uses). After changing ports or credentials, `--force` recreate the
+  container. For `pg mc`, the container cannot use a `127.0.0.1` alias — see
+  the endpoint note above.

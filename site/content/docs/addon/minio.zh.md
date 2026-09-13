@@ -9,11 +9,11 @@ weight: 49
 Web 控制台。典型用途是所有主机都能访问的备份仓库（例如 Patroni 集群的
 pgBackRest `repo1-type=s3` 目标），但它本身就是通用对象存储。
 
-> **平台支持：** MinIO 插件**仅支持 Linux**。它通过主机网络提供服务，而 macOS
-> 的 `podman machine` 不会把主机网络暴露给容器，因此在该平台上会快速失败并给出
-> 明确提示。公开镜像为双架构（amd64 + arm64），任意 Linux 主机架构均可运行；
-> macOS 上 `pg addon list` 仍可显示已配置实例，但没有实时状态。[`pg mc`
-> 客户端](#使用-mc-客户端)不同——它在 macOS 上同样可用。
+> **平台支持：** MinIO 插件**两个平台都支持**。Linux 上通过主机网络提供服务；
+> macOS 上加入 `pgcli-net` bridge 网络并发布两个端口，Mac 用
+> `127.0.0.1:<port>` 即可访问 API 与控制台，与其他插件一致。公开镜像为双架构
+> （amd64 + arm64），任意主机架构均可运行。[`pg mc`
+> 客户端](#使用-mc-客户端)同样两个平台可用。
 
 ## 工作原理
 
@@ -34,9 +34,10 @@ Alpine 上，因为 MinIO 官方镜像移除了内置的 Web 控制台。`pg add
   （`addons.minio.<name>.root_password`），并在安装摘要中**打印一次**方便记录。
 
 容器按 MinIO 官方部署建议带上 `--ulimit nofile=1048576:1048576` 和
-`--stop-timeout 60`。注意 root 凭据通过 `-e` 传入，会出现在 `podman inspect`
-里——与手工运行容器的暴露程度相同；对 rootless 单机部署（本插件的定位）可以
-接受。
+`--stop-timeout 60`；macOS 上 `podman machine` 虚拟机的 RLIMIT_NOFILE 上限更
+低，因此该平台改用 `65536`——单机 dev/test 足够。注意 root 凭据通过 `-e` 传
+入，会出现在 `podman inspect` 里——与手工运行容器的暴露程度相同；对 rootless
+单机部署（本插件的定位）可以接受。
 
 ## 安装
 
@@ -99,6 +100,18 @@ Linux 和 macOS 都一样——`alias set` 一次，之后每次 `pg mc`（以�
 挂载进容器，然后运行 `ghcr.io/mars-base/pgcli/pgcli-mc`（静态上游二进制 +
 `scratch`，首次使用时自动拉取）；没有别的魔法。
 
+`cp` / `mirror` / `diff` 的本地文件参数同样可用：`pg mc` 会把每个本地路径按
+realpath 解析，并把该绝对路径原样挂载进容器，因此
+
+```bash
+pg mc cp ./dump.pglz store/backups/        # 从当前目录上传
+pg mc cp store/backups/dump.pglz ./        # 下载到当前目录
+pg mc mirror ./repo store/backups/         # 或镜像整棵目录树
+```
+
+所见即所得。macOS 上路径必须位于家目录之下——那是 `podman machine` 虚拟机唯
+一共享的目录树；家目录之外的路径 `pg mc` 会明确提示并跳过。
+
 任何会被 `pg` 自己的参数解析器拒绝的 `mc` 标志（`--all`、`--json` 等）放到
 `--` 之后，与 `pg etcdctl` 的约定完全一致：
 
@@ -113,11 +126,11 @@ pg mc ls store -- --all
 MC_HOST_store="http://admin:<密码>@127.0.0.1:9000" pg mc ls store
 ```
 
-> **平台：** MinIO **插件**本身仍仅支持 Linux（见上文）；`pg mc`
-> 只是一个客户端，macOS 上同样可用，指向远端或局域网端点即可。macOS 上别名
-> 里的 `127.0.0.1` / `localhost` 是容器自己的回环，不是宿主机的；请改用可路由
-> 地址（或 `host.containers.internal`）。Linux 上 `pg mc` 走主机网络，回环
-> 别名可以直达本机 `pg addon install minio` 起的实例。
+> **各平台的端点：** Linux 上 `pg mc` 走主机网络，`127.0.0.1` 别名可直达本机
+> addon 实例。macOS 上容器位于 bridge 网络，`127.0.0.1` 是容器自己的回环——
+> 指向 Mac 本机 addon 的别名请用
+> `http://admin:<密码>@host.containers.internal:9000`，远端存储则用其可路由地
+> 址。`pg mc` 本身在两个平台上行为一致。
 
 ### 常用命令
 
@@ -253,6 +266,7 @@ MinIO 日志走 stdout：启动行（`API:`/`Console:` 地址、`Documentation:`
 - **控制台能打开，但 S3 客户端超时。** `MINIO_SERVER_URL` 由 `listen` + API
   端口拼成；若绑在 `127.0.0.1` 却从其他主机访问，客户端会被重定向到回环地址。
   把 `listen` 设为客户端真正可达的地址。
-- **macOS。** 该插件不支持——它通过主机网络提供服务，而 `podman machine` 不会
-  把它暴露给容器。Linux（amd64 与 arm64）均可用；见上文平台支持。`pg mc` 在
-  macOS 上仍可对接远端端点使用。
+- **macOS。** 已支持：插件加入 `pgcli-net` bridge 并发布两个端口，Mac 用
+  `127.0.0.1:<port>` 即可访问（容器内部绑 `0.0.0.0`，`MINIO_SERVER_URL` 宣告
+  Mac 使用的回环地址）。改过端口或凭据后用 `--force` 重建容器。用 `pg mc` 时
+  注意容器内 `127.0.0.1` 别名不可用——见上文端点说明。
