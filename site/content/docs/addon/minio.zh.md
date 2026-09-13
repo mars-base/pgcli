@@ -1,13 +1,12 @@
 ---
 title: "MinIO"
-description: "以 pgcli 插件方式运行 MinIO——单机 S3 兼容对象存储（含 Web 控制台），典型用途是共享的 pgBackRest 备份仓库"
+description: "以 pgcli 插件方式运行 MinIO——单机 S3 兼容对象存储（含 Web 控制台）"
 weight: 49
 ---
 
 [MinIO](https://min.io) 是 S3 兼容的对象存储。pgcli 将其作为**独立的顶层插件**
 运行——共享基础设施，而非实例级 sidecar——采用**单机（single-node）**模式，带
-Web 控制台。典型用途是所有主机都能访问的备份仓库（例如 Patroni 集群的
-pgBackRest `repo1-type=s3` 目标），但它本身就是通用对象存储。
+Web 控制台。它本身就是通用对象存储。
 
 > **平台支持：** MinIO 插件**两个平台都支持**。Linux 上通过主机网络提供服务；
 > macOS 上加入 `pgcli-net` bridge 网络并发布两个端口，Mac 用
@@ -32,6 +31,10 @@ Alpine 上，因为 MinIO 官方镜像移除了内置的 Web 控制台。`pg add
 - `root_user` 默认 `admin`；
 - `root_password` **首次 install 时自动生成**，存入 `pg.yaml`
   （`addons.minio.<name>.root_password`），并在安装摘要中**打印一次**方便记录。
+
+二者就是 MinIO root 的 **access key / secret key**——所有 S3 客户端（包括
+`pg mc alias set <名称> <URL> <root_user> <root_password>`）所说的 access key
+与 secret key 就是它们。
 
 容器按 MinIO 官方部署建议带上 `--ulimit nofile=1048576:1048576` 和
 `--stop-timeout 60`；macOS 上 `podman machine` 虚拟机的 RLIMIT_NOFILE 上限更
@@ -88,7 +91,10 @@ pg addon install minio --name store --listen 0.0.0.0
 手敲 `podman run`：
 
 ```bash
-pg mc alias set store http://127.0.0.1:9000 admin <密码>
+# 按平台选 URL —— 见下文"各平台的端点"：
+pg mc alias set store http://127.0.0.1:9000 admin <密码>    # Linux，本机 addon
+pg mc alias set store http://host.containers.internal:9000 admin <密码>  # macOS，本机 addon
+pg mc alias set store http://10.0.5.7:9000 admin <密码>     # 两者皆可，远端存储
 pg mc mb store/backups
 pg mc ls store
 pg mc cp ./dump.pglz store/backups/
@@ -96,9 +102,11 @@ pg mc cp ./dump.pglz store/backups/
 
 别名持久化保存在宿主的 `~/.mc/config.json`——这是 `mc` 自己的默认路径，
 Linux 和 macOS 都一样——`alias set` 一次，之后每次 `pg mc`（以及 Linux 上
-原生安装的 `mc`）都能看到同一批别名。`pg mc` 底层做的事只是把你的 `~/.mc`
-挂载进容器，然后运行 `ghcr.io/mars-base/pgcli/pgcli-mc`（静态上游二进制 +
-`scratch`，首次使用时自动拉取）；没有别的魔法。
+原生安装的 `mc`）都能看到同一批别名。`pg mc alias list` 读回列表，
+`pg mc alias remove` 删除单个别名。`alias set` 会先拿凭据向端点校验，通过才
+写文件——密码打错不会在配置里留下一个用不了的别名。`pg mc` 底层做的事只是把
+你的 `~/.mc` 挂载进容器，然后运行 `ghcr.io/mars-base/pgcli/pgcli-mc`（静态上
+游二进制 + `scratch`，首次使用时自动拉取）；没有别的魔法。
 
 `cp` / `mirror` / `diff` 的本地文件参数同样可用：`pg mc` 会把每个本地路径按
 realpath 解析，并把该绝对路径原样挂载进容器，因此
@@ -109,15 +117,29 @@ pg mc cp store/backups/dump.pglz ./        # 下载到当前目录
 pg mc mirror ./repo store/backups/         # 或镜像整棵目录树
 ```
 
-所见即所得。macOS 上路径必须位于家目录之下——那是 `podman machine` 虚拟机唯
-一共享的目录树；家目录之外的路径 `pg mc` 会明确提示并跳过。
+所见即所得。下载到尚不存在的路径（新文件名、或还没建的 `./newdir/`）也没问
+题——挂载的是它最近的已存在父目录，mc 写出的文件会落回宿主。macOS 上路径必须
+位于家目录之下——那是 `podman machine` 虚拟机唯一共享的目录树；家目录之外的
+路径 `pg mc` 会明确提示并跳过。
 
-任何会被 `pg` 自己的参数解析器拒绝的 `mc` 标志（`--all`、`--json` 等）放到
-`--` 之后，与 `pg etcdctl` 的约定完全一致：
+任何 `pg` 自己解析器会拒绝的 `mc` 标志都要放到 `--` 之后，与 `pg etcdctl` 的
+约定完全一致。`mc` 的长标志（`--all`、`--json`、`--recursive`、`--force`、
+`--newer-than` 等）pg 一个都不认识，因此全部放 `--` 之后：
 
 ```bash
 pg mc ls store -- --all
+pg mc cp ./dir store/backups/ -- --recursive
+pg mc rm store/old -- --recursive --force
 ```
+
+放在 `--` 之前会在 `pg` 这一层就被拦下，报错形如 `unknown flag: --recursive`
+——看到它就说明分隔符漏了。
+
+原生 mc 有个与本地挂载相关的注意点值得知道：在文件类命令（`cp` / `mirror` /
+`diff`）里，首段不是已知别名的参数一律按本地路径处理。所以别名拼错时不会报
+错，而是安静地上传/下载到当前目录下一个以拼错名字命名的本地目录——`pg mc`
+只是忠实挂载了 mc 判定要读的路径，这是原生行为而非 `pg mc` 的怪癖。执行文件
+操作前先用 `pg mc alias list` 确认别名存在。
 
 `MC_HOST_<name>` 环境变量形式的别名——`mc` 的无状态用法，不碰配置文件——同样
 适用于 `pg mc`，因为该变量会被转发进容器：
@@ -131,6 +153,9 @@ MC_HOST_store="http://admin:<密码>@127.0.0.1:9000" pg mc ls store
 > 指向 Mac 本机 addon 的别名请用
 > `http://admin:<密码>@host.containers.internal:9000`，远端存储则用其可路由地
 > 址。`pg mc` 本身在两个平台上行为一致。
+>
+> Mac 浏览器访问控制台走的是宿主机侧的 `127.0.0.1:<console-port>`（插件已发布
+> 该端口），这与 `pg mc` 容器能不能用 `127.0.0.1` 无关——那只是宿主机自己的回环。
 
 ### 常用命令
 
@@ -138,11 +163,13 @@ MC_HOST_store="http://admin:<密码>@127.0.0.1:9000" pg mc ls store
 |------|------|
 | `pg mc ls store` / `pg mc ls store/backups` | 列出桶 / 对象 |
 | `pg mc mb store/backups` | 创建桶 |
-| `pg mc cp ./file store/backups/` | 上传（整个目录加 `--recursive`） |
+| `pg mc cp ./file store/backups/` | 上传（目录树用 `pg mc mirror ./dir store/backups/`，或给 `cp` 加 `-- --recursive`） |
 | `pg mc cp store/backups/file ./` | 下载 |
 | `pg mc find store -- --name '*.pglz'` | 按名字搜索对象 |
 | `pg mc du store` | 统计各桶大小 |
 | `pg mc rm store/backups/file` | 删除单个对象 |
+| `pg mc rm store/prefix -- --recursive` | 批量删除对象 |
+| `pg mc rb store/bucket -- --force` | 连对象一起删桶 |
 
 同一套 root 凭据适用于任何 S3 SDK——包括 pgBackRest 的 `repo1-type=s3`
 仓库（见[备份](/docs/backup/)、[恢复](/docs/restore/)）。

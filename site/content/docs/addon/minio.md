@@ -1,14 +1,13 @@
 ---
 title: "MinIO"
-description: "Run MinIO as a pgcli addon — single-node S3-compatible object storage with web console, typically as a shared pgBackRest backup repository"
+description: "Run MinIO as a pgcli addon — single-node S3-compatible object storage with web console"
 weight: 49
 ---
 
 [MinIO](https://min.io) is S3-compatible object storage. pgcli runs it as a
 **standalone, top-level addon** — shared infrastructure, not a per-instance
-sidecar — in **single-node** mode, with the web console included. The intended
-use is a backup repository every host can reach (e.g. a pgBackRest `repo1-type=s3`
-target for a Patroni cluster), but it is a general-purpose object store.
+sidecar — in **single-node** mode, with the web console included. It is a
+general-purpose object store.
 
 > **Platform support:** the MinIO addon works on **both platforms**. Linux
 > serves over host networking; macOS joins the `pgcli-net` bridge with its two
@@ -36,6 +35,10 @@ Credentials are handled like Patroni's:
 - `root_password` is **generated on first install** and stored in `pg.yaml`
   (`addons.minio.<name>.root_password`) and **printed once** in the install
   summary for convenience.
+
+They are exactly MinIO's root **access key / secret key** — what every S3
+client (and `pg mc alias set <name> <url> <root_user> <root_password>`) calls
+the access key and secret key.
 
 The container runs `--ulimit nofile=1048576:1048576` and `--stop-timeout 60` as
 MinIO's deployment docs recommend. On macOS the `podman machine` VM caps
@@ -95,7 +98,10 @@ credentials take effect — without losing the data directory.
 install, no manual `podman run` invocation:
 
 ```bash
-pg mc alias set store http://127.0.0.1:9000 admin <password>
+# pick the URL for your platform — see "Endpoints by platform" below:
+pg mc alias set store http://127.0.0.1:9000 admin <password>    # Linux, local addon
+pg mc alias set store http://host.containers.internal:9000 admin <password>  # macOS, local addon
+pg mc alias set store http://10.0.5.7:9000 admin <password>     # either, remote store
 pg mc mb store/backups
 pg mc ls store
 pg mc cp ./dump.pglz store/backups/
@@ -104,7 +110,10 @@ pg mc cp ./dump.pglz store/backups/
 Aliases persist on the host at `~/.mc/config.json` — mc's own default path,
 the same on Linux and macOS — so `alias set` once and every later `pg mc`
 invocation (and a native `mc` install, on Linux) sees the same aliases.
-Under the hood `pg mc` mounts your `~/.mc` into the container and runs
+`pg mc alias list` reads them back and `pg mc alias remove` drops one.
+`alias set` validates the credentials against the endpoint before writing, so a
+wrong password leaves `~/.mc/config.json` untouched rather than storing a dead
+alias. Under the hood `pg mc` mounts your `~/.mc` into the container and runs
 `ghcr.io/mars-base/pgcli/pgcli-mc` (the static upstream binary on `scratch`,
 pulled on first use); nothing else about it is magic.
 
@@ -117,16 +126,33 @@ pg mc cp store/backups/dump.pglz ./        # download into the cwd
 pg mc mirror ./repo store/backups/         # or mirror a whole tree
 ```
 
-just does what it looks like. On macOS the path must live under your home
-directory — that is the only tree the `podman machine` VM shares; `pg mc` says
-so and skips any mount outside it.
+just does what it looks like. A download target that does not exist yet (a new
+filename, or a `./newdir/` not created) is handled too — its nearest existing
+parent directory is what gets mounted, so the file mc writes lands on the host.
+On macOS the path must live under your home directory — that is the only tree
+the `podman machine` VM shares; `pg mc` says so and skips any mount outside it.
 
-Any `mc` flag that `pg`'s own flag parser would reject (`--all`, `--json`, …)
-goes after `--`, exactly like `pg etcdctl`:
+Any `mc` flag that `pg`'s own flag parser would reject goes after `--`, exactly
+like `pg etcdctl` — this covers essentially every `mc` long flag, since none are
+registered on `pg`: `--all`, `--json`, `--recursive`, `--force`, `--newer-than`,
+and so on. Put them all after `--`:
 
 ```bash
 pg mc ls store -- --all
+pg mc cp ./dir store/backups/ -- --recursive
+pg mc rm store/old -- --recursive --force
 ```
+
+Passing one before `--` fails in `pg`, not in `mc`, with a message like
+`unknown flag: --recursive` — a giveaway that the separator is missing.
+
+One caveat from native mc is worth knowing, because it interacts with the local
+mounts above: in a file command (`cp` / `mirror` / `diff`) an operand whose
+first segment is not a known alias is treated as a local path. A typo in an
+alias name therefore uploads or downloads to a local directory named after the
+typo instead of erroring — `pg mc` faithfully mounts what mc decides to read, so
+the behaviour is native, not a pg mc quirk. Confirm the alias with `pg mc alias
+list` before a file operation.
 
 `MC_HOST_<name>` environment aliases — mc's stateless form, no config file
 touched — work through `pg mc` too, since the variable is forwarded into the
@@ -142,6 +168,10 @@ MC_HOST_store="http://admin:<password>@127.0.0.1:9000" pg mc ls store
 > own loopback — point an alias at a local Mac addon via
 > `http://admin:<password>@host.containers.internal:9000`, or at a remote store
 > via its routable address. `pg mc` itself works identically on both.
+>
+> A Mac browser reaches the console on `127.0.0.1:<console-port>` (the addon
+> publishes it); that is host-side and unrelated to what the `pg mc` container
+> can address.
 
 ### Common commands
 
@@ -149,11 +179,13 @@ MC_HOST_store="http://admin:<password>@127.0.0.1:9000" pg mc ls store
 |-------|---------|
 | `pg mc ls store` / `pg mc ls store/backups` | list buckets / objects |
 | `pg mc mb store/backups` | create a bucket |
-| `pg mc cp ./file store/backups/` | upload (add `--recursive` for a tree) |
+| `pg mc cp ./file store/backups/` | upload (for a tree: `pg mc mirror ./dir store/backups/`, or add `-- --recursive` to `cp`) |
 | `pg mc cp store/backups/file ./` | download |
 | `pg mc find store -- --name '*.pglz'` | search objects by name |
 | `pg mc du store` | size per bucket |
 | `pg mc rm store/backups/file` | delete one object |
+| `pg mc rm store/prefix -- --recursive` | delete many objects |
+| `pg mc rb store/bucket -- --force` | remove a bucket, objects and all |
 
 The same root credentials work for any S3 SDK — including pgBackRest against a
 `repo1-type=s3` repository.
