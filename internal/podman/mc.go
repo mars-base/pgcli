@@ -149,17 +149,17 @@ func mcKnownAliases(configDir string, envs []string) map[string]bool {
 	names := map[string]bool{}
 
 	if data, err := os.ReadFile(filepath.Join(configDir, "config.json")); err == nil {
+		// mc's config.json keys aliases by name (a JSON object, not a list) —
+		// {"aliases": {"store": {"url": ...}, ...}}.
 		var cfg struct {
-			Aliases []struct {
-				Name string `json:"name"`
-			} `json:"aliases"`
+			Aliases map[string]json.RawMessage `json:"aliases"`
 		}
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			slog.Debug("mc: parsing config.json for alias detection, treating all bare names as local", "err", err)
 		}
-		for _, a := range cfg.Aliases {
-			if a.Name != "" {
-				names[a.Name] = true
+		for name := range cfg.Aliases {
+			if name != "" {
+				names[name] = true
 			}
 		}
 	}

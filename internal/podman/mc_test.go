@@ -163,6 +163,30 @@ func TestMCLocalFiles(t *testing.T) {
 	}
 }
 
+func TestMCKnownAliases(t *testing.T) {
+	dir := t.TempDir()
+	// mc's real config.json shape: aliases keyed by name.
+	if err := os.WriteFile(filepath.Join(dir, "config.json"),
+		[]byte(`{"version":"10","aliases":{"store":{"url":"http://h:9000","accessKey":"a"},"gcs":{"url":"https://storage.googleapis.com"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	names := mcKnownAliases(dir, []string{"MC_HOST_e2e=http://admin:pass@host:9000"})
+	for _, want := range []string{"store", "gcs", "e2e"} {
+		if !names[want] {
+			t.Errorf("alias %q not detected (names=%v)", want, names)
+		}
+	}
+	if names["./file"] {
+		t.Error("a path must never be an alias")
+	}
+
+	// a missing file simply yields the env aliases.
+	names = mcKnownAliases(filepath.Join(dir, "nonexistent"), nil)
+	if len(names) != 0 {
+		t.Errorf("missing config = %v, want empty", names)
+	}
+}
+
 func TestIsMCLocalOperand(t *testing.T) {
 	aliases := map[string]bool{"store": true}
 	tests := []struct {
