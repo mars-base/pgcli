@@ -99,8 +99,9 @@ Addon networking differs per component:
 - **[HAProxy](/docs/addon/haproxy/)** — **Linux only.** It fronts Patroni
   members over host networking, which the podman machine VM does not provide to
   containers; the manager fails fast on macOS.
-- **[MinIO](/docs/addon/minio/)** — **both platforms.** Single-node object
-  storage. On Linux it serves over host networking; on macOS it joins
+- **[MinIO](/docs/addon/minio/)** — **both platforms.** Object storage,
+  standalone or as a distributed erasure-coded cluster across hosts. On Linux it
+  serves over host networking; on macOS it joins
   `pgcli-net` with its API and console ports published, so the Mac reaches both
   on `127.0.0.1:<port>` (the same path the proxy addons use). The public image
   is dual-arch (amd64 + arm64).

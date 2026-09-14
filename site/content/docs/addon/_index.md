@@ -27,7 +27,7 @@ The following addons are currently supported:
 | [`etcd`](./etcd/) | Distributed key-value store — standalone, clusterable, for HA / DCS use |
 | [`pgdog`](./pgdog/) | Postgres proxy — connection pooling, load balancing and sharding |
 | [`haproxy`](./haproxy/) | TCP load balancer in front of a Patroni cluster — unified or read/write split (Linux only) |
-| [`minio`](./minio/) | Single-node S3-compatible object storage with web console (Linux and macOS) |
+| [`minio`](./minio/) | S3-compatible object storage with web console — standalone or distributed erasure-coded cluster across hosts (Linux and macOS) |
 | [`ha`](./ha/) | Patroni high availability — automatic failover. **Not installed via `pg addon`**: it is its own top-level command, `pg ha` |
 
 Each addon has its own page with commands, parameters, and troubleshooting.

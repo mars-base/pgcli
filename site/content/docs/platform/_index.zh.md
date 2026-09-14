@@ -90,8 +90,8 @@ macOS 上这些都是**单主机**：跨主机副本、跨多机的连接池属�
 - **[HAProxy](/docs/addon/haproxy/)** —— **仅 Linux**。它通过主机网络代理
   Patroni 成员，而 podman machine 虚拟机不提供该能力；manager 在 macOS 上快速
   失败。
-- **[MinIO](/docs/addon/minio/)** —— **两个平台都支持**。单机对象存储。
-  Linux 上经主机网络提供服务；macOS 上加入 `pgcli-net` 并发布 API 与控制台端
+- **[MinIO](/docs/addon/minio/)** —— **两个平台都支持**。对象存储，单机或跨
+  主机分布式纠删码集群皆可。Linux 上经主机网络提供服务；macOS 上加入 `pgcli-net` 并发布 API 与控制台端
   口，Mac 通过 `127.0.0.1:<port>` 即可访问（与代理插件同一条路径）。公开镜像
   为双架构（amd64 + arm64）。
 - **[`pg mc`](/docs/addon/minio/#使用-mc-客户端)**（MinIO 客户端）——

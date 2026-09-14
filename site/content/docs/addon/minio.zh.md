@@ -1,6 +1,6 @@
 ---
 title: "MinIO"
-description: "以 pgcli 插件方式运行 MinIO——单机 S3 兼容对象存储（含 Web 控制台）"
+description: "以 pgcli 插件方式运行 MinIO——单机或跨主机分布式纠删码集群的 S3 兼容对象存储（含 Web 控制台）"
 weight: 49
 ---
 
