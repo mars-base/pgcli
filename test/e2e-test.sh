@@ -8,13 +8,13 @@
 # with other pgcli configs on the same host.
 #
 # Usage:
-#   bash scripts/e2e-test.sh                 # full test
-#   bash scripts/e2e-test.sh --skip-destroy  # keep containers after test
-#   SKIP_PITR=1 bash scripts/e2e-test.sh     # skip PITR tests (faster)
-#   PG_BINARY=/usr/local/bin/pg bash scripts/e2e-test.sh  # custom binary path
-#   PGCLI_NAMESPACE=t1 bash scripts/e2e-test.sh  # custom namespace
-#   PGCLI_PG_START_PORT=38100 PGCLI_SSH_START_PORT=43100 bash scripts/e2e-test.sh  # custom ports
-#   PGCLI_TEST_DIR=/mnt/pgcli-e2e PGCLI_CONFIG_DIR=/mnt/pgcli-e2e-config bash scripts/e2e-test.sh  # custom dirs
+#   bash test/e2e-test.sh                 # full test
+#   bash test/e2e-test.sh --skip-destroy  # keep containers after test
+#   SKIP_PITR=1 bash test/e2e-test.sh     # skip PITR tests (faster)
+#   PG_BINARY=/usr/local/bin/pg bash test/e2e-test.sh  # custom binary path
+#   PGCLI_NAMESPACE=t1 bash test/e2e-test.sh  # custom namespace
+#   PGCLI_PG_START_PORT=38100 PGCLI_SSH_START_PORT=43100 bash test/e2e-test.sh  # custom ports
+#   PGCLI_TEST_DIR=/mnt/pgcli-e2e PGCLI_CONFIG_DIR=/mnt/pgcli-e2e-config bash test/e2e-test.sh  # custom dirs
 set -euo pipefail
 
 BINARY="${PG_BINARY:-/usr/local/bin/pg}"
