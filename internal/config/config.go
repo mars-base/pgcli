@@ -367,6 +367,18 @@ type MinioConfig struct {
 	RootUser     string `yaml:"root_user,omitempty"`     // default admin
 	RootPassword string `yaml:"root_password,omitempty"` // generated on first install
 
+	// Endpoints switches this addon to distributed (cluster) mode when non-empty:
+	// the list is passed verbatim to `minio server <ep1> <ep2> ...` instead of the
+	// single-node `/data`, e.g. http://10.0.0.1:9000/data. The URL path is the
+	// in-container export dir — pgcli bind-mounts data_dir at /data, so it must
+	// be /data (or a subdir); any other path hits the container's root fs and
+	// MinIO refuses it ("drive is part of root drive"). Every node of the
+	// cluster must carry an identical list AND identical root credentials (MinIO
+	// has no runtime membership join — all peers handshake from this list at
+	// startup), so this value is written into each node's own pg.yaml. Empty =>
+	// single-node mode, unchanged behaviour.
+	Endpoints []string `yaml:"endpoints,omitempty"`
+
 	// Autostart brings this container up on host boot via the boot service
 	// (pg autostart enable --minio). Start-only: it starts the existing
 	// container, so install first.

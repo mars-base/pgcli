@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -115,5 +116,42 @@ func TestMinioSaveLoadRoundTrip(t *testing.T) {
 	again := got.Addons.Minio["store"]
 	if again.APIPort != 9000 || again.ConsolePort != 9001 {
 		t.Errorf("ApplyDefaults re-assigned ports: %d/%d", again.APIPort, again.ConsolePort)
+	}
+}
+
+// Endpoints empty => single-node mode unchanged; non-empty => distributed mode,
+// order-preserving round-trip (the exact list must reach every node verbatim).
+func TestMinioEndpointsMode(t *testing.T) {
+	cfg := Default()
+	cfg.Instances = map[string]InstanceConfig{"a": {}}
+	cfg.Addons.Minio = map[string]MinioConfig{
+		"store": {},
+	}
+	cfg.ApplyDefaults()
+	if eps := cfg.Addons.Minio["store"].Endpoints; len(eps) != 0 {
+		t.Errorf("endpoints = %v, want empty for single-node default", eps)
+	}
+
+	cfg.Addons.Minio["store"] = MinioConfig{
+		ContainerName: "pgcli-minio-store",
+		Name:          "store",
+		Endpoints: []string{
+			"http://10.0.0.1:9000/data",
+			"http://10.0.0.2:9000/data",
+			"http://10.0.0.3:9000/data",
+			"http://10.0.0.4:9000/data",
+		},
+	}
+	path := filepath.Join(t.TempDir(), "pg.yaml")
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	want := cfg.Addons.Minio["store"].Endpoints
+	if !reflect.DeepEqual(got.Addons.Minio["store"].Endpoints, want) {
+		t.Errorf("endpoints round-trip mismatch:\n got %v\nwant %v", got.Addons.Minio["store"].Endpoints, want)
 	}
 }

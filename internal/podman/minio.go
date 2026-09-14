@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/mars-base/pgcli/internal/config"
 	"github.com/mars-base/pgcli/internal/platform"
@@ -62,6 +63,50 @@ func (m *MinioManager) resolveDataDir(mc *config.MinioConfig) string {
 // DataDir returns the resolved host data directory (for display).
 func (m *MinioManager) DataDir(mc *config.MinioConfig) string {
 	return m.resolveDataDir(mc)
+}
+
+// DataDirSharesRootDevice reports whether the resolved data dir sits on the same
+// block device as the host root filesystem. MinIO's distributed-cluster startup
+// rejects a drive that is "part of root drive, will not be used" (a safety check
+// against accidentally using the OS disk as an EC volume), so a cluster's
+// data_dir must live on a separately-mounted disk. Single-node mode has no such
+// requirement, so this only matters when Endpoints is non-empty. Callers compare
+// it to decide whether to warn at install time; it is advisory, never an error.
+//
+// The dir may not exist yet at install time (createContainer creates it), so we
+// stat the nearest existing ancestor — the device id is inherited until an actual
+// mount point, which is exactly what the check needs to see.
+func (m *MinioManager) DataDirSharesRootDevice(mc *config.MinioConfig) (bool, error) {
+	root, err := os.Stat("/")
+	if err != nil {
+		return false, fmt.Errorf("stat root fs: %w", err)
+	}
+	data, err := statNearestExisting(m.resolveDataDir(mc))
+	if err != nil {
+		return false, fmt.Errorf("stat data dir: %w", err)
+	}
+	rd, ok1 := root.Sys().(*syscall.Stat_t)
+	dd, ok2 := data.Sys().(*syscall.Stat_t)
+	if !ok1 || !ok2 {
+		return false, nil // can't compare device ids on this platform; assume not-shared
+	}
+	return rd.Dev == dd.Dev, nil
+}
+
+// statNearestExisting stats path, walking up to its parent until a path exists.
+// Returns the FileInfo of the first existing path found.
+func statNearestExisting(path string) (os.FileInfo, error) {
+	p := filepath.Clean(path)
+	for {
+		if fi, err := os.Stat(p); err == nil {
+			return fi, nil
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return nil, fmt.Errorf("no existing ancestor of %s", path)
+		}
+		p = parent
+	}
 }
 
 // EnsureImage pulls the MinIO image if it is not present locally (pull-only:
@@ -157,8 +202,10 @@ func (m *MinioManager) StartContainer(mc *config.MinioConfig) error {
 	return nil
 }
 
-// createContainer runs a single-node MinIO serving /data (the bind-mounted
-// data dir). Linux: host networking, bound to mc.Listen:APIPort (S3 API) and
+// createContainer runs MinIO: single-node serving /data (the bind-mounted
+// data dir) when mc.Endpoints is empty, or a distributed cluster with mc.Endpoints
+// as the shared endpoint list when non-empty (see config.MinioConfig.Endpoints).
+// Linux: host networking, bound to mc.Listen:APIPort (S3 API) and
 // mc.Listen:ConsolePort (web console). macOS: the same ports on the pgcli-net
 // bridge, published -p N:N so the Mac reaches them on 127.0.0.1 — which needs
 // the server bound to 0.0.0.0 inside the container (proxyBindHost) and
@@ -200,9 +247,29 @@ func (m *MinioManager) createContainer(mc *config.MinioConfig) error {
 		"-v", fmt.Sprintf("%s:/data:z", hostMountPath(dataDir)),
 		"-e", "MINIO_ROOT_USER="+mc.RootUser,
 		"-e", "MINIO_ROOT_PASSWORD="+mc.RootPassword,
-		"-e", "MINIO_SERVER_URL="+m.serverURL(mc),
-		mc.ImageTag,
-		"server", "/data",
+	)
+	// MINIO_SERVER_URL must be byte-identical on every node or MinIO refuses to
+	// form the cluster ("Mismatching environment values: [MINIO_SERVER_URL]",
+	// each node then loops on "Waiting for at least 1 remote servers with valid
+	// configuration"). Distributed nodes each advertise their own reachable IP,
+	// so there is no single value to pin — omit it and let the endpoint list
+	// define addresses. Single-node keeps pointing clients at the local URL.
+	if len(mc.Endpoints) == 0 {
+		args = append(args, "-e", "MINIO_SERVER_URL="+m.serverURL(mc))
+	}
+	args = append(args, mc.ImageTag)
+	// Distributed mode: Endpoints is a cluster-wide list every node carries
+	// verbatim (e.g. http://10.0.0.1:9000/data). The container bind-mounts
+	// mc.DataDir at /data unconditionally, so "/data" is the correct export
+	// path for every endpoint in that list. Single-node mode keeps serving
+	// just /data — same as before this field existed.
+	if len(mc.Endpoints) > 0 {
+		args = append(args, "server")
+		args = append(args, mc.Endpoints...)
+	} else {
+		args = append(args, "server", "/data")
+	}
+	args = append(args,
 		"--address", fmt.Sprintf("%s:%d", bind, mc.APIPort),
 		"--console-address", fmt.Sprintf("%s:%d", bind, mc.ConsolePort),
 	)

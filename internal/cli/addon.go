@@ -278,6 +278,8 @@ func init() {
 	addonInstallCmd.Flags().Int("console-port", 0, "MinIO web console host port (0=auto-assign, next free port)")
 	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network)")
 	addonInstallCmd.Flags().String("root-user", "", "MinIO root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config)")
+	addonInstallCmd.Flags().String("root-password", "", "MinIO root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand)")
+	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (path is the in-container export dir; keep it under /data where --data-dir is mounted; repeat for each node; the list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
 	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO container even if one already exists (to apply changed ports/listen/credentials)")
 
 	// start / stop flags
@@ -1367,6 +1369,8 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	consolePort, _ := cmd.Flags().GetInt("console-port")
 	listenAddr, _ := cmd.Flags().GetString("listen")
 	rootUser, _ := cmd.Flags().GetString("root-user")
+	rootPassword, _ := cmd.Flags().GetString("root-password")
+	endpoints, _ := cmd.Flags().GetStringSlice("endpoint")
 	force, _ := cmd.Flags().GetBool("force")
 
 	path := cfgPath
@@ -1406,8 +1410,14 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	if rootUser != "" {
 		existing.RootUser = rootUser
 	}
+	if rootPassword != "" {
+		existing.RootPassword = rootPassword
+	}
 	if listenAddr != "" {
 		existing.Listen = listenAddr
+	}
+	if len(endpoints) > 0 {
+		existing.Endpoints = endpoints
 	}
 	if existing.Name == "" {
 		existing.Name = name
@@ -1465,6 +1475,14 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 		if err := mm.EnsureImage(mc.ImageTag); err != nil {
 			return err
 		}
+		// Distributed mode: MinIO refuses a drive on the root filesystem
+		// ("drive is part of root drive, will not be used"), so warn before we
+		// try to start — the container would just fail to form quorum.
+		if len(mc.Endpoints) > 0 {
+			if shared, err := mm.DataDirSharesRootDevice(&mc); err == nil && shared {
+				fmt.Printf("-> WARNING: distributed mode with data dir %q on the same device as the host root filesystem; MinIO will refuse this drive. Point --data-dir at a separately-mounted disk.\n", mm.DataDir(&mc))
+			}
+		}
 		fmt.Println("-> Starting MinIO container...")
 		if err := mm.EnsureContainer(&mc); err != nil {
 			return err
@@ -1491,6 +1509,14 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	fmt.Println()
 	fmt.Printf("  Root user:     %s\n", mc.RootUser)
 	fmt.Printf("  Root password: %s\n", mc.RootPassword)
+	if len(mc.Endpoints) > 0 {
+		fmt.Println()
+		fmt.Printf("  Distributed mode: %d endpoints\n", len(mc.Endpoints))
+		for _, ep := range mc.Endpoints {
+			fmt.Printf("    - %s\n", ep)
+		}
+		fmt.Println("  NOTE: every node's pg.yaml must carry the identical endpoint list AND identical root credentials, or the cluster will not form.")
+	}
 	return nil
 }
 
