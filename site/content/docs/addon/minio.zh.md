@@ -5,8 +5,9 @@ weight: 49
 ---
 
 [MinIO](https://min.io) 是 S3 兼容的对象存储。pgcli 将其作为**独立的顶层插件**
-运行——共享基础设施，而非实例级 sidecar——采用**单机（single-node）**模式，带
-Web 控制台。它本身就是通用对象存储。
+运行——共享基础设施，而非实例级 sidecar——带 Web 控制台。默认采用**单机
+（single-node）**模式，也支持跨主机的**分布式集群模式**（见下文
+[分布式 / 集群模式](#分布式--集群模式)）。两种模式下它都是通用对象存储。
 
 > **平台支持：** MinIO 插件**两个平台都支持**。Linux 上通过主机网络提供服务；
 > macOS 上加入 `pgcli-net` bridge 网络并发布两个端口，Mac 用
@@ -29,7 +30,8 @@ Alpine 上，因为 MinIO 官方镜像移除了内置的 Web 控制台。`pg add
 凭据的处理方式与 Patroni 相同：
 
 - `root_user` 默认 `admin`；
-- `root_password` **首次 install 时自动生成**，存入 `pg.yaml`
+- `root_password` **首次 install 时自动生成**（也可以用 `--root-password`
+  显式指定），存入 `pg.yaml`
   （`addons.minio.<name>.root_password`），并在安装摘要中**打印一次**方便记录。
 
 二者就是 MinIO root 的 **access key / secret key**——所有 S3 客户端（包括
@@ -84,6 +86,81 @@ pg addon install minio --name store --listen 0.0.0.0
 > **绑定地址：** 默认 `127.0.0.1`，存储仅本机可见。`--listen 0.0.0.0`（或
 > `pg.yaml` 里的 `listen` 键）会把它暴露到网络上——能访问该端口的任何人都可尝试
 > root 凭据，因此只应在防火墙后或 TLS 终结代理之后这样暴露。
+
+## 分布式 / 集群模式
+
+也支持 MinIO 的纠删码（EC）集群模式。它要求**至少 4 个互不相同的
+`host:port` 端点**，并且与其他插件不同，**没有中心协调者**：每台主机各自跑
+一份 pgcli、各自一份 `pg.yaml`，而每一份 `pg.yaml` 都完整写入*同一份*端点
+列表和*同一套* root 凭据。pgcli 只负责拉起本机对应的那一个容器——跨主机的
+组环握手由 MinIO 自己完成。
+
+端点列表就是模式开关：为空即单机（行为不变），非空则以
+`minio server <ep1> <ep2> ...` 进入分布式模式。
+
+每个端点的形式是 `http://<host>:<port><路径>`。`host:port` 是节点之间互相
+访问、完成组环握手的地址。尾部那段 `<路径>` **不是** HTTP 路由——客户端永远
+看不到它——它是 **export path（导出路径）**，即该节点把自己那一份纠删码分片
+数据存放在**容器内**的哪个目录。pgcli 总是把 `--data-dir` 挂载到容器的 `/data`，
+所以这段路径必须是 `/data` 本身，或它下面的一个子目录。（如果选了子目录，
+比如 `/data/minio`，MinIO 会在挂载卷**内部**创建这一层目录——也就是说宿主上
+会多出一层你从未传给 `--data-dir` 的嵌套：`--data-dir /data/minio` 搭配
+endpoint `.../data/minio`，数据实际落在宿主 `/data/minio/minio`，而不是
+`/data/minio`。）四个端点里这段路径字符串要保持一致。
+
+```bash
+# 节点 1（10.0.0.11），宿主上独立数据盘已挂载到 /data/minio：
+pg addon install minio --name store \
+  --listen 10.0.0.11 \
+  --data-dir /data/minio \
+  --root-password '<共享密码>' \
+  --endpoint http://10.0.0.11:9000/data/minio \
+  --endpoint http://10.0.0.12:9000/data/minio \
+  --endpoint http://10.0.0.20:9000/data/minio \
+  --endpoint http://10.0.0.21:9000/data/minio
+
+# 节点 2-4：同样的命令、各自的 --listen、完全相同的 --endpoint 列表，以及
+# 完全相同的 --root-password 值。
+```
+
+`--root-password` 是可选的：不传的话首次 install 会自动生成一个（打印一次、
+存入 `pg.yaml`）。集群模式下每台传同一个值，就能保证全集群凭据一致，不需要
+任何手工复制。
+
+安装摘要会列出成员并提醒一致性要求：
+
+```
+✓ minio installed: "store"
+  ...
+  Distributed mode: 4 endpoints
+    - http://10.0.0.11:9000/data/minio
+    - http://10.0.0.12:9000/data/minio
+    - http://10.0.0.20:9000/data/minio
+    - http://10.0.0.21:9000/data/minio
+  NOTE: every node's pg.yaml must carry the identical endpoint list AND
+  identical root credentials, or the cluster will not form.
+```
+
+集群模式有三条硬性约束，都是实测踩出来的：
+
+- **端点必须是可路由、互不相同的主机。** 同一主机会折叠成"单机多盘"并被
+  拒绝（`use path style endpoint for single node setup`）；`127.0.0.0/8`
+  回环段直接被拒（`resolves to localhost`）。请用各节点真实的局域网地址。
+- **数据目录必须位于与根文件系统不同的磁盘上。** MinIO 拒绝与系统盘同设备
+  的驱动器（`drive is part of root drive, will not be used`）。pgcli 会用
+  数据目录与 `/` 的 `stat` 做检测，在 `--data-dir` 落在根设备时于 install
+  时给出警告——警告是提示性的、不阻断；请把 `--data-dir` 指向独立挂载的
+  数据盘。
+- **集群模式下不下发 `MINIO_SERVER_URL`。** 它在各节点本就不同（各自宣告
+  自己的 IP），而 MinIO 要求所有 `MINIO_*` 环境变量逐节点字节一致，否则每台
+  都会卡在 `Waiting for at least 1 remote servers with valid configuration`。
+  地址由端点列表决定。单机模式仍按 `listen` 设置 `MINIO_SERVER_URL`。
+
+**Quorum（EC）：** 写需要 `⌈N/2⌉+1` 个节点在线，读需要 `⌈N/2⌉`。因此 4 节点
+集群在挂掉 2 台时仍可读、但拒绝写；重启下线的节点后集群自愈。
+
+> **仅跨主机。** 这是真正的分布式部署——每台主机由你自己跑 pgcli。pgcli 不会
+> 在节点间 SSH、也不做成员注册；保持 N 份 `pg.yaml` 一致是运维的职责。
 
 ## 使用 mc 客户端
 
@@ -205,11 +282,16 @@ addons:
       root_user: admin
       root_password: <generated>   # 首次 install 时写入
       autostart: false             # pg autostart enable --minio --name store
+      # endpoints:                 # 省略即单机；见"分布式 / 集群模式"
+      #   - http://10.0.0.11:9000/data/minio
+      #   - http://10.0.0.12:9000/data/minio
+      #   - http://10.0.0.20:9000/data/minio
+      #   - http://10.0.0.21:9000/data/minio
 ```
 
-修改 `listen`、端口、`root_user`、`root_password`、`image_tag` 或 `data_dir`
-后，执行 `pg addon install minio --name store --force` 即生效——普通 install 会
-跳过已存在的容器，`--force` 会重建它（数据目录永不受影响）。
+修改 `listen`、端口、`root_user`、`root_password`、`image_tag`、`data_dir` 或
+`endpoints` 后，执行 `pg addon install minio --name store --force` 即生效——普通
+install 会跳过已存在的容器，`--force` 会重建它（数据目录永不受影响）。
 
 ### 查看列表
 
@@ -290,9 +372,15 @@ MinIO 日志走 stdout：启动行（`API:`/`Console:` 地址、`Documentation:`
 - **主机重启后 `pg addon start` 无效果/失败。** 看
   `pg logs addon minio --name store -f`——多半是数据目录被删了（`--clean-data`
   或人为），MinIO 拒绝在曾格式化过的空目录上启动；或者绑定端口变了。
-- **控制台能打开，但 S3 客户端超时。** `MINIO_SERVER_URL` 由 `listen` + API
-  端口拼成；若绑在 `127.0.0.1` 却从其他主机访问，客户端会被重定向到回环地址。
-  把 `listen` 设为客户端真正可达的地址。
+- **控制台能打开，但 S3 客户端超时。** 单机模式下 `MINIO_SERVER_URL` 由
+  `listen` + API 端口拼成；若绑在 `127.0.0.1` 却从其他主机访问，客户端会被
+  重定向到回环地址。把 `listen` 设为客户端真正可达的地址。（集群模式完全
+  不下发 `MINIO_SERVER_URL`——见[分布式 / 集群模式](#分布式--集群模式)。）
+- **集群卡在 `Waiting for at least 1 remote servers with valid
+  configuration`。** 节点之间配置不一致。逐台用 `podman inspect
+  pgcli-minio-<ns>-<name> --format '{{json .Config.Env}}'` 核对每份
+  `pg.yaml` 的 `endpoints` 列表与 `root_password` 是否字节级一致，并确认
+  没有残留的每节点 `MINIO_SERVER_URL`。
 - **macOS。** 已支持：插件加入 `pgcli-net` bridge 并发布两个端口，Mac 用
   `127.0.0.1:<port>` 即可访问（容器内部绑 `0.0.0.0`，`MINIO_SERVER_URL` 宣告
   Mac 使用的回环地址）。改过端口或凭据后用 `--force` 重建容器。用 `pg mc` 时

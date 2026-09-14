@@ -1,13 +1,15 @@
 ---
 title: "MinIO"
-description: "Run MinIO as a pgcli addon — single-node S3-compatible object storage with web console"
+description: "Run MinIO as a pgcli addon — single-node or distributed S3-compatible object storage with web console"
 weight: 49
 ---
 
 [MinIO](https://min.io) is S3-compatible object storage. pgcli runs it as a
 **standalone, top-level addon** — shared infrastructure, not a per-instance
-sidecar — in **single-node** mode, with the web console included. It is a
-general-purpose object store.
+sidecar — with the web console included. It defaults to **single-node** mode and
+supports a genuinely distributed **cluster mode** across hosts
+([see below](#distributed--cluster-mode)). Either way it is a general-purpose
+object store.
 
 > **Platform support:** the MinIO addon works on **both platforms**. Linux
 > serves over host networking; macOS joins the `pgcli-net` bridge with its two
@@ -32,7 +34,8 @@ addon install` pulls it; pgcli never builds the image at run time.
 Credentials are handled like Patroni's:
 
 - `root_user` defaults to `admin`;
-- `root_password` is **generated on first install** and stored in `pg.yaml`
+- `root_password` is **generated on first install** (or supplied explicitly via
+  `--root-password`) and stored in `pg.yaml`
   (`addons.minio.<name>.root_password`) and **printed once** in the install
   summary for convenience.
 
@@ -84,13 +87,99 @@ drive them from the terminal with [`pg mc`](#using-the-mc-client) below.
 Re-running install against a **live** instance is a no-op: the container is not
 recreated (a stopped one is simply started, with a notice), the flags are
 merged into the stored config, and the existing root password is kept. Pass
-`--force` to recreate the container so changed ports, listen address, or
-credentials take effect — without losing the data directory.
+`--force` to recreate the container so changed ports, listen address, endpoint
+list, or credentials take effect — without losing the data directory.
 
 > **Bind address:** the default `127.0.0.1` keeps the store local. `--listen
 > 0.0.0.0` (or the `listen` key in `pg.yaml`) exposes it on the network. Anyone
 > who can reach the port can then attempt the root credentials, so only do this
 > behind a firewall or a TLS-terminating proxy.
+
+## Distributed / Cluster Mode
+
+MinIO's erasure-coded (EC) cluster mode is available too. It requires **at
+least four distinct `host:port` endpoints** and, unlike the other addons,
+**no central coordinator**: every node runs its own pgcli with its own
+`pg.yaml`, and every one of those `pg.yaml` files carries the *same* full
+endpoint list and the *same* root credentials. pgcli only ever starts the
+container for the node it is running on — MinIO itself does the handshake to
+form the ring across hosts.
+
+The endpoint list is the mode switch: an empty list is single-node (unchanged),
+a non-empty list starts `minio server <ep1> <ep2> ...` in distributed mode.
+
+Each endpoint is `http://<host>:<port><path>`. The `host:port` is how the nodes
+reach each other to form the ring. The trailing `<path>` is **not** an HTTP
+route — clients never see it — it is the **export path**, the directory *inside
+the container* where that node keeps its own slice of the erasure-coded data.
+pgcli always bind-mounts the `--data-dir` at `/data`, so the path must be
+`/data` itself, or a subdirectory under it. (If you pick a subdirectory, e.g.
+`/data/minio`, MinIO creates it *inside* the mounted volume — a real path you
+never passed to `--data-dir` will get an extra nesting level on the host:
+`--data-dir /data/minio` plus endpoint `.../data/minio` means data lands at
+host `/data/minio/minio`, not `/data/minio`.) Keep the same path string across
+all four endpoints.
+
+```bash
+# on node 1 (10.0.0.11), with a dedicated data disk mounted at /data/minio:
+pg addon install minio --name store \
+  --listen 10.0.0.11 \
+  --data-dir /data/minio \
+  --root-password '<shared-secret>' \
+  --endpoint http://10.0.0.11:9000/data/minio \
+  --endpoint http://10.0.0.12:9000/data/minio \
+  --endpoint http://10.0.0.20:9000/data/minio \
+  --endpoint http://10.0.0.21:9000/data/minio
+
+# nodes 2-4: same command, own --listen, and the SAME --endpoint list AND the
+# SAME --root-password value.
+```
+
+`--root-password` is optional: omit it and the first install generates one
+(printed once, stored in `pg.yaml`). In cluster mode, pass the same value on
+every node so the stored credential is identical across the cluster without
+any manual copy.
+
+The install summary lists the members and reminds you of the consistency
+requirement:
+
+```
+✓ minio installed: "store"
+  ...
+  Distributed mode: 4 endpoints
+    - http://10.0.0.11:9000/data/minio
+    - http://10.0.0.12:9000/data/minio
+    - http://10.0.0.20:9000/data/minio
+    - http://10.0.0.21:9000/data/minio
+  NOTE: every node's pg.yaml must carry the identical endpoint list AND
+  identical root credentials, or the cluster will not form.
+```
+
+Three things are strict in cluster mode, each learned the hard way:
+
+- **Endpoints must be routable, distinct hosts.** Same-host folds into
+  single-node-multi-drive and is rejected (`use path style endpoint for
+  single node setup`); the `127.0.0.0/8` loopback range is rejected outright
+  (`resolves to localhost`). Use each node's real LAN address.
+- **The data directory must be on a disk separate from the root filesystem.**
+  MinIO refuses a drive that shares the OS disk (`drive is part of root
+  drive, will not be used`). pgcli detects this with a `stat` of the data dir
+  versus `/` and warns at install time when `--data-dir` is on the root device
+  — the warning is advisory; point `--data-dir` at a mounted data disk.
+- **`MINIO_SERVER_URL` is not set in cluster mode.** It would differ per node
+  (each advertises its own IP), and MinIO requires every `MINIO_*` env var to
+  be byte-identical across nodes, so a per-node `MINIO_SERVER_URL` makes each
+  node loop on `Waiting for at least 1 remote servers with valid
+  configuration`. The endpoint list defines the addresses instead. Single-node
+  still sets `MINIO_SERVER_URL` from `listen`.
+
+**Quorum (EC):** writes need `⌈N/2⌉+1` nodes up, reads need `⌈N/2⌉`. A 4-node
+set therefore keeps serving reads with 2 nodes down but rejects writes; restart
+the downed nodes and the cluster self-heals.
+
+> **Cross-host only.** This is a genuinely distributed deployment — you run
+> pgcli on each host yourself. pgcli does not SSH between nodes or register
+> members; keeping the N `pg.yaml` files consistent is the operator's job.
 
 ## Using the mc Client
 
@@ -223,10 +312,15 @@ addons:
       root_user: admin
       root_password: <generated>   # written on first install
       autostart: false             # pg autostart enable --minio --name store
+      # endpoints:                 # omit for single-node; see "Distributed / Cluster Mode"
+      #   - http://10.0.0.11:9000/data/minio
+      #   - http://10.0.0.12:9000/data/minio
+      #   - http://10.0.0.20:9000/data/minio
+      #   - http://10.0.0.21:9000/data/minio
 ```
 
-Edits to `listen`, ports, `root_user`, `root_password`, `image_tag`, or
-`data_dir` take effect after the next `pg addon install minio --name store
+Edits to `listen`, ports, `root_user`, `root_password`, `image_tag`, `data_dir`,
+or `endpoints` take effect after the next `pg addon install minio --name store
 --force` — the plain install skips a still-present container, `--force`
 recreates it (the data directory is never touched).
 
@@ -316,7 +410,14 @@ and request errors. An `API: http://...` block confirms the listeners came up.
 - **Console reachable but S3 clients time out.** The `MINIO_SERVER_URL` is
   built from `listen` + API port; if you serve on `127.0.0.1` but access from
   another host, clients get redirected to the loopback URL. Set `listen` to the
-  address clients can actually reach.
+  address clients can actually reach. (Cluster mode does not set
+  `MINIO_SERVER_URL` at all — see [Distributed / Cluster
+  Mode](#distributed--cluster-mode).)
+- **Cluster stuck on `Waiting for at least 1 remote servers with valid
+  configuration`.** The nodes disagree. Check that every `pg.yaml` has the
+  byte-identical `endpoints` list and `root_password` (`podman inspect
+  pgcli-minio-<ns>-<name> --format '{{json .Config.Env}}'` on each node), and
+  that no per-node `MINIO_SERVER_URL` crept back in.
 - **macOS.** Supported: the addon serves on the `pgcli-net` bridge with both
   ports published, so the Mac's `127.0.0.1:<port>` reaches them (the container
   binds `0.0.0.0` internally and `MINIO_SERVER_URL` advertises the loopback the
