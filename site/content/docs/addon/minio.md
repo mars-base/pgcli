@@ -112,24 +112,30 @@ Each endpoint is `http://<host>:<port><path>`. The `host:port` is how the nodes
 reach each other to form the ring. The trailing `<path>` is **not** an HTTP
 route — clients never see it — it is the **export path**, the directory *inside
 the container* where that node keeps its own slice of the erasure-coded data.
-pgcli always bind-mounts the `--data-dir` at `/data`, so the path must be
-`/data` itself, or a subdirectory under it. (If you pick a subdirectory, e.g.
-`/data/minio`, MinIO creates it *inside* the mounted volume — a real path you
-never passed to `--data-dir` will get an extra nesting level on the host:
-`--data-dir /data/minio` plus endpoint `.../data/minio` means data lands at
-host `/data/minio/minio`, not `/data/minio`.) Keep the same path string across
-all four endpoints.
+pgcli always bind-mounts the `--data-dir` at `/data`, so the path must start at
+`/data` — the simplest choice is literally `/data`. Keep the same path string
+across all four endpoints.
+
+Note the endpoint path is a *container* path, independent of the host layout:
+if `/data` is a shared disk and you want to keep other things on it, point
+`--data-dir` at a subdirectory of it — `--data-dir /data/minio` stores this
+cluster's data under the host's `/data/minio` while the endpoints stay
+`http://<host>:9000/data` (the endpoint cannot name that subdirectory; it sees
+the mount root). Only if you deliberately extend into the volume with a path
+below `/data` (e.g. `/data/mystore`) does the data land one level deeper on the
+host: `<data-dir>/mystore` — avoid pairing `--data-dir /data/minio` with
+endpoint `.../data/minio`, which nests as `/data/minio/minio`.
 
 ```bash
-# on node 1 (10.0.0.11), with a dedicated data disk mounted at /data/minio:
+# on node 1 (10.0.0.11), with a dedicated data disk mounted at /data:
 pg addon install minio --name store \
   --listen 10.0.0.11 \
-  --data-dir /data/minio \
+  --data-dir /data \
   --root-password '<shared-secret>' \
-  --endpoint http://10.0.0.11:9000/data/minio \
-  --endpoint http://10.0.0.12:9000/data/minio \
-  --endpoint http://10.0.0.20:9000/data/minio \
-  --endpoint http://10.0.0.21:9000/data/minio
+  --endpoint http://10.0.0.11:9000/data \
+  --endpoint http://10.0.0.12:9000/data \
+  --endpoint http://10.0.0.20:9000/data \
+  --endpoint http://10.0.0.21:9000/data
 
 # nodes 2-4: same command, own --listen, and the SAME --endpoint list AND the
 # SAME --root-password value.
@@ -147,10 +153,10 @@ requirement:
 ✓ minio installed: "store"
   ...
   Distributed mode: 4 endpoints
-    - http://10.0.0.11:9000/data/minio
-    - http://10.0.0.12:9000/data/minio
-    - http://10.0.0.20:9000/data/minio
-    - http://10.0.0.21:9000/data/minio
+    - http://10.0.0.11:9000/data
+    - http://10.0.0.12:9000/data
+    - http://10.0.0.20:9000/data
+    - http://10.0.0.21:9000/data
   NOTE: every node's pg.yaml must carry the identical endpoint list AND
   identical root credentials, or the cluster will not form.
 ```
@@ -313,10 +319,10 @@ addons:
       root_password: <generated>   # written on first install
       autostart: false             # pg autostart enable --minio --name store
       # endpoints:                 # omit for single-node; see "Distributed / Cluster Mode"
-      #   - http://10.0.0.11:9000/data/minio
-      #   - http://10.0.0.12:9000/data/minio
-      #   - http://10.0.0.20:9000/data/minio
-      #   - http://10.0.0.21:9000/data/minio
+      #   - http://10.0.0.11:9000/data
+      #   - http://10.0.0.12:9000/data
+      #   - http://10.0.0.20:9000/data
+      #   - http://10.0.0.21:9000/data
 ```
 
 Edits to `listen`, ports, `root_user`, `root_password`, `image_tag`, `data_dir`,

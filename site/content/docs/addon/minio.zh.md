@@ -101,23 +101,28 @@ pg addon install minio --name store --listen 0.0.0.0
 每个端点的形式是 `http://<host>:<port><路径>`。`host:port` 是节点之间互相
 访问、完成组环握手的地址。尾部那段 `<路径>` **不是** HTTP 路由——客户端永远
 看不到它——它是 **export path（导出路径）**，即该节点把自己那一份纠删码分片
-数据存放在**容器内**的哪个目录。pgcli 总是把 `--data-dir` 挂载到容器的 `/data`，
-所以这段路径必须是 `/data` 本身，或它下面的一个子目录。（如果选了子目录，
-比如 `/data/minio`，MinIO 会在挂载卷**内部**创建这一层目录——也就是说宿主上
-会多出一层你从未传给 `--data-dir` 的嵌套：`--data-dir /data/minio` 搭配
-endpoint `.../data/minio`，数据实际落在宿主 `/data/minio/minio`，而不是
-`/data/minio`。）四个端点里这段路径字符串要保持一致。
+数据存放在**容器内**的哪个目录。pgcli 总是把 `--data-dir` 挂载到容器的
+`/data`，所以这段路径必须从 `/data` 开始——最简单就直接写 `/data`。四个端点里
+这段路径字符串要保持一致。
+
+注意端点里的路径是**容器内**路径，与宿主目录结构无关：如果 `/data` 是一块
+共享盘、还想在上面放别的东西，把 `--data-dir` 指到它的子目录即可——
+`--data-dir /data/minio` 让本集群的数据落在宿主的 `/data/minio`，而端点仍然
+写 `http://<host>:9000/data`（端点无法指名这个子目录，它看到的是挂载根）。
+只有当你有意往卷内部再扩展一层（比如 `/data/mystore`）时，数据才会在宿主上
+多落一层到 `<data-dir>/mystore`——避免把 `--data-dir /data/minio` 和端点
+`.../data/minio` 搭配使用，那会嵌套成 `/data/minio/minio`。
 
 ```bash
-# 节点 1（10.0.0.11），宿主上独立数据盘已挂载到 /data/minio：
+# 节点 1（10.0.0.11），宿主上独立数据盘已挂载到 /data：
 pg addon install minio --name store \
   --listen 10.0.0.11 \
-  --data-dir /data/minio \
+  --data-dir /data \
   --root-password '<共享密码>' \
-  --endpoint http://10.0.0.11:9000/data/minio \
-  --endpoint http://10.0.0.12:9000/data/minio \
-  --endpoint http://10.0.0.20:9000/data/minio \
-  --endpoint http://10.0.0.21:9000/data/minio
+  --endpoint http://10.0.0.11:9000/data \
+  --endpoint http://10.0.0.12:9000/data \
+  --endpoint http://10.0.0.20:9000/data \
+  --endpoint http://10.0.0.21:9000/data
 
 # 节点 2-4：同样的命令、各自的 --listen、完全相同的 --endpoint 列表，以及
 # 完全相同的 --root-password 值。
@@ -133,10 +138,10 @@ pg addon install minio --name store \
 ✓ minio installed: "store"
   ...
   Distributed mode: 4 endpoints
-    - http://10.0.0.11:9000/data/minio
-    - http://10.0.0.12:9000/data/minio
-    - http://10.0.0.20:9000/data/minio
-    - http://10.0.0.21:9000/data/minio
+    - http://10.0.0.11:9000/data
+    - http://10.0.0.12:9000/data
+    - http://10.0.0.20:9000/data
+    - http://10.0.0.21:9000/data
   NOTE: every node's pg.yaml must carry the identical endpoint list AND
   identical root credentials, or the cluster will not form.
 ```
@@ -283,10 +288,10 @@ addons:
       root_password: <generated>   # 首次 install 时写入
       autostart: false             # pg autostart enable --minio --name store
       # endpoints:                 # 省略即单机；见"分布式 / 集群模式"
-      #   - http://10.0.0.11:9000/data/minio
-      #   - http://10.0.0.12:9000/data/minio
-      #   - http://10.0.0.20:9000/data/minio
-      #   - http://10.0.0.21:9000/data/minio
+      #   - http://10.0.0.11:9000/data
+      #   - http://10.0.0.12:9000/data
+      #   - http://10.0.0.20:9000/data
+      #   - http://10.0.0.21:9000/data
 ```
 
 修改 `listen`、端口、`root_user`、`root_password`、`image_tag`、`data_dir` 或
