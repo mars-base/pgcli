@@ -424,7 +424,7 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		} else {
 			pbConf = config.PgBouncerConfig{
 				ContainerName:   "pgcli-pgbouncer" + nsSuffixCLI(cfg.Namespace) + "-" + pgName,
-				ImageTag:        "edoburu/pgbouncer:latest",
+				ImageTag:        config.DefaultPgBouncerImageTag,
 				PoolMode:        "transaction",
 				DSN:             dsn,
 				MaxClientConn:   100,
@@ -493,7 +493,7 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		if inst.Addons.PgBouncer == nil {
 			inst.Addons.PgBouncer = &config.PgBouncerConfig{
 				ContainerName:   "pgcli-pgbouncer" + nsSuffixCLI(cfg.Namespace) + "-" + instName,
-				ImageTag:        "edoburu/pgbouncer:latest",
+				ImageTag:        config.DefaultPgBouncerImageTag,
 				PoolMode:        "transaction",
 				MaxClientConn:   100,
 				DefaultPoolSize: 20,
@@ -2041,8 +2041,11 @@ func runAddonStopEtcd(cmd *cobra.Command) error {
 		return nil
 	}
 	fmt.Printf("-> Stopping etcd %q...\n", name)
-	_, err = em.Stop(ec.ContainerName)
-	return err
+	if _, err := em.Stop(ec.ContainerName); err != nil {
+		return err
+	}
+	fmt.Printf("✓ etcd %q stopped\n", name)
+	return nil
 }
 
 func runAddonStartPgDog(cmd *cobra.Command) error {
@@ -2095,8 +2098,11 @@ func runAddonStopPgDog(cmd *cobra.Command) error {
 		return nil
 	}
 	fmt.Printf("-> Stopping pgdog %q...\n", name)
-	_, err = dm.Stop(pd.ContainerName)
-	return err
+	if _, err := dm.Stop(pd.ContainerName); err != nil {
+		return err
+	}
+	fmt.Printf("✓ pgdog %q stopped\n", name)
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -2197,8 +2203,11 @@ func runAddonStopHAProxy(cmd *cobra.Command) error {
 		return nil
 	}
 	fmt.Printf("-> Stopping haproxy %q...\n", name)
-	_, err = hm.Stop(hc.ContainerName)
-	return err
+	if _, err := hm.Stop(hc.ContainerName); err != nil {
+		return err
+	}
+	fmt.Printf("✓ haproxy %q stopped\n", name)
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -2300,8 +2309,11 @@ func runAddonStopMinio(cmd *cobra.Command) error {
 		return nil
 	}
 	fmt.Printf("-> Stopping minio %q...\n", name)
-	_, err = mm.Stop(mc.ContainerName)
-	return err
+	if _, err := mm.Stop(mc.ContainerName); err != nil {
+		return err
+	}
+	fmt.Printf("✓ minio %q stopped\n", name)
+	return nil
 }
 
 // resolvePgBouncerTarget maps (pg-name / cfgInstance) to (pbConf, instName).
@@ -2365,8 +2377,11 @@ func runAddonStopPgBouncer(cmd *cobra.Command) error {
 		return nil
 	}
 	fmt.Printf("-> Stopping PgBouncer for %q...\n", instName)
-	_, err = pbm.Stop(pbConf.ContainerName)
-	return err
+	if _, err := pbm.Stop(pbConf.ContainerName); err != nil {
+		return err
+	}
+	fmt.Printf("✓ PgBouncer for %q stopped\n", instName)
+	return nil
 }
 
 // ---------------------------------------------------------------------------

@@ -87,7 +87,7 @@ type TopAddonsConfig struct {
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
 type PgBouncerConfig struct {
 	ContainerName   string `yaml:"container_name"`              // e.g. pgcli-pgbouncer-ns-<instance>
-	ImageTag        string `yaml:"image_tag,omitempty"`         // edoburu/pgbouncer:latest (default)
+	ImageTag        string `yaml:"image_tag,omitempty"`         // docker.io/edoburu/pgbouncer:v1.25.2-p0 (default)
 	HostPort        int    `yaml:"host_port,omitempty"`         // 56432+ auto-assigned
 	PoolMode        string `yaml:"pool_mode,omitempty"`         // transaction (default)
 	DSN             string `yaml:"dsn,omitempty"`               // remote PG DSN (remote mode only)
@@ -337,6 +337,12 @@ const DefaultMinioImageTag = "ghcr.io/mars-base/pgcli/pgcli-minio:20250422221226
 // the const is the single source of truth; keep it in sync with the Makefile's
 // MC_IMAGE ($(MC_TS) is derived from MC_VERSION).
 const DefaultMCImageTag = "ghcr.io/mars-base/pgcli/pgcli-mc:20250813083541"
+
+// DefaultPgBouncerImageTag pins the PgBouncer image to a specific upstream
+// release rather than :latest, so installs are reproducible. edoburu/pgbouncer
+// tags its images vX.Y.Z-pN; v1.25.2-p0 is the release currently tracked. Keep
+// this and the Makefile (if one ever builds it) in sync.
+const DefaultPgBouncerImageTag = "docker.io/edoburu/pgbouncer:v1.25.2-p0"
 
 // MinioConfig holds a standalone MinIO addon (single-node S3-compatible object
 // storage). Like etcd/pgdog/haproxy it is shared infrastructure, so it lives at
@@ -846,7 +852,7 @@ func (c *Config) ApplyDefaults() {
 				pb.ContainerName = "pgcli-pgbouncer" + nsSuffix(c.Namespace) + "-" + name
 			}
 			if pb.ImageTag == "" {
-				pb.ImageTag = "edoburu/pgbouncer:latest"
+				pb.ImageTag = DefaultPgBouncerImageTag
 			}
 			if pb.PoolMode == "" {
 				pb.PoolMode = "transaction"
@@ -870,7 +876,7 @@ func (c *Config) ApplyDefaults() {
 			addon.ContainerName = "pgcli-pgbouncer" + nsSuffix(c.Namespace) + "-" + name
 		}
 		if addon.ImageTag == "" {
-			addon.ImageTag = "edoburu/pgbouncer:latest"
+			addon.ImageTag = DefaultPgBouncerImageTag
 		}
 		if addon.PoolMode == "" {
 			addon.PoolMode = "transaction"
