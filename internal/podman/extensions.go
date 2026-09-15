@@ -133,9 +133,11 @@ func (b *extImageBuilder) build(fromTag string, pkgList []string, pigstyRepo str
 ENV http_proxy="" HTTP_PROXY="" https_proxy="" HTTPS_PROXY="" no_proxy="" NO_PROXY=""
 ENV DEBIAN_FRONTEND=noninteractive
 
+USER root
 RUN apt-get update \
     && apt-get install -y %s \
     && rm -rf /var/lib/apt/lists/*
+USER postgres
 `, buildFrom, strings.Join(aptPkgs, " "))
 	} else {
 		// First-time ext build from the plain base image: set up Pigsty repo
@@ -144,6 +146,7 @@ RUN apt-get update \
 ENV http_proxy="" HTTP_PROXY="" https_proxy="" HTTPS_PROXY="" no_proxy="" NO_PROXY=""
 ENV DEBIAN_FRONTEND=noninteractive
 
+USER root
 # Pigsty DEB repository (https://pigsty.io/ext/) — 576+ PG extensions
 RUN apt-get update && apt-get install -y curl gnupg2 lsb-release \
     && curl -fsSL %s/key | gpg --dearmor -o /etc/apt/keyrings/pigsty.gpg \
@@ -154,6 +157,7 @@ RUN apt-get update && apt-get install -y curl gnupg2 lsb-release \
     && apt-get install -y %s \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get purge -y --auto-remove curl gnupg2 lsb-release
+USER postgres
 `, buildFrom, pigstyRepo, pigstyRepo, pigstyRepo, strings.Join(aptPkgs, " "))
 	}
 

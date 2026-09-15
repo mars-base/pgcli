@@ -156,6 +156,72 @@ func splitExtArgs(args []string) []string {
 	return out
 }
 
+// mergeWithDCSPreload reads the DCS's current shared_preload_libraries and
+// merges them with the local extension list. This prevents cross-host install
+// from overwriting extensions installed by other hosts — each host's pg.yaml
+// only lists its own extensions, but DCS holds the cluster-wide union.
+func mergeWithDCSPreload(pm *podman.PatroniManager, cluster *config.PatroniClusterConfig, nsScope string, localExts []string) []string {
+	out, err := pm.PatronictlCapture(cluster, "show-config", nsScope)
+	if err != nil {
+		return localExts // can't read DCS, fall back to local only
+	}
+
+	// Find shared_preload_libraries line in show-config output
+	idx := strings.Index(out, "shared_preload_libraries")
+	if idx < 0 {
+		return localExts // nothing in DCS yet
+	}
+	lineEnd := strings.Index(out[idx:], "\n")
+	if lineEnd < 0 {
+		lineEnd = len(out) - idx
+	}
+	line := out[idx : idx+lineEnd]
+
+	// Parse "shared_preload_libraries: pg_cron,pg_stat_statements"
+	// or "shared_preload_libraries: 'pg_cron,pg_stat_statements'"
+	var dcsCSV string
+	if colon := strings.Index(line, ":"); colon >= 0 {
+		dcsCSV = strings.TrimSpace(line[colon+1:])
+		dcsCSV = strings.Trim(dcsCSV, "'\"")
+	}
+	if dcsCSV == "" {
+		return localExts
+	}
+
+	// Merge: union of local + DCS extensions (dedupe)
+	seen := make(map[string]bool)
+	for _, e := range localExts {
+		seen[strings.TrimSpace(e)] = true
+	}
+	for _, e := range strings.Split(dcsCSV, ",") {
+		e = strings.TrimSpace(e)
+		if e != "" {
+			// DCS stores resolved SQL names (e.g. "vector"); map back to user
+			// names where possible so BuildPreloadCSV can re-resolve them.
+			userName := dcsToUserName(e)
+			if !seen[userName] {
+				seen[userName] = true
+			}
+		}
+	}
+	merged := make([]string, 0, len(seen))
+	for e := range seen {
+		merged = append(merged, e)
+	}
+	slices.Sort(merged)
+	return merged
+}
+
+// dcsToUserName maps a resolved SQL extension name (from DCS shared_preload_libraries)
+// back to the user-facing name. For most extensions, SQL name == user name.
+// The exception is pgvector: user types "pgvector", SQL name is "vector".
+func dcsToUserName(sqlName string) string {
+	if sqlName == "vector" {
+		return "pgvector"
+	}
+	return sqlName
+}
+
 func runHAExtensionInstall(scope string, extNames []string, database string, autoRestart bool) error {
 	path := cfgPath
 	if path == "" {
@@ -520,8 +586,12 @@ func runHAExtensionApplyWithCluster(pm *podman.PatroniManager, cfg *config.Confi
 		time.Sleep(3 * time.Second)
 	}
 
-	// Build shared_preload_libraries CSV
-	csv, hasCron := podman.BuildPreloadCSV(cluster.Extensions)
+	// Build shared_preload_libraries CSV.
+	// In cross-host clusters, each host's pg.yaml only lists its own extensions.
+	// Read DCS's current shared_preload_libraries and merge so we don't drop
+	// extensions installed by other hosts.
+	mergedExts := mergeWithDCSPreload(pm, cluster, nsScope, cluster.Extensions)
+	csv, hasCron := podman.BuildPreloadCSV(mergedExts)
 
 	// Prompt for rolling restart confirmation
 	if csv != "" || hasCron {
@@ -556,23 +626,35 @@ func runHAExtensionApplyWithCluster(pm *podman.PatroniManager, cfg *config.Confi
 
 	// Wait for rolling restart to complete. After edit-config changes
 	// shared_preload_libraries, Patroni marks each member with "pending_restart"
-	// in the JSON list. The members stay in State "running"/"streaming" until
-	// Patroni rolls them, so we must also check that no member has a pending
-	// restart — otherwise we'd break immediately and CREATE EXTENSION would
-	// fail because the new shared_preload_libraries isn't loaded yet.
+	// but does NOT automatically restart them — an explicit
+	// `patronictl restart` is required to trigger the rolling restart.
 	fmt.Println("-> Waiting for rolling restart to complete...")
+	restartTriggered := false
 	for i := 0; i < 60; i++ { // 5min timeout
 		time.Sleep(5 * time.Second)
-		if out, err := pm.PatronictlCapture(cluster, "list", nsScope, "-f", "json"); err == nil {
-			// Check all members are running/streaming
-			if strings.Contains(out, `"State": "running"`) || strings.Contains(out, `"State": "streaming"`) {
-				// Check no member has a pending restart
-				if !strings.Contains(out, `"Pending restart"`) {
-					leader := podman.PatroniLeaderFromListJSON(out)
-					if leader != "" {
-						fmt.Printf("  [OK] Cluster healthy, leader: %s\n", leader)
-						break
-					}
+		out, err := pm.PatronictlCapture(cluster, "list", nsScope, "-f", "json")
+		if err != nil {
+			continue
+		}
+		hasPending := strings.Contains(out, `"Pending restart"`)
+		if hasPending && !restartTriggered {
+			// Patroni only marks members as pending; it won't restart them
+			// automatically for shared_preload_libraries changes.
+			// Trigger the rolling restart explicitly.
+			fmt.Println("  -> Triggering rolling restart (patronictl restart)...")
+			if rerr := pm.Patronictl(cluster, "restart", nsScope, "--force"); rerr != nil {
+				fmt.Printf("  [!] Warning: patronictl restart: %v\n", rerr)
+			}
+			restartTriggered = true
+			continue
+		}
+		// Check all members are running/streaming with no pending restart
+		if !hasPending {
+			if (strings.Contains(out, `"State": "running"`) || strings.Contains(out, `"State": "streaming"`)) {
+				leader := podman.PatroniLeaderFromListJSON(out)
+				if leader != "" {
+					fmt.Printf("  [OK] Cluster healthy, leader: %s\n", leader)
+					break
 				}
 			}
 		}
