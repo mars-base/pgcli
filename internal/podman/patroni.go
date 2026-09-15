@@ -12,11 +12,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -719,14 +721,24 @@ func (m *PatroniManager) DiscoverLeader(cluster *config.PatroniClusterConfig) (m
 	for _, mm := range members {
 		role, _ := mm["Role"].(string)
 		name, _ := mm["Member"].(string)
-		host, _ := mm["Host"].(string)
-		portF, _ := mm["Port"].(float64)
-		port := int(portF)
 
 		role = strings.ToLower(role)
-		if name != "" && (strings.Contains(role, "leader") || role == "primary") {
-			return name, host, port, nil
+		if name == "" || (!strings.Contains(role, "leader") && role != "primary") {
+			continue
 		}
+
+		// patronictl list JSON puts host:port in the "Host" field (e.g.
+		// "10.0.0.1:35532"); there is no separate "Port" key. Split it.
+		hostField, _ := mm["Host"].(string)
+		h, pStr, splitErr := net.SplitHostPort(hostField)
+		if splitErr != nil {
+			return name, hostField, 0, nil
+		}
+		p, parseErr := strconv.Atoi(pStr)
+		if parseErr != nil {
+			return name, h, 0, nil
+		}
+		return name, h, p, nil
 	}
 	return "", "", 0, fmt.Errorf("no leader found in cluster %q", cluster.Name)
 }
@@ -761,8 +773,9 @@ func (m *PatroniManager) ExecLeaderQuery(cluster *config.PatroniClusterConfig, d
 	podmanArgs := []string{
 		"run", "--rm", "--name", containerName,
 		"--network", "host",
+		"--entrypoint", "psql",
 		imageTag,
-		"psql", "--dbname=" + dsn, "-t", "-A", "-c", sql,
+		"--dbname=" + dsn, "-t", "-A", "-c", sql,
 	}
 	cmd := exec.Command(m.podman, podmanArgs...)
 	var stderr bytes.Buffer

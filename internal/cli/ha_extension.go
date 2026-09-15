@@ -513,11 +513,17 @@ func runHAExtensionApply(scope string, database string, autoRestart bool) error 
 func runHAExtensionApplyWithCluster(pm *podman.PatroniManager, cfg *config.Config, cluster *config.PatroniClusterConfig, scope, database string, autoRestart, didRecreate bool) error {
 	nsScope := cfg.PatroniScope(scope)
 
-	// Resume cluster if we just recreated containers (it's paused)
+	// Resume cluster if we just recreated containers (it's paused).
+	// Tolerate "not paused" — a manual restart or external resume may
+	// have already resumed the cluster before apply runs.
 	if didRecreate {
 		fmt.Printf("-> Resuming cluster %q...\n", scope)
-		if err := pm.Patronictl(cluster, "resume", nsScope, "--wait"); err != nil {
-			return fmt.Errorf("resuming cluster: %w", err)
+		if _, err := pm.PatronictlCapture(cluster, "resume", nsScope, "--wait"); err != nil {
+			if strings.Contains(err.Error(), "not paused") {
+				fmt.Println("  (cluster is not paused — skipping resume)")
+			} else {
+				return fmt.Errorf("resuming cluster: %w", err)
+			}
 		}
 		// Wait a moment for leader election to stabilize
 		time.Sleep(3 * time.Second)
