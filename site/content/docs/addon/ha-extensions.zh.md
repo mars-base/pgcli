@@ -149,14 +149,19 @@ pg ha extension apply app --database mydb --auto-restart
 **第一阶段 —— 每台主机：** 在每台主机上运行 `pg ha extension install`。每台主机：
 - 在本地构建 `-ext` 镜像
 - 暂停集群
-- 用新镜像重建自己的本地成员
+- 用新镜像重建自己的本地成员（**同主机内 replica 先、leader 后**，避免不必要的故障切换）
 - 恢复集群
 
+> **推荐顺序：从 replica 所在主机开始。** 如果 leader 所在主机先执行 install，
+> leader 重建会触发故障切换（leader 漂移到其他主机）。从 replica 主机开始，
+> leader 始终不动，直到最后才处理 leader 所在主机，最大限度减少 leader 漂移
+> 带来的数据同步开销。
+
 ```bash
-# 主机 A
+# 主机 A（只有 replica，先执行）
 pg ha extension install app pg_stat_statements,pg_cron
 
-# 主机 B
+# 主机 B（有 leader，后执行）
 pg ha extension install app pg_stat_statements,pg_cron
 ```
 

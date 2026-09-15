@@ -155,14 +155,20 @@ installation workflow splits into two phases:
 **Phase 1 — per host:** Run `pg ha extension install` on each host. Each host:
 - Builds the `-ext` image locally
 - Pauses the cluster
-- Recreates its own local members from the new image
+- Recreates its own local members from the new image (**replicas first, leader last**
+  within each host, to avoid unnecessary failovers)
 - Resumes the cluster
 
+> **Recommended order: start from replica hosts.** If the host with the leader runs
+> `install` first, recreating the leader triggers a failover (leader moves to another
+> host). Starting from replica hosts keeps the leader in place until the very end,
+> minimizing failover-related data sync overhead.
+
 ```bash
-# host A
+# host A (replicas only — run first)
 pg ha extension install app pg_stat_statements,pg_cron
 
-# host B
+# host B (has the leader — run last)
 pg ha extension install app pg_stat_statements,pg_cron
 ```
 

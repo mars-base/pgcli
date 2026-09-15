@@ -222,6 +222,31 @@ func dcsToUserName(sqlName string) string {
 	return sqlName
 }
 
+// replicasFirstOrder returns local member names sorted so that replicas are
+// recreated before the leader. This minimizes unnecessary failovers during
+// extension install — if the leader is recreated first, Patroni promotes a
+// replica, and then we'd recreate the new leader again on the next host.
+func replicasFirstOrder(pm *podman.PatroniManager, cluster *config.PatroniClusterConfig, nsScope string) []string {
+	// Query current roles from patronictl list
+	leader := ""
+	if out, err := pm.PatronictlCapture(cluster, "list", nsScope, "-f", "json"); err == nil {
+		leader = podman.PatroniLeaderFromListJSON(out)
+	}
+
+	var replicas []string
+	var leaders []string
+	for member := range cluster.Members {
+		if member == leader {
+			leaders = append(leaders, member)
+		} else {
+			replicas = append(replicas, member)
+		}
+	}
+	// Stable order: replicas first, then leader
+	slices.Sort(replicas)
+	return append(replicas, leaders...)
+}
+
 func runHAExtensionInstall(scope string, extNames []string, database string, autoRestart bool) error {
 	path := cfgPath
 	if path == "" {
@@ -341,8 +366,14 @@ func runHAExtensionInstall(scope string, extNames []string, database string, aut
 			return fmt.Errorf("pausing cluster: %w", err)
 		}
 
+		// Determine recreate order: replicas first, leader last.
+		// This avoids unnecessary failover — if we recreate the leader first,
+		// Patroni promotes a replica, and then we'd recreate the new leader
+		// again when we get to that host.
+		recreateOrder := replicasFirstOrder(pm, &cluster, nsScope)
+
 		fmt.Printf("-> Recreating %d local member(s) from new image...\n", len(cluster.Members))
-		for member := range cluster.Members {
+		for _, member := range recreateOrder {
 			fmt.Printf("  -> Recreating member %s...\n", member)
 			if err := pm.RecreateMemberWithImage(&cluster, member, newTag); err != nil {
 				return fmt.Errorf("recreating member %s: %w", member, err)
