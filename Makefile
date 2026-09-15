@@ -43,8 +43,7 @@ container-build-backup:
 	podman build --platform linux/arm64 -t ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0-arm64 -f embed/backup.Containerfile embed/
 
 container-build-patroni:
-	podman build --platform linux/amd64 --http-proxy=false -t ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5-amd64 -f embed/patroni.Containerfile embed/
-	podman build --platform linux/arm64 --http-proxy=false -t ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5-arm64 -f embed/patroni.Containerfile embed/
+	podman build --http-proxy=false -t ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5 -f embed/patroni.Containerfile embed/
 
 container-manifest:
 	podman manifest rm ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 2>/dev/null || true
@@ -55,15 +54,11 @@ container-manifest:
 	podman manifest create ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 \
 		ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0-amd64 \
 		ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0-arm64
-	podman manifest rm ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5 2>/dev/null || true
-	podman manifest create ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5 \
-		ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5-amd64 \
-		ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5-arm64
 
 container-push:
 	podman manifest push ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 --all
 	podman manifest push ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 --all
-	podman manifest push ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5 ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5 --all
+	podman push ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5 ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5
 
 # Single-node MinIO image (public, referenced by config.DefaultMinioImageTag).
 # Built from the upstream static binaries (minio/minio GitHub releases) on
