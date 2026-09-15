@@ -51,3 +51,4 @@ embed/minio.linux-*
 # after. (Exact paths — embed/mc.Containerfile stays tracked.)
 embed/mc
 embed/ca-certificates.crt
+pg
