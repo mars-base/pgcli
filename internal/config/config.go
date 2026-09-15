@@ -25,6 +25,7 @@ type Config struct {
 	PgDogStartPort          int                       `yaml:"pgdog_start_port,omitempty"`           // starting PgDog host port, default 7432 (openmetrics gets the next free port)
 	PatroniStartPort        int                       `yaml:"patroni_start_port,omitempty"`         // starting Patroni member PG host port, default 35532
 	PatroniRestapiStartPort int                       `yaml:"patroni_restapi_start_port,omitempty"` // starting Patroni REST API host port, default 8008
+	PatroniSSHStartPort     int                       `yaml:"patroni_ssh_start_port,omitempty"`     // starting Patroni SSH host port, default 42301 (separate from PG instance SSH pool at 42201)
 	HaProxyStartPort        int                       `yaml:"haproxy_start_port,omitempty"`         // starting HAProxy listener host port, default 5000 (read port and stats take the next free ports)
 	MinioStartPort          int                       `yaml:"minio_start_port,omitempty"`           // starting MinIO API host port, default 9000 (console takes the next free port)
 	Postgres                PostgresConfig            `yaml:"postgres"`
@@ -250,6 +251,7 @@ type PatroniMemberConfig struct {
 	AdvertiseHost string `yaml:"advertise_host,omitempty"` // connect_address host; empty = loopback only (single host); a LAN IP/FQDN for cross-host
 	HostPort      int    `yaml:"host_port,omitempty"`      // PG listen port, 35532+ auto-assigned per host
 	RestapiPort   int    `yaml:"restapi_port,omitempty"`   // Patroni REST API port, 8008+ auto-assigned per host
+	SSHPort       int    `yaml:"ssh_port,omitempty"`       // SSH port for pgbackrest backup, 42301+ auto-assigned per host
 	DataDir       string `yaml:"data_dir,omitempty"`       // host dir bound to /var/lib/postgresql (PGDATA under it)
 	// Autostart brings this member's container up on host boot via the boot
 	// service (pg autostart enable --ha). Start-only: it starts the existing
@@ -450,6 +452,7 @@ func Default() *Config {
 		PgDogStartPort:          7432,
 		PatroniStartPort:        35532,
 		PatroniRestapiStartPort: 8008,
+		PatroniSSHStartPort:     42301,
 		HaProxyStartPort:        5000,
 		MinioStartPort:          9000,
 		Postgres: PostgresConfig{
@@ -1240,8 +1243,10 @@ func (c *Config) autoAssignPorts() {
 	// host's own `pg ha create`, and must match — see docs).
 	patroniBase := c.PatroniStartPort
 	patroniRestBase := c.PatroniRestapiStartPort
+	patroniSSHBase := c.PatroniSSHStartPort
 	assignedPatroniPG := map[int]bool{}
 	assignedPatroniRest := map[int]bool{}
+	assignedPatroniSSH := map[int]bool{}
 	for _, cluster := range c.Addons.Patroni {
 		for _, mb := range cluster.Members {
 			if mb.HostPort != 0 {
@@ -1249,6 +1254,9 @@ func (c *Config) autoAssignPorts() {
 			}
 			if mb.RestapiPort != 0 {
 				assignedPatroniRest[mb.RestapiPort] = true
+			}
+			if mb.SSHPort != 0 {
+				assignedPatroniSSH[mb.SSHPort] = true
 			}
 		}
 	}
@@ -1260,6 +1268,7 @@ func (c *Config) autoAssignPorts() {
 		sort.Strings(scopes)
 		nextPG := patroniBase
 		nextRest := patroniRestBase
+		nextSSH := patroniSSHBase
 		for _, scope := range scopes {
 			cluster := c.Addons.Patroni[scope]
 			members := make([]string, 0, len(cluster.Members))
@@ -1286,6 +1295,15 @@ func (c *Config) autoAssignPorts() {
 					nextRest++
 				} else if mb.RestapiPort >= nextRest {
 					nextRest = mb.RestapiPort + 1
+				}
+				if mb.SSHPort == 0 && patroniSSHBase > 0 {
+					for (usedPorts != nil && usedPorts[nextSSH]) || assignedPatroniSSH[nextSSH] {
+						nextSSH++
+					}
+					mb.SSHPort = nextSSH
+					nextSSH++
+				} else if mb.SSHPort >= nextSSH {
+					nextSSH = mb.SSHPort + 1
 				}
 				cluster.Members[m] = mb
 			}

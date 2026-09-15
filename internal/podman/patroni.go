@@ -306,6 +306,7 @@ func (m *PatroniManager) createMemberContainer(cluster *config.PatroniClusterCon
 		"--network", "host",
 		"--http-proxy=false",
 		"--restart", "unless-stopped",
+		"-e", fmt.Sprintf("PGCLI_SSH_PORT=%d", mb.SSHPort),
 		"-v", fmt.Sprintf("%s:/var/lib/postgresql:z", hostMountPath(mb.DataDir)),
 		"-v", fmt.Sprintf("%s:/patroni:z", hostMountPath(dir)),
 		mb.ImageTag,

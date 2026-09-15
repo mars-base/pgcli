@@ -10,6 +10,8 @@ INSTALL_DIR="${INSTALL_DIR:-}"
 # Container images (pulled during install for faster first startup)
 PG_IMAGE="ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0"
 BACKUP_IMAGE="ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0"
+PATRONI_IMAGE="ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5"
+ETCD_IMAGE="quay.io/coreos/etcd:v3.5.30"
 
 red()   { printf '\033[0;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[0;32m%s\033[0m\n' "$*"; }
@@ -382,6 +384,8 @@ pull_images() {
     yellow "-> Pulling container images..."
     podman pull "$PG_IMAGE" 2>/dev/null && green "  [OK] PostgreSQL image pulled" || yellow "  [!] Failed to pull PostgreSQL image (will pull on first use)"
     podman pull "$BACKUP_IMAGE" 2>/dev/null && green "  [OK] Backup image pulled" || yellow "  [!] Failed to pull backup image (will pull on first use)"
+    podman pull "$PATRONI_IMAGE" 2>/dev/null && green "  [OK] Patroni image pulled" || yellow "  [!] Failed to pull Patroni image (will pull on first use)"
+    podman pull "$ETCD_IMAGE" 2>/dev/null && green "  [OK] etcd image pulled" || yellow "  [!] Failed to pull etcd image (will pull on first use)"
 }
 
 check_path() {

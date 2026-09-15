@@ -8,12 +8,27 @@ FROM docker.io/library/postgres:18
 # S3/DynamoDB. vim is present because an interactive `patronictl edit-config`
 # needs an EDITOR inside the container.
 #
+# pgbackrest + openssh-server enable the pgcli backup container to SSH into
+# this member and run backups (same architecture as the plain PG image).
+# S3/MinIO data transfer goes directly from the remote pgBackRest process,
+# SSH is only the control channel.
+#
 # Built with the host proxy disabled (`--http-proxy=false`) — a stale proxy
 # env makes the pip install 403 against PyPI. Version pinned for reproducibility.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 python3-pip vim-tiny \
+    && apt-get install -y --no-install-recommends \
+         python3 python3-pip vim-tiny \
+         pgbackrest openssh-server \
     && rm -rf /var/lib/apt/lists/* \
-    && pip3 install --no-cache-dir --break-system-packages "patroni[psycopg3,etcd3]==4.1.5"
+    && pip3 install --no-cache-dir --break-system-packages "patroni[psycopg3,etcd3]==4.1.5" \
+    && mkdir -p /var/run/sshd /home/postgres/.ssh /var/log/pgbackrest \
+    && chmod 700 /home/postgres/.ssh \
+    && chown postgres:postgres /var/log/pgbackrest \
+    && sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config \
+    && sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config \
+    && sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config \
+    && echo 'AuthorizedKeysFile /etc/ssh/authorized_keys/%u' >> /etc/ssh/sshd_config \
+    && mkdir -p /etc/ssh/authorized_keys
 
 # Patroni must resolve the PostgreSQL client tools itself: same-image guarantee.
 RUN patroni --version \
