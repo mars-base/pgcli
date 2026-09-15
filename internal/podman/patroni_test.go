@@ -225,6 +225,39 @@ func TestPatroniRenderUsesContainerPaths(t *testing.T) {
 	}
 }
 
+func TestPatroniClusterConfigExtensionsRoundTrip(t *testing.T) {
+	cluster := &config.PatroniClusterConfig{
+		Name:       "app",
+		Extensions: []string{"pg_stat_statements", "pg_cron", "pgvector"},
+		Passwords: config.PatroniPasswords{
+			Superuser: "su-pass", Replication: "re-pass", Rewind: "rw-pass",
+			RestapiUser: "restuser", RestapiPasswd: "restpass",
+		},
+		Members: map[string]config.PatroniMemberConfig{
+			"node1": {HostPort: 5432, RestapiPort: 8008},
+		},
+	}
+
+	out, err := yaml.Marshal(cluster)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var decoded config.PatroniClusterConfig
+	if err := yaml.Unmarshal(out, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(decoded.Extensions) != len(cluster.Extensions) {
+		t.Fatalf("Extensions length mismatch: got %d, want %d", len(decoded.Extensions), len(cluster.Extensions))
+	}
+	for i, ext := range decoded.Extensions {
+		if ext != cluster.Extensions[i] {
+			t.Errorf("Extensions[%d] = %q, want %q", i, ext, cluster.Extensions[i])
+		}
+	}
+}
+
 func TestPatroniPickMemberYMLPrefersOnDisk(t *testing.T) {
 	cfg := config.Default()
 	dir := t.TempDir()

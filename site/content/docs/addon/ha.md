@@ -213,6 +213,7 @@ co-locating is fine for dev and small footprints.
 | `pg ha start` / `stop <scope> --member m \| --all` | Raw container start/stop (see lifecycle caveat) |
 | `pg ha remove <scope> --member m \| --scope-all [--clean-data] [--force]` | Remove member(s); `--scope-all` also clears the DCS |
 | `pg ha passwords <scope> [--file F]` | Export the stored password set (the `--passwords-file` format, for other hosts) |
+| `pg ha extension install/remove/list/apply` | Install, remove, or list PostgreSQL extensions (see [Extensions in HA](./ha-extensions/)) |
 | `pg ha ctl <scope> -- <patronictl args…>` | Passthrough to any `patronictl` command |
 
 Flags after `--` reach `patronictl` verbatim (cobra strips the `--`), so
@@ -547,6 +548,29 @@ which settings require a restart.
 
 > **Full parameter reference:** [Patroni Dynamic Configuration](./ha-dynamic/)
 > covers every DCS-tunable parameter with defaults, constraints, and examples.
+
+## Extensions
+
+PostgreSQL extensions in a Patroni cluster cannot be installed the same way as
+single-node instances — Patroni regenerates `postgresql.conf` from the DCS every
+loop, so `shared_preload_libraries` must be set via `patronictl edit-config`,
+and container recreation must be coordinated with pause/resume to avoid
+unwanted failovers.
+
+```bash
+# Install extensions (builds -ext image, recreates members, edit-config, CREATE EXTENSION)
+pg ha extension install app pg_stat_statements pg_cron
+
+# List installed extensions (config, DCS, and leader views)
+pg ha extension list app
+
+# Remove extensions (DROP EXTENSION + edit-config)
+pg ha extension remove app pg_cron
+```
+
+> **Full reference:** [Extensions in HA Clusters](./ha-extensions/) covers the
+> orchestration order, cross-host workflow, `shared_preload_libraries` ordering
+> rules (citus-first, pg_cron auto-config), and builtin-only fast path.
 
 ## Notes
 

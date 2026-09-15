@@ -7,15 +7,18 @@
 package podman
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	res "github.com/mars-base/pgcli/embed"
 	"github.com/mars-base/pgcli/internal/config"
@@ -661,4 +664,120 @@ func (m *PatroniManager) containerRunning(name string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// --- extension support -------------------------------------------------
+
+// BuildExtensionImage builds a derived Patroni image that layers Pigsty DEB
+// packages on top of the member's base image. Delegates to the shared
+// extImageBuilder. pigstyRepo is required (the patroni base image does NOT
+// have Pigsty repo pre-configured).
+func (m *PatroniManager) BuildExtensionImage(fromTag string, pkgList []string, pigstyRepo string) (string, error) {
+	b := &extImageBuilder{
+		dataDir:        m.dataDir,
+		runInteractive: m.runInteractive,
+		imageExists:    m.imageExists,
+		run:            m.run,
+	}
+	return b.build(fromTag, pkgList, pigstyRepo)
+}
+
+// DiscoverLeader queries the cluster via patronictl list -f json and returns
+// the leader member's name, host, and port. If the leader is not found or
+// the cluster is unhealthy, returns an error.
+func (m *PatroniManager) DiscoverLeader(cluster *config.PatroniClusterConfig) (memberName, host string, port int, err error) {
+	nsScope := m.cfg.PatroniScope(cluster.Name)
+	out, err := m.PatronictlCapture(cluster, "list", nsScope, "-f", "json")
+	if err != nil {
+		return "", "", 0, fmt.Errorf("querying cluster state: %w", err)
+	}
+
+	var members []map[string]any
+	if err := json.Unmarshal([]byte(out), &members); err != nil {
+		return "", "", 0, fmt.Errorf("parsing patronictl output: %w", err)
+	}
+
+	for _, mm := range members {
+		role, _ := mm["Role"].(string)
+		name, _ := mm["Member"].(string)
+		host, _ := mm["Host"].(string)
+		portF, _ := mm["Port"].(float64)
+		port := int(portF)
+
+		role = strings.ToLower(role)
+		if name != "" && (strings.Contains(role, "leader") || role == "primary") {
+			return name, host, port, nil
+		}
+	}
+	return "", "", 0, fmt.Errorf("no leader found in cluster %q", cluster.Name)
+}
+
+// ExecLeaderQuery runs a SQL query against the cluster leader via a temporary
+// container with host networking. Used for CREATE EXTENSION on the leader,
+// which may be on a remote host. The DSN is built from the leader's advertised
+// host:port and the cluster's superuser password.
+func (m *PatroniManager) ExecLeaderQuery(cluster *config.PatroniClusterConfig, database, sql string) (string, error) {
+	_, host, port, err := m.DiscoverLeader(cluster)
+	if err != nil {
+		return "", err
+	}
+
+	dsn := fmt.Sprintf("postgres://postgres:%s@%s:%d/%s",
+		url.QueryEscape(cluster.Passwords.Superuser),
+		host, port, database)
+
+	// Use any local member's image tag for the throwaway container
+	imageTag := ""
+	for _, mb := range cluster.Members {
+		imageTag = mb.ImageTag
+		break
+	}
+	if imageTag == "" {
+		imageTag = DefaultPatroniImageTag
+	}
+
+	containerName := fmt.Sprintf("pgcli-ha-query-%d", time.Now().UnixNano())
+	defer m.run("rm", "-f", containerName)
+
+	podmanArgs := []string{
+		"run", "--rm", "--name", containerName,
+		"--network", "host",
+		imageTag,
+		"psql", "--dbname=" + dsn, "-t", "-A", "-c", sql,
+	}
+	cmd := exec.Command(m.podman, podmanArgs...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("querying leader: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return string(out), nil
+}
+
+// RecreateMemberWithImage updates a member's image tag and recreates its
+// container. This is DESTRUCTIVE: the member goes offline, and if it was the
+// leader, failover will occur (unless cluster is paused). Callers must pause
+// the cluster first if they want to avoid failover.
+func (m *PatroniManager) RecreateMemberWithImage(cluster *config.PatroniClusterConfig, member, newImageTag string) error {
+	mb, ok := cluster.Members[member]
+	if !ok {
+		return fmt.Errorf("member %q not found in cluster %q", member, cluster.Name)
+	}
+
+	// Update the member's image tag
+	mb.ImageTag = newImageTag
+	cluster.Members[member] = mb
+
+	// Re-render patroni.yml (references the new image)
+	if _, err := m.WriteMemberConfig(cluster, member); err != nil {
+		return fmt.Errorf("writing patroni.yml: %w", err)
+	}
+
+	// Recreate the container (stop+rm+create)
+	if err := m.EnsureMemberContainer(cluster, member); err != nil {
+		return fmt.Errorf("recreating member container: %w", err)
+	}
+
+	return nil
 }

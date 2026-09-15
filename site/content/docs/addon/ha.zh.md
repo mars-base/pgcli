@@ -198,6 +198,7 @@ Patroni 只需要一个可达的 etcd 集群，因此有两种布局：
 | `pg ha start` / `stop <scope> --member m \| --all` | 裸容器 start/stop（见生命周期警告） |
 | `pg ha remove <scope> --member m \| --scope-all [--clean-data] [--force]` | 移除成员；`--scope-all` 同时清 DCS |
 | `pg ha passwords <scope> [--file F]` | 导出存储的密码集（`--passwords-file` 的格式，供其它主机使用） |
+| `pg ha extension install/remove/list/apply` | 安装、卸载或列出 PostgreSQL 扩展（见 [HA 集群扩展](./ha-extensions/)） |
 | `pg ha ctl <scope> -- <patronictl 参数…>` | 透传任意 `patronictl` 命令 |
 
 `--` 之后的 flag 原样到达 `patronictl`（cobra 会剥掉 `--`），所以
@@ -511,6 +512,27 @@ pg ha edit-config app -- -s 'postgresql.parameters.work_mem=64MB'
   只能重建集群。
 
 > **完整参数参考：** [Patroni 动态配置](./ha-dynamic/) 涵盖所有 DCS 可调参数，包含默认值、约束条件和示例。
+
+## 扩展安装
+
+Patroni 集群中的 PostgreSQL 扩展不能用单节点的方式安装 —— Patroni 每个循环都从
+DCS 重新生成 `postgresql.conf`，因此 `shared_preload_libraries` 必须通过
+`patronictl edit-config` 设置，容器重建必须配合 pause/resume 以避免意外的故障切换。
+
+```bash
+# 安装扩展（构建 -ext 镜像、重建成员、edit-config、CREATE EXTENSION）
+pg ha extension install app pg_stat_statements pg_cron
+
+# 列出已安装的扩展（配置、DCS、leader 三个视图）
+pg ha extension list app
+
+# 卸载扩展（DROP EXTENSION + edit-config）
+pg ha extension remove app pg_cron
+```
+
+> **完整参考：** [HA 集群扩展安装](./ha-extensions/) 涵盖编排顺序、跨主机工作流、
+> `shared_preload_libraries` 排序规则（citus 强制排第一、pg_cron 自动配置）以及
+> 纯内置扩展快速路径。
 
 ## 注意
 

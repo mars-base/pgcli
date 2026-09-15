@@ -981,7 +981,7 @@ func init() {
 	haCmd.AddCommand(
 		haCreateCmd, haListCmd, haStatusCmd, haRemoveCmd, haCtlCmd,
 		haSwitchoverCmd, haFailoverCmd, haPauseCmd, haResumeCmd, haEditConfigCmd,
-		haStartCmd, haStopCmd, haPasswordsCmd,
+		haStartCmd, haStopCmd, haPasswordsCmd, haExtensionCmd,
 	)
 	haPasswordsCmd.Flags().String("file", "", "write the YAML to this file (mode 0600) instead of stdout")
 }

@@ -272,6 +272,12 @@ type PatroniClusterConfig struct {
 
 	Passwords PatroniPasswords `yaml:"passwords,omitempty"`
 
+	// Extensions lists the PostgreSQL extension names installed cluster-wide
+	// (managed by `pg ha extension install/remove`). Cluster-scoped (like
+	// Passwords), not per-member: all members must share the same packages and
+	// shared_preload_libraries.
+	Extensions []string `yaml:"extensions,omitempty"`
+
 	Members map[string]PatroniMemberConfig `yaml:"members,omitempty"` // member name -> config (this host's only)
 }
 
@@ -534,6 +540,13 @@ func (c *Config) SetInstance(name string) error {
 
 	inst, ok := c.Instances[name]
 	if !ok {
+		// Check if it's a Patroni member and give a helpful hint
+		for scope, cluster := range c.Addons.Patroni {
+			if _, isMember := cluster.Members[name]; isMember {
+				return fmt.Errorf("instance %q is a Patroni member in scope %q — use `pg ha start %s --member %s` instead",
+					name, scope, scope, name)
+			}
+		}
 		return fmt.Errorf("instance %q not found in config", name)
 	}
 	// Merge Postgres config

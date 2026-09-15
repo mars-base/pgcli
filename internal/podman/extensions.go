@@ -55,8 +55,161 @@ const (
 )
 
 // ---------------------------------------------------------------------------
-// Extension image build
+// Extension image build — shared builder (stateless)
 // ---------------------------------------------------------------------------
+
+// extImageBuilder is a stateless helper that builds extension images for any
+// Debian-based PostgreSQL image (pgcli-pg, pgcli-patroni, etc.). It holds
+// only the podman runner functions needed for build + package-check, not the
+// full Manager or PatroniManager state. Both (*Manager).BuildExtensionImage
+// and (*PatroniManager).BuildExtensionImage delegate to it.
+type extImageBuilder struct {
+	dataDir        string
+	runInteractive func(args ...string) error
+	imageExists    func(tag string) (bool, error)
+	run            func(args ...string) (string, error)
+}
+
+// build is the shared implementation. fromTag is the base image (pgcli-pg:18-X
+// or pgcli-patroni:18-4.1.5); pkgList is ALL extensions to include (install)
+// or REMAINING extensions (remove). pigstyRepo is the Pigsty DEB repo URL.
+// Returns the new image tag (fromTag-ext or fromTag if all builtin).
+func (b *extImageBuilder) build(fromTag string, pkgList []string, pigstyRepo string) (string, error) {
+	newTag := ExtensionImageTag(BaseImageTag(fromTag), pkgList)
+
+	// Filter to non-builtin extensions only, resolve apt package names
+	var aptPkgs []string
+	for _, name := range pkgList {
+		if ExtIsBuiltin(name) {
+			continue // already in base image
+		}
+		resolved := ResolveExtName(name)
+		pkg, _, _, found := LookupExtension(resolved)
+		if found && pkg != "" {
+			aptPkgs = append(aptPkgs, "postgresql-18-"+pkg)
+		} else {
+			// Fallback: use the resolved name as package suffix
+			aptPkgs = append(aptPkgs, "postgresql-18-"+resolved)
+		}
+	}
+
+	if len(aptPkgs) == 0 {
+		fmt.Println("-> All extensions are built-in (contrib), no image build needed")
+		return fromTag, nil
+	}
+
+	// Decide the build base: if the -ext image already exists (even without
+	// all required packages), build on top of it — Pigsty repo is already
+	// configured and apt install is idempotent.  Only fall back to the plain
+	// base image when no -ext image exists at all.
+	buildFrom := newTag
+	if exists, _ := b.imageExists(newTag); exists {
+		if b.extImageHasPackages(newTag, aptPkgs) {
+			fmt.Printf("-> Extension image %s already has all required packages\n", newTag)
+			return newTag, nil
+		}
+		// -ext image exists but missing packages — rebuild on top of it.
+		fmt.Printf("-> Extension image %s exists, installing missing packages on top...\n", newTag)
+	} else {
+		// No -ext image at all — first-time build from the plain base image.
+		buildFrom = BaseImageTag(fromTag)
+		fmt.Printf("-> Building extension image with %d package(s) (from %s)...\n", len(aptPkgs), buildFrom)
+	}
+
+	var dockerfile string
+	if strings.HasSuffix(buildFrom, "-ext") {
+		// Building from an existing -ext image: Pigsty repo already configured,
+		// just install additional packages (apt install is idempotent).
+		dockerfile = fmt.Sprintf(`FROM %s
+
+ENV http_proxy="" HTTP_PROXY="" https_proxy="" HTTPS_PROXY="" no_proxy="" NO_PROXY=""
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y %s \
+    && rm -rf /var/lib/apt/lists/*
+`, buildFrom, strings.Join(aptPkgs, " "))
+	} else {
+		// First-time ext build from the plain base image: set up Pigsty repo
+		dockerfile = fmt.Sprintf(`FROM %s
+
+ENV http_proxy="" HTTP_PROXY="" https_proxy="" HTTPS_PROXY="" no_proxy="" NO_PROXY=""
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Pigsty DEB repository (https://pigsty.io/ext/) — 576+ PG extensions
+RUN apt-get update && apt-get install -y curl gnupg2 lsb-release \
+    && curl -fsSL %s/key | gpg --dearmor -o /etc/apt/keyrings/pigsty.gpg \
+    && . /etc/os-release \
+    && echo "deb [signed-by=/etc/apt/keyrings/pigsty.gpg] %s/apt/infra generic main" > /etc/apt/sources.list.d/pigsty.list \
+    && echo "deb [signed-by=/etc/apt/keyrings/pigsty.gpg] %s/apt/pgsql/${VERSION_CODENAME} ${VERSION_CODENAME} main" >> /etc/apt/sources.list.d/pigsty.list \
+    && apt-get update \
+    && apt-get install -y %s \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get purge -y --auto-remove curl gnupg2 lsb-release
+`, buildFrom, pigstyRepo, pigstyRepo, pigstyRepo, strings.Join(aptPkgs, " "))
+	}
+
+	buildDir := filepath.Join(b.dataDir, "ext-build")
+	if err := os.MkdirAll(buildDir, 0755); err != nil {
+		return "", fmt.Errorf("creating ext build directory: %w", err)
+	}
+
+	cfPath := filepath.Join(buildDir, "Containerfile.ext")
+	if err := os.WriteFile(cfPath, []byte(dockerfile), 0644); err != nil {
+		return "", fmt.Errorf("writing extension Containerfile: %w", err)
+	}
+
+	if err := b.runInteractive("build", "-t", newTag, "-f", cfPath, buildDir); err != nil {
+		return "", fmt.Errorf("building extension image: %w", err)
+	}
+
+	fmt.Printf("  [OK] Extension image built: %s\n", newTag)
+	return newTag, nil
+}
+
+// extImageHasPackages checks if the given image already contains all the
+// specified apt packages by running a temporary container and checking
+// with dpkg -s.
+func (b *extImageBuilder) extImageHasPackages(imageTag string, packages []string) bool {
+	var checkCmd strings.Builder
+	checkCmd.WriteString("set -e; ")
+	for _, pkg := range packages {
+		fmt.Fprintf(&checkCmd, "dpkg -s %s >/dev/null 2>&1 || exit 1; ", pkg)
+	}
+	checkCmd.WriteString("echo all-installed")
+
+	// Run a temporary container to check packages
+	out, err := b.run("run", "--rm", imageTag, "sh", "-c", checkCmd.String())
+	if err != nil {
+		return false
+	}
+	return strings.Contains(out, "all-installed")
+}
+
+// BuildPreloadCSV builds the shared_preload_libraries CSV from a list of
+// extensions. Citus is forced first (FATAL if not at position 0). Returns
+// the CSV string and whether pg_cron is present (needs cron.database_name).
+func BuildPreloadCSV(extNames []string) (csv string, hasCron bool) {
+	var preload []string
+	hasCitus := false
+	for _, name := range extNames {
+		if ExtNeedsPreload(name) {
+			resolved := ResolveExtName(name)
+			if name == "citus" || resolved == "citus" {
+				hasCitus = true
+				continue
+			}
+			preload = append(preload, resolved)
+			if name == "pg_cron" || resolved == "pg_cron" {
+				hasCron = true
+			}
+		}
+	}
+	if hasCitus {
+		preload = append([]string{"citus"}, preload...)
+	}
+	return strings.Join(preload, ","), hasCron
+}
 
 // ExtensionImageTag derives a deterministic image tag from the base tag.
 // All extension images share a single "-ext" suffix; the exact extension
@@ -103,8 +256,8 @@ func HasNonBuiltinExtensions(extNames []string) bool {
 }
 
 // BuildExtensionImage builds a derived image that layers Pigsty DEB source
-// and non-builtin extension packages on top of fromTag.  Builtin (contrib)
-// extensions are skipped — they are already in the base image.
+// and non-builtin extension packages on top of fromTag.  Delegates to the
+// shared extImageBuilder (zero behavior change).
 //
 // For install: fromTag is the current ImageTag (may be base or -ext),
 //
@@ -114,117 +267,13 @@ func HasNonBuiltinExtensions(extNames []string) bool {
 //
 //	pkgList contains the REMAINING extensions.
 func (m *Manager) BuildExtensionImage(fromTag string, pkgList []string, pigstyRepo string) (string, error) {
-	newTag := ExtensionImageTag(BaseImageTag(fromTag), pkgList)
-
-	// Filter to non-builtin extensions only, resolve apt package names
-	var aptPkgs []string
-	for _, name := range pkgList {
-		if ExtIsBuiltin(name) {
-			continue // already in base image
-		}
-		resolved := ResolveExtName(name)
-		pkg, _, _, found := LookupExtension(resolved)
-		if found && pkg != "" {
-			aptPkgs = append(aptPkgs, "postgresql-18-"+pkg)
-		} else {
-			// Fallback: use the resolved name as package suffix
-			aptPkgs = append(aptPkgs, "postgresql-18-"+resolved)
-		}
+	b := &extImageBuilder{
+		dataDir:        m.dataDir,
+		runInteractive: m.runInteractive,
+		imageExists:    m.imageExists,
+		run:            m.run,
 	}
-
-	if len(aptPkgs) == 0 {
-		fmt.Println("-> All extensions are built-in (contrib), no image build needed")
-		return fromTag, nil
-	}
-
-	// Decide the build base: if the -ext image already exists (even without
-	// all required packages), build on top of it — Pigsty repo is already
-	// configured and apt install is idempotent.  Only fall back to the plain
-	// base image when no -ext image exists at all.
-	buildFrom := newTag
-	if exists, _ := m.imageExists(newTag); exists {
-		if m.extImageHasPackages(newTag, aptPkgs) {
-			fmt.Printf("-> Extension image %s already has all required packages\n", newTag)
-			return newTag, nil
-		}
-		// -ext image exists but missing packages — rebuild on top of it.
-		fmt.Printf("-> Extension image %s exists, installing missing packages on top...\n", newTag)
-	} else {
-		// No -ext image at all — first-time build from the plain base image.
-		buildFrom = BaseImageTag(fromTag)
-		fmt.Printf("-> Building extension image with %d package(s) (from %s)...\n", len(aptPkgs), buildFrom)
-	}
-
-	var dockerfile string
-	if strings.HasSuffix(buildFrom, "-ext") {
-		// Building from an existing -ext image: Pigsty repo already configured,
-		// just install additional packages (apt install is idempotent).
-		dockerfile = fmt.Sprintf(`FROM %s
-
-ENV http_proxy="" HTTP_PROXY="" https_proxy="" HTTPS_PROXY="" no_proxy="" NO_PROXY=""
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update \
-    && apt-get install -y %s \
-    && rm -rf /var/lib/apt/lists/*
-`, buildFrom, strings.Join(aptPkgs, " "))
-	} else {
-		// First-time ext build from the plain base image: set up Pigsty repo
-		dockerfile = fmt.Sprintf(`FROM %s
-
-ENV http_proxy="" HTTP_PROXY="" https_proxy="" HTTPS_PROXY="" no_proxy="" NO_PROXY=""
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Pigsty DEB repository (https://pigsty.io/ext/) — 576+ PG extensions
-RUN apt-get update && apt-get install -y curl gnupg2 lsb-release \
-    && curl -fsSL %s/key | gpg --dearmor -o /etc/apt/keyrings/pigsty.gpg \
-    && . /etc/os-release \
-    && echo "deb [signed-by=/etc/apt/keyrings/pigsty.gpg] %s/apt/infra generic main" > /etc/apt/sources.list.d/pigsty.list \
-    && echo "deb [signed-by=/etc/apt/keyrings/pigsty.gpg] %s/apt/pgsql/${VERSION_CODENAME} ${VERSION_CODENAME} main" >> /etc/apt/sources.list.d/pigsty.list \
-    && apt-get update \
-    && apt-get install -y %s \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get purge -y --auto-remove curl gnupg2 lsb-release
-`, buildFrom, pigstyRepo, pigstyRepo, pigstyRepo, strings.Join(aptPkgs, " "))
-	}
-
-	buildDir := filepath.Join(m.dataDir, "ext-build")
-	if err := os.MkdirAll(buildDir, 0755); err != nil {
-		return "", fmt.Errorf("creating ext build directory: %w", err)
-	}
-
-	cfPath := filepath.Join(buildDir, "Containerfile.ext")
-	if err := os.WriteFile(cfPath, []byte(dockerfile), 0644); err != nil {
-		return "", fmt.Errorf("writing extension Containerfile: %w", err)
-	}
-
-	if err := m.runInteractive("build", "-t", newTag, "-f", cfPath, buildDir); err != nil {
-		return "", fmt.Errorf("building extension image: %w", err)
-	}
-
-	fmt.Printf("  [OK] Extension image built: %s\n", newTag)
-	return newTag, nil
-}
-
-// extImageHasPackages checks if the given image already contains all the
-// specified apt packages by running a temporary container and checking
-// with dpkg -s.
-func (m *Manager) extImageHasPackages(imageTag string, packages []string) bool {
-	var checkCmd strings.Builder
-	checkCmd.WriteString("set -e; ")
-	for _, pkg := range packages {
-		fmt.Fprintf(&checkCmd, "dpkg -s %s >/dev/null 2>&1 || exit 1; ", pkg)
-	}
-	checkCmd.WriteString("echo all-installed")
-
-	// Run a temporary container to check packages
-	cmd := exec.Command(m.podman, "run", "--rm", imageTag, "sh", "-c", checkCmd.String())
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return false
-	}
-
-	return strings.Contains(string(output), "all-installed")
+	return b.build(fromTag, pkgList, pigstyRepo)
 }
 
 // EnsurePgpass creates or updates the .pgpass file for the postgres OS user.
@@ -368,6 +417,11 @@ func (m *Manager) RunCreateExtensions(extNames []string) error {
 // For pg_cron, also sets cron.database_name to the configured database
 // (postmaster-level, requires restart).
 // Returns needsRestart=true if any postmaster-level parameter changed.
+//
+// NOT for Patroni members: Patroni owns postgresql.conf and regenerates it
+// from DCS every cycle, so a direct edit is clobbered. Use patronictl
+// edit-config to set postgresql.parameters.shared_preload_libraries in the
+// DCS instead — see internal/cli/ha_extension.go.
 func (m *Manager) ApplyExtensions(extNames []string) (needsRestart bool, err error) {
 	// Collect extensions that need preloading.
 	// Citus must be loaded first (FATAL if not at position 0), so we
