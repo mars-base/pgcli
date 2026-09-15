@@ -275,8 +275,37 @@ func runHAExtensionInstall(scope string, extNames []string, database string, aut
 			existingMap[name] = true
 		}
 	}
+
+	// Merge with DCS's current shared_preload_libraries so the image build
+	// includes ALL extension packages (not just this host's), and pg.yaml
+	// stays consistent across hosts.
+	nsScope := cfg.PatroniScope(scope)
+	dcsMerged := mergeWithDCSPreload(pm, &cluster, nsScope, func() []string {
+		out := make([]string, 0, len(existingMap))
+		for e := range existingMap {
+			out = append(out, e)
+		}
+		return out
+	}())
+	// Rebuild existingMap from the merged list
+	existingMap = make(map[string]bool)
+	for _, e := range dcsMerged {
+		existingMap[e] = true
+	}
+
+	// Check if there's anything new to install
 	if len(toInstall) == 0 {
 		fmt.Println("All requested extensions already installed")
+		// Even if nothing new, save merged list if DCS had extras
+		if !slices.Equal(dcsMerged, cluster.Extensions) {
+			cluster.Extensions = dcsMerged
+			cfg.Addons.Patroni[scope] = cluster
+			if err := cfg.Save(path); err != nil {
+				fmt.Printf("  [!] Warning: could not save merged extensions to pg.yaml: %v\n", err)
+			} else {
+				fmt.Printf("  -> Synced local pg.yaml extensions from DCS: %v\n", dcsMerged)
+			}
+		}
 		return nil
 	}
 	allExts := make([]string, 0, len(existingMap))
@@ -591,6 +620,18 @@ func runHAExtensionApplyWithCluster(pm *podman.PatroniManager, cfg *config.Confi
 	// Read DCS's current shared_preload_libraries and merge so we don't drop
 	// extensions installed by other hosts.
 	mergedExts := mergeWithDCSPreload(pm, cluster, nsScope, cluster.Extensions)
+
+	// Sync merged list back to local pg.yaml so all hosts stay consistent.
+	if !slices.Equal(mergedExts, cluster.Extensions) {
+		cluster.Extensions = mergedExts
+		cfg.Addons.Patroni[scope] = *cluster
+		if err := cfg.Save(cfgPath); err != nil {
+			fmt.Printf("  [!] Warning: could not save merged extensions to pg.yaml: %v\n", err)
+		} else {
+			fmt.Printf("  -> Synced local pg.yaml extensions: %v\n", mergedExts)
+		}
+	}
+
 	csv, hasCron := podman.BuildPreloadCSV(mergedExts)
 
 	// Prompt for rolling restart confirmation
