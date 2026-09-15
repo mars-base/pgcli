@@ -188,6 +188,12 @@ pg ha extension apply app --auto-restart
 对于单主机集群（所有成员都在本地），`install` 自动执行 `apply` 步骤 ——
 不需要单独的命令。
 
+> **关于 leader 漂移：** 目前无法完全避免 leader 漂移。当 leader 所在主机的
+> 容器被重建时，Patroni 进程停止，DCS 中的 leader key 在 TTL 过期后失效，
+> 即使集群已暂停（pause），其他 replica 仍会检测到 key 失效并触发新一轮选举。
+> `replicas-first` 重建顺序能确保 leader 所在主机是最后一个执行 install 的，
+> 但无法阻止 leader 漂移本身。这是 Patroni + 容器重建的固有限制。
+
 ## `extensions` 配置字段
 
 扩展在 `pg.yaml` 的 Patroni 集群配置中以集群级别跟踪：

@@ -191,6 +191,14 @@ pg ha extension apply app --auto-restart
 For single-host clusters (all members local), `install` automatically runs
 the `apply` step — no separate command needed.
 
+> **About leader drift:** Leader drift cannot be completely avoided at this time.
+> When the container on the host where the leader resides is recreated, the Patroni
+> process stops. After the leader key in the DCS expires (TTL), even if the cluster
+> is paused, other replicas will still detect the expired key and trigger a new
+> election. The `replicas-first` recreation order ensures that the host with the
+> leader is the last one to run `install`, but it cannot prevent the leader drift
+> itself. This is an inherent limitation of Patroni + container recreation.
+
 ## The `extensions` Config Field
 
 Extensions are tracked at the cluster level in `pg.yaml`, under the Patroni
