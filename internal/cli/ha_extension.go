@@ -247,6 +247,32 @@ func replicasFirstOrder(pm *podman.PatroniManager, cluster *config.PatroniCluste
 	return append(replicas, leaders...)
 }
 
+// totalClusterMemberCount queries DCS (patronictl list) for the total number
+// of cluster members. Returns 0 if DCS is unreachable. Used to distinguish
+// single-host (all members local) from cross-host clusters.
+func totalClusterMemberCount(pm *podman.PatroniManager, cluster *config.PatroniClusterConfig, nsScope string) int {
+	out, err := pm.PatronictlCapture(cluster, "list", nsScope, "-f", "json")
+	if err != nil {
+		return 0
+	}
+	return strings.Count(out, `"Member":`)
+}
+
+// pauseCluster pauses the Patroni cluster, tolerating "already paused" (idempotent).
+// In cross-host flows, multiple hosts may each call pause — the second host must
+// not fail because the first already paused it.
+func pauseCluster(pm *podman.PatroniManager, cluster *config.PatroniClusterConfig, nsScope string) error {
+	if _, err := pm.PatronictlCapture(cluster, "pause", nsScope, "--wait"); err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "already paused") || strings.Contains(msg, "is already paused") {
+			fmt.Println("  (cluster is already paused — continuing)")
+			return nil
+		}
+		return fmt.Errorf("pausing cluster: %w", err)
+	}
+	return nil
+}
+
 func runHAExtensionInstall(scope string, extNames []string, database string, autoRestart bool) error {
 	path := cfgPath
 	if path == "" {
@@ -359,11 +385,11 @@ func runHAExtensionInstall(scope string, extNames []string, database string, aut
 			return fmt.Errorf("building extension image: %w", err)
 		}
 
-		// Recreate local members (paused)
+		// Pause cluster (idempotent — cross-host: second host won't fail)
 		fmt.Printf("-> Pausing cluster %q...\n", scope)
 		nsScope := cfg.PatroniScope(scope)
-		if err := pm.Patronictl(&cluster, "pause", nsScope, "--wait"); err != nil {
-			return fmt.Errorf("pausing cluster: %w", err)
+		if err := pauseCluster(pm, &cluster, nsScope); err != nil {
+			return err
 		}
 
 		// Determine recreate order: replicas first, leader last.
@@ -398,32 +424,33 @@ func runHAExtensionInstall(scope string, extNames []string, database string, aut
 		}
 	}
 
-	// Check if all members are local (single-host cluster) — if so, auto-apply
-	allLocal := len(cluster.Members) > 0
-	if allLocal {
-		// Update extensions list and save config
-		cluster.Extensions = allExts
-		cfg.Addons.Patroni[scope] = cluster
-		if err := cfg.Save(path); err != nil {
-			return fmt.Errorf("saving config: %w", err)
-		}
+	// Update extensions list and save config
+	cluster.Extensions = allExts
+	cfg.Addons.Patroni[scope] = cluster
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("saving config: %w", err)
+	}
 
-		// Auto-apply: resume + edit-config + CREATE EXTENSION
+	// Detect single-host vs cross-host by comparing local member count with
+	// DCS total member count. cluster.Members only contains LOCAL members;
+	// patronictl list shows ALL members across all hosts.
+	totalMembers := totalClusterMemberCount(pm, &cluster, nsScope)
+	singleHost := totalMembers > 0 && len(cluster.Members) >= totalMembers
+
+	if singleHost {
+		// Single-host: auto-apply (resume + edit-config + CREATE EXTENSION)
 		if err := runHAExtensionApplyWithCluster(pm, cfg, &cluster, scope, database, autoRestart, hasNonBuiltin); err != nil {
 			return err
 		}
 		fmt.Printf("✓ Extensions installed in cluster %q: %v\n", scope, toInstall)
 	} else {
-		// Cross-host: save config and print instructions
-		cluster.Extensions = allExts
-		cfg.Addons.Patroni[scope] = cluster
-		if err := cfg.Save(path); err != nil {
-			return fmt.Errorf("saving config: %w", err)
-		}
+		// Cross-host: cluster stays paused — other hosts still need to install.
+		// The last step (resume + edit-config + CREATE EXTENSION) runs via apply.
 		fmt.Println()
-		fmt.Printf("✓ Extension image built and local members recreated on this host.\n")
-		fmt.Printf("  For cross-host clusters: run `pg ha extension install %s %s` on each remaining host,\n", scope, strings.Join(extNames, ","))
-		fmt.Printf("  then run `pg ha extension apply %s` once on any host to complete.\n", scope)
+		fmt.Printf("✓ Local members recreated on this host. Cluster is paused.\n")
+		fmt.Printf("  Next steps:\n")
+		fmt.Printf("  1. Run `pg ha extension install %s %s` on each remaining host\n", scope, strings.Join(extNames, ","))
+		fmt.Printf("  2. Run `pg ha extension apply %s` once on any host to complete\n", scope)
 	}
 
 	return nil

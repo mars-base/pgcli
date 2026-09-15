@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	res "github.com/mars-base/pgcli/embed"
 	"github.com/mars-base/pgcli/internal/config"
@@ -625,6 +626,66 @@ func PatroniLeaderFromListJSON(out string) string {
 		}
 	}
 	return ""
+}
+
+// IsClusterPaused checks whether the Patroni cluster is currently paused by
+// reading the DCS config via patronictl show-config. When a cluster is paused,
+// Patroni writes a top-level pause key into the DCS config, which appears in
+// show-config output as a non-indented line ("pause: true" or "pause: false").
+// Returns false if the cluster is not paused or if the DCS cannot be reached
+// (callers should treat errors as "assume not paused" and let the explicit
+// pause/resume commands surface the real problem).
+// Idempotent: safe to call before every patronictl pause to avoid redundant
+// pause attempts in cross-host install flows.
+func (m *PatroniManager) IsClusterPaused(cluster *config.PatroniClusterConfig, nsScope string) bool {
+	out, err := m.PatronictlCapture(cluster, "show-config", nsScope)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(out, "\n") {
+		// Top-level YAML keys start at column 0. Indented lines (nested
+		// mappings) are skipped — those are sub-keys of other top-level
+		// entries and cannot be the pause key itself.
+		if len(line) == 0 || line[0] == ' ' || line[0] == '	' {
+			continue
+		}
+		if !strings.HasPrefix(line, "pause") {
+			continue
+		}
+		// Ensure the match is the key name "pause" exactly, not a prefix
+		// of a longer key name (e.g. "pause_timeout"). After "pause" we
+		// expect ':', ' ', or end-of-line.
+		rest := line[len("pause"):]
+		if len(rest) == 0 || rest[0] == ':' || rest[0] == ' ' {
+			return true
+		}
+		// If the next character is a letter, this is a different key
+		// (e.g. "paused_since") — not the pause flag.
+		if len(rest) > 0 && unicode.IsLetter(rune(rest[0])) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// CountClusterMembers returns the total number of members in the cluster as
+// reported by the DCS via patronictl list -f json. This is used to distinguish
+// single-host clusters (all members are local) from cross-host clusters (some
+// members live on remote hosts and are not in the local pg.yaml).
+// Returns -1 on error so callers can fall back to assuming single-host (the
+// conservative choice: auto-apply rather than print instructions that may
+// never be followed).
+func (m *PatroniManager) CountClusterMembers(cluster *config.PatroniClusterConfig, nsScope string) int {
+	out, err := m.PatronictlCapture(cluster, "list", nsScope, "-f", "json")
+	if err != nil {
+		return -1
+	}
+	var members []map[string]any
+	if json.Unmarshal([]byte(out), &members) != nil {
+		return -1
+	}
+	return len(members)
 }
 
 // --- shared low-level helpers (mirror pgdog/etcd manager internals) -----

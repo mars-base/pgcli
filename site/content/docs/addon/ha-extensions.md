@@ -150,14 +150,15 @@ pg ha extension apply app --database mydb --auto-restart
 ## Cross-Host Workflow
 
 In a cross-host cluster, each host manages only its own members. The extension
-installation workflow splits into two phases:
+installation workflow splits into two phases with **global pause/resume** —
+the cluster is paused once and resumed once, not per-host:
 
-**Phase 1 — per host:** Run `pg ha extension install` on each host. Each host:
-- Builds the `-ext` image locally
-- Pauses the cluster
-- Recreates its own local members from the new image (**replicas first, leader last**
-  within each host, to avoid unnecessary failovers)
-- Resumes the cluster
+**Phase 1 — per host (sequentially):** Run `pg ha extension install` on each host.
+Each host:
+- Builds the `-ext` image locally (merging DCS's existing preload list to include all packages)
+- Pauses the cluster (idempotent — second host won't fail on "already paused")
+- Recreates its own local members from the new image (**replicas first, leader last**)
+- Saves config — **cluster stays paused**, no resume
 
 > **Recommended order: start from replica hosts.** If the host with the leader runs
 > `install` first, recreating the leader triggers a failover (leader moves to another
@@ -165,17 +166,15 @@ installation workflow splits into two phases:
 > minimizing failover-related data sync overhead.
 
 ```bash
-# host A (replicas only — run first)
+# host A (replicas only — run first) — cluster enters paused state
 pg ha extension install app pg_stat_statements,pg_cron
 
-# host B (has the leader — run last)
+# host B (has the leader — run last) — cluster stays paused
 pg ha extension install app pg_stat_statements,pg_cron
 ```
 
-After the first host's `install`, the command detects that not all members are
-local and prints instructions for the remaining hosts.
-
 **Phase 2 — once, on any host:** Run `pg ha extension apply` to:
+- Resume the cluster (idempotent — tolerates "not paused")
 - Update `shared_preload_libraries` via `patronictl edit-config`
 - Wait for the rolling restart
 - Run `CREATE EXTENSION` on the leader
@@ -183,6 +182,10 @@ local and prints instructions for the remaining hosts.
 ```bash
 pg ha extension apply app --auto-restart
 ```
+
+> **Note:** After `install`, the cluster is in paused state (auto-failover disabled).
+> If you forget to run `apply`, run `pg ha extension apply` or manually
+> `patronictl resume <scope>` to re-enable failover.
 
 For single-host clusters (all members local), `install` automatically runs
 the `apply` step — no separate command needed.

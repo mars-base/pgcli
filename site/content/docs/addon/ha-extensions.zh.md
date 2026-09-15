@@ -144,13 +144,16 @@ pg ha extension apply app --database mydb --auto-restart
 
 ## 跨主机工作流
 
-在跨主机集群中，每台主机只管理自己的成员。扩展安装流程分为两个阶段：
+在跨主机集群中，每台主机只管理自己的成员。扩展安装流程分为两个阶段，
+**全局只暂停/恢复一次**，避免不必要的 leader 漂移：
 
-**第一阶段 —— 每台主机：** 在每台主机上运行 `pg ha extension install`。每台主机：
-- 在本地构建 `-ext` 镜像
-- 暂停集群
-- 用新镜像重建自己的本地成员（**同主机内 replica 先、leader 后**，避免不必要的故障切换）
-- 恢复集群
+**第一阶段 —— 每台主机依次运行 `install`：**
+
+每台主机执行：
+- 在本地构建 `-ext` 镜像（合并 DCS 已有的扩展列表，确保包含所有包）
+- 暂停集群（幂等 —— 第二台主机不会因"已暂停"而报错）
+- 用新镜像重建自己的本地成员（**同主机内 replica 先、leader 后**）
+- 保存配置 —— **集群保持暂停状态**，不 resume
 
 > **推荐顺序：从 replica 所在主机开始。** 如果 leader 所在主机先执行 install，
 > leader 重建会触发故障切换（leader 漂移到其他主机）。从 replica 主机开始，
@@ -158,17 +161,16 @@ pg ha extension apply app --database mydb --auto-restart
 > 带来的数据同步开销。
 
 ```bash
-# 主机 A（只有 replica，先执行）
+# 主机 A（只有 replica，先执行）—— 集群变为暂停状态
 pg ha extension install app pg_stat_statements,pg_cron
 
-# 主机 B（有 leader，后执行）
+# 主机 B（有 leader，后执行）—— 集群保持暂停
 pg ha extension install app pg_stat_statements,pg_cron
 ```
 
-第一台主机的 `install` 完成后，命令会检测到不是所有成员都在本地，打印
-后续主机的操作指引。
+**第二阶段 —— 一次，在任意主机运行 `apply`：**
 
-**第二阶段 —— 一次，在任意主机：** 运行 `pg ha extension apply`：
+- 恢复集群（幂等 —— tolerate "not paused"）
 - 通过 `patronictl edit-config` 更新 `shared_preload_libraries`
 - 等待滚动重启
 - 在 leader 上执行 `CREATE EXTENSION`
@@ -176,6 +178,10 @@ pg ha extension install app pg_stat_statements,pg_cron
 ```bash
 pg ha extension apply app --auto-restart
 ```
+
+> **注意：** `install` 后集群处于暂停状态。如果忘记执行 `apply`，集群会一直暂停
+> （自动故障切换被禁用）。此时运行 `pg ha extension apply` 或手动
+> `patronictl resume <scope>` 即可恢复。
 
 对于单主机集群（所有成员都在本地），`install` 自动执行 `apply` 步骤 ——
 不需要单独的命令。
