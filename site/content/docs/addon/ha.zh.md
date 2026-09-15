@@ -14,8 +14,9 @@ weight: 45
 > 生命周期代码，也不是 `pg create` 创建的。它唯一借鉴 addon 体系的地方，是
 > 用 [etcd](./etcd/) 做 DCS。
 
-**仅支持 Linux**，与 [etcd](./etcd/) addon 一样：Patroni 成员依赖 rootless
-podman 的 host 网络。macOS 上这些命令会快速失败并给出清晰提示。
+**仅支持 Linux**，与 [etcd](./etcd/) addon 一样：Patroni 成员依赖 podman 的
+host 网络。root 和 rootless podman 均可使用。macOS 上这些命令会快速失败并给出
+清晰提示。
 
 ## 所有权边界
 
@@ -536,8 +537,9 @@ pg ha extension remove app pg_cron
 
 ## 注意
 
-- **仅 Linux / rootless。** 成员通过 `--userns=keep-id` 以宿主用户身份运行，
-  这样 rootless 容器才能读 `0600` 的配置、写自己的数据目录。
+- **仅 Linux（root 或 rootless）。** rootless 成员通过 `--userns=keep-id`
+  以宿主用户身份运行；root 成员会将配置和数据目录 chown 给 postgres
+  （uid 999），这样容器才能读 `0600` 的配置、写自己的数据目录。
 - **`pg_hba.conf` 有意保持宽松**（`host all all all scram-sha-256` + 一行
   `replication`）。rootless podman 的 pasta 会改写回环源地址，收紧成固定白名
   单是后续待做的改进 —— 现阶段别把这些端口暴露给不受信网络。

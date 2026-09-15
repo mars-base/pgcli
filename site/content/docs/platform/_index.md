@@ -92,10 +92,9 @@ Addon networking differs per component:
   as **permanent cluster state**; retrofitting the macOS bridge + container-name
   model would rewrite that state. Kept Linux-only until that is designed in.
 - **[Patroni](/docs/addon/ha/)** (`pg ha`) — **Linux only.** Members rely on
-  rootless podman host networking and Linux-specific loopback rewriting to share
-  a `0600` config and their data directories; the uid mapping a `podman machine`
-  VM uses does not line up. The commands fail fast on macOS with a clear
-  message. See [Patroni HA](/docs/addon/ha/).
+  podman host networking; both root and rootless podman are supported. The
+  `podman machine` VM's uid mapping does not align with host networking.
+  The commands fail fast on macOS with a clear message. See [Patroni HA](/docs/addon/ha/).
 - **[HAProxy](/docs/addon/haproxy/)** — **Linux only.** It fronts Patroni
   members over host networking, which the podman machine VM does not provide to
   containers; the manager fails fast on macOS.

@@ -83,9 +83,9 @@ macOS 上这些都是**单主机**：跨主机副本、跨多机的连接池属�
 - **[etcd](/docs/addon/etcd/)** —— **仅 Linux**。成员以 host 网络运行，并把
   client/peer URL 作为**永久的集群状态**写进 raft 成员列表；要移植 macOS 的
   bridge + 容器名模型就得重写这份状态，在完成该设计之前保持仅 Linux。
-- **[Patroni](/docs/addon/ha/)**（`pg ha`）—— **仅 Linux**。成员依赖 rootless
-  podman 的 host 网络与 Linux 专属的回环地址改写来共享 `0600` 配置与数据目录；
-  `podman machine` 虚拟机的 uid 映射与之并不吻合。这些命令在 macOS 上会快速失
+- **[Patroni](/docs/addon/ha/)**（`pg ha`）—— **仅 Linux**。成员依赖 podman
+  的 host 网络；root 和 rootless podman 均可使用。`podman machine` 虚拟机的
+  uid 映射与 host 网络模型不吻合。这些命令在 macOS 上会快速失
   败并给出清晰提示。见 [Patroni 高可用](/docs/addon/ha/)。
 - **[HAProxy](/docs/addon/haproxy/)** —— **仅 Linux**。它通过主机网络代理
   Patroni 成员，而 podman machine 虚拟机不提供该能力；manager 在 macOS 上快速

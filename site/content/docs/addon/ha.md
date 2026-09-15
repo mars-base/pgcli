@@ -16,8 +16,8 @@ folding it into the plain `pg` instance path.
 > thing it borrows from the addon system is the [etcd](./etcd/) DCS.
 
 **Linux only**, like the [etcd](./etcd/) addon: Patroni members rely on
-rootless podman host networking. On macOS the commands fail fast with a clear
-message.
+podman host networking. Both root and rootless podman are supported. On macOS
+the commands fail fast with a clear message.
 
 ## Ownership boundary
 
@@ -575,9 +575,9 @@ pg ha extension remove app pg_cron
 
 ## Notes
 
-- **Linux / rootless only.** Members run as the host user via
-  `--userns=keep-id` so the rootless container can read the `0600` config and
-  write its data dir.
+- **Linux only (root or rootless).** Rootless members run as the host user via
+  `--userns=keep-id`; root members chown config and data dirs to postgres
+  (uid 999) so the container can read `0600` config and write its data dir.
 - **`pg_hba.conf` is permissive by design** (`host all all all scram-sha-256`
   + a `replication` line). Rootless podman's pasta rewrites loopback sources,
   and tightening to a fixed allow-list is a planned future refinement — do not
