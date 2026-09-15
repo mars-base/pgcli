@@ -42,9 +42,6 @@ func NewPatroniManager(cfg *config.Config) (*PatroniManager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("podman is not installed: %w", err)
 	}
-	if !platform.Rootless() {
-		return nil, fmt.Errorf("patroni containers must run as the postgres user, which requires rootless podman (uid remapping); this podman is not rootless — see docs/addon/patroni for the supported setup")
-	}
 	dataDir := cfg.BaseDir
 	if dataDir == "" {
 		dataDir = platform.DefaultConfigDir()
@@ -215,6 +212,25 @@ func (m *PatroniManager) WriteMemberConfig(cluster *config.PatroniClusterConfig,
 	if err := os.WriteFile(path, out, 0600); err != nil {
 		return "", fmt.Errorf("writing patroni.yml: %w", err)
 	}
+
+	// When running as root with root podman, the container runs as postgres
+	// (uid 999) which cannot read files owned by root. Chown the config file
+	// and data directory to postgres uid so the container can access them.
+	if os.Geteuid() == 0 {
+		if err := os.Chown(path, 999, 999); err != nil {
+			return "", fmt.Errorf("chown patroni.yml to postgres: %w", err)
+		}
+		// Also chown the data directory if it exists
+		dataDir := mb.DataDir
+		if dataDir != "" {
+			if err := os.MkdirAll(dataDir, 0755); err != nil {
+				return "", fmt.Errorf("creating data dir: %w", err)
+			}
+			if err := os.Chown(dataDir, 999, 999); err != nil {
+				return "", fmt.Errorf("chown data dir to postgres: %w", err)
+			}
+		}
+	}
 	return path, nil
 }
 
@@ -297,15 +313,18 @@ func (m *PatroniManager) createMemberContainer(cluster *config.PatroniClusterCon
 	return nil
 }
 
-// patroniUserFlags makes the container run as the CURRENT HOST user rather than
-// the image's baked-in `postgres` (uid 999). Rootless podman maps uid 999 onto
-// a host subuid that does not own the 0600 patroni.yml pgcli writes, so the
-// container could not read its own config (PermissionError crash-loop). With
-// --userns=keep-id the host uid is available inside the namespace; pinning
-// --user to it means container uid == file owner, so the read-only bind-mount
-// is readable AND the bind-mounted data dir stays owned by us. The image's
-// initdb runs fine as this non-root uid (it only refuses to run as root).
+// patroniUserFlags returns podman flags to make the container run as the host user.
+// - Root users (uid 0): no special flags needed, root can access all files
+// - Non-root users: use --userns=keep-id to map container UID to host UID,
+//   ensuring the container can read 0600 config files owned by the host user
 func patroniUserFlags() []string {
+	if os.Geteuid() == 0 {
+		// Running as root: no user namespace tricks needed.
+		// Root can access any file regardless of permissions.
+		return []string{}
+	}
+	// Running as non-root: use keep-id to map container UID to host UID.
+	// This ensures the container runs as the same UID that owns the config files.
 	return []string{
 		"--userns", "keep-id",
 		"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
