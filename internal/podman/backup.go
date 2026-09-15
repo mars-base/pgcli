@@ -153,7 +153,18 @@ func sshPublicKey(pub *rsa.PublicKey) (string, error) {
 	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pk))), nil
 }
 
-// AuthorizeKeyOnContainer installs the backup public key into a PG container.
+// AuthorizeKeyOnContainer installs the backup public key into a PG container
+// and patches PAM so that SSH command execution works inside unprivileged
+// containers.
+//
+// Containers lack CAP_AUDIT_WRITE, which pam_loginuid.so needs to write
+// /proc/self/loginuid.  When pam_loginuid is "required" (Debian default),
+// sshd accepts the connection but kills the session before the command runs —
+// exit status 254 with only the MOTD banner.  pgBackRest SSH connections then
+// receive "uname" output instead of JSON protocol responses.
+//
+// Making pam_loginuid "optional" is safe: loginuid auditing is irrelevant
+// inside a container and the rest of the PAM stack remains unchanged.
 func (m *BackupManager) AuthorizeKeyOnContainer(containerName string) error {
 	keys := m.SSHKeyPaths()
 
@@ -162,11 +173,19 @@ func (m *BackupManager) AuthorizeKeyOnContainer(containerName string) error {
 		return fmt.Errorf("reading public key: %w", err)
 	}
 
-	// Write authorized_keys file via exec, then ensure correct ownership/permissions.
-	cmd := fmt.Sprintf("mkdir -p /etc/ssh/authorized_keys && echo '%s' > /etc/ssh/authorized_keys/postgres && chown postgres:postgres /etc/ssh/authorized_keys/postgres && chmod 600 /etc/ssh/authorized_keys/postgres", strings.TrimSpace(string(pub)))
+	// 1. Write authorized_keys file, ensure correct ownership/permissions.
+	// 2. Patch pam_loginuid.so from "required" to "optional" so SSH commands
+	//    execute inside containers that lack CAP_AUDIT_WRITE.
+	cmd := fmt.Sprintf(
+		"mkdir -p /etc/ssh/authorized_keys && "+
+			"echo '%s' > /etc/ssh/authorized_keys/postgres && "+
+			"chown postgres:postgres /etc/ssh/authorized_keys/postgres && "+
+			"chmod 600 /etc/ssh/authorized_keys/postgres && "+
+			"sed -i 's/^session  *required  *pam_loginuid/session    optional     pam_loginuid/' /etc/pam.d/sshd",
+		strings.TrimSpace(string(pub)))
 	podmanArgs := []string{"exec", "-u", "root", containerName, "sh", "-c", cmd}
 	if _, err := execWithTimeout(m.podman, podmanArgs, 30*time.Second); err != nil {
-		return fmt.Errorf("installing authorized_keys on %s: %w", containerName, err)
+		return fmt.Errorf("configuring SSH on %s: %w", containerName, err)
 	}
 	return nil
 }
