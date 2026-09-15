@@ -149,6 +149,27 @@ pg addon install haproxy --name lb --mode split \
 leader 迁回来。对于 leader 可能漂移的跨主机集群，优先用显式的、列出全部成员的
 `--node` 列表（或每台主机各跑一个 HAProxy，再用上层的 VIP / DNS 前置它）。
 
+## 读写分离使用示例
+
+用 `--mode split` 安装后，会暴露两个客户端端口：
+
+| 端口 | 流量 | 后端 |
+|------|------|------|
+| `write_port`（默认 5000） | 读写 | 仅 leader |
+| `read_port`（默认 5001） | 只读 | 各 replica（轮询，lag ≤ `max-lag`） |
+| `stats_port`（默认 5002） | HTTP 统计页 | — |
+
+```bash
+# 写（始终打到当前 leader）
+psql "host=127.0.0.1 port=5000 user=postgres dbname=postgres"
+
+# 读（负载均衡到各 replica）
+psql "host=127.0.0.1 port=5001 user=postgres dbname=postgres"
+```
+
+故障切换后 HAProxy 通过健康检查自动识别新 leader —— 无需改连接串。浏览器打开
+`http://127.0.0.1:5002/` 可实时查看后端状态。
+
 ## 端口
 
 端口从主机级端口池自动分配：每个实例连续取 3 个空闲端口（rw，split 模式下再

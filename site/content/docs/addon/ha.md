@@ -337,6 +337,9 @@ psql "host=127.0.0.1 port=<leader_port> user=postgres dbname=postgres"
 After a failover the leader changes, so a fixed connection string should be
 avoided unless fronted by a pooler or the Patroni REST API's leader redirect.
 
+For a stable endpoint that survives failover — and optional read/write
+separation — put [HAProxy](./haproxy/) in front of the cluster.
+
 ## pg ha vs. pg replica — which to pick
 
 pgcli has two ways to get a standby:
@@ -551,26 +554,14 @@ which settings require a restart.
 
 ## Extensions
 
-PostgreSQL extensions in a Patroni cluster cannot be installed the same way as
-single-node instances — Patroni regenerates `postgresql.conf` from the DCS every
-loop, so `shared_preload_libraries` must be set via `patronictl edit-config`,
-and container recreation must be coordinated with pause/resume to avoid
-unwanted failovers.
-
 ```bash
-# Install extensions (builds -ext image, recreates members, edit-config, CREATE EXTENSION)
-pg ha extension install app pg_stat_statements,pg_cron
-
-# List installed extensions (config, DCS, and leader views)
-pg ha extension list app
-
-# Remove extensions (DROP EXTENSION + edit-config)
-pg ha extension remove app pg_cron
+pg ha extension install app pg_stat_statements,pg_cron   # install
+pg ha extension list app                                  # list
+pg ha extension remove app pg_cron                        # remove
 ```
 
 > **Full reference:** [Extensions in HA Clusters](./ha-extensions/) covers the
-> orchestration order, cross-host workflow, `shared_preload_libraries` ordering
-> rules (PreloadFirst extensions like citus/timescaledb, pg_cron auto-config),
+> orchestration order, cross-host workflow, `shared_preload_libraries` ordering,
 > and builtin-only fast path.
 
 ## Notes

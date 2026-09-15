@@ -63,24 +63,20 @@ image build, no container recreate, no pause/resume. The flow goes straight to
 ### Install
 
 ```bash
-pg ha extension install <scope> <extension>[,<extension>...] [extension...] [flags]
+pg ha extension install <scope> <extension>[,<extension>...] [flags]
 ```
 
 Builds the `-ext` image, recreates all member containers (coordinated via
 pause/resume), sets `shared_preload_libraries` via `patronictl edit-config`,
 and runs `CREATE EXTENSION` on the leader.
 
-Extensions can be passed as separate arguments or comma-separated — both forms
-are equivalent:
+Extensions are passed as a comma-separated list:
 
 ```bash
 # Install a single extension
 pg ha extension install app pg_stat_statements
 
-# Install multiple extensions (space-separated)
-pg ha extension install app pg_cron pg_stat_statements --database mydb
-
-# Comma-separated (same result)
+# Install multiple extensions to a specific database
 pg ha extension install app pg_cron,pg_stat_statements --database mydb
 
 # Skip the rolling-restart confirmation prompt
@@ -97,7 +93,7 @@ pg ha extension install app pgvector --auto-restart
 ### Remove
 
 ```bash
-pg ha extension remove <scope> <extension>[,<extension>...] [extension...] [flags]
+pg ha extension remove <scope> <extension>[,<extension>...] [flags]
 ```
 
 Runs `DROP EXTENSION` on the leader, then updates `shared_preload_libraries`
@@ -105,7 +101,7 @@ via `patronictl edit-config` (triggers a rolling restart). Does **not** rebuild
 the image or recreate containers — the `-ext` image only grows; disk reclamation
 is rare and manual.
 
-Extensions can be passed as separate arguments or comma-separated:
+Extensions are passed as a comma-separated list:
 
 ```bash
 pg ha extension remove app pg_cron
@@ -164,10 +160,10 @@ installation workflow splits into two phases:
 
 ```bash
 # host A
-pg ha extension install app pg_stat_statements pg_cron
+pg ha extension install app pg_stat_statements,pg_cron
 
 # host B
-pg ha extension install app pg_stat_statements pg_cron
+pg ha extension install app pg_stat_statements,pg_cron
 ```
 
 After the first host's `install`, the command detects that not all members are
@@ -234,7 +230,7 @@ Additional extensions may require companion DCS parameters:
 ### Install pg_stat_statements and pg_cron
 
 ```bash
-pg ha extension install app pg_stat_statements pg_cron --database mydb --auto-restart
+pg ha extension install app pg_stat_statements,pg_cron --database mydb --auto-restart
 ```
 
 This builds an `-ext` image, recreates all members (with pause/resume), sets

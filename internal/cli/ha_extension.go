@@ -34,14 +34,14 @@ The install flow is:
   6. CREATE EXTENSION on leader
 
 Commands:
-  pg ha extension install <scope> <ext>...  install extensions (builds image, recreates, edit-config)
-  pg ha extension remove <scope> <ext>...   remove extensions (DROP EXTENSION + edit-config)
-  pg ha extension list <scope>              list installed extensions (from DCS + leader query)
-  pg ha extension apply <scope>             (advanced) manually trigger edit-config + CREATE EXTENSION`,
+  pg ha extension install <scope> <ext>[,<ext>...]  install extensions (builds image, recreates, edit-config)
+  pg ha extension remove <scope> <ext>[,<ext>...]   remove extensions (DROP EXTENSION + edit-config)
+  pg ha extension list <scope>                      list installed extensions (from DCS + leader query)
+  pg ha extension apply <scope>                     (advanced) manually trigger edit-config + CREATE EXTENSION`,
 }
 
 var haExtensionInstallCmd = &cobra.Command{
-	Use:   "install <scope> <extension>[,<extension>...] [extension...]",
+	Use:   "install <scope> <extension>[,<extension>...]",
 	Short: "Install extensions in a Patroni cluster",
 	Long: `Install PostgreSQL extensions in a Patroni-managed HA cluster.
 
@@ -54,15 +54,11 @@ For cross-host clusters: run this command on each host (each recreates only its
 local members), then run ` + "`pg ha extension apply <scope>`" + ` once on any host to
 trigger the edit-config + CREATE EXTENSION.
 
-Extensions can be passed as separate arguments or comma-separated:
-  pg ha extension install app pg_cron pg_stat_statements
-  pg ha extension install app pg_cron,pg_stat_statements
-
 Examples:
   pg ha extension install app pg_stat_statements
   pg ha extension install app pg_cron,pg_stat_statements --database mydb
   pg ha extension install app pgvector --auto-restart`,
-	Args: cobra.MinimumNArgs(2),
+	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		scope := args[0]
 		extNames := splitExtArgs(args[1:])
@@ -73,7 +69,7 @@ Examples:
 }
 
 var haExtensionRemoveCmd = &cobra.Command{
-	Use:   "remove <scope> <extension>[,<extension>...] [extension...]",
+	Use:   "remove <scope> <extension>[,<extension>...]",
 	Short: "Remove extensions from a Patroni cluster",
 	Long: `Remove PostgreSQL extensions from a Patroni-managed HA cluster.
 
@@ -81,14 +77,10 @@ Runs DROP EXTENSION on the leader, then updates shared_preload_libraries via
 patronictl edit-config (triggers rolling restart). Does NOT rebuild the image
 or recreate containers (the -ext image only grows; disk reclamation is rare).
 
-Extensions can be passed as separate arguments or comma-separated:
-  pg ha extension remove app pg_cron pg_stat_statements
-  pg ha extension remove app pg_cron,pg_stat_statements
-
 Examples:
   pg ha extension remove app pg_cron
   pg ha extension remove app pg_stat_statements,pg_cron --auto-restart`,
-	Args: cobra.MinimumNArgs(2),
+	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		scope := args[0]
 		extNames := splitExtArgs(args[1:])
@@ -149,9 +141,8 @@ func init() {
 	}
 }
 
-// splitExtArgs expands comma-separated extension names so both
-// "pg ha extension install app pg_cron,pg_stat_statements" and
-// "pg ha extension install app pg_cron pg_stat_statements" work.
+// splitExtArgs expands comma-separated extension names so
+// "pg ha extension install app pg_cron,pg_stat_statements" works.
 func splitExtArgs(args []string) []string {
 	var out []string
 	for _, a := range args {
@@ -305,7 +296,7 @@ func runHAExtensionInstall(scope string, extNames []string, database string, aut
 		}
 		fmt.Println()
 		fmt.Printf("✓ Extension image built and local members recreated on this host.\n")
-		fmt.Printf("  For cross-host clusters: run `pg ha extension install %s %s` on each remaining host,\n", scope, strings.Join(extNames, " "))
+		fmt.Printf("  For cross-host clusters: run `pg ha extension install %s %s` on each remaining host,\n", scope, strings.Join(extNames, ","))
 		fmt.Printf("  then run `pg ha extension apply %s` once on any host to complete.\n", scope)
 	}
 

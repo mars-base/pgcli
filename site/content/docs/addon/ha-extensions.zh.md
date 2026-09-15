@@ -60,23 +60,20 @@ PostgreSQL 一起发布），步骤 2-4 会完全跳过 —— 不构建镜像�
 ### 安装
 
 ```bash
-pg ha extension install <scope> <extension>[,<extension>...] [extension...] [flags]
+pg ha extension install <scope> <extension>[,<extension>...] [flags]
 ```
 
 构建 `-ext` 镜像，重建所有成员容器（通过 pause/resume 协调），通过
 `patronictl edit-config` 设置 `shared_preload_libraries`，并在 leader 上
 执行 `CREATE EXTENSION`。
 
-扩展可以用空格分隔或逗号分隔传入 —— 两种形式等价：
+扩展以逗号分隔传入：
 
 ```bash
 # 安装单个扩展
 pg ha extension install app pg_stat_statements
 
-# 安装多个扩展到指定数据库（空格分隔）
-pg ha extension install app pg_cron pg_stat_statements --database mydb
-
-# 逗号分隔（相同结果）
+# 安装多个扩展到指定数据库
 pg ha extension install app pg_cron,pg_stat_statements --database mydb
 
 # 跳过滚动重启确认提示
@@ -93,14 +90,14 @@ pg ha extension install app pgvector --auto-restart
 ### 卸载
 
 ```bash
-pg ha extension remove <scope> <extension>[,<extension>...] [extension...] [flags]
+pg ha extension remove <scope> <extension>[,<extension>...] [flags]
 ```
 
 在 leader 上执行 `DROP EXTENSION`，然后通过 `patronictl edit-config` 更新
 `shared_preload_libraries`（触发滚动重启）。**不会**重建镜像或重建容器 ——
 `-ext` 镜像只增不减；磁盘回收很少见且需手动操作。
 
-扩展可以用空格分隔或逗号分隔传入：
+扩展以逗号分隔传入：
 
 ```bash
 pg ha extension remove app pg_cron
@@ -157,10 +154,10 @@ pg ha extension apply app --database mydb --auto-restart
 
 ```bash
 # 主机 A
-pg ha extension install app pg_stat_statements pg_cron
+pg ha extension install app pg_stat_statements,pg_cron
 
 # 主机 B
-pg ha extension install app pg_stat_statements pg_cron
+pg ha extension install app pg_stat_statements,pg_cron
 ```
 
 第一台主机的 `install` 完成后，命令会检测到不是所有成员都在本地，打印
@@ -225,7 +222,7 @@ PostgreSQL 会 FATAL）。pgcli 在扩展目录中以 `PreloadFirst` 属性跟�
 ### 安装 pg_stat_statements 和 pg_cron
 
 ```bash
-pg ha extension install app pg_stat_statements pg_cron --database mydb --auto-restart
+pg ha extension install app pg_stat_statements,pg_cron --database mydb --auto-restart
 ```
 
 构建 `-ext` 镜像，重建所有成员（带 pause/resume），在 DCS 中设置

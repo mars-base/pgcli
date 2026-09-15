@@ -159,6 +159,28 @@ UP server until the leader moves back. For cross-host clusters where the leader
 can move, prefer the explicit all-members `--node` list (or run one HAProxy per
 host and front it with a higher-level VIP/DNS).
 
+## Read/Write Split in Practice
+
+After installing with `--mode split`, two client ports are exposed:
+
+| Port | Traffic | Backend |
+|------|---------|---------|
+| `write_port` (default 5000) | Read + write | Leader only |
+| `read_port` (default 5001) | Read only | Replicas (round-robin, lag ≤ `max-lag`) |
+| `stats_port` (default 5002) | HTTP stats page | — |
+
+```bash
+# Write (always hits the current leader)
+psql "host=127.0.0.1 port=5000 user=postgres dbname=postgres"
+
+# Read (load-balanced across replicas)
+psql "host=127.0.0.1 port=5001 user=postgres dbname=postgres"
+```
+
+After a failover, HAProxy picks up the new leader automatically via health
+checks — no connection string change needed. A browser at
+`http://127.0.0.1:5002/` shows real-time backend state.
+
 ## Ports
 
 Ports are auto-assigned from a per-host pool, three consecutive free ports per

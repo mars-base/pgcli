@@ -313,6 +313,9 @@ psql "host=127.0.0.1 port=<leader_port> user=postgres dbname=postgres"
 failover 后 leader 会变，所以固定连接串应当避免 —— 除非前面有连接池或 Patroni
 REST API 的 leader 重定向兜着。
 
+如果需要稳定的、能扛住故障切换的连接端点 —— 以及可选的读写分离 —— 在集群前面
+放一个 [HAProxy](./haproxy/)。
+
 ## pg ha vs. pg replica —— 怎么选
 
 pgcli 有两种拿到副本的方式：
@@ -516,24 +519,14 @@ pg ha edit-config app -- -s 'postgresql.parameters.work_mem=64MB'
 
 ## 扩展安装
 
-Patroni 集群中的 PostgreSQL 扩展不能用单节点的方式安装 —— Patroni 每个循环都从
-DCS 重新生成 `postgresql.conf`，因此 `shared_preload_libraries` 必须通过
-`patronictl edit-config` 设置，容器重建必须配合 pause/resume 以避免意外的故障切换。
-
 ```bash
-# 安装扩展（构建 -ext 镜像、重建成员、edit-config、CREATE EXTENSION）
-pg ha extension install app pg_stat_statements,pg_cron
-
-# 列出已安装的扩展（配置、DCS、leader 三个视图）
-pg ha extension list app
-
-# 卸载扩展（DROP EXTENSION + edit-config）
-pg ha extension remove app pg_cron
+pg ha extension install app pg_stat_statements,pg_cron   # 安装
+pg ha extension list app                                  # 列出
+pg ha extension remove app pg_cron                        # 卸载
 ```
 
 > **完整参考：** [HA 集群扩展安装](./ha-extensions/) 涵盖编排顺序、跨主机工作流、
-> `shared_preload_libraries` 排序规则（PreloadFirst 扩展如 citus/timescaledb、
-> pg_cron 自动配置）以及纯内置扩展快速路径。
+> `shared_preload_libraries` 排序规则以及纯内置扩展快速路径。
 
 ## 注意
 
