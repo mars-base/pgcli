@@ -557,17 +557,25 @@ func runHAExtensionApplyWithCluster(pm *podman.PatroniManager, cfg *config.Confi
 		return fmt.Errorf("edit-config: %w", err)
 	}
 
-	// Wait for rolling restart to complete
+	// Wait for rolling restart to complete. After edit-config changes
+	// shared_preload_libraries, Patroni marks each member with "pending_restart"
+	// in the JSON list. The members stay in State "running"/"streaming" until
+	// Patroni rolls them, so we must also check that no member has a pending
+	// restart — otherwise we'd break immediately and CREATE EXTENSION would
+	// fail because the new shared_preload_libraries isn't loaded yet.
 	fmt.Println("-> Waiting for rolling restart to complete...")
 	for i := 0; i < 60; i++ { // 5min timeout
 		time.Sleep(5 * time.Second)
 		if out, err := pm.PatronictlCapture(cluster, "list", nsScope, "-f", "json"); err == nil {
 			// Check all members are running/streaming
 			if strings.Contains(out, `"State": "running"`) || strings.Contains(out, `"State": "streaming"`) {
-				leader := podman.PatroniLeaderFromListJSON(out)
-				if leader != "" {
-					fmt.Printf("  [OK] Cluster healthy, leader: %s\n", leader)
-					break
+				// Check no member has a pending restart
+				if !strings.Contains(out, `"Pending restart"`) {
+					leader := podman.PatroniLeaderFromListJSON(out)
+					if leader != "" {
+						fmt.Printf("  [OK] Cluster healthy, leader: %s\n", leader)
+						break
+					}
 				}
 			}
 		}
