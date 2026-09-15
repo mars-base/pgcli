@@ -66,9 +66,10 @@ image build, no container recreate, no pause/resume. The flow goes straight to
 pg ha extension install <scope> <extension>[,<extension>...] [flags]
 ```
 
-Builds the `-ext` image, recreates all member containers (coordinated via
-pause/resume), sets `shared_preload_libraries` via `patronictl edit-config`,
-and runs `CREATE EXTENSION` on the leader.
+Builds the `-ext` image, pauses the cluster, and recreates local member containers.
+
+- **Single-host cluster** (all members local): automatically runs apply (resume + edit-config + CREATE EXTENSION)
+- **Cross-host cluster**: only performs pause + recreate, cluster stays paused. Run install on each host separately, then run `pg ha extension apply` on any host to complete the installation.
 
 Extensions are passed as a comma-separated list:
 
@@ -79,7 +80,7 @@ pg ha extension install app pg_stat_statements
 # Install multiple extensions to a specific database
 pg ha extension install app pg_cron,pg_stat_statements --database mydb
 
-# Skip the rolling-restart confirmation prompt
+# Skip the rolling restart confirmation prompt
 pg ha extension install app pgvector --auto-restart
 ```
 

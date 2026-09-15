@@ -63,9 +63,11 @@ PostgreSQL 一起发布），步骤 2-4 会完全跳过 —— 不构建镜像�
 pg ha extension install <scope> <extension>[,<extension>...] [flags]
 ```
 
-构建 `-ext` 镜像，重建所有成员容器（通过 pause/resume 协调），通过
-`patronictl edit-config` 设置 `shared_preload_libraries`，并在 leader 上
-执行 `CREATE EXTENSION`。
+构建 `-ext` 镜像，暂停集群，重建本地成员容器。
+
+- **单主机集群**（所有成员在本地）：自动执行 apply（resume + edit-config + CREATE EXTENSION）
+- **跨主机集群**：只执行 pause + recreate，集群保持暂停。需要在每台主机上分别运行
+  install，最后在任意主机上运行 `pg ha extension apply` 完成安装。
 
 扩展以逗号分隔传入：
 

@@ -368,6 +368,15 @@ func runHAExtensionInstall(scope string, extNames []string, database string, aut
 	// Check if any are non-builtin (need image build + container recreate)
 	hasNonBuiltin := podman.HasNonBuiltinExtensions(allExts)
 
+	// Pause cluster (global, idempotent).
+	// In cross-host flows, the first host pauses; subsequent hosts find it
+	// already paused and continue. The cluster stays paused until the final
+	// `pg ha extension apply` resumes it.
+	fmt.Printf("-> Pausing cluster %q...\n", scope)
+	if err := pauseCluster(pm, &cluster, nsScope); err != nil {
+		return err
+	}
+
 	if hasNonBuiltin {
 		// Build image
 		fmt.Printf("-> Building extension image for cluster %q...\n", scope)
@@ -383,13 +392,6 @@ func runHAExtensionInstall(scope string, extNames []string, database string, aut
 		newTag, err := pm.BuildExtensionImage(baseTag, allExts, cfg.Pigsty.Repo)
 		if err != nil {
 			return fmt.Errorf("building extension image: %w", err)
-		}
-
-		// Pause cluster (idempotent — cross-host: second host won't fail)
-		fmt.Printf("-> Pausing cluster %q...\n", scope)
-		nsScope := cfg.PatroniScope(scope)
-		if err := pauseCluster(pm, &cluster, nsScope); err != nil {
-			return err
 		}
 
 		// Determine recreate order: replicas first, leader last.
@@ -439,7 +441,7 @@ func runHAExtensionInstall(scope string, extNames []string, database string, aut
 
 	if singleHost {
 		// Single-host: auto-apply (resume + edit-config + CREATE EXTENSION)
-		if err := runHAExtensionApplyWithCluster(pm, cfg, &cluster, scope, database, autoRestart, hasNonBuiltin); err != nil {
+		if err := runHAExtensionApplyWithCluster(pm, cfg, &cluster, scope, database, autoRestart); err != nil {
 			return err
 		}
 		fmt.Printf("✓ Extensions installed in cluster %q: %v\n", scope, toInstall)
@@ -644,34 +646,35 @@ func runHAExtensionApply(scope string, database string, autoRestart bool) error 
 		return err
 	}
 
-	if err := runHAExtensionApplyWithCluster(pm, cfg, &cluster, scope, database, autoRestart, true); err != nil {
+	if err := runHAExtensionApplyWithCluster(pm, cfg, &cluster, scope, database, autoRestart); err != nil {
 		return err
 	}
 	fmt.Printf("✓ Extensions applied to cluster %q\n", scope)
 	return nil
 }
 
-// runHAExtensionApplyWithCluster is the shared apply logic: resume (if paused),
+// runHAExtensionApplyWithCluster is the shared apply logic: resume (idempotent),
 // edit-config (triggers rolling restart), CREATE EXTENSION on leader.
-// didRecreate indicates whether containers were just recreated (so we need to resume).
-func runHAExtensionApplyWithCluster(pm *podman.PatroniManager, cfg *config.Config, cluster *config.PatroniClusterConfig, scope, database string, autoRestart, didRecreate bool) error {
+// The cluster is expected to be paused when this is called (either from single-host
+// install which pauses globally, or from cross-host where the last host applies).
+func runHAExtensionApplyWithCluster(pm *podman.PatroniManager, cfg *config.Config, cluster *config.PatroniClusterConfig, scope, database string, autoRestart bool) error {
 	nsScope := cfg.PatroniScope(scope)
 
-	// Resume cluster if we just recreated containers (it's paused).
-	// Tolerate "not paused" — a manual restart or external resume may
-	// have already resumed the cluster before apply runs.
-	if didRecreate {
-		fmt.Printf("-> Resuming cluster %q...\n", scope)
-		if _, err := pm.PatronictlCapture(cluster, "resume", nsScope, "--wait"); err != nil {
-			if strings.Contains(err.Error(), "not paused") {
-				fmt.Println("  (cluster is not paused — skipping resume)")
-			} else {
-				return fmt.Errorf("resuming cluster: %w", err)
-			}
+	// Resume cluster (idempotent).
+	// After the global-pause refactor, the cluster is always paused when apply
+	// runs (either from single-host install or cross-host after all hosts have
+	// recreated). Tolerate "not paused" for the standalone `pg ha extension apply`
+	// command, which may be run when the cluster was already resumed manually.
+	fmt.Printf("-> Resuming cluster %q...\n", scope)
+	if _, err := pm.PatronictlCapture(cluster, "resume", nsScope, "--wait"); err != nil {
+		if strings.Contains(err.Error(), "not paused") {
+			fmt.Println("  (cluster is not paused — skipping resume)")
+		} else {
+			return fmt.Errorf("resuming cluster: %w", err)
 		}
-		// Wait a moment for leader election to stabilize
-		time.Sleep(3 * time.Second)
 	}
+	// Wait a moment for leader election to stabilize
+	time.Sleep(3 * time.Second)
 
 	// Build shared_preload_libraries CSV.
 	// In cross-host clusters, each host's pg.yaml only lists its own extensions.
