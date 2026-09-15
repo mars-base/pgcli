@@ -89,6 +89,10 @@ pg ha extension install app pgvector --auto-restart
 | `--database` | `postgres` | `CREATE EXTENSION` 的目标数据库 |
 | `--auto-restart` | `false` | 跳过 `edit-config` 触发的滚动重启确认 |
 
+> **⚠ `--database` 影响全部扩展。** 指定 `--database` 后，`apply` 阶段会对**所有已安装扩展**（不仅是本次新增的）在目标数据库执行 `CREATE EXTENSION IF NOT EXISTS`。例如，集群已安装 `[pg_cron, pg_stat_statements, pgvector]`，执行 `pg ha extension install app hstore --database mydb` 后，这四个扩展都会在 `mydb` 中创建。扩展的 `.so` 文件已在镜像中，不会重复安装，只是 SQL 对象（函数、类型等）在目标库中注册。
+>
+> 如果只想在特定数据库中启用已有扩展，无需重新 install，直接用 psql 连接对应库执行 `CREATE EXTENSION IF NOT EXISTS` 即可。
+
 ### 卸载
 
 ```bash
@@ -143,6 +147,8 @@ leader 上执行 `CREATE EXTENSION`。
 pg ha extension apply app
 pg ha extension apply app --database mydb --auto-restart
 ```
+
+> **⚠ `--database` 对所有已安装扩展生效。** `apply` 会对集群中**全部扩展**在指定数据库执行 `CREATE EXTENSION IF NOT EXISTS`，不仅限于本次新增的扩展。
 
 ## 跨主机工作流
 

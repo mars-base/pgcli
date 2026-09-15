@@ -91,6 +91,10 @@ pg ha extension install app pgvector --auto-restart
 | `--database` | `postgres` | Target database for `CREATE EXTENSION` |
 | `--auto-restart` | `false` | Skip confirmation for the rolling restart triggered by `edit-config` |
 
+> **⚠ `--database` affects all extensions.** When you specify `--database`, the `apply` phase runs `CREATE EXTENSION IF NOT EXISTS` for **all installed extensions** (not just the newly added ones) in the target database. For example, if the cluster has `[pg_cron, pg_stat_statements, pgvector]` installed, running `pg ha extension install app hstore --database mydb` will create all four extensions in `mydb`. The extension `.so` files are already in the image and won't be reinstalled — only the SQL objects (functions, types, etc.) are registered in the target database.
+>
+> If you only want to enable an existing extension in a specific database, there's no need to reinstall. Simply connect to that database with psql and run `CREATE EXTENSION IF NOT EXISTS` directly.
+
 ### Remove
 
 ```bash
@@ -147,6 +151,8 @@ to complete the DCS update and extension creation.
 pg ha extension apply app
 pg ha extension apply app --database mydb --auto-restart
 ```
+
+> **⚠ `--database` affects all installed extensions.** `apply` runs `CREATE EXTENSION IF NOT EXISTS` for **all extensions** in the cluster in the specified database, not just the newly added ones.
 
 ## Cross-Host Workflow
 
