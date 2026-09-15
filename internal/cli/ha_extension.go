@@ -41,7 +41,7 @@ Commands:
 }
 
 var haExtensionInstallCmd = &cobra.Command{
-	Use:   "install <scope> <extension> [extension...]",
+	Use:   "install <scope> <extension>[,<extension>...] [extension...]",
 	Short: "Install extensions in a Patroni cluster",
 	Long: `Install PostgreSQL extensions in a Patroni-managed HA cluster.
 
@@ -54,14 +54,18 @@ For cross-host clusters: run this command on each host (each recreates only its
 local members), then run ` + "`pg ha extension apply <scope>`" + ` once on any host to
 trigger the edit-config + CREATE EXTENSION.
 
+Extensions can be passed as separate arguments or comma-separated:
+  pg ha extension install app pg_cron pg_stat_statements
+  pg ha extension install app pg_cron,pg_stat_statements
+
 Examples:
   pg ha extension install app pg_stat_statements
-  pg ha extension install app pg_cron pg_stat_statements --database mydb
+  pg ha extension install app pg_cron,pg_stat_statements --database mydb
   pg ha extension install app pgvector --auto-restart`,
 	Args: cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		scope := args[0]
-		extNames := args[1:]
+		extNames := splitExtArgs(args[1:])
 		database, _ := cmd.Flags().GetString("database")
 		autoRestart, _ := cmd.Flags().GetBool("auto-restart")
 		return runHAExtensionInstall(scope, extNames, database, autoRestart)
@@ -69,7 +73,7 @@ Examples:
 }
 
 var haExtensionRemoveCmd = &cobra.Command{
-	Use:   "remove <scope> <extension> [extension...]",
+	Use:   "remove <scope> <extension>[,<extension>...] [extension...]",
 	Short: "Remove extensions from a Patroni cluster",
 	Long: `Remove PostgreSQL extensions from a Patroni-managed HA cluster.
 
@@ -77,13 +81,17 @@ Runs DROP EXTENSION on the leader, then updates shared_preload_libraries via
 patronictl edit-config (triggers rolling restart). Does NOT rebuild the image
 or recreate containers (the -ext image only grows; disk reclamation is rare).
 
+Extensions can be passed as separate arguments or comma-separated:
+  pg ha extension remove app pg_cron pg_stat_statements
+  pg ha extension remove app pg_cron,pg_stat_statements
+
 Examples:
   pg ha extension remove app pg_cron
-  pg ha extension remove app pg_stat_statements pg_cron --auto-restart`,
+  pg ha extension remove app pg_stat_statements,pg_cron --auto-restart`,
 	Args: cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		scope := args[0]
-		extNames := args[1:]
+		extNames := splitExtArgs(args[1:])
 		database, _ := cmd.Flags().GetString("database")
 		autoRestart, _ := cmd.Flags().GetBool("auto-restart")
 		return runHAExtensionRemove(scope, extNames, database, autoRestart)
@@ -139,6 +147,22 @@ func init() {
 		cmd.Flags().String("database", "postgres", "target database for CREATE EXTENSION (Patroni config has no 'database' concept)")
 		cmd.Flags().Bool("auto-restart", false, "skip confirmation prompt for edit-config rolling restart")
 	}
+}
+
+// splitExtArgs expands comma-separated extension names so both
+// "pg ha extension install app pg_cron,pg_stat_statements" and
+// "pg ha extension install app pg_cron pg_stat_statements" work.
+func splitExtArgs(args []string) []string {
+	var out []string
+	for _, a := range args {
+		for _, s := range strings.Split(a, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
 }
 
 func runHAExtensionInstall(scope string, extNames []string, database string, autoRestart bool) error {

@@ -31,22 +31,30 @@ func ResolveExtName(name string) string {
 // either as a builtin (contrib) or in the Pigsty catalog.
 func IsExtensionKnown(name string) bool {
 	resolved := ResolveExtName(name)
-	_, _, _, found := LookupExtension(resolved)
+	_, _, _, _, found := LookupExtension(resolved)
 	return found
 }
 
 // ExtNeedsPreload returns true if the extension requires shared_preload_libraries.
 func ExtNeedsPreload(name string) bool {
 	resolved := ResolveExtName(name)
-	_, needsPreload, _, found := LookupExtension(resolved)
+	_, needsPreload, _, _, found := LookupExtension(resolved)
 	return found && needsPreload
 }
 
 // ExtIsBuiltin returns true if the extension is already in the base image.
 func ExtIsBuiltin(name string) bool {
 	resolved := ResolveExtName(name)
-	_, _, builtin, found := LookupExtension(resolved)
+	_, _, _, builtin, found := LookupExtension(resolved)
 	return found && builtin
+}
+
+// ExtMustBeFirst returns true if the extension must be at position 0 in
+// shared_preload_libraries (FATAL if not, e.g. citus, timescaledb).
+func ExtMustBeFirst(name string) bool {
+	resolved := ResolveExtName(name)
+	_, _, preloadFirst, _, found := LookupExtension(resolved)
+	return found && preloadFirst
 }
 
 const (
@@ -84,7 +92,7 @@ func (b *extImageBuilder) build(fromTag string, pkgList []string, pigstyRepo str
 			continue // already in base image
 		}
 		resolved := ResolveExtName(name)
-		pkg, _, _, found := LookupExtension(resolved)
+		pkg, _, _, _, found := LookupExtension(resolved)
 		if found && pkg != "" {
 			aptPkgs = append(aptPkgs, "postgresql-18-"+pkg)
 		} else {
@@ -187,16 +195,16 @@ func (b *extImageBuilder) extImageHasPackages(imageTag string, packages []string
 }
 
 // BuildPreloadCSV builds the shared_preload_libraries CSV from a list of
-// extensions. Citus is forced first (FATAL if not at position 0). Returns
-// the CSV string and whether pg_cron is present (needs cron.database_name).
+// extensions. Extensions with PreloadFirst are forced to position 0 (FATAL if not).
+// Returns the CSV string and whether pg_cron is present (needs cron.database_name).
 func BuildPreloadCSV(extNames []string) (csv string, hasCron bool) {
 	var preload []string
-	hasCitus := false
+	var first []string
 	for _, name := range extNames {
 		if ExtNeedsPreload(name) {
 			resolved := ResolveExtName(name)
-			if name == "citus" || resolved == "citus" {
-				hasCitus = true
+			if ExtMustBeFirst(name) {
+				first = append(first, resolved)
 				continue
 			}
 			preload = append(preload, resolved)
@@ -205,9 +213,7 @@ func BuildPreloadCSV(extNames []string) (csv string, hasCron bool) {
 			}
 		}
 	}
-	if hasCitus {
-		preload = append([]string{"citus"}, preload...)
-	}
+	preload = append(first, preload...)
 	return strings.Join(preload, ","), hasCron
 }
 
@@ -424,16 +430,16 @@ func (m *Manager) RunCreateExtensions(extNames []string) error {
 // DCS instead — see internal/cli/ha_extension.go.
 func (m *Manager) ApplyExtensions(extNames []string) (needsRestart bool, err error) {
 	// Collect extensions that need preloading.
-	// Citus must be loaded first (FATAL if not at position 0), so we
-	// track it separately and prepend it after the loop.
+	// Extensions with PreloadFirst must be at position 0 (FATAL if not),
+	// so we track them separately and prepend them after the loop.
 	var preload []string
+	var first []string
 	hasCron := false
-	hasCitus := false
 	for _, name := range extNames {
 		if ExtNeedsPreload(name) {
 			resolved := ResolveExtName(name)
-			if name == "citus" || resolved == "citus" {
-				hasCitus = true
+			if ExtMustBeFirst(name) {
+				first = append(first, resolved)
 				continue // will be prepended below
 			}
 			preload = append(preload, resolved)
@@ -443,10 +449,8 @@ func (m *Manager) ApplyExtensions(extNames []string) (needsRestart bool, err err
 			}
 		}
 	}
-	// Citus must be first in shared_preload_libraries
-	if hasCitus {
-		preload = append([]string{"citus"}, preload...)
-	}
+	// Extensions with PreloadFirst must be first in shared_preload_libraries
+	preload = append(first, preload...)
 
 	// Read current postgresql.conf
 	current, err := m.Exec("cat", pgConfPath)

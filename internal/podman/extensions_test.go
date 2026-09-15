@@ -48,6 +48,18 @@ func TestBuildPreloadCSV(t *testing.T) {
 			wantCron:   true,
 		},
 		{
+			name:       "timescaledb forced first",
+			extensions: []string{"pg_stat_statements", "timescaledb"},
+			wantCSV:    "timescaledb,pg_stat_statements",
+			wantCron:   false,
+		},
+		{
+			name:       "multiple preload-first extensions",
+			extensions: []string{"pg_stat_statements", "citus", "timescaledb"},
+			wantCSV:    "citus,timescaledb,pg_stat_statements",
+			wantCron:   false,
+		},
+		{
 			name:       "extensions not needing preload are skipped",
 			extensions: []string{"hstore", "pg_stat_statements", "uuid-ossp"},
 			wantCSV:    "pg_stat_statements",
@@ -139,6 +151,28 @@ func TestBaseImageTag(t *testing.T) {
 			got := BaseImageTag(tt.tag)
 			if got != tt.want {
 				t.Errorf("BaseImageTag() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtMustBeFirst(t *testing.T) {
+	tests := []struct {
+		name string
+		ext  string
+		want bool
+	}{
+		{"citus must be first", "citus", true},
+		{"timescaledb must be first", "timescaledb", true},
+		{"pg_stat_statements no order requirement", "pg_stat_statements", false},
+		{"pg_cron no order requirement", "pg_cron", false},
+		{"hstore (builtin, no preload)", "hstore", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtMustBeFirst(tt.ext)
+			if got != tt.want {
+				t.Errorf("ExtMustBeFirst(%q) = %v, want %v", tt.ext, got, tt.want)
 			}
 		})
 	}
