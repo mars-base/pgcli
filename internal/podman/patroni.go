@@ -574,7 +574,7 @@ func (m *PatroniManager) RemoveScopeFromDCS(cluster *config.PatroniClusterConfig
 
 	leader := ""
 	if out, err := m.PatronictlCapture(cluster, "list", nsScope, "-f", "json"); err == nil {
-		leader = patroniLeaderFromListJSON(out)
+		leader = PatroniLeaderFromListJSON(out)
 	}
 
 	script := strings.Join([]string{nsScope, "Yes I am aware", leader}, "\n") + "\n"
@@ -583,11 +583,11 @@ func (m *PatroniManager) RemoveScopeFromDCS(cluster *config.PatroniClusterConfig
 	return m.runPatronictl(cluster, "-i", strings.NewReader(script), os.Stderr, os.Stderr, []string{"remove", nsScope})
 }
 
-// patroniLeaderFromListJSON extracts the leader member name from
+// PatroniLeaderFromListJSON extracts the leader member name from
 // `patronictl list -f json` output. Values are `any`, not string: the rows
 // mix types ("TL" is a number), and a strict map[string]string unmarshal
 // would fail the whole array and silently lose the leader.
-func patroniLeaderFromListJSON(out string) string {
+func PatroniLeaderFromListJSON(out string) string {
 	var members []map[string]any
 	if json.Unmarshal([]byte(out), &members) != nil {
 		return ""

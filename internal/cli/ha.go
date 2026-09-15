@@ -55,6 +55,7 @@ set; see ` + "`pg ha create --help`" + ` and the docs page):
 
 Commands:
   pg ha create <scope> --member <m> ...   register + (re)install a member
+  pg ha list                              list all HA clusters
   pg ha status   [scope]                  cluster(s) overview / patronictl list
   pg ha switchover <scope>                planned leader change
   pg ha failover   <scope>                promote a replica now
@@ -443,6 +444,99 @@ func haStatusAll(pm *podman.PatroniManager) error {
 	}
 	fmt.Println("\nMember detail: pg ha status <scope>")
 	return nil
+}
+
+// --- list -----------------------------------------------------------
+
+var haListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all HA clusters",
+	Long: `List all Patroni HA clusters configured locally with a compact table view:
+scope, namespace, member count, DCS source, and cluster status (leader or
+container running count).
+
+Examples:
+  pg ha list`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := loadConfigForDSN(); err != nil {
+			return err
+		}
+		pm, _ := podman.NewPatroniManager(cfg)
+		return haListClusters(pm)
+	},
+}
+
+// haListClusters prints a table row per HA cluster — scope, namespace, member
+// count, DCS source, and status (leader name when the DCS is reachable, or a
+// running/total container count otherwise).
+func haListClusters(pm *podman.PatroniManager) error {
+	if len(cfg.Addons.Patroni) == 0 {
+		fmt.Println("No HA clusters configured — create one with `pg ha create <scope> --member <m> --etcd <m1>`")
+		return nil
+	}
+
+	namespace := cfg.Namespace
+	if namespace == "" {
+		namespace = "-"
+	}
+
+	fmt.Printf("%-12s %-12s %-9s %-20s %-30s\n", "SCOPE", "NAMESPACE", "MEMBERS", "DCS", "STATUS")
+	fmt.Println(strings.Repeat("-", 84))
+
+	scopes := make([]string, 0, len(cfg.Addons.Patroni))
+	for s := range cfg.Addons.Patroni {
+		scopes = append(scopes, s)
+	}
+	sort.Strings(scopes)
+
+	for _, scope := range scopes {
+		cluster := cfg.Addons.Patroni[scope]
+		memberCount := len(cluster.Members)
+
+		// DCS column
+		dcs := "external"
+		if len(cluster.EtcdMembers) > 0 {
+			dcs = "etcd:" + strings.Join(cluster.EtcdMembers, ",")
+		}
+
+		// STATUS column: prefer patronictl leader, fall back to container state
+		status := haListStatus(pm, scope, &cluster)
+
+		membersStr := fmt.Sprintf("%d", memberCount)
+		if len(dcs) > 18 {
+			dcs = dcs[:15] + "..."
+		}
+		if len(status) > 28 {
+			status = status[:25] + "..."
+		}
+		fmt.Printf("%-12s %-12s %-9s %-20s %-30s\n", scope, namespace, membersStr, dcs, status)
+	}
+	return nil
+}
+
+// haListStatus returns the status string for one HA cluster row.
+// It tries patronictl list -f json for the leader; on failure it falls back to
+// counting running containers.
+func haListStatus(pm *podman.PatroniManager, scope string, cluster *config.PatroniClusterConfig) string {
+	if pm == nil {
+		return "-"
+	}
+	nsScope := cfg.PatroniScope(scope)
+	if out, err := pm.PatronictlCapture(cluster, "list", nsScope, "-f", "json"); err == nil {
+		if leader := podman.PatroniLeaderFromListJSON(out); leader != "" {
+			return "Leader: " + leader
+		}
+		return "no leader"
+	}
+	// DCS unreachable — count running containers
+	running := 0
+	total := len(cluster.Members)
+	for _, mb := range cluster.Members {
+		if r, err := pm.ContainerRunning(mb.ContainerName); err == nil && r {
+			running++
+		}
+	}
+	return fmt.Sprintf("%d/%d running", running, total)
 }
 
 // --- remove -----------------------------------------------------------
@@ -885,7 +979,7 @@ func init() {
 
 	rootCmd.AddCommand(haCmd)
 	haCmd.AddCommand(
-		haCreateCmd, haStatusCmd, haRemoveCmd, haCtlCmd,
+		haCreateCmd, haListCmd, haStatusCmd, haRemoveCmd, haCtlCmd,
 		haSwitchoverCmd, haFailoverCmd, haPauseCmd, haResumeCmd, haEditConfigCmd,
 		haStartCmd, haStopCmd, haPasswordsCmd,
 	)

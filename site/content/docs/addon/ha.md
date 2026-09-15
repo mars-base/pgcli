@@ -204,6 +204,7 @@ co-locating is fine for dev and small footprints.
 | Command | What it does |
 |---------|--------------|
 | `pg ha create <scope> --member <m> …` | Register + (re)install one member — **recreate = node offline** |
+| `pg ha list` | Compact table of all HA clusters (scope, members, DCS, status) |
 | `pg ha status [scope]` | All clusters, or one cluster's `patronictl list` |
 | `pg ha switchover <scope>` | Planned leader change (patronictl confirms; `--yes` to script) |
 | `pg ha failover <scope>` | Promote a replica now |

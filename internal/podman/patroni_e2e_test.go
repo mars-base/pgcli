@@ -74,20 +74,20 @@ func TestPatroniInitdbRendersBareBooleanFlag(t *testing.T) {
 func TestPatroniLeaderFromListJSON(t *testing.T) {
 	healthy := `[{"Cluster": "e2e", "Member": "n1", "Host": "127.0.0.1:35599", "Role": "Leader", "State": "running", "TL": 1},` +
 		`{"Cluster": "e2e", "Member": "n2", "Host": "127.0.0.1:35598", "Role": "Replica", "State": "streaming", "TL": 1}]`
-	if got := patroniLeaderFromListJSON(healthy); got != "n1" {
+	if got := PatroniLeaderFromListJSON(healthy); got != "n1" {
 		t.Errorf("leader from healthy list = %q, want n1 (numeric TL must not break decoding)", got)
 	}
 
 	// A stopped replica reports Role "stopped", Member present, no leader.
 	dead := `[{"Cluster": "e2e", "Member": "n1", "Role": "Replica", "State": "stopped"}]`
-	if got := patroniLeaderFromListJSON(dead); got != "" {
+	if got := PatroniLeaderFromListJSON(dead); got != "" {
 		t.Errorf("no leader present = %q, want empty", got)
 	}
 
 	// Unparseable or empty output must not panic or fabricate a name.
 	for _, bad := range []string{"", "not json", "[]", "{}"} {
-		if got := patroniLeaderFromListJSON(bad); got != "" {
-			t.Errorf("patroniLeaderFromListJSON(%q) = %q, want empty", bad, got)
+		if got := PatroniLeaderFromListJSON(bad); got != "" {
+			t.Errorf("PatroniLeaderFromListJSON(%q) = %q, want empty", bad, got)
 		}
 	}
 }

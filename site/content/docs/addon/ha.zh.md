@@ -189,6 +189,7 @@ Patroni 只需要一个可达的 etcd 集群，因此有两种布局：
 | 命令 | 作用 |
 |------|------|
 | `pg ha create <scope> --member <m> …` | 登记 + （重）装一个成员 —— **重建 = 节点离线** |
+| `pg ha list` | 所有 HA 集群的紧凑表格（scope、成员数、DCS、状态） |
 | `pg ha status [scope]` | 所有集群，或单个集群的 `patronictl list` |
 | `pg ha switchover <scope>` | 计划内切换 leader（patronictl 会二次确认；`--yes` 可脚本化） |
 | `pg ha failover <scope>` | 立即提升一个副本 |
