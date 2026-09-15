@@ -63,19 +63,25 @@ image build, no container recreate, no pause/resume. The flow goes straight to
 ### Install
 
 ```bash
-pg ha extension install <scope> <extension> [extension...] [flags]
+pg ha extension install <scope> <extension>[,<extension>...] [extension...] [flags]
 ```
 
 Builds the `-ext` image, recreates all member containers (coordinated via
 pause/resume), sets `shared_preload_libraries` via `patronictl edit-config`,
 and runs `CREATE EXTENSION` on the leader.
 
+Extensions can be passed as separate arguments or comma-separated — both forms
+are equivalent:
+
 ```bash
 # Install a single extension
 pg ha extension install app pg_stat_statements
 
-# Install multiple extensions into a specific database
+# Install multiple extensions (space-separated)
 pg ha extension install app pg_cron pg_stat_statements --database mydb
+
+# Comma-separated (same result)
+pg ha extension install app pg_cron,pg_stat_statements --database mydb
 
 # Skip the rolling-restart confirmation prompt
 pg ha extension install app pgvector --auto-restart
@@ -91,7 +97,7 @@ pg ha extension install app pgvector --auto-restart
 ### Remove
 
 ```bash
-pg ha extension remove <scope> <extension> [extension...] [flags]
+pg ha extension remove <scope> <extension>[,<extension>...] [extension...] [flags]
 ```
 
 Runs `DROP EXTENSION` on the leader, then updates `shared_preload_libraries`
@@ -99,9 +105,11 @@ via `patronictl edit-config` (triggers a rolling restart). Does **not** rebuild
 the image or recreate containers — the `-ext` image only grows; disk reclamation
 is rare and manual.
 
+Extensions can be passed as separate arguments or comma-separated:
+
 ```bash
 pg ha extension remove app pg_cron
-pg ha extension remove app pg_stat_statements pg_cron --auto-restart
+pg ha extension remove app pg_stat_statements,pg_cron --auto-restart
 ```
 
 ### List
@@ -202,14 +210,21 @@ what `apply` installs. Both `install` and `remove` update it automatically.
 
 ## `shared_preload_libraries` Ordering
 
-Some extensions must appear at specific positions in `shared_preload_libraries`:
+Some extensions must appear at position 0 in `shared_preload_libraries`
+(PostgreSQL fatals if they're not first). pgcli tracks this as a catalog
+attribute (`PreloadFirst`) — currently set on:
 
-- **`citus`** must be first (PostgreSQL fatals if it's not at position 0)
-- **`pg_cron`** needs an additional DCS parameter: `cron.database_name`
+- **`citus`** — distributed PostgreSQL, must be loaded before anything else
+- **`timescaledb`** — time-series engine, same constraint
 
-`pg ha extension` handles both automatically:
+Additional extensions may require companion DCS parameters:
 
-- `citus` is always placed first in the CSV, regardless of input order
+- **`pg_cron`** needs `cron.database_name`
+
+`pg ha extension` handles all of this automatically:
+
+- Extensions with `PreloadFirst` are always placed at the start of the CSV,
+  regardless of input order
 - When `pg_cron` is present, `cron.database_name` is set to the `--database`
   value (default `postgres`)
 - When `pg_cron` is removed, `cron.database_name` is cleared
@@ -230,10 +245,13 @@ This builds an `-ext` image, recreates all members (with pause/resume), sets
 
 ```bash
 pg ha extension install app citus pg_stat_statements
+# or equivalently:
+pg ha extension install app citus,pg_stat_statements
 ```
 
 Even though `citus` is listed second, the preload CSV is generated as
-`citus,pg_stat_statements` — citus is forced to position 0.
+`citus,pg_stat_statements` — extensions with `PreloadFirst` are always
+placed at position 0.
 
 ### Remove an extension
 

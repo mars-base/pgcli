@@ -43,6 +43,9 @@ pg extension install pg_stat_statements
 # Install multiple extensions (single image build)
 pg extension install pgmq uuid-ossp pg_stat_statements
 
+# Comma-separated (same result)
+pg extension install pgmq,uuid-ossp,pg_stat_statements
+
 # Target a specific instance
 pg extension install pg_stat_statements -i pg01
 ```
@@ -173,6 +176,10 @@ Extensions requiring `shared_preload_libraries` are automatically configured in 
 shared_preload_libraries = 'pg_stat_statements,pg_cron'
 # === end pgcli extensions ===
 ```
+
+Extensions that must be loaded first (e.g., `citus`, `timescaledb`) are
+automatically placed at position 0 regardless of install order — PostgreSQL
+fatals if they appear anywhere else.
 
 This is a postmaster-level parameter; PostgreSQL must be restarted after changes.
 

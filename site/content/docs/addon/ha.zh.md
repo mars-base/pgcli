@@ -521,7 +521,7 @@ DCS 重新生成 `postgresql.conf`，因此 `shared_preload_libraries` 必须通
 
 ```bash
 # 安装扩展（构建 -ext 镜像、重建成员、edit-config、CREATE EXTENSION）
-pg ha extension install app pg_stat_statements pg_cron
+pg ha extension install app pg_stat_statements,pg_cron
 
 # 列出已安装的扩展（配置、DCS、leader 三个视图）
 pg ha extension list app
@@ -531,8 +531,8 @@ pg ha extension remove app pg_cron
 ```
 
 > **完整参考：** [HA 集群扩展安装](./ha-extensions/) 涵盖编排顺序、跨主机工作流、
-> `shared_preload_libraries` 排序规则（citus 强制排第一、pg_cron 自动配置）以及
-> 纯内置扩展快速路径。
+> `shared_preload_libraries` 排序规则（PreloadFirst 扩展如 citus/timescaledb、
+> pg_cron 自动配置）以及纯内置扩展快速路径。
 
 ## 注意
 

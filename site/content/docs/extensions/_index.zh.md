@@ -36,6 +36,9 @@ pg extension install pg_stat_statements
 # 安装多个扩展（单次镜像构建）
 pg extension install pgmq uuid-ossp pg_stat_statements
 
+# 逗号分隔（相同结果）
+pg extension install pgmq,uuid-ossp,pg_stat_statements
+
 # 针对特定实例
 pg extension install pg_stat_statements -i pg01
 ```
@@ -166,6 +169,9 @@ instances:
 shared_preload_libraries = 'pg_stat_statements,pg_cron'
 # === end pgcli extensions ===
 ```
+
+必须最先加载的扩展（如 `citus`、`timescaledb`）会自动放在位置 0，不管安装
+顺序如何 —— 如果它们出现在其他位置，PostgreSQL 会 FATAL。
 
 这是 postmaster 级别参数；更改后必须重启 PostgreSQL。
 

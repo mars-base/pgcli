@@ -34,7 +34,7 @@ Commands:
 }
 
 var extensionInstallCmd = &cobra.Command{
-	Use:   "install <extension> [extension...]",
+	Use:   "install <extension>[,<extension>...] [extension...]",
 	Short: "Install one or more PostgreSQL extensions",
 	Long: `Install PostgreSQL extensions from the Pigsty DEB repository.
 
@@ -47,13 +47,17 @@ pg_cron), PostgreSQL will be restarted to load the shared library.
 By default, you will be prompted for confirmation before restarting.
 Use --auto-restart to skip the prompt and restart automatically.
 
+Extensions can be passed as separate arguments or comma-separated:
+  pg extension install pg_cron pg_stat_statements
+  pg extension install pg_cron,pg_stat_statements
+
 Examples:
   pg extension install pg_stat_statements
-  pg extension install pgmq uuid-ossp pg_stat_statements
+  pg extension install pgmq,uuid-ossp,pg_stat_statements
   pg extension install pg_stat_statements --auto-restart`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runExtensionInstall(args)
+		return runExtensionInstall(splitExtArgs(args))
 	},
 }
 
@@ -66,7 +70,7 @@ var extensionListCmd = &cobra.Command{
 }
 
 var extensionRemoveCmd = &cobra.Command{
-	Use:   "remove <extension> [extension...]",
+	Use:   "remove <extension>[,<extension>...] [extension...]",
 	Short: "Remove one or more PostgreSQL extensions",
 	Long: `Remove PostgreSQL extensions (DROP EXTENSION + rebuild image without them).
 
@@ -77,13 +81,17 @@ If removing an extension that requires shared_preload_libraries (e.g., pg_stat_s
 a restart will be required. By default, you will be prompted for confirmation.
 Use --auto-restart to skip the prompt and restart automatically.
 
+Extensions can be passed as separate arguments or comma-separated:
+  pg extension remove pg_cron pg_stat_statements
+  pg extension remove pg_cron,pg_stat_statements
+
 Examples:
   pg extension remove pgmq
-  pg extension remove pg_stat_statements pg_cron
+  pg extension remove pg_stat_statements,pg_cron
   pg extension remove pg_stat_statements --auto-restart`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runExtensionRemove(args)
+		return runExtensionRemove(splitExtArgs(args))
 	},
 }
 

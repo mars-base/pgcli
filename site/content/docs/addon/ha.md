@@ -559,7 +559,7 @@ unwanted failovers.
 
 ```bash
 # Install extensions (builds -ext image, recreates members, edit-config, CREATE EXTENSION)
-pg ha extension install app pg_stat_statements pg_cron
+pg ha extension install app pg_stat_statements,pg_cron
 
 # List installed extensions (config, DCS, and leader views)
 pg ha extension list app
@@ -570,7 +570,8 @@ pg ha extension remove app pg_cron
 
 > **Full reference:** [Extensions in HA Clusters](./ha-extensions/) covers the
 > orchestration order, cross-host workflow, `shared_preload_libraries` ordering
-> rules (citus-first, pg_cron auto-config), and builtin-only fast path.
+> rules (PreloadFirst extensions like citus/timescaledb, pg_cron auto-config),
+> and builtin-only fast path.
 
 ## Notes
 

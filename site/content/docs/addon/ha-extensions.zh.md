@@ -60,19 +60,24 @@ PostgreSQL 一起发布），步骤 2-4 会完全跳过 —— 不构建镜像�
 ### 安装
 
 ```bash
-pg ha extension install <scope> <extension> [extension...] [flags]
+pg ha extension install <scope> <extension>[,<extension>...] [extension...] [flags]
 ```
 
 构建 `-ext` 镜像，重建所有成员容器（通过 pause/resume 协调），通过
 `patronictl edit-config` 设置 `shared_preload_libraries`，并在 leader 上
 执行 `CREATE EXTENSION`。
 
+扩展可以用空格分隔或逗号分隔传入 —— 两种形式等价：
+
 ```bash
 # 安装单个扩展
 pg ha extension install app pg_stat_statements
 
-# 安装多个扩展到指定数据库
+# 安装多个扩展到指定数据库（空格分隔）
 pg ha extension install app pg_cron pg_stat_statements --database mydb
+
+# 逗号分隔（相同结果）
+pg ha extension install app pg_cron,pg_stat_statements --database mydb
 
 # 跳过滚动重启确认提示
 pg ha extension install app pgvector --auto-restart
@@ -88,16 +93,18 @@ pg ha extension install app pgvector --auto-restart
 ### 卸载
 
 ```bash
-pg ha extension remove <scope> <extension> [extension...] [flags]
+pg ha extension remove <scope> <extension>[,<extension>...] [extension...] [flags]
 ```
 
 在 leader 上执行 `DROP EXTENSION`，然后通过 `patronictl edit-config` 更新
 `shared_preload_libraries`（触发滚动重启）。**不会**重建镜像或重建容器 ——
 `-ext` 镜像只增不减；磁盘回收很少见且需手动操作。
 
+扩展可以用空格分隔或逗号分隔传入：
+
 ```bash
 pg ha extension remove app pg_cron
-pg ha extension remove app pg_stat_statements pg_cron --auto-restart
+pg ha extension remove app pg_stat_statements,pg_cron --auto-restart
 ```
 
 ### 列表
@@ -195,14 +202,20 @@ addons:
 
 ## `shared_preload_libraries` 排序
 
-某些扩展必须在 `shared_preload_libraries` 中出现在特定位置：
+某些扩展必须出现在 `shared_preload_libraries` 的第 0 位（如果不在第一位，
+PostgreSQL 会 FATAL）。pgcli 在扩展目录中以 `PreloadFirst` 属性跟踪此约束 ——
+当前设置此标记的扩展：
 
-- **`citus`** 必须排第一（如果不在位置 0，PostgreSQL 会 FATAL）
-- **`pg_cron`** 需要额外的 DCS 参数：`cron.database_name`
+- **`citus`** —— 分布式 PostgreSQL，必须最先加载
+- **`timescaledb`** —— 时序引擎，同样的约束
 
-`pg ha extension` 自动处理这两种情况：
+部分扩展还需要额外的 DCS 参数：
 
-- `citus` 始终放在 CSV 的第一位，不管输入顺序如何
+- **`pg_cron`** 需要 `cron.database_name`
+
+`pg ha extension` 自动处理所有情况：
+
+- 带 `PreloadFirst` 的扩展始终放在 CSV 开头，不管输入顺序如何
 - 当存在 `pg_cron` 时，`cron.database_name` 设为 `--database` 的值
   （默认 `postgres`）
 - 当 `pg_cron` 被移除时，`cron.database_name` 被清除
@@ -223,10 +236,12 @@ pg ha extension install app pg_stat_statements pg_cron --database mydb --auto-re
 
 ```bash
 pg ha extension install app citus pg_stat_statements
+# 或等价写法：
+pg ha extension install app citus,pg_stat_statements
 ```
 
 即使 `citus` 列在第二位，preload CSV 也会生成为
-`citus,pg_stat_statements` —— citus 强制放在位置 0。
+`citus,pg_stat_statements` —— 带 `PreloadFirst` 的扩展始终放在位置 0。
 
 ### 卸载扩展
 
