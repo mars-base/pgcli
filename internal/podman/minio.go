@@ -87,7 +87,7 @@ func (m *MinioManager) EnsureTLS(mc *config.MinioConfig) (string, error) {
 			hosts = append(hosts, h)
 		}
 	}
-	// 30 days: renew well before the 825-day expiry if NIC IPs changed.
+	// 30 days: renew well ahead of expiry when NIC IPs changed.
 	return tlsca.Generate(m.TLSDir(mc), hosts, 30*24*time.Hour)
 }
 

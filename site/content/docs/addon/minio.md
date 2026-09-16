@@ -114,8 +114,24 @@ connects with full certificate verification — see
 
 `pg mc` adds `--insecure` automatically when a command targets a TLS store via
 a loopback alias (mc persists no CA trust per alias; same-host loopback makes
-this acceptable). External `https://` endpoints keep full verification.
-Toggling `--tls` on an existing instance needs `--force` to take effect.
+this acceptable). An alias to a LAN-IP endpoint is not loopback — append
+`-- --insecure` yourself, or set up the CA properly. External `https://`
+endpoints keep full verification. Toggling `--tls` on an existing instance
+needs `--force` to take effect.
+
+**Lifetimes and access from other hosts.** CA and leaf are both valid for 100
+years (the 825-day cap public CAs observe is a browser policy, not something
+Go's verifier enforces for a private root). pgcli re-signs the leaf on
+`--force`, or whenever a host address changes, so handing `ca.crt` to clients
+is a one-time act per store. A TLS client validates the address it *dials*
+against the leaf's SANs — the client's own address never matters. Remote
+hosts (a VM's Patroni member, another machine's backup container) therefore
+point `backup.repo.s3.endpoint` at one of the store host's IPs (loopback
+names and every NIC IP, virtual bridges included, are in the SAN; raw
+hostnames are not — unless you set `MINIO_SERVER_URL`, whose host is added).
+Copying the same `ca.crt` into a remote host's `pg.yaml` `ca_file` is the
+only setup a remote consumer needs; a pgBackRest stanza never requires the
+MinIO to share its host.
 
 ## Distributed / Cluster Mode
 

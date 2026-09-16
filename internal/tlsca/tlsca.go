@@ -28,7 +28,15 @@ const (
 	ServerCert = "public.crt"
 	ServerKey  = "private.key"
 
-	leafValidity = 825 * 24 * time.Hour // longest validity Go/verifiers honour
+	// Same 100 years as the CA: the CA/Browser Forum's 825-day cap on leaf
+	// validity is a policy for publicly-trusted CAs, not a limit Go's x509
+	// verifier enforces — a pgcli-private cert is never seen by a browser that
+	// would apply it. Longevity costs nothing here: renewing for a changed SAN
+	// (hostSANsMissing) is what absorbs address drift, independent of expiry.
+	// A short leaf would only add a silent-failure mode — a container left
+	// untouched past its expiry starts failing archive-push with no pgcli run
+	// to renew it.
+	leafValidity = 100 * 365 * 24 * time.Hour
 	// 100 years: the CA is pgcli's private root for a loopback-adjacent
 	// service, not a public PKI artifact — a short CA would force every client
 	// that received ca.crt to re-distribute it long before the deployment
