@@ -13,6 +13,7 @@ import (
 	"github.com/mars-base/pgcli/internal/config"
 	"github.com/mars-base/pgcli/internal/platform"
 	"github.com/mars-base/pgcli/internal/podman"
+	"github.com/mars-base/pgcli/internal/tlsca"
 )
 
 // ---------------------------------------------------------------------------
@@ -1729,7 +1730,18 @@ func runAddonList() error {
 			fmt.Printf("    Listen:      %s\n", mc.Listen)
 			fmt.Printf("    API port:    %d\n", mc.APIPort)
 			fmt.Printf("    Console port: %d\n", mc.ConsolePort)
-			fmt.Printf("    Console URL: http://%s:%d/\n", mc.Listen, mc.ConsolePort)
+			scheme := "http"
+			if mc.TLS {
+				scheme = "https"
+			}
+			fmt.Printf("    Console URL: %s://%s:%d/\n", scheme, mc.Listen, mc.ConsolePort)
+			if mc.TLS {
+				caPath := filepath.Join(mm.TLSDir(&mc), tlsca.CACertFile)
+				fmt.Printf("    TLS:         on (CA: %s)\n", caPath)
+				// mc.Listen is the bind address (often 0.0.0.0) — the hint uses
+				// a dialable example host instead.
+				fmt.Printf("                   as pgBackRest repo CA: pg backup setup --s3-endpoint <host>:%d --s3-ca-file %s\n", mc.APIPort, caPath)
+			}
 			fmt.Printf("    Data:        %s\n", mm.DataDir(&mc))
 			fmt.Printf("    Root user:   %s\n", mc.RootUser)
 			fmt.Printf("    Image:       %s\n", mc.ImageTag)
