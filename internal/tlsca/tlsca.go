@@ -29,7 +29,12 @@ const (
 	ServerKey  = "private.key"
 
 	leafValidity = 825 * 24 * time.Hour // longest validity Go/verifiers honour
-	caValidity   = 10 * 365 * 24 * time.Hour
+	// 100 years: the CA is pgcli's private root for a loopback-adjacent
+	// service, not a public PKI artifact — a short CA would force every client
+	// that received ca.crt to re-distribute it long before the deployment
+	// retires. Leaf rotation (leafValidity + auto-renew) is where address
+	// changes are absorbed, so CA longevity costs nothing operationally.
+	caValidity = 100 * 365 * 24 * time.Hour
 )
 
 // Generate creates a self-signed CA (when absent) and a leaf cert for the
