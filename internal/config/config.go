@@ -975,12 +975,25 @@ func (c *Config) ApplyDefaults() {
 				cluster.Name = scope
 			}
 			nsScope := scope + nsSuffix(c.Namespace)
+			// Detect cluster-wide image tag: if any member has a non-default
+			// image (e.g. -ext), use it as the default for new members too.
+			clusterImageTag := ""
+			for _, mb := range cluster.Members {
+				if mb.ImageTag != "" && mb.ImageTag != "ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5" {
+					clusterImageTag = mb.ImageTag
+					break
+				}
+			}
 			for member, mb := range cluster.Members {
 				if mb.ContainerName == "" {
 					mb.ContainerName = "pgcli-patroni" + nsSuffix(c.Namespace) + "-" + scope + "-" + member
 				}
 				if mb.ImageTag == "" {
-					mb.ImageTag = "ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5"
+					if clusterImageTag != "" {
+						mb.ImageTag = clusterImageTag
+					} else {
+						mb.ImageTag = "ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5"
+					}
 				}
 				if mb.DataDir == "" {
 					mb.DataDir = filepath.Join(patroniBaseDir, "addon", "patroni", nsScope, member)

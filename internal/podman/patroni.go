@@ -288,6 +288,48 @@ func (m *PatroniManager) buildPatroniImage(tag string) error {
 // pgpass live under the member dir which is bind-mounted at /patroni (rw —
 // Patroni writes its pgpass there); the data dir is mounted at
 // /var/lib/postgresql so PGDATA=/var/lib/postgresql/data matches the yml.
+//
+// For backup support, the backup container's public key is bind-mounted at
+// /run/pgcli/backup_id_rsa.pub so the entrypoint can install it for sshd.
+// generateContainerPasswd creates /etc/passwd and /etc/group files that map
+// the postgres user to the host UID. This is needed for non-root users:
+// --user <uid>:<gid> overrides the image's USER postgres (uid 999), making
+// all processes run as the host user. But /etc/passwd still says postgres
+// is uid 999, so sshd can't authenticate SSH connections as "postgres".
+// The custom files fix this by mapping postgres to the actual container UID.
+//
+// Files are written to the member's config dir and bind-mounted read-only
+// into the container at /etc/passwd and /etc/group.
+func (m *PatroniManager) generateContainerPasswd(nsScope, member string) error {
+	if os.Geteuid() == 0 {
+		return nil // root: no mapping needed
+	}
+	uid := os.Getuid()
+	gid := os.Getgid()
+	dir := m.memberConfigDir(nsScope, member)
+
+	passwd := fmt.Sprintf(`root:x:0:0:root:/root:/bin/sh
+postgres:x:%d:%d:PostgreSQL user:/var/lib/postgresql:/bin/bash
+nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin
+_apt:x:42:65534::/nonexistent:/usr/sbin/nologin
+`, uid, gid)
+
+	group := fmt.Sprintf(`root:x:0:
+postgres:x:%d:
+nobody:x:65534:
+_apt:x:42:
+ssl-cert:x:101:
+`, gid)
+
+	if err := os.WriteFile(filepath.Join(dir, "passwd"), []byte(passwd), 0644); err != nil {
+		return fmt.Errorf("writing container passwd: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "group"), []byte(group), 0644); err != nil {
+		return fmt.Errorf("writing container group: %w", err)
+	}
+	return nil
+}
+
 func (m *PatroniManager) createMemberContainer(cluster *config.PatroniClusterConfig, member string) error {
 	mb, ok := cluster.Members[member]
 	if !ok {
@@ -309,26 +351,59 @@ func (m *PatroniManager) createMemberContainer(cluster *config.PatroniClusterCon
 		"-e", fmt.Sprintf("PGCLI_SSH_PORT=%d", mb.SSHPort),
 		"-v", fmt.Sprintf("%s:/var/lib/postgresql:z", hostMountPath(mb.DataDir)),
 		"-v", fmt.Sprintf("%s:/patroni:z", hostMountPath(dir)),
-		mb.ImageTag,
 	)
+
+	// Non-root: mount custom /etc/passwd and /etc/group that map postgres
+	// to the host UID. This makes sshd authenticate correctly when the
+	// container runs with --user <uid>:<gid> (host user's UID).
+	if os.Geteuid() != 0 {
+		passwdPath := filepath.Join(dir, "passwd")
+		groupPath := filepath.Join(dir, "group")
+		if err := m.generateContainerPasswd(nsScope, member); err != nil {
+			return fmt.Errorf("generating container passwd: %w", err)
+		}
+		args = append(args,
+			"-v", fmt.Sprintf("%s:/etc/passwd:ro,z", hostMountPath(passwdPath)),
+			"-v", fmt.Sprintf("%s:/etc/group:ro,z", hostMountPath(groupPath)),
+		)
+	}
+
+	// Mount backup container's public key for SSH-based backup support.
+	// The entrypoint script installs it in sshd's authorized_keys.
+	bm, err := NewBackupManager(m.cfg)
+	if err == nil {
+		keys, err := bm.EnsureSSHKey()
+		if err == nil {
+			args = append(args,
+				"-v", fmt.Sprintf("%s:/run/pgcli/backup_id_rsa.pub:ro,z", hostMountPath(keys.Public)),
+			)
+		}
+		// Mount pgbackrest.conf so pgbackrest can run in this container.
+		confPath := filepath.Join(m.dataDir, "pgbackrest.conf")
+		if _, err := os.Stat(confPath); err == nil {
+			args = append(args,
+				"-v", fmt.Sprintf("%s:/etc/pgbackrest.conf:ro,z", hostMountPath(confPath)),
+			)
+		}
+	}
+
+	args = append(args, mb.ImageTag)
 	if _, err := m.run(args...); err != nil {
 		return fmt.Errorf("creating Patroni member container %s: %w", member, err)
 	}
 	return nil
 }
 
-// patroniUserFlags returns podman flags to make the container run as the host user.
-// - Root users (uid 0): no special flags needed, root can access all files
-// - Non-root users: use --userns=keep-id to map container UID to host UID,
-//   ensuring the container can read 0600 config files owned by the host user
+// patroniUserFlags returns podman flags for Patroni member containers.
+// - Root users: no flags needed, root can access any file.
+// - Non-root users: --userns=keep-id + --user <uid>:<gid> maps the container
+//   process to the host user's UID so bind-mounted 0600 config files are
+//   readable. This overrides the image's USER postgres, so a custom /etc/passwd
+//   with a pgbackrest user at the host UID must be bind-mounted for SSH auth.
 func patroniUserFlags() []string {
 	if os.Geteuid() == 0 {
-		// Running as root: no user namespace tricks needed.
-		// Root can access any file regardless of permissions.
 		return []string{}
 	}
-	// Running as non-root: use keep-id to map container UID to host UID.
-	// This ensures the container runs as the same UID that owns the config files.
 	return []string{
 		"--userns", "keep-id",
 		"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),

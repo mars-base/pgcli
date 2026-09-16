@@ -95,6 +95,27 @@ func (m *BackupManager) WriteSSHConfig() (string, error) {
 		sb.WriteString("    User postgres\n")
 		fmt.Fprintf(&sb, "    Port %d\n\n", sshPort)
 	}
+
+	// Patroni cluster members: same SSH scheme but with their own port range.
+	for _, cluster := range m.cfg.Addons.Patroni {
+		for _, mb := range cluster.Members {
+			if mb.ContainerName == "" {
+				continue
+			}
+			sshPort := mb.SSHPort
+			if sshPort == 0 {
+				sshPort = 42301
+			}
+			fmt.Fprintf(&sb, "Host %s\n", mb.ContainerName)
+			fmt.Fprintf(&sb, "    HostName 127.0.0.1\n")
+			sb.WriteString("    StrictHostKeyChecking no\n")
+			sb.WriteString("    UserKnownHostsFile /dev/null\n")
+			sb.WriteString("    IdentityFile /home/postgres/.ssh/id_rsa\n")
+			sb.WriteString("    User postgres\n")
+			fmt.Fprintf(&sb, "    Port %d\n\n", sshPort)
+		}
+	}
+
 	conf := sb.String()
 
 	path := m.SSHConfigPath()
@@ -327,6 +348,7 @@ func (m *BackupManager) EnsureBackupInfra() error {
 // Returns the path to the generated config file.
 func (m *BackupManager) WritePgbackrestConf() (string, error) {
 	var sb strings.Builder
+	stanzaCount := 0
 
 	// Build stanza for each instance with PITR enabled
 	for name, inst := range m.cfg.Instances {
@@ -350,6 +372,28 @@ func (m *BackupManager) WritePgbackrestConf() (string, error) {
 		fmt.Fprintf(&sb, "pg1-host=%s\n", host)
 		fmt.Fprintf(&sb, "pg1-path=/var/lib/postgresql/data\n")
 		fmt.Fprintf(&sb, "pg1-user=postgres\n\n")
+		stanzaCount++
+	}
+
+	// Build stanza for each Patroni cluster (local members only).
+	// Patroni members share the same data_dir layout as standalone PG
+	// (PGDATA=/var/lib/postgresql/data) and use the same SSH port scheme.
+	for scope, cluster := range m.cfg.Addons.Patroni {
+		for member, mb := range cluster.Members {
+			if mb.ContainerName == "" {
+				continue
+			}
+			stanza := fmt.Sprintf("pgcli_%s_%s", scope, member)
+			sb.WriteString("[")
+			sb.WriteString(stanza)
+			sb.WriteString("]\n")
+			fmt.Fprintf(&sb, "pg1-host=%s\n", mb.ContainerName)
+			fmt.Fprintf(&sb, "pg1-path=/var/lib/postgresql/data\n")
+			fmt.Fprintf(&sb, "pg1-port=%d\n", mb.HostPort)
+			fmt.Fprintf(&sb, "pg1-socket-path=/var/lib/postgresql\n")
+			fmt.Fprintf(&sb, "pg1-user=postgres\n\n")
+			stanzaCount++
+		}
 	}
 
 	// Global section
@@ -365,7 +409,7 @@ func (m *BackupManager) WritePgbackrestConf() (string, error) {
 		return "", fmt.Errorf("writing pgbackrest.conf: %w", err)
 	}
 
-	fmt.Printf("-> pgbackrest.conf generated: %s (%d stanzas)\n", confPath, len(m.cfg.Instances))
+	fmt.Printf("-> pgbackrest.conf generated: %s (%d stanzas)\n", confPath, stanzaCount)
 	return confPath, nil
 }
 

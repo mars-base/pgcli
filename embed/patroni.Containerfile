@@ -18,17 +18,13 @@ FROM docker.io/library/postgres:18
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
          python3 python3-pip vim-tiny \
-         pgbackrest openssh-server \
+         pgbackrest=2.59.1* openssh-server \
     && rm -rf /var/lib/apt/lists/* \
     && pip3 install --no-cache-dir --break-system-packages "patroni[psycopg3,etcd3]==4.1.5" \
     && mkdir -p /var/run/sshd /home/postgres/.ssh /var/log/pgbackrest \
+    && chown -R postgres:postgres /home/postgres/.ssh \
     && chmod 700 /home/postgres/.ssh \
-    && chown postgres:postgres /var/log/pgbackrest \
-    && sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config \
-    && sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config \
-    && sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config \
-    && echo 'AuthorizedKeysFile /etc/ssh/authorized_keys/%u' >> /etc/ssh/sshd_config \
-    && mkdir -p /etc/ssh/authorized_keys
+    && chown postgres:postgres /var/log/pgbackrest
 
 # Patroni must resolve the PostgreSQL client tools itself: same-image guarantee.
 RUN patroni --version \
@@ -36,12 +32,9 @@ RUN patroni --version \
          command -v "$b" >/dev/null || { echo "MISS $b"; exit 1; }; \
        done
 
-# Patroni owns the postmaster lifecycle. PID 1 is the Patroni daemon, which
-# reads its config from a bind-mounted file (mounted read-only at runtime);
-# pgcli does NOT use docker-entrypoint-initdb.d here — Patroni runs initdb
-# itself, so the admin/default_db convention of the plain PG image does not
-# apply. Run as the postgres user (uid 999): rootless podman maps it onto the
-# host's unprivileged subuid so the bind-mounted data dir is writable.
+# Entrypoint generates SSH host keys at runtime in /tmp (writable by postgres),
+# so the container works with --userns=keep-id. No build-time key generation
+# or /etc/ssh writes (root-only in the image).
 COPY patroni-entrypoint.sh /usr/local/bin/patroni-entrypoint.sh
 RUN chmod +x /usr/local/bin/patroni-entrypoint.sh
 
