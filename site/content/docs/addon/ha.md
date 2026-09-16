@@ -303,6 +303,27 @@ pg ha remote app --member node3 --ssh-port 42301   # writes members.<m>.remote_h
 pg ha remote remove app --member node3             # undo the registration
 ```
 
+### S3 backups and WAL archiving
+
+Patroni clusters ship with archiving **off** — full backups alone can never
+reach a point-in-time. Enabling the S3 repository
+([backup docs](../../backup/#s3-object-storage-repository), English;
+[中文](../../backup/#s3-对象存储仓库)) flips it on. Each cluster is **one
+stanza** — `pgcli_<scope>`, matching the namespaced DCS scope, so two pgcli
+namespaces sharing one S3 bucket never collide — whose backup-side config lists
+every member as a `pg*-host`, so pgBackRest finds the primary itself and keeps
+working across failovers. `pg backup setup` renders the identical
+`archive_command` into each member's local `patroni.yml` (pgcli never writes
+archive GUCs into DCS — that is `edit-config`'s territory, and Patroni applies
+a local value whenever DCS does not manage the key), recreates stale member
+containers **replicas-first inside a pause window** (the recreate is also the
+postmaster restart `archive_mode` needs), and runs `stanza-create` + `check`
+for the cluster. From then on WAL streams to S3 continuously, from whichever
+member holds the leader lock.
+
+Expect a short per-member offline window and a planned leader demotion at
+the end — the same recreate semantics as `pg ha create`.
+
 ## Passwords
 
 The first `pg ha create` for a scope generates four credentials — `superuser`,

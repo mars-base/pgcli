@@ -64,7 +64,11 @@ func (m *MCRunner) Run(args []string) error {
 	}
 
 	envs := forwardMCHostEnv()
-	aliases := mcKnownAliases(m.configDir, envs)
+	aliasURLs := mcAliasURLs(m.configDir, envs)
+	aliases := make(map[string]bool, len(aliasURLs))
+	for name := range aliasURLs {
+		aliases[name] = true
+	}
 
 	// The container cannot see the host filesystem except through mounts, so a
 	// local-path operand of `cp` / `mirror` / `diff` would fail with
@@ -74,6 +78,12 @@ func (m *MCRunner) Run(args []string) error {
 	// not an option — on macOS its .Trash is TCC-protected, and mounting $HOME
 	// fails outright.
 	args, mounts := mcLocalFiles(args, aliases)
+
+	// A self-signed pgcli MinIO on loopback needs --insecure (mc cannot persist
+	// CA trust); add it unless the user already passed one.
+	if !containsInsecureFlag(args) && mcLocalInsecureHosts(args, aliasURLs) {
+		args = append(args, "--insecure")
+	}
 
 	// macOS: the podman machine shares only the home tree over virtiofs, so a
 	// mount outside it fails with an opaque error — drop it with a clear note.
@@ -142,34 +152,109 @@ func forwardMCHostEnv() []string {
 // (every other subcommand's arguments are alias/bucket URLs only, or flags).
 var mcFileCommands = map[string]bool{"cp": true, "mirror": true, "diff": true}
 
-// mcKnownAliases returns the set of names mc already treats as remote — the
-// ones stored in ~/.mc/config.json plus MC_HOST_* env aliases — so an operand
-// like "store/backups" is left alone while "./LICENSE" is a local path.
-func mcKnownAliases(configDir string, envs []string) map[string]bool {
-	names := map[string]bool{}
+// mcAliasURLs maps every known alias name to its endpoint URL ("" when the
+// config entry carries none). MC_HOST_* env aliases contribute their value's
+// URL too.
+func mcAliasURLs(configDir string, envs []string) map[string]string {
+	urls := map[string]string{}
 
 	if data, err := os.ReadFile(filepath.Join(configDir, "config.json")); err == nil {
 		// mc's config.json keys aliases by name (a JSON object, not a list) —
 		// {"aliases": {"store": {"url": ...}, ...}}.
 		var cfg struct {
-			Aliases map[string]json.RawMessage `json:"aliases"`
+			Aliases map[string]struct {
+				URL string `json:"url"`
+			} `json:"aliases"`
 		}
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			slog.Debug("mc: parsing config.json for alias detection, treating all bare names as local", "err", err)
 		}
-		for name := range cfg.Aliases {
+		for name, a := range cfg.Aliases {
 			if name != "" {
-				names[name] = true
+				urls[name] = a.URL
 			}
 		}
 	}
 
 	for _, kv := range envs {
-		if name := strings.TrimPrefix(kv[:strings.Index(kv, "=")], "MC_HOST_"); name != "" {
-			names[name] = true
+		name, val, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		if name = strings.TrimPrefix(name, "MC_HOST_"); name != "" {
+			urls[name] = val
 		}
 	}
+	return urls
+}
+
+// mcKnownAliases returns the set of names mc already treats as remote — the
+// ones stored in ~/.mc/config.json plus MC_HOST_* env aliases — so an operand
+// like "store/backups" is left alone while "./LICENSE" is a local path.
+func mcKnownAliases(configDir string, envs []string) map[string]bool {
+	names := map[string]bool{}
+	for name := range mcAliasURLs(configDir, envs) {
+		names[name] = true
+	}
 	return names
+}
+
+// mcLocalInsecureHosts reports whether an argument references a loopback
+// https:// endpoint — a pgcli MinIO addon installed with --tls. mc persists no
+// CA trust in its alias config (--insecure is a per-command flag), so `pg mc`
+// adds it automatically for these: same-host loopback is pgcli's own trust
+// boundary, and the alternative is every user hand-appending `-- --insecure`.
+// External https endpoints are never touched — their certs are real.
+func mcLocalInsecureHosts(args []string, aliasURLs map[string]string) bool {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		first := arg
+		if j := strings.Index(arg, "://"); j >= 0 {
+			// A full URL operand: https://127.0.0.1:9002/...
+			if mcIsLoopbackHTTPS(arg) {
+				return true
+			}
+			continue
+		}
+		if j := strings.Index(arg, "/"); j >= 0 {
+			first = arg[:j]
+		}
+		if u, ok := aliasURLs[first]; ok && mcIsLoopbackHTTPS(u) {
+			return true
+		}
+	}
+	return false
+}
+
+func mcIsLoopbackHTTPS(url string) bool {
+	if !strings.HasPrefix(url, "https://") {
+		return false
+	}
+	host := strings.TrimPrefix(url, "https://")
+	if i := strings.Index(host, "/"); i >= 0 {
+		host = host[:i] // path first — a "@" in the path must not confuse the next cut
+	}
+	if i := strings.LastIndex(host, "@"); i >= 0 {
+		host = host[i+1:] // MC_HOST values carry userinfo: https://user:pass@127.0.0.1:9000
+	}
+	if i := strings.LastIndex(host, ":"); i >= 0 && !strings.Contains(host[i:], "]") {
+		host = host[:i] // strip :port (IPv6 literals keep brackets)
+	}
+	host = strings.Trim(host, "[]")
+	return host == "127.0.0.1" || host == "localhost" || host == "::1"
+}
+
+// containsInsecureFlag guards against double-adding --insecure when the user
+// already passed it after `--`.
+func containsInsecureFlag(args []string) bool {
+	for _, a := range args {
+		if a == "--insecure" {
+			return true
+		}
+	}
+	return false
 }
 
 // mcLocalFiles rewrites the host-path operands of a file-taking mc subcommand

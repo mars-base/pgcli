@@ -56,3 +56,46 @@ pg backup status
 ```
 
 备份基础设施（网络、镜像、目录、配置、容器）在 `pg start` 时自动准备；手动运行 `pg backup setup` 重新初始化，例如更改基础目录之后。
+
+## S3 对象存储仓库
+
+Patroni 集群的备份与 WAL 归档可以推送到任意 S3 兼容存储（MinIO、AWS S3……）。
+配置写在 `pg.yaml` 的 `backup.repo.s3` 下：
+
+```yaml
+backup:
+  repo:
+    s3:
+      endpoint: 10.0.0.9:9000     # host:port，不带 scheme
+      bucket: pgbackrest
+      access_key: admin
+      secret_key: <密码>           # 与其它 pgcli 密码一样存于 pg.yaml
+      ca_file: /home/you/.pgcli/tls/minio/store/ca.crt   # 私有 CA 时必填
+```
+
+然后（重）跑 setup，它会自动完成归档编排：
+
+```bash
+pg backup setup
+```
+
+- **HTTPS 是硬性要求。** pgBackRest 拒绝明文 S3（上游明确不实现），端点必须
+  提供 TLS。pgcli 自带的 MinIO 用 `pg addon install minio --tls` 开启原生
+  HTTPS —— pgcli 会生成自签 CA，并把 `ca.crt` 路径填进上面的 `ca_file`。
+  外部端点（真实 AWS S3 等公签证书）留空 `ca_file` 即可；实在无法提供 CA 时
+  可用 `verify_tls: false` 逃生（不做证书校验）。
+- **归档自动化。** setup 检测到 Patroni 成员的归档配置过期时，会 pause 集群、
+  按"副本先、leader 后"重建成员容器（recreate 即重启，`archive_mode` 是
+  postmaster 级参数）、resume。每个成员的 patroni.yml 会注入同一份
+  `archive_command`（每个集群一个 stanza，成员互为 `pg*-host`，pgBackRest
+  自动定位 primary），WAL 从此持续 push 到 S3。
+- **作用范围。** S3 仓库只作用于 Patroni 集群的 stanza；`pg` 直接管理的普通
+  实例备份仍走本地仓库，互不影响。
+
+等价的一次性 flag 写法（`secret_key` 建议手编 pg.yaml，避免落入 shell 历史）：
+
+```bash
+pg backup setup --s3-endpoint 10.0.0.9:9000 --s3-bucket pgbackrest \
+    --s3-access-key admin --s3-ca-file ~/.pgcli/tls/minio/store/ca.crt
+```
+

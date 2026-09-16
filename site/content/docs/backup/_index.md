@@ -63,3 +63,49 @@ pg backup status
 ```
 
 Backup infrastructure (network, image, directories, config, container) is prepared automatically on `pg start`; run `pg backup setup` manually to reinitialize, e.g. after changing the base directory.
+
+## S3 Object Storage Repository
+
+Patroni cluster backups and WAL archiving can push to any S3-compatible store
+(MinIO, AWS S3, ...). Configure it under `backup.repo.s3` in `pg.yaml`:
+
+```yaml
+backup:
+  repo:
+    s3:
+      endpoint: 10.0.0.9:9000     # host:port, no scheme
+      bucket: pgbackrest
+      access_key: admin
+      secret_key: <password>       # stored in pg.yaml like every pgcli secret
+      ca_file: /home/you/.pgcli/tls/minio/store/ca.crt   # required for a private CA
+```
+
+Then re-run setup — it performs the archiving orchestration:
+
+```bash
+pg backup setup
+```
+
+- **HTTPS is mandatory.** pgBackRest refuses plaintext S3 (upstream won't
+  implement it), so the endpoint must serve TLS. pgcli's own MinIO does via
+  `pg addon install minio --tls` — pgcli generates a self-signed CA whose
+  `ca.crt` path you put in `ca_file` above. Publicly-caught endpoints (real
+  AWS S3) just omit `ca_file`; if you truly cannot supply a CA, `verify_tls:
+  false` is the escape hatch (no certificate verification).
+- **Archiving is automated.** When setup finds a Patroni member whose archiving
+  config is stale, it pauses the cluster, recreates members replicas-first
+  (the recreate restarts PostgreSQL, which postmaster-level `archive_mode`
+  needs), then resumes. Each member's patroni.yml gets the same
+  `archive_command` — one stanza per cluster, members listed as `pg*-host` so
+  pgBackRest finds the primary itself — and WAL streams to S3 from then on.
+- **Blast radius.** The S3 repo applies only to Patroni cluster stanzas;
+  `pg`-managed regular instances keep backing up to the local repo, unchanged.
+
+One-shot flag equivalent (`secret_key` is best edited into pg.yaml so it never
+lands in shell history):
+
+```bash
+pg backup setup --s3-endpoint 10.0.0.9:9000 --s3-bucket pgbackrest \
+    --s3-access-key admin --s3-ca-file ~/.pgcli/tls/minio/store/ca.crt
+```
+

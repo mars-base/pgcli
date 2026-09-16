@@ -277,6 +277,23 @@ pg ha remote app --member node3 --ssh-port 42301   # 写 members.<m>.remote_host
 pg ha remote remove app --member node3             # 撤销该登记
 ```
 
+### S3 备份与 WAL 归档
+
+Patroni 集群默认**不开归档**——只有全量备份永远做不到时间点恢复。开启 S3 仓库
+（见[备份文档](../../backup/#s3-对象存储仓库)）即随之打开。每个集群是**一个
+stanza**——`pgcli_<scope>`，与带 namespace 的 DCS scope 一致，两个 pgcli
+namespace 共用一个 S3 桶也撞不上——其备份侧配置把每个成员列为一个
+`pg*-host`，pgBackRest 自己找到 primary，failover 后也无需改配置。
+`pg backup setup` 会把同一份 `archive_command` 渲染进每个成员本地的
+`patroni.yml`（pgcli 绝不把归档 GUC 写进 DCS——那是 `edit-config` 的地盘；
+而只要 DCS 不管理某个 key，Patroni 就会采用本地值），在 pause 窗口内按"副本
+先、leader 后"重建过期的成员容器（recreate 同时就是 `archive_mode` 需要的
+postmaster 重启），并为集群执行 `stanza-create` + `check`。此后 WAL 由持有
+leader 锁的成员持续推送到 S3。
+
+每个成员会有短暂离线、最后有一次计划内的 leader 降级——与 `pg ha create` 的
+recreate 语义相同。
+
 ## 密码
 
 某个 scope 的第一次 `pg ha create` 生成四份凭据 —— `superuser`、

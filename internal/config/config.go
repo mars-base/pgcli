@@ -380,6 +380,16 @@ type MinioConfig struct {
 	RootUser     string `yaml:"root_user,omitempty"`     // default admin
 	RootPassword string `yaml:"root_password,omitempty"` // generated on first install
 
+	// TLS turns on MinIO's native HTTPS: pgcli generates a self-signed CA plus a
+	// leaf cert (SAN: loopback, localhost, this host's NIC IPv4 addresses) under
+	// <base-dir>/tls/minio-<name>/ and mounts them via --certs-dir. Required for
+	// pgBackRest S3 repositories — pgBackRest refuses plaintext HTTP for S3
+	// (upstream issue #1590 was rejected), so a MinIO that should receive WAL
+	// archive-push has to speak TLS. Clients that trust the CA (pgcli passes
+	// repo*-s3-ca-file to pgBackRest) verify normally; `pg mc` uses --insecure
+	// since mc has no clean per-alias CA hook.
+	TLS bool `yaml:"tls,omitempty"`
+
 	// Endpoints switches this addon to distributed (cluster) mode when non-empty:
 	// the list is passed verbatim to `minio server <ep1> <ep2> ...` instead of the
 	// single-node `/data`, e.g. http://10.0.0.1:9000/data. The URL path is the
@@ -439,6 +449,36 @@ type BackupConfig struct {
 	// Autostart starts the backup container automatically on host boot
 	// (`pg autostart enable --backup`).
 	Autostart bool `yaml:"autostart,omitempty"`
+
+	// Repo selects where pgBackRest writes backups. Zero value = local POSIX
+	// repo1 under DataDir (the historical behaviour). Setting Repo.S3 turns
+	// repo1 into an S3 repository that every stanza (regular instances and
+	// Patroni members alike) pushes to.
+	Repo BackupRepo `yaml:"repo,omitempty"`
+}
+
+// BackupRepo groups repository backends for the shared backup container. Only
+// one backend may be active; S3 is the only non-default one today.
+type BackupRepo struct {
+	// S3 configures repo1 as an S3-compatible repository (MinIO, AWS S3, ...).
+	// nil => local POSIX repo under BackupConfig.DataDir.
+	S3 *BackupRepoS3 `yaml:"s3,omitempty"`
+}
+
+// BackupRepoS3 holds explicit S3 repository settings — deliberately no
+// "auto-wire the local minio addon" magic: endpoint and credentials are always
+// written by hand in pg.yaml (or via `pg backup setup --s3-*`). pgBackRest
+// requires HTTPS for S3, so an endpoint backed by a private CA needs CAFile.
+type BackupRepoS3 struct {
+	Endpoint  string `yaml:"endpoint"`             // host:port, no scheme — e.g. 10.0.0.9:9000
+	Bucket    string `yaml:"bucket"`               // repo1-s3-bucket
+	Region    string `yaml:"region,omitempty"`     // default us-east-1 (MinIO accepts anything)
+	Path      string `yaml:"path,omitempty"`       // repo1-path inside the bucket, default /pgbackrest
+	AccessKey string `yaml:"access_key"`           // repo1-s3-key
+	SecretKey string `yaml:"secret_key"`           // repo1-s3-key-secret (stored in pg.yaml like every other pgcli secret)
+	URIStyle  string `yaml:"uri_style,omitempty"`  // repo1-s3-uri-style, default path (MinIO needs path)
+	CAFile    string `yaml:"ca_file,omitempty"`    // host path to a PEM CA bundle; empty = image's system CAs
+	VerifyTLS *bool  `yaml:"verify_tls,omitempty"` // default true; false = repo*-s3-verify-tls=n escape hatch
 }
 
 // PigstyConfig holds Pigsty extension repository settings.
@@ -832,6 +872,18 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Backup.RetentionFull == 0 {
 		c.Backup.RetentionFull = d.Backup.RetentionFull
+	}
+	if c.Backup.Repo.S3 != nil {
+		s3 := c.Backup.Repo.S3
+		if s3.Region == "" {
+			s3.Region = "us-east-1"
+		}
+		if s3.URIStyle == "" {
+			s3.URIStyle = "path"
+		}
+		if s3.Path == "" {
+			s3.Path = "/pgbackrest"
+		}
 	}
 
 	// Pigsty

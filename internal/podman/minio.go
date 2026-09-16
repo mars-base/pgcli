@@ -3,14 +3,17 @@ package podman
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/mars-base/pgcli/internal/config"
 	"github.com/mars-base/pgcli/internal/platform"
+	"github.com/mars-base/pgcli/internal/tlsca"
 )
 
 // MinioManager manages standalone single-node MinIO containers: S3-compatible
@@ -63,6 +66,29 @@ func (m *MinioManager) resolveDataDir(mc *config.MinioConfig) string {
 // DataDir returns the resolved host data directory (for display).
 func (m *MinioManager) DataDir(mc *config.MinioConfig) string {
 	return m.resolveDataDir(mc)
+}
+
+// TLSDir is the host dir holding this addon's self-signed CA + leaf cert when
+// mc.TLS is on. MinIO's --certs-dir wants public.crt/private.key there; the CA
+// pair sits alongside for distribution (pgBackRest's repo*-s3-ca-file).
+func (m *MinioManager) TLSDir(mc *config.MinioConfig) string {
+	return filepath.Join(m.dataDir, "tls", "minio", mc.Name)
+}
+
+// EnsureTLS (re)generates the addon's cert material when needed and returns
+// the CA cert path. Called before container creation whenever mc.TLS is set.
+// SANs cover every address a client can dial: loopback names, this host's NIC
+// IPs (members/backup containers run on host networking), the configured
+// Listen bind, and the host MINIO_SERVER_URL advertises.
+func (m *MinioManager) EnsureTLS(mc *config.MinioConfig) (string, error) {
+	hosts := tlsca.LocalHosts(mc.Listen)
+	if u := m.serverURL(mc); u != "" {
+		if h, _, err := net.SplitHostPort(strings.TrimPrefix(strings.TrimPrefix(u, "https://"), "http://")); err == nil {
+			hosts = append(hosts, h)
+		}
+	}
+	// 30 days: renew well before the 825-day expiry if NIC IPs changed.
+	return tlsca.Generate(m.TLSDir(mc), hosts, 30*24*time.Hour)
 }
 
 // DataDirSharesRootDevice reports whether the resolved data dir sits on the same
@@ -221,6 +247,20 @@ func (m *MinioManager) createContainer(mc *config.MinioConfig) error {
 
 	bind := proxyBindHost(m.bridge, mc.Listen)
 
+	// TLS: MinIO serves HTTPS natively from --certs-dir (public.crt +
+	// private.key). pgBackRest refuses plaintext HTTP for S3 repos, so a MinIO
+	// feeding Patroni archive-push must be TLS; pgcli's own CA (tlsca) covers
+	// every address clients dial and is distributed as repo*-s3-ca-file.
+	var tlsDir string
+	if mc.TLS {
+		caPath, err := m.EnsureTLS(mc)
+		if err != nil {
+			return err
+		}
+		tlsDir = m.TLSDir(mc)
+		fmt.Printf("  [OK] TLS certs (CA: %s)\n", caPath)
+	}
+
 	// MinIO's deployment docs recommend nofile=1048576. The podman machine VM
 	// caps RLIMIT_NOFILE at its host's hard limit (524288 on the current
 	// applehv image), and crun refuses to set soft > hard outright, so macOS
@@ -248,6 +288,11 @@ func (m *MinioManager) createContainer(mc *config.MinioConfig) error {
 		"-e", "MINIO_ROOT_USER="+mc.RootUser,
 		"-e", "MINIO_ROOT_PASSWORD="+mc.RootPassword,
 	)
+	if tlsDir != "" {
+		args = append(args,
+			"-v", fmt.Sprintf("%s:/opt/minio/certs:ro,z", hostMountPath(tlsDir)),
+		)
+	}
 	// MINIO_SERVER_URL must be byte-identical on every node or MinIO refuses to
 	// form the cluster ("Mismatching environment values: [MINIO_SERVER_URL]",
 	// each node then loops on "Waiting for at least 1 remote servers with valid
@@ -273,6 +318,9 @@ func (m *MinioManager) createContainer(mc *config.MinioConfig) error {
 		"--address", fmt.Sprintf("%s:%d", bind, mc.APIPort),
 		"--console-address", fmt.Sprintf("%s:%d", bind, mc.ConsolePort),
 	)
+	if tlsDir != "" {
+		args = append(args, "--certs-dir", "/opt/minio/certs")
+	}
 
 	if _, err := m.run(args...); err != nil {
 		return fmt.Errorf("creating MinIO container: %w", err)
@@ -289,7 +337,11 @@ func (m *MinioManager) serverURL(mc *config.MinioConfig) string {
 	if m.bridge {
 		host = "127.0.0.1"
 	}
-	return fmt.Sprintf("http://%s:%d", host, mc.APIPort)
+	scheme := "http"
+	if mc.TLS {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://%s:%d", scheme, host, mc.APIPort)
 }
 
 // Remove stops and removes the MinIO container. The data dir is kept by

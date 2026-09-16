@@ -280,6 +280,7 @@ func init() {
 	addonInstallCmd.Flags().String("root-user", "", "MinIO root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config)")
 	addonInstallCmd.Flags().String("root-password", "", "MinIO root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand)")
 	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (path is the in-container export dir; keep it under /data where --data-dir is mounted; repeat for each node; the list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
+	addonInstallCmd.Flags().Bool("tls", false, "MinIO: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/minio/<name>/; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a MinIO used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Changing this needs --force to recreate")
 	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO container even if one already exists (to apply changed ports/listen/credentials)")
 
 	// start / stop flags
@@ -1379,6 +1380,7 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	rootPassword, _ := cmd.Flags().GetString("root-password")
 	endpoints, _ := cmd.Flags().GetStringSlice("endpoint")
 	force, _ := cmd.Flags().GetBool("force")
+	tls, _ := cmd.Flags().GetBool("tls")
 
 	path := cfgPath
 	if path == "" {
@@ -1425,6 +1427,9 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	}
 	if len(endpoints) > 0 {
 		existing.Endpoints = endpoints
+	}
+	if tls {
+		existing.TLS = true
 	}
 	if existing.Name == "" {
 		existing.Name = name
@@ -1511,11 +1516,18 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	fmt.Printf("  Container:    %s\n", mc.ContainerName)
 	fmt.Printf("  Image:        %s\n", mc.ImageTag)
 	fmt.Printf("  Data:         %s\n", mm.DataDir(&mc))
-	fmt.Printf("  S3 API:       http://%s:%d\n", mc.Listen, mc.APIPort)
-	fmt.Printf("  Console:      http://%s:%d\n", mc.Listen, mc.ConsolePort)
+	scheme := "http"
+	if mc.TLS {
+		scheme = "https"
+	}
+	fmt.Printf("  S3 API:       %s://%s:%d\n", scheme, mc.Listen, mc.APIPort)
+	fmt.Printf("  Console:      %s://%s:%d\n", scheme, mc.Listen, mc.ConsolePort)
 	fmt.Println()
 	fmt.Printf("  Root user:     %s\n", mc.RootUser)
 	fmt.Printf("  Root password: %s\n", mc.RootPassword)
+	if mc.TLS {
+		fmt.Printf("  TLS CA cert:   %s\n", filepath.Join(mm.TLSDir(&mc), "ca.crt"))
+	}
 	if len(mc.Endpoints) > 0 {
 		fmt.Println()
 		fmt.Printf("  Distributed mode: %d endpoints\n", len(mc.Endpoints))

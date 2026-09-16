@@ -182,6 +182,28 @@ func (m *PatroniManager) renderPatroniYML(cluster *config.PatroniClusterConfig, 
 			},
 		},
 	}
+
+	// WAL archiving is off by default for Patroni. Turn it on only when the S3
+	// backup repo is configured — that is the opt-in for this feature, so an HA
+	// cluster that never enabled S3 keeps its current (full-backup-only)
+	// behaviour. The stanza is cluster-wide (pgcli_<scope>), so the same
+	// archive_command is valid for every member and could in principle live in
+	// DCS. It stays in the member's LOCAL patroni.yml postgresql parameters
+	// anyway: DCS is bootstrap-once territory managed via edit-config, and a
+	// pgcli-owned GUC there would fight the user. Patroni applies a GUC from
+	// local config when DCS does not manage it. archive_mode is
+	// postmaster-level, so it takes effect on the container recreate the setup
+	// orchestration performs.
+	if m.cfg.Backup.Repo.S3 != nil {
+		params := doc["postgresql"].(map[string]any)["parameters"].(map[string]any)
+		params["archive_mode"] = "on"
+		params["archive_timeout"] = 10
+		params["archive_command"] = fmt.Sprintf(
+			`pgbackrest --stanza=%s archive-push "%%p"`,
+			patroniStanzaName(nsScope),
+		)
+	}
+
 	return doc, nil
 }
 
@@ -381,11 +403,25 @@ func (m *PatroniManager) createMemberContainer(cluster *config.PatroniClusterCon
 				"-v", fmt.Sprintf("%s:/run/pgcli/backup_id_rsa.pub:ro,z", hostMountPath(keys.Public)),
 			)
 		}
-		// Mount pgbackrest.conf so pgbackrest can run in this container.
-		confPath := filepath.Join(m.dataDir, "pgbackrest.conf")
-		if _, err := os.Stat(confPath); err == nil {
+	}
+
+	// Mount a pgbackrest.conf so archive-push can run in this container. Prefer
+	// the member-local archive conf (no pg1-host — pgBackRest refuses
+	// archive-push on a stanza naming a foreign pg1-host, [072]); fall back to
+	// the shared backup conf when no archive view was generated (e.g. hosts that
+	// never ran `pg backup setup`).
+	archivePath := filepath.Join(m.dataDir, "pgbackrest-archive.conf")
+	confPath := filepath.Join(m.dataDir, "pgbackrest.conf")
+	if _, err := os.Stat(archivePath); err == nil {
+		confPath = archivePath
+	}
+	if _, err := os.Stat(confPath); err == nil {
+		args = append(args,
+			"-v", fmt.Sprintf("%s:/etc/pgbackrest.conf:ro,z", hostMountPath(confPath)),
+		)
+		if ca := m.cfg.Backup.Repo.S3; ca != nil && ca.CAFile != "" {
 			args = append(args,
-				"-v", fmt.Sprintf("%s:/etc/pgbackrest.conf:ro,z", hostMountPath(confPath)),
+				"-v", fmt.Sprintf("%s:/etc/pgbackrest/ca.crt:ro,z", hostMountPath(ca.CAFile)),
 			)
 		}
 	}

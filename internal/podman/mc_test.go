@@ -187,6 +187,54 @@ func TestMCKnownAliases(t *testing.T) {
 	}
 }
 
+func TestMCInsecureAutoForLoopbackTLS(t *testing.T) {
+	aliasURLs := map[string]string{
+		"store": "https://127.0.0.1:9002",   // pgcli minio --tls on loopback
+		"cloud": "https://s3.amazonaws.com", // real cert — must stay verified
+		"plain": "http://127.0.0.1:9000",    // no TLS involved
+		"lanip": "https://10.0.0.9:9002",    // pgcli TLS on a LAN NIC IP
+	}
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"alias operand", []string{"ls", "store"}, true},
+		{"alias path operand", []string{"find", "store/pgbackrest"}, true},
+		{"full loopback url", []string{"ls", "https://127.0.0.1:9002/store/x"}, true},
+		{"external alias untouched", []string{"ls", "cloud"}, false},
+		{"http loopback untouched", []string{"ls", "plain"}, false},
+		{"lan-ip alias untouched", []string{"ls", "lanip"}, false},
+		{"local path untouched", []string{"cp", "./file", "cloud/b"}, false},
+	}
+	for _, tt := range tests {
+		if got := mcLocalInsecureHosts(tt.args, aliasURLs); got != tt.want {
+			t.Errorf("%s: mcLocalInsecureHosts(%v) = %v, want %v", tt.name, tt.args, got, tt.want)
+		}
+	}
+}
+
+func TestMCIsLoopbackHTTPS(t *testing.T) {
+	tests := []struct {
+		url  string
+		want bool
+	}{
+		{"https://127.0.0.1:9002", true},
+		{"https://admin:pass@127.0.0.1:9002", true},    // MC_HOST userinfo form
+		{"https://admin:pass@localhost/buck@et", true}, // @ inside path must not confuse
+		{"https://[::1]:9000", true},
+		{"https://localhost", true},
+		{"http://127.0.0.1:9000", false},
+		{"https://s3.amazonaws.com", false},
+		{"https://10.241.21.97:9002", false},
+	}
+	for _, tt := range tests {
+		if got := mcIsLoopbackHTTPS(tt.url); got != tt.want {
+			t.Errorf("mcIsLoopbackHTTPS(%q) = %v, want %v", tt.url, got, tt.want)
+		}
+	}
+}
+
 func TestIsMCLocalOperand(t *testing.T) {
 	aliases := map[string]bool{"store": true}
 	tests := []struct {

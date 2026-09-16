@@ -58,6 +58,9 @@ pg addon install minio --name store --api-port 9000 --console-port 9001 --root-u
 
 # 绑定到所有网卡，暴露到网络
 pg addon install minio --name store --listen 0.0.0.0
+
+# HTTPS（pgBackRest S3 仓库的前提）：pgcli 自签 CA + 原生 TLS
+pg addon install minio --name store --tls
 ```
 
 输出会报告端点与 root 凭据：
@@ -86,6 +89,23 @@ pg addon install minio --name store --listen 0.0.0.0
 > **绑定地址：** 默认 `127.0.0.1`，存储仅本机可见。`--listen 0.0.0.0`（或
 > `pg.yaml` 里的 `listen` 键）会把它暴露到网络上——能访问该端口的任何人都可尝试
 > root 凭据，因此只应在防火墙后或 TLS 终结代理之后这样暴露。
+
+### TLS（`--tls`）
+
+`--tls` 让 MinIO 以 HTTPS 提供服务：pgcli 用标准库生成一把自签 CA 和一张叶证
+书（SAN 覆盖回环名、`localhost` 与本机所有网卡 IP），落在
+`<base_dir>/tls/minio/<name>/`（`public.crt` / `private.key` 供 MinIO
+`--certs-dir` 用，`ca.crt` 供分发），随后把证书目录只读挂进容器。端点 URL 随
+之变为 `https://`。
+
+之所以需要它：**pgBackRest 对 S3 仓库强制 HTTPS**（明文被上游明确拒绝），所以
+一个要接收 Patroni `archive-push` 的 MinIO 必须说 TLS。把 `ca.crt` 路径填进
+`backup.repo.s3.ca_file`，pgBackRest 就会以完整证书校验连接它——见
+[备份 → S3 对象存储仓库](../../backup/#s3-对象存储仓库)。
+
+`pg mc` 在命令通过回环别名访问 TLS 存储时会自动附加 `--insecure`（`mc` 无法
+按别名持久化 CA 信任；同机 `127.0.0.1` 回环可接受）。外部 `https://` 端点仍
+做完整校验。给已存在的实例开关 `--tls` 需要 `--force` 重建容器才生效。
 
 ## 分布式 / 集群模式
 

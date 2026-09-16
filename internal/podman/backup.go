@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -418,6 +419,55 @@ func (m *BackupManager) EnsureBackupInfra() error {
 
 // --- pgbackrest.conf generation ----------------------------------
 
+// patroniStanzaName is the single source of truth for a Patroni cluster's
+// pgBackRest stanza name. It is CLUSTER-wide, not per-member: all members are
+// one logical database with one timeline, so they share a stanza (identical
+// WAL pushes from a demoted old leader simply dedup). The backup-side stanza
+// lists one pg*-host per member so pgBackRest locates the primary on its own
+// and keeps working across failovers — stanza-create and full backups must
+// connect to the primary ([056]), which a per-member stanza cannot do. Both
+// the config generator and the injected archive_command must agree here.
+//
+// nsScope MUST be the DCS-qualified name (cfg.PatroniScope(scope)): namespaces
+// are how two pgcli configs on one host — or sharing one etcd — stay apart,
+// and the local repo1-path plus a shared S3 bucket give no other isolation.
+// A bare scope would let namespace "a" and "b" collide on pgcli_app in the
+// object store.
+func patroniStanzaName(nsScope string) string {
+	return fmt.Sprintf("pgcli_%s", nsScope)
+}
+
+// s3StanzaLines returns the repo1 S3 override block emitted *inside* each
+// Patroni stanza, or "" when no S3 repo is configured. Deliberately per-stanza
+// rather than in [global]: the shared [global] repo1-path stays local, so the
+// pgcli-managed regular-instance backups are completely unaffected by S3.
+// Only Patroni cluster stanzas push to the object store.
+func (m *BackupManager) s3StanzaLines() string {
+	s3 := m.cfg.Backup.Repo.S3
+	if s3 == nil {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("# S3 repo (overrides [global] repo1-path) — pgBackRest forces HTTPS for S3.\n")
+	sb.WriteString("repo1-type=s3\n")
+	fmt.Fprintf(&sb, "repo1-s3-endpoint=%s\n", s3.Endpoint)
+	fmt.Fprintf(&sb, "repo1-s3-bucket=%s\n", s3.Bucket)
+	fmt.Fprintf(&sb, "repo1-s3-region=%s\n", s3.Region)
+	fmt.Fprintf(&sb, "repo1-s3-uri-style=%s\n", s3.URIStyle)
+	fmt.Fprintf(&sb, "repo1-path=%s\n", s3.Path)
+	fmt.Fprintf(&sb, "repo1-s3-key=%s\n", s3.AccessKey)
+	fmt.Fprintf(&sb, "repo1-s3-key-secret=%s\n", s3.SecretKey)
+	verify := "y"
+	if s3.VerifyTLS != nil && !*s3.VerifyTLS {
+		verify = "n"
+	}
+	fmt.Fprintf(&sb, "repo1-s3-verify-tls=%s\n", verify)
+	if s3.CAFile != "" {
+		sb.WriteString("repo1-s3-ca-file=/etc/pgbackrest/ca.crt\n")
+	}
+	return sb.String()
+}
+
 // WritePgbackrestConf generates pgbackrest.conf with all instance stanzas.
 // Returns the path to the generated config file.
 func (m *BackupManager) WritePgbackrestConf() (string, error) {
@@ -449,22 +499,16 @@ func (m *BackupManager) WritePgbackrestConf() (string, error) {
 		stanzaCount++
 	}
 
-	// Build a stanza for each Patroni member cluster-wide. Cross-host members
-	// are included automatically via the DCS + registry (see
-	// patroniBackupTargets). Patroni members share the standalone PG data_dir
-	// layout (PGDATA=/var/lib/postgresql/data).
-	for _, t := range m.patroniBackupTargets() {
-		stanza := fmt.Sprintf("pgcli_%s_%s", t.scope, t.member)
-		sb.WriteString("[")
-		sb.WriteString(stanza)
-		sb.WriteString("]\n")
-		fmt.Fprintf(&sb, "pg1-host=%s\n", t.alias)
-		fmt.Fprintf(&sb, "pg1-path=/var/lib/postgresql/data\n")
-		fmt.Fprintf(&sb, "pg1-port=%d\n", t.hostPort)
-		fmt.Fprintf(&sb, "pg1-socket-path=/var/lib/postgresql\n")
-		fmt.Fprintf(&sb, "pg1-user=postgres\n\n")
-		stanzaCount++
-	}
+	// One cluster-wide stanza per Patroni scope, listing every member as an
+	// additional pg*-host (cross-host members included automatically via the
+	// DCS + registry — see patroniBackupTargets). pgBackRest probes the hosts,
+	// finds the primary itself, and survives failovers with no config change.
+	// Patroni members share the standalone PG data_dir layout
+	// (PGDATA=/var/lib/postgresql/data). The S3 repo (when configured) is
+	// scoped to these stanzas only.
+	patroniConf, patroniStanzas := m.patroniBackupStanzas(m.patroniBackupTargets())
+	sb.WriteString(patroniConf)
+	stanzaCount += patroniStanzas
 
 	// Global section
 	sb.WriteString("[global]\n")
@@ -483,12 +527,123 @@ func (m *BackupManager) WritePgbackrestConf() (string, error) {
 	return confPath, nil
 }
 
+// patroniBackupStanzas renders the backup-container view: one stanza per
+// Patroni scope containing every member as pgN-host (pgBackRest probes them,
+// finds the primary itself, and keeps working across failovers). Returns the
+// text and the stanza count.
+func (m *BackupManager) patroniBackupStanzas(targets []patroniBackupTarget) (string, int) {
+	var sb strings.Builder
+	s3 := m.s3StanzaLines()
+	count := 0
+	for _, scope := range scopesInOrder(targets) {
+		sb.WriteString("[" + patroniStanzaName(m.cfg.PatroniScope(scope)) + "]\n")
+		i := 0
+		for _, t := range targets {
+			if t.scope != scope {
+				continue
+			}
+			i++
+			fmt.Fprintf(&sb, "pg%d-host=%s\n", i, t.alias)
+			fmt.Fprintf(&sb, "pg%d-path=/var/lib/postgresql/data\n", i)
+			fmt.Fprintf(&sb, "pg%d-port=%d\n", i, t.hostPort)
+			fmt.Fprintf(&sb, "pg%d-socket-path=/var/lib/postgresql\n", i)
+			fmt.Fprintf(&sb, "pg%d-user=postgres\n", i)
+		}
+		sb.WriteString(s3)
+		sb.WriteString("\n")
+		count++
+	}
+	return sb.String(), count
+}
+
+// patroniArchiveStanzas renders the member-local view: one stanza per scope,
+// no pg*-host and no ports (archive-push never connects to PostgreSQL — it
+// only reads WAL files under pg1-path — and a stanza naming any pg1-host
+// makes archive-push abort with [072] "must be run on the PostgreSQL host").
+// Every member mounts this identical text and pushes to the identical stanza.
+func (m *BackupManager) patroniArchiveStanzas(targets []patroniBackupTarget) (string, int) {
+	var sb strings.Builder
+	s3 := m.s3StanzaLines()
+	count := 0
+	for _, scope := range scopesInOrder(targets) {
+		sb.WriteString("[" + patroniStanzaName(m.cfg.PatroniScope(scope)) + "]\n")
+		sb.WriteString("pg1-path=/var/lib/postgresql/data\n")
+		sb.WriteString("pg1-user=postgres\n")
+		sb.WriteString(s3)
+		sb.WriteString("\n")
+		count++
+	}
+	return sb.String(), count
+}
+
+// scopesInOrder lists the distinct scopes in sorted order — stanza text must
+// not shuffle between runs (Go map iteration is randomized).
+func scopesInOrder(targets []patroniBackupTarget) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, t := range targets {
+		if !seen[t.scope] {
+			seen[t.scope] = true
+			out = append(out, t.scope)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// WritePgbackrestArchiveConf generates the *member-local* pgbackrest.conf used
+// for archive-push, mounted read-only into every Patroni member container at
+// /etc/pgbackrest.conf. See patroniArchiveStanzas for why the stanza carries no
+// pg*-host. The backup container keeps using WritePgbackrestConf (with
+// pg*-hosts) for backup/restore, so this is a second, distinct file.
+func (m *BackupManager) WritePgbackrestArchiveConf() (string, error) {
+	var sb strings.Builder
+	archiveConf, stanzaCount := m.patroniArchiveStanzas(m.patroniBackupTargets())
+	sb.WriteString(archiveConf)
+
+	sb.WriteString("[global]\n")
+	sb.WriteString("repo1-path=/var/lib/pgbackrest\n")
+	fmt.Fprintf(&sb, "repo1-retention-full=%d\n", m.cfg.Backup.RetentionFull)
+	sb.WriteString("log-level-console=info\n")
+	sb.WriteString("start-fast=y\n")
+	sb.WriteString("compress-type=zst\n")
+
+	confPath := filepath.Join(m.dataDir, "pgbackrest-archive.conf")
+	if err := os.WriteFile(confPath, []byte(sb.String()), 0644); err != nil {
+		return "", fmt.Errorf("writing pgbackrest-archive.conf: %w", err)
+	}
+	fmt.Printf("-> pgbackrest-archive.conf generated: %s (%d cluster stanzas, local view)\n", confPath, stanzaCount)
+	return confPath, nil
+}
+
+// backupContainerDrift returns a short reason when the running backup
+// container's mounts no longer match the desired config — today only the S3 CA
+// file (a mount a pre-S3 container never had). "" means it's current.
+func (m *BackupManager) backupContainerDrift() (string, error) {
+	s3 := m.cfg.Backup.Repo.S3
+	if s3 == nil || s3.CAFile == "" {
+		return "", nil // nothing to drift on (local repo, or system CAs)
+	}
+	out, err := m.run("inspect", "--format", "{{range .Mounts}}{{.Destination}}\n{{end}}", m.cfg.Backup.ContainerName)
+	if err != nil {
+		return "", fmt.Errorf("inspecting backup container mounts: %w", err)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "/etc/pgbackrest/ca.crt" {
+			return "", nil
+		}
+	}
+	return "missing the S3 CA mount", nil
+}
+
 // --- Container management ---------------------------------------------
 
 // EnsureBackupContainer creates and starts the backup container if needed.
-// SSH config and pgbackrest.conf are bind-mounted, so host file updates are
-// reflected inside the container without recreation. Only (re)create if the
-// container does not exist or is not running.
+// SSH config and pgbackrest.conf are bind-mounted at fixed paths, so host file
+// updates are reflected inside the container without recreation. But a newly
+// configured CA mount (/etc/pgbackrest/ca.crt) can only arrive via recreate —
+// a running container predating it is silently missing the cert and every S3
+// op fails with [095]. So: (re)create when absent, not running, or drifting.
 func (m *BackupManager) EnsureBackupContainer(confPath string) error {
 	containerName := m.cfg.Backup.ContainerName
 
@@ -504,9 +659,19 @@ func (m *BackupManager) EnsureBackupContainer(confPath string) error {
 		return err
 	}
 	if running {
+		if drift, err := m.backupContainerDrift(); err != nil {
+			return err
+		} else if drift != "" {
+			fmt.Printf("-> Backup container is %s; recreating...\n", drift)
+			if _, err := m.run("rm", "-f", containerName); err != nil {
+				return fmt.Errorf("removing backup container: %w", err)
+			}
+			return m.createBackupContainer(confPath)
+		}
 		fmt.Println("-> Backup container already running")
 		return nil
 	}
+
 
 	exists, err := m.containerExists(containerName)
 	if err != nil {
@@ -671,6 +836,42 @@ func (m *BackupManager) BackupExec(tailLogs bool, args ...string) (string, error
 	return execWithTimeout(m.podman, podmanArgs, 10*time.Minute)
 }
 
+// StanzaCreatePatroni runs `pgbackrest stanza-create` + `check` for every
+// Patroni cluster stanza (the ones the S3 repo covers). Existing valid
+// stanzas are tolerated, so this is safe to re-run on every `pg backup setup`.
+// stanza-create failures are fatal (a repository that is unreachable or a
+// missing leader means backups silently would not work); check failures are
+// advisory, since a fresh stanza has no archived WAL yet.
+func (m *BackupManager) StanzaCreatePatroni() error {
+	targets := m.PatroniStanzaNames()
+	if len(targets) == 0 {
+		return nil
+	}
+	for _, t := range targets {
+		out, err := m.BackupExec(false, "pgbackrest", "--stanza="+t.Stanza, "stanza-create")
+		if err != nil {
+			if strings.Contains(out, "already exists and is valid") || strings.Contains(out, "already valid") {
+				fmt.Printf("  [OK] stanza %s (already exists)\n", t.Stanza)
+				continue
+			}
+			return fmt.Errorf("stanza-create %s: %w\n%s", t.Stanza, err, strings.TrimSpace(out))
+		}
+		fmt.Printf("  [OK] stanza %s created\n", t.Stanza)
+	}
+	for _, t := range targets {
+		out, err := m.BackupExec(false, "pgbackrest", "--stanza="+t.Stanza, "check")
+		if err != nil {
+			// A brand-new stanza has no archived WAL yet, so check legitimately
+			// fails until the first segment is pushed. Advisory, not fatal.
+			fmt.Printf("  [!] check %s: %s\n      (expected on a fresh stanza until the first WAL segment archives; force one with SELECT pg_switch_wal())\n",
+				t.Stanza, strings.SplitN(strings.TrimSpace(out), "\n", 2)[0])
+			continue
+		}
+		fmt.Printf("  [OK] check %s\n", t.Stanza)
+	}
+	return nil
+}
+
 // BackupExecToWriter runs a command inside the backup container, streaming
 // stdout/stderr to w in addition to collecting them for error reporting.
 // w may be nil (falls back to os.Stdout/os.Stderr only).
@@ -771,8 +972,11 @@ func (m *BackupManager) createBackupContainer(confPath string) error {
 		"-v", fmt.Sprintf("%s:/home/postgres/.ssh/id_rsa:z", hostMountPath(keys.Private)),
 		"-v", fmt.Sprintf("%s:/home/postgres/.ssh/id_rsa.pub:z", hostMountPath(keys.Public)),
 		"-v", fmt.Sprintf("%s:/home/postgres/.ssh/config:z", hostMountPath(sshConfPath)),
-		m.cfg.Backup.ImageTag,
 	)
+	if ca := m.cfg.Backup.Repo.S3; ca != nil && ca.CAFile != "" {
+		args = append(args, "-v", fmt.Sprintf("%s:/etc/pgbackrest/ca.crt:ro,z", hostMountPath(ca.CAFile)))
+	}
+	args = append(args, m.cfg.Backup.ImageTag)
 
 	if _, err := m.run(args...); err != nil {
 		return fmt.Errorf("creating backup container: %w", err)

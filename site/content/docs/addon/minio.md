@@ -64,6 +64,9 @@ pg addon install minio --name store --api-port 9000 --console-port 9001 --root-u
 
 # expose the store on the network instead of loopback only
 pg addon install minio --name store --listen 0.0.0.0
+
+# HTTPS via pgcli's self-signed CA (the prerequisite for a pgBackRest S3 repo)
+pg addon install minio --name store --tls
 ```
 
 The output reports endpoints and the root credentials:
@@ -93,7 +96,26 @@ list, or credentials take effect — without losing the data directory.
 > **Bind address:** the default `127.0.0.1` keeps the store local. `--listen
 > 0.0.0.0` (or the `listen` key in `pg.yaml`) exposes it on the network. Anyone
 > who can reach the port can then attempt the root credentials, so only do this
-> behind a firewall or a TLS-terminating proxy.
+> behind a firewall or with TLS (`--tls`, below).
+
+### TLS (`--tls`)
+
+`--tls` makes MinIO serve HTTPS. pgcli generates a self-signed CA and a leaf
+cert with the stdlib — SANs cover the loopback names, `localhost`, and every NIC
+IP of the host — into `<base_dir>/tls/minio/<name>/`: `public.crt` /
+`private.key` for MinIO's `--certs-dir`, and `ca.crt` for distribution. The cert
+dir is mounted read-only and the endpoint URL becomes `https://`.
+
+Why you need it: **pgBackRest forces HTTPS for S3 repositories** (plaintext is
+an upstream-rejected option), so a MinIO meant to receive Patroni `archive-push`
+must speak TLS. Point `backup.repo.s3.ca_file` at `ca.crt` and pgBackRest
+connects with full certificate verification — see
+[Backup → S3 object storage repository](../../backup/#s3-object-storage-repository).
+
+`pg mc` adds `--insecure` automatically when a command targets a TLS store via
+a loopback alias (mc persists no CA trust per alias; same-host loopback makes
+this acceptable). External `https://` endpoints keep full verification.
+Toggling `--tls` on an existing instance needs `--force` to take effect.
 
 ## Distributed / Cluster Mode
 
