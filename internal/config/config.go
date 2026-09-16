@@ -249,10 +249,15 @@ type PatroniMemberConfig struct {
 	ContainerName string `yaml:"container_name,omitempty"` // pgcli-patroni<ns>-<scope>-<member>
 	ImageTag      string `yaml:"image_tag,omitempty"`      // ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5 (default)
 	AdvertiseHost string `yaml:"advertise_host,omitempty"` // connect_address host; empty = loopback only (single host); a LAN IP/FQDN for cross-host
-	HostPort      int    `yaml:"host_port,omitempty"`      // PG listen port, 35532+ auto-assigned per host
-	RestapiPort   int    `yaml:"restapi_port,omitempty"`   // Patroni REST API port, 8008+ auto-assigned per host
-	SSHPort       int    `yaml:"ssh_port,omitempty"`       // SSH port for pgbackrest backup, 42301+ auto-assigned per host
-	DataDir       string `yaml:"data_dir,omitempty"`       // host dir bound to /var/lib/postgresql (PGDATA under it)
+	// RemoteHost declares this member as living on another physical host: pgcli
+	// never creates or manages a local container for it, but its connection
+	// params (HostPort/SSHPort/RestapiPort) feed the backup, SSH, and HAProxy
+	// config generators so cross-host members are reachable. Empty = local.
+	RemoteHost  string `yaml:"remote_host,omitempty"`
+	HostPort    int    `yaml:"host_port,omitempty"`    // PG listen port, 35532+ auto-assigned per host
+	RestapiPort int    `yaml:"restapi_port,omitempty"` // Patroni REST API port, 8008+ auto-assigned per host
+	SSHPort     int    `yaml:"ssh_port,omitempty"`     // SSH port for pgbackrest backup, 42301+ auto-assigned per host
+	DataDir     string `yaml:"data_dir,omitempty"`     // host dir bound to /var/lib/postgresql (PGDATA under it)
 	// Autostart brings this member's container up on host boot via the boot
 	// service (pg autostart enable --ha). Start-only: it starts the existing
 	// container reading the patroni.yml already on disk; never re-renders.
@@ -985,6 +990,9 @@ func (c *Config) ApplyDefaults() {
 				}
 			}
 			for member, mb := range cluster.Members {
+				if mb.RemoteHost != "" {
+					continue // remote member: connection params only, no local container
+				}
 				if mb.ContainerName == "" {
 					mb.ContainerName = "pgcli-patroni" + nsSuffix(c.Namespace) + "-" + scope + "-" + member
 				}
@@ -1291,6 +1299,9 @@ func (c *Config) autoAssignPorts() {
 			sort.Strings(members)
 			for _, m := range members {
 				mb := cluster.Members[m]
+				if mb.RemoteHost != "" {
+					continue // remote member: ports are declared on its own host, never auto-assigned here
+				}
 				if mb.HostPort == 0 && patroniBase > 0 {
 					for (usedPorts != nil && usedPorts[nextPG]) || assignedPatroniPG[nextPG] {
 						nextPG++

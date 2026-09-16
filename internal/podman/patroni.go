@@ -335,6 +335,9 @@ func (m *PatroniManager) createMemberContainer(cluster *config.PatroniClusterCon
 	if !ok {
 		return fmt.Errorf("member %q is not part of cluster %q", member, cluster.Name)
 	}
+	if mb.RemoteHost != "" {
+		return fmt.Errorf("member %q is remote (on %s); no local container to create", member, mb.RemoteHost)
+	}
 	nsScope := m.cfg.PatroniScope(cluster.Name)
 	dir := m.memberConfigDir(nsScope, member)
 
@@ -553,7 +556,19 @@ func (m *PatroniManager) pickMemberYML(cluster *config.PatroniClusterConfig) (ym
 	if len(cluster.Members) == 0 {
 		return "", nil, "", fmt.Errorf("cluster %q has no members — run `pg ha create %s --member <m>` first", cluster.Name, cluster.Name)
 	}
-	chosen := members[0]
+	// Prefer a local member for the synthetic config — its REST/PG ports are
+	// meaningful on this host. A remote member has no local container, so a
+	// 127.0.0.1 connect_address pointing at it would be unreachable.
+	chosen := ""
+	for _, name := range members {
+		if cluster.Members[name].RemoteHost == "" {
+			chosen = name
+			break
+		}
+	}
+	if chosen == "" {
+		chosen = members[0] // all remote: nothing better to point patronictl at
+	}
 	mb := cluster.Members[chosen]
 	imageTag = mb.ImageTag
 	if imageTag == "" {
@@ -897,6 +912,9 @@ func (m *PatroniManager) ExecLeaderQuery(cluster *config.PatroniClusterConfig, d
 	// Use any local member's image tag for the throwaway container
 	imageTag := ""
 	for _, mb := range cluster.Members {
+		if mb.ImageTag == "" {
+			continue // remote members carry no local image tag
+		}
 		imageTag = mb.ImageTag
 		break
 	}

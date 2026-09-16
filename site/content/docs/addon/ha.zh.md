@@ -199,6 +199,8 @@ Patroni 只需要一个可达的 etcd 集群，因此有两种布局：
 | `pg ha start` / `stop <scope> --member m \| --all` | 裸容器 start/stop（见生命周期警告） |
 | `pg ha remove <scope> --member m \| --scope-all [--clean-data] [--force]` | 移除成员；`--scope-all` 同时清 DCS |
 | `pg ha passwords <scope> [--file F]` | 导出存储的密码集（`--passwords-file` 的格式，供其它主机使用） |
+| `pg ha remote <scope> [--member m] [--ssh-port P]` | 登记另一台主机上的成员（典型为跨主机 leader），供备份 SSH 使用 |
+| `pg ha remote remove <scope> --member m` | 撤销上述登记（不触碰远端容器） |
 | `pg ha extension install/remove/list/apply` | 安装、卸载或列出 PostgreSQL 扩展（见 [HA 集群扩展](./ha-extensions/)） |
 | `pg ha ctl <scope> -- <patronictl 参数…>` | 透传任意 `patronictl` 命令 |
 
@@ -243,6 +245,37 @@ pg ha create app --member node2 --advertise-host 10.0.0.12 \
 
 pgcli 不校验对端配置；`pg ha status` 会显示每个成员的 `connect_address`，便于
 自查可达性。
+
+### 备份跨主机 leader
+
+每台主机的 `pg.yaml` 只记录本机成员，所以本机默认看不到另一台主机上的 leader
+—— 而 pgBackRest 的 `stanza-create` / 全量备份恰恰要求连到 leader。
+
+这一步现在**自动完成**：`pg ha create` 成功装好一个成员后，会把它 pgcli 私有的
+端口（SSH / REST API）写进 etcd 的 `/pgcli/ha/<scope>/<member>` 注册表（拓扑本身
+—— 成员名 + host:pgport —— Patroni 早已存在 DCS 里）。备份配置生成时用
+`patronictl list` 拿全集群拓扑、再查注册表补齐每个远端成员的 SSH 端口，于是
+`pgbackrest.conf` / `ssh_config` 自动包含所有主机的成员，`pg1-host` 与 SSH
+`HostName` 直接指向远端 IP（本机成员仍走 `127.0.0.1`）。`pg ha start/stop/remove`、
+autostart 与 `pg ha extension` 会跳过非本机成员 —— 它们归各自主机的 pgcli 管。
+
+刷新备份配置即可：
+
+```bash
+pg backup setup
+```
+
+远端成员的 sshd 仍需信任本机备份公钥，且 `--advertise-host` 已把它的监听翻成
+`0.0.0.0`（见上文），所以跨机 SSH 可达。
+
+**兜底**：若某远端成员是那台主机升级 pgcli 之前创建的、尚未注册端口，生成器会把
+它的 SSH 端口回退到本 scope 的基础端口（每台主机都从 `patroni_ssh_start_port`
+起，通常首个成员即猜对）。猜错时，手动登记这一个成员覆盖之（不创建任何容器）：
+
+```bash
+pg ha remote app --member node3 --ssh-port 42301   # 写 members.<m>.remote_host
+pg ha remote remove app --member node3             # 撤销该登记
+```
 
 ## 密码
 
@@ -315,6 +348,41 @@ REST API 的 leader 重定向兜着。
 
 如果需要稳定的、能扛住故障切换的连接端点 —— 以及可选的读写分离 —— 在集群前面
 放一个 [HAProxy](./haproxy/)。
+
+## 计划内主从切换
+
+failover 由 Patroni 掌握，`pg ha` 只是包装了 `patronictl` 里"主动挪 leader"的
+几个动词。三个命令都只吃 scope：
+
+```bash
+pg ha switchover app                     # patronictl 交互式询问候选
+pg ha switchover app --candidate node2   # 事先指定
+pg ha switchover app --candidate node2 --yes   # 脚本化，跳过所有确认
+
+pg ha failover   app --candidate node2 --yes   # 立即提升，不做握手
+pg ha pause      app                          # 关掉自动 failover
+pg ha resume     app                          # 恢复
+```
+
+- **`switchover`** 是计划内的、优雅的那一种：当前 leader 先降级，候选再被提升，
+  切换瞬间没有在途事务。前提是**双方健康且已追平**。旧 leader 会在几秒后自动
+  以 `streaming` 副本身份回归（Patroni 重启它的 postmaster 时，短暂看到它
+  `stopped` 是正常的）。切换会开一条新的 timeline —— 这是正常的，不是脑裂。
+- **`failover`** 不做握手，直接把副本立即提升。只在 leader 已经挂了、或你有意
+  丢弃它时使用；对健康集群跑一次只是多一次抖动。凡是计划内的操作，都用
+  `switchover`。
+- **`pause`** 在整个集群范围内关掉自动 failover。**任何有计划的容器操作之前**
+  都应该先 pause —— 例如 `pg ha stop --all`、`pg ha create` 重建、
+  `pg ha extension` —— 否则 Patroni 会在你脚下把一个副本提升走。`pg ha resume`
+  再打开。（paused 的集群**没有**自动 failover，直到 resume 为止。）
+
+这些都是纯 DCS 操作 —— 在一次性容器里跑 `patronictl`，不碰任何成员的容器或
+数据，成员分散在不同主机也照样能切。和所有 `pg ha` 控制命令一样，scope 会被
+解析成带 namespace 后缀的 DCS 键（`app` → `app-default`），本机 leader 和
+跨主机 leader 的切法完全一样。
+
+由于客户端连的是 leader 的端口，switchover 之后连接目标会跟着变 —— 参见
+[连接](#连接)；想要一个稳定的端点，就在前面放 HAProxy。
 
 ## pg ha vs. pg replica —— 怎么选
 

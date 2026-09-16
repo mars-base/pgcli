@@ -36,6 +36,7 @@ fi
 # StrictModes off: avoids permission checks on home dirs that fail when
 # the container runs with --userns keep-id (host UID != 999 on disk).
 cat > "$SSHD_DIR/sshd_config" <<SSHD_EOF
+ListenAddress 0.0.0.0
 Port ${PGCLI_SSH_PORT:-22}
 HostKey $SSHD_DIR/ssh_host_rsa_key
 HostKey $SSHD_DIR/ssh_host_ed25519_key

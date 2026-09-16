@@ -235,7 +235,10 @@ func replicasFirstOrder(pm *podman.PatroniManager, cluster *config.PatroniCluste
 
 	var replicas []string
 	var leaders []string
-	for member := range cluster.Members {
+	for member, mb := range cluster.Members {
+		if mb.RemoteHost != "" {
+			continue // remote members are recreated on their own host
+		}
 		if member == leader {
 			leaders = append(leaders, member)
 		} else {
@@ -380,9 +383,12 @@ func runHAExtensionInstall(scope string, extNames []string, database string, aut
 	if hasNonBuiltin {
 		// Build image
 		fmt.Printf("-> Building extension image for cluster %q...\n", scope)
-		// Pick any local member's base image tag
+		// Pick any local member's base image tag (remote members carry none).
 		baseTag := ""
 		for _, mb := range cluster.Members {
+			if mb.RemoteHost != "" {
+				continue
+			}
 			baseTag = podman.BaseImageTag(mb.ImageTag)
 			break
 		}
@@ -400,7 +406,7 @@ func runHAExtensionInstall(scope string, extNames []string, database string, aut
 		// again when we get to that host.
 		recreateOrder := replicasFirstOrder(pm, &cluster, nsScope)
 
-		fmt.Printf("-> Recreating %d local member(s) from new image...\n", len(cluster.Members))
+		fmt.Printf("-> Recreating %d local member(s) from new image...\n", len(recreateOrder))
 		for _, member := range recreateOrder {
 			fmt.Printf("  -> Recreating member %s...\n", member)
 			if err := pm.RecreateMemberWithImage(&cluster, member, newTag); err != nil {
@@ -434,10 +440,17 @@ func runHAExtensionInstall(scope string, extNames []string, database string, aut
 	}
 
 	// Detect single-host vs cross-host by comparing local member count with
-	// DCS total member count. cluster.Members only contains LOCAL members;
+	// DCS total member count. cluster.Members may include remote member
+	// declarations (no local container); only local members count here.
 	// patronictl list shows ALL members across all hosts.
+	localCount := 0
+	for _, mb := range cluster.Members {
+		if mb.RemoteHost == "" {
+			localCount++
+		}
+	}
 	totalMembers := totalClusterMemberCount(pm, &cluster, nsScope)
-	singleHost := totalMembers > 0 && len(cluster.Members) >= totalMembers
+	singleHost := totalMembers > 0 && localCount >= totalMembers
 
 	if singleHost {
 		// Single-host: auto-apply (resume + edit-config + CREATE EXTENSION)

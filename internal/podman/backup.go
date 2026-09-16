@@ -66,6 +66,87 @@ func (m *BackupManager) SSHConfigPath() string {
 	return filepath.Join(m.dataDir, "backup", "ssh_config")
 }
 
+// patroniBackupTarget is one Patroni member normalized for the backup
+// generators: the same value feeds both the SSH `Host` alias / `HostName` and
+// the pgBackRest `pg1-host` / `pg1-port`, so the two files can never disagree.
+type patroniBackupTarget struct {
+	scope    string // Patroni cluster map key (for the stanza name)
+	member   string // member name (for the stanza name)
+	alias    string // SSH Host alias == pgBackRest pg1-host
+	hostName string // SSH HostName (127.0.0.1 / container name / remote IP)
+	hostPort int    // PostgreSQL port == pg1-port
+	sshPort  int    // sshd port on hostName
+}
+
+// patroniBackupTargets resolves the full backup target set for every Patroni
+// cluster. It prefers the DCS-merged view (DiscoverAllMembers), which includes
+// cross-host members this host's pg.yaml never saw, and folds in each member's
+// SSH port from the pgcli member registry. When the DCS is unreachable it
+// falls back to this host's local config (which may still carry `pg ha remote`
+// registrations). Callers get a best-effort list; no error is surfaced because
+// a missing remote member must not block local backups.
+func (m *BackupManager) patroniBackupTargets() []patroniBackupTarget {
+	pm, pmErr := NewPatroniManager(m.cfg)
+	isMac := platform.Detect() == platform.MacOS
+	defaultSSH := m.cfg.PatroniSSHStartPort
+	if defaultSSH == 0 {
+		defaultSSH = 42301
+	}
+
+	var out []patroniBackupTarget
+	for scope, cluster := range m.cfg.Addons.Patroni {
+		if pmErr == nil {
+			if members, err := pm.DiscoverAllMembers(&cluster); err == nil {
+				for _, cm := range members {
+					t := patroniBackupTarget{scope: scope, member: cm.Name, hostPort: cm.HostPort}
+					t.sshPort = cm.SSHPort
+					if t.sshPort == 0 {
+						t.sshPort = defaultSSH
+					}
+					if cm.Local {
+						// Same host: reach via the container-name alias.
+						t.alias = cluster.Members[cm.Name].ContainerName
+						if t.alias == "" {
+							t.alias = cm.Host // no local container name; use DCS host
+						}
+						t.hostName = "127.0.0.1"
+						if isMac {
+							t.hostName = t.alias
+						}
+					} else {
+						t.alias = cm.Host
+						t.hostName = cm.Host
+					}
+					out = append(out, t)
+				}
+				continue
+			}
+		}
+		// DCS unreachable: local config only.
+		for member, mb := range cluster.Members {
+			t := patroniBackupTarget{scope: scope, member: member, hostPort: mb.HostPort}
+			t.sshPort = mb.SSHPort
+			if t.sshPort == 0 {
+				t.sshPort = defaultSSH
+			}
+			if mb.RemoteHost != "" {
+				t.alias = mb.RemoteHost
+				t.hostName = mb.RemoteHost
+			} else if mb.ContainerName != "" {
+				t.alias = mb.ContainerName
+				t.hostName = "127.0.0.1"
+				if isMac {
+					t.hostName = mb.ContainerName
+				}
+			} else {
+				continue // local member not yet created — nothing to back up
+			}
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // WriteSSHConfig writes an SSH client config that disables host key checking
 // for PG containers. All platforms use host networking -- per-instance Host
 // aliases map container names to 127.0.0.1 with unique SSH ports.
@@ -97,23 +178,16 @@ func (m *BackupManager) WriteSSHConfig() (string, error) {
 	}
 
 	// Patroni cluster members: same SSH scheme but with their own port range.
-	for _, cluster := range m.cfg.Addons.Patroni {
-		for _, mb := range cluster.Members {
-			if mb.ContainerName == "" {
-				continue
-			}
-			sshPort := mb.SSHPort
-			if sshPort == 0 {
-				sshPort = 42301
-			}
-			fmt.Fprintf(&sb, "Host %s\n", mb.ContainerName)
-			fmt.Fprintf(&sb, "    HostName 127.0.0.1\n")
-			sb.WriteString("    StrictHostKeyChecking no\n")
-			sb.WriteString("    UserKnownHostsFile /dev/null\n")
-			sb.WriteString("    IdentityFile /home/postgres/.ssh/id_rsa\n")
-			sb.WriteString("    User postgres\n")
-			fmt.Fprintf(&sb, "    Port %d\n\n", sshPort)
-		}
+	// The alias (== pg1-host in the stanza) is the container name for local
+	// members (→ 127.0.0.1) and the host IP for cross-host members.
+	for _, t := range m.patroniBackupTargets() {
+		fmt.Fprintf(&sb, "Host %s\n", t.alias)
+		fmt.Fprintf(&sb, "    HostName %s\n", t.hostName)
+		sb.WriteString("    StrictHostKeyChecking no\n")
+		sb.WriteString("    UserKnownHostsFile /dev/null\n")
+		sb.WriteString("    IdentityFile /home/postgres/.ssh/id_rsa\n")
+		sb.WriteString("    User postgres\n")
+		fmt.Fprintf(&sb, "    Port %d\n\n", t.sshPort)
 	}
 
 	conf := sb.String()
@@ -375,25 +449,21 @@ func (m *BackupManager) WritePgbackrestConf() (string, error) {
 		stanzaCount++
 	}
 
-	// Build stanza for each Patroni cluster (local members only).
-	// Patroni members share the same data_dir layout as standalone PG
-	// (PGDATA=/var/lib/postgresql/data) and use the same SSH port scheme.
-	for scope, cluster := range m.cfg.Addons.Patroni {
-		for member, mb := range cluster.Members {
-			if mb.ContainerName == "" {
-				continue
-			}
-			stanza := fmt.Sprintf("pgcli_%s_%s", scope, member)
-			sb.WriteString("[")
-			sb.WriteString(stanza)
-			sb.WriteString("]\n")
-			fmt.Fprintf(&sb, "pg1-host=%s\n", mb.ContainerName)
-			fmt.Fprintf(&sb, "pg1-path=/var/lib/postgresql/data\n")
-			fmt.Fprintf(&sb, "pg1-port=%d\n", mb.HostPort)
-			fmt.Fprintf(&sb, "pg1-socket-path=/var/lib/postgresql\n")
-			fmt.Fprintf(&sb, "pg1-user=postgres\n\n")
-			stanzaCount++
-		}
+	// Build a stanza for each Patroni member cluster-wide. Cross-host members
+	// are included automatically via the DCS + registry (see
+	// patroniBackupTargets). Patroni members share the standalone PG data_dir
+	// layout (PGDATA=/var/lib/postgresql/data).
+	for _, t := range m.patroniBackupTargets() {
+		stanza := fmt.Sprintf("pgcli_%s_%s", t.scope, t.member)
+		sb.WriteString("[")
+		sb.WriteString(stanza)
+		sb.WriteString("]\n")
+		fmt.Fprintf(&sb, "pg1-host=%s\n", t.alias)
+		fmt.Fprintf(&sb, "pg1-path=/var/lib/postgresql/data\n")
+		fmt.Fprintf(&sb, "pg1-port=%d\n", t.hostPort)
+		fmt.Fprintf(&sb, "pg1-socket-path=/var/lib/postgresql\n")
+		fmt.Fprintf(&sb, "pg1-user=postgres\n\n")
+		stanzaCount++
 	}
 
 	// Global section

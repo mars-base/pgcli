@@ -213,6 +213,8 @@ co-locating is fine for dev and small footprints.
 | `pg ha start` / `stop <scope> --member m \| --all` | Raw container start/stop (see lifecycle caveat) |
 | `pg ha remove <scope> --member m \| --scope-all [--clean-data] [--force]` | Remove member(s); `--scope-all` also clears the DCS |
 | `pg ha passwords <scope> [--file F]` | Export the stored password set (the `--passwords-file` format, for other hosts) |
+| `pg ha remote <scope> [--member m] [--ssh-port P]` | Register a member living on another host (typically the cross-host leader) for backup SSH |
+| `pg ha remote remove <scope> --member m` | Undo such a registration (the remote container is untouched) |
 | `pg ha extension install/remove/list/apply` | Install, remove, or list PostgreSQL extensions (see [Extensions in HA](./ha-extensions/)) |
 | `pg ha ctl <scope> -- <patronictl args…>` | Passthrough to any `patronictl` command |
 
@@ -262,6 +264,44 @@ Cross-host checklist (all three must line up on every host):
 
 pgcli does not validate the peers' config; `pg ha status` shows each member's
 `connect_address` so you can self-check reachability.
+
+### Backing up a cross-host leader
+
+Each host's `pg.yaml` records only its own members, so this host cannot see a
+leader running on another host — yet pgBackRest's `stanza-create` and full
+backups must connect to the leader.
+
+This now happens **automatically**: after `pg ha create` installs a member, it
+publishes that member's pgcli-private ports (SSH / REST API) into an etcd
+registry at `/pgcli/ha/<scope>/<member>` (the topology itself — member name +
+host:pgport — Patroni already stores in the DCS). The backup config generators
+then run `patronictl list` for the cluster-wide topology and look up each remote
+member's SSH port in the registry, so `pgbackrest.conf` / `ssh_config` include
+members on every host, with `pg1-host` and the SSH `HostName` pointing at the
+remote IP (local members still go via `127.0.0.1`). `pg ha start/stop/remove`,
+autostart, and `pg ha extension` skip members that aren't local — they belong to
+their own host's pgcli.
+
+Just refresh the backup config:
+
+```bash
+pg backup setup
+```
+
+The remote member's sshd must still trust this host's backup public key, and its
+`--advertise-host` already flipped its listener to `0.0.0.0` (see above), so
+cross-host SSH reaches it.
+
+**Fallback**: a remote member created on its host *before* that host upgraded
+pgcli has no registry entry, so the generators fall back to this scope's base
+SSH port for it (every host starts at `patroni_ssh_start_port`, so the first
+member is usually right). When it isn't, register just that member manually to
+override (creates no container):
+
+```bash
+pg ha remote app --member node3 --ssh-port 42301   # writes members.<m>.remote_host
+pg ha remote remove app --member node3             # undo the registration
+```
 
 ## Passwords
 
@@ -339,6 +379,47 @@ avoided unless fronted by a pooler or the Patroni REST API's leader redirect.
 
 For a stable endpoint that survives failover — and optional read/write
 separation — put [HAProxy](./haproxy/) in front of the cluster.
+
+## Planned leader changes
+
+Patroni owns failover; `pg ha` wraps the `patronictl` verbs that move the
+leader on purpose. All three take just the scope:
+
+```bash
+pg ha switchover app                     # patronictl prompts for the candidate
+pg ha switchover app --candidate node2   # name it up front
+pg ha switchover app --candidate node2 --yes   # skip prompts (scripted)
+
+pg ha failover   app --candidate node2 --yes   # promote now, no handoff
+pg ha pause      app                          # stop auto-failover
+pg ha resume     app                          # re-enable it
+```
+
+- **`switchover`** is the planned, graceful one: the current leader is demoted
+  first, so nothing is in flight when the candidate is promoted. Both members
+  must be healthy and caught up. The old leader automatically rejoins as a
+  `streaming` replica a few seconds later (you may briefly see it as `stopped`
+  while Patroni restarts its postmaster). A new timeline is opened — this is
+  normal, not a split-brain.
+- **`failover`** force-promotes a replica immediately without a clean handoff
+  from the leader. Use it only when the leader is already gone or you are
+  deliberately discarding it; on a healthy cluster it just causes an
+  unnecessary blip. Reach for `switchover` for anything planned.
+- **`pause`** turns off automatic failover cluster-wide. Do this *before* any
+  planned container surgery — `pg ha stop --all`, a `pg ha create` recreate, or
+  `pg ha extension` — so Patroni doesn't promote a replica out from under you.
+  `pg ha resume` puts auto-failover back. (A paused cluster has **no** automatic
+  failover until resumed.)
+
+These are pure DCS operations — they run `patronictl` in a throwaway container,
+touch no member's container or data, and work even when some members live on
+other hosts. Like every `pg ha` control command, the scope is resolved to the
+namespaced DCS key (`app` → `app-default`), so a single-host or cross-host
+leader is switched the same way.
+
+Because clients dial the leader's port, the connection target moves after a
+switchover — see [Connecting](#connecting) and put HAProxy in front if you need
+one stable endpoint.
 
 ## pg ha vs. pg replica — which to pick
 

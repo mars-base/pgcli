@@ -279,7 +279,7 @@ func startAutostartPgDogs(c *config.Config) error {
 func hasAutostartPatroni(c *config.Config) bool {
 	for _, cluster := range c.Addons.Patroni {
 		for _, mb := range cluster.Members {
-			if mb.Autostart {
+			if mb.Autostart && mb.RemoteHost == "" {
 				return true
 			}
 		}
@@ -298,7 +298,7 @@ func startAutostartPatroni(c *config.Config) error {
 	var scopes []string
 	for scope, cluster := range c.Addons.Patroni {
 		for _, mb := range cluster.Members {
-			if mb.Autostart {
+			if mb.Autostart && mb.RemoteHost == "" {
 				scopes = append(scopes, scope)
 				break
 			}
@@ -318,7 +318,7 @@ func startAutostartPatroni(c *config.Config) error {
 		cluster := c.Addons.Patroni[scope]
 		var members []string
 		for name, mb := range cluster.Members {
-			if mb.Autostart {
+			if mb.Autostart && mb.RemoteHost == "" {
 				members = append(members, name)
 			}
 		}

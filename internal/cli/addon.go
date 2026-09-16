@@ -1189,6 +1189,13 @@ func haScopeTargets(cfg *config.Config, scope string) ([]config.HAProxyTarget, e
 	targets := make([]config.HAProxyTarget, 0, len(names))
 	for _, m := range names {
 		mb := cluster.Members[m]
+		if mb.RemoteHost != "" && mb.RestapiPort == 0 {
+			// Remote member without a REST port: HAProxy cannot health-check
+			// it from here — re-register with `pg ha remote ... --member <m>
+			// --restapi-port <p>` to include it as a backend.
+			fmt.Printf("  [skip] %s: remote member without --restapi-port\n", m)
+			continue
+		}
 		targets = append(targets, config.HAProxyTarget{
 			Name:     m,
 			Host:     pgConnectHost(mb),

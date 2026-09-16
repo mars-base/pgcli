@@ -209,6 +209,14 @@ func runHACreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Publish this member's pgcli-private ports (SSH/REST) to the DCS so other
+	// hosts' backup config can reach it over SSH. Non-fatal: the member is up;
+	// a registry miss only means peers fall back to `pg ha remote` for it.
+	if err := pm.RegisterMemberPorts(&clusterRef, member); err != nil {
+		fmt.Printf("  [!] could not publish member ports to the DCS: %v\n", err)
+		fmt.Printf("      other hosts can register this member for backup with: pg ha remote %s --member %s --ssh-port %d\n", scope, member, mb.SSHPort)
+	}
+
 	fmt.Println()
 	fmt.Printf("✓ Patroni member %q installed in scope %q\n", member, scope)
 	fmt.Printf("  scope (DCS):  %s\n", nsScope)
@@ -432,6 +440,10 @@ func haStatusAll(pm *podman.PatroniManager) error {
 		sort.Strings(members)
 		for _, m := range members {
 			mb := cluster.Members[m]
+			if mb.RemoteHost != "" {
+				fmt.Printf("  %-14s %-8s pg=%s:%d  rest=%d  (remote)\n", m, "remote", mb.RemoteHost, mb.HostPort, mb.RestapiPort)
+				continue
+			}
 			state := "?"
 			if running, err := pm.ContainerRunning(mb.ContainerName); err == nil {
 				state = "stopped"
@@ -528,10 +540,15 @@ func haListStatus(pm *podman.PatroniManager, scope string, cluster *config.Patro
 		}
 		return "no leader"
 	}
-	// DCS unreachable — count running containers
+	// DCS unreachable — count running local containers (remote members are
+	// not checkable from here, so they're excluded from the local tally).
 	running := 0
-	total := len(cluster.Members)
+	total := 0
 	for _, mb := range cluster.Members {
+		if mb.RemoteHost != "" {
+			continue
+		}
+		total++
 		if r, err := pm.ContainerRunning(mb.ContainerName); err == nil && r {
 			running++
 		}
@@ -632,13 +649,29 @@ Examples:
 			} else {
 				fmt.Println("  [OK] DCS entry removed")
 			}
+			if err := pm.UnregisterScopePorts(&cluster); err != nil {
+				fmt.Printf("  [!] could not clear the pgcli member registry: %v\n", err)
+			}
 		}
 
-		// Stop + remove local member containers/config.
+		// Stop + remove local member containers/config. Remote members have no
+		// local container or data dir — just drop them from the config.
 		for _, m := range targets {
 			mb := cluster.Members[m]
+			if mb.RemoteHost != "" {
+				fmt.Printf("  [OK] removed remote member %s (on %s) from config\n", m, mb.RemoteHost)
+				delete(cluster.Members, m)
+				continue
+			}
 			if err := pm.RemoveMemberContainer(&cluster, m); err != nil {
 				fmt.Printf("  [!] %s: %v\n", m, err)
+			}
+			if !scopeAll {
+				// Drop this local member's private ports from the DCS registry
+				// so peer hosts stop generating a stanza/SSH entry for it.
+				if err := pm.UnregisterMemberPorts(&cluster, m); err != nil {
+					fmt.Printf("  [!] could not unregister %s from the DCS: %v\n", m, err)
+				}
 			}
 			if cleanData {
 				if err := os.RemoveAll(mb.DataDir); err != nil && !os.IsNotExist(err) {
@@ -792,6 +825,12 @@ Examples:
 // into patronictl argv. cmd.Flags().Args() carries tokens after `--` verbatim.
 func patronictlArgsFor(cmd *cobra.Command, args []string) ([]string, error) {
 	scope := args[0]
+	// patronictl resolves the cluster by its DCS scope, which pgcli namespaces
+	// (scope + suffix). The config file passed via -c carries the same suffixed
+	// scope, but patronictl's positional arg OVERRIDES it — so passing the bare
+	// user-facing scope makes patronictl query an empty /service/<scope> and
+	// report "no leader". Always hand patronictl the namespaced scope.
+	scope = cfg.PatroniScope(scope)
 	rest := args[1:] // native patronictl flags after `--`
 	base := []string{cmd.Name()}
 
@@ -897,7 +936,10 @@ func runHAStartStop(cmd *cobra.Command, args []string) error {
 	targets := []string{member}
 	if all {
 		targets = nil
-		for m := range cluster.Members {
+		for m, mb := range cluster.Members {
+			if mb.RemoteHost != "" {
+				continue // --all never touches remote (cross-host) members
+			}
 			targets = append(targets, m)
 		}
 		sort.Strings(targets)
@@ -908,6 +950,10 @@ func runHAStartStop(cmd *cobra.Command, args []string) error {
 		mb, ok := cluster.Members[m]
 		if !ok {
 			return fmt.Errorf("member %q is not part of scope %q", m, scope)
+		}
+		if mb.RemoteHost != "" {
+			fmt.Printf("  [skip] %s (remote member on %s)\n", m, mb.RemoteHost)
+			continue
 		}
 		if start {
 			if err := pm.StartMemberContainer(&cluster, m); err != nil {
@@ -941,6 +987,9 @@ func lookupHACluster(scope string) (*config.PatroniClusterConfig, error) {
 // pgConnectHost is the host a client/patronictl should reach a member on for
 // local reporting: the advertised address, or loopback for a local member.
 func pgConnectHost(mb config.PatroniMemberConfig) string {
+	if mb.RemoteHost != "" {
+		return mb.RemoteHost
+	}
 	if mb.AdvertiseHost != "" {
 		return mb.AdvertiseHost
 	}
