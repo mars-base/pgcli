@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,6 +32,7 @@ func init() {
 	backupCmd.AddCommand(backupStartCmd)
 	backupCmd.AddCommand(backupStopCmd)
 	backupCmd.AddCommand(backupStatusCmd)
+	backupCmd.AddCommand(backupFetchCACmd)
 
 	backupSetupCmd.Flags().StringVar(&backupBaseDir, "base-dir", "", "base directory for backup data and logs (overrides config base_dir)")
 	backupSetupCmd.Flags().StringVar(&s3Endpoint, "s3-endpoint", "", "S3 repository host:port (pgBackRest forces HTTPS - use a TLS-terminated endpoint, e.g. a MinIO installed with 'pg addon install minio --tls')")
@@ -39,8 +41,10 @@ func init() {
 	backupSetupCmd.Flags().StringVar(&s3SecretKey, "s3-secret-key", "", "S3 secret key (prefer editing backup.repo.s3.secret_key in pg.yaml so it stays out of shell history)")
 	backupSetupCmd.Flags().StringVar(&s3Region, "s3-region", "", "S3 region (default us-east-1)")
 	backupSetupCmd.Flags().StringVar(&s3Path, "s3-path", "", "path prefix inside the bucket (default /pgbackrest)")
-	backupSetupCmd.Flags().StringVar(&s3CAFile, "s3-ca-file", "", "host path to a PEM CA bundle trusted for the endpoint (mounted into the backup and member containers as /etc/pgbackrest/ca.crt)")
+	backupSetupCmd.Flags().StringVar(&s3CAFile, "s3-ca-file", "", "host path to a PEM CA bundle trusted for the endpoint (mounted into the backup and member containers as /etc/pgbackrest/ca.crt; on a remote storage host, pull it with 'pg backup fetch-ca')")
 	backupSetupCmd.Flags().BoolVar(&s3NoVerify, "s3-no-verify-tls", false, "skip TLS certificate verification (repo1-s3-verify-tls=n) — escape hatch for self-signed endpoints you cannot hand a CA for")
+
+	backupFetchCACmd.Flags().StringVar(&fetchCAOut, "out", "", "where to write the fetched CA (default <base-dir>/backup/repo-ca/ca-<endpoint>.crt)")
 }
 
 var backupCmd = &cobra.Command{
@@ -52,10 +56,11 @@ The backup container is shared across all database instances -- each instance
 gets its own pgbackrest stanza, but they all share a single pgbackrest repository.
 
 Subcommands:
-  setup   Build image, create directories, generate config, start container
-  start   Start the backup container
-  stop    Stop the backup container
-  status  Show backup container status`,
+  setup     Build image, create directories, generate config, start container
+  start     Start the backup container
+  stop      Stop the backup container
+  status    Show backup container status
+  fetch-ca  Fetch an S3 endpoint's TLS CA certificate over the network`,
 }
 
 // loadRawConfig loads config without calling SetInstance (for backup commands
@@ -617,4 +622,90 @@ var backupStatusCmd = &cobra.Command{
 		fmt.Println()
 		return nil
 	},
+}
+
+// --- backup fetch-ca ----------------------------------------------
+
+var fetchCAOut string
+
+var backupFetchCACmd = &cobra.Command{
+	Use:   "fetch-ca [endpoint]",
+	Short: "Fetch an S3 endpoint's TLS CA certificate over the network",
+	Long: `fetch-ca dials the S3 repository endpoint over TLS and saves the CA
+certificate that signed its leaf, so a Patroni host on a different machine than
+the storage host can trust it without anyone scp'ing ca.crt across.
+
+The endpoint argument defaults to backup.repo.s3.endpoint from pg.yaml. The
+command prints the saved path and a sha256 fingerprint — cross-check the
+fingerprint against the storage host (sha256sum of its tls/minio/<name>/ca.crt)
+the way you would an SSH host key, since fetching a trust anchor before you
+trust anything is inherently trust-on-first-use.
+
+Then hand the file to setup, which publishes it to the cluster's etcd registry
+so the remaining hosts need nothing at all:
+
+  pg backup setup --s3-ca-file <path>
+
+Works against a pgcli-served MinIO (pgcli's own CA sits in its TLS chain). A
+publicly-caught endpoint (real AWS S3) needs no ca_file and this command is
+pointless there. This is a deliberate one-shot rather than something setup runs
+on its own: a silent TOFU dial on every setup would bury the fingerprint nobody
+was asked to look at.`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := loadRawConfig()
+		if err != nil {
+			return fmt.Errorf("failed to load config: %w", err)
+		}
+		endpoint := ""
+		if len(args) == 1 {
+			endpoint = args[0]
+		} else if cfg.Backup.Repo.S3 != nil {
+			endpoint = cfg.Backup.Repo.S3.Endpoint
+		}
+		if endpoint == "" {
+			return fmt.Errorf("no endpoint given and backup.repo.s3.endpoint is unset — usage: pg backup fetch-ca <host:port>")
+		}
+
+		pemStr, err := podman.FetchRepoCA(endpoint)
+		if err != nil {
+			return err
+		}
+
+		out := fetchCAOut
+		if out == "" {
+			base := cfg.BaseDir
+			if base == "" {
+				base = platform.DefaultConfigDir()
+			}
+			out = filepath.Join(base, "backup", "repo-ca", "ca-"+caFileStem(podman.NormalizeS3Endpoint(endpoint))+".crt")
+		}
+		if err := os.MkdirAll(filepath.Dir(out), 0755); err != nil {
+			return fmt.Errorf("creating CA dir: %w", err)
+		}
+		// 0644: this file is bind-mounted into backup/member containers, whose
+		// postgres-uid processes must read it (the same trap WriteClusterAuthKeys
+		// documents).
+		if err := os.WriteFile(out, []byte(pemStr), 0644); err != nil {
+			return fmt.Errorf("writing CA: %w", err)
+		}
+		if err := os.Chmod(out, 0644); err != nil {
+			return fmt.Errorf("chmod %s: %w", out, err)
+		}
+
+		sum := sha256.Sum256([]byte(pemStr))
+		fmt.Printf("  [OK] CA fetched from %s\n", podman.NormalizeS3Endpoint(endpoint))
+		fmt.Printf("       saved:    %s\n", out)
+		fmt.Printf("       SHA-256:  %x\n", sum)
+		fmt.Printf("Next:         pg backup setup --s3-ca-file %s\n", out)
+		return nil
+	},
+}
+
+// caFileStem turns a normalized host:port into a safe file stem
+// (10.0.0.9:9000 -> 10.0.0.9-9000; [fd00::9]:9000 -> fd00--9-9000).
+func caFileStem(hostport string) string {
+	s := strings.ReplaceAll(hostport, "[", "")
+	s = strings.ReplaceAll(s, "]", "")
+	return strings.ReplaceAll(s, ":", "-")
 }

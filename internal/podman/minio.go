@@ -197,6 +197,17 @@ func (m *MinioManager) EnsureContainer(mc *config.MinioConfig) error {
 func (m *MinioManager) StartContainer(mc *config.MinioConfig) error {
 	containerName := mc.ContainerName
 
+	// TLS: run the cert refresh even against a live container. MinIO watches
+	// its cert files and hot-reloads, so this is how an existing deployment
+	// picks up the leaf+CA chain (the `pg backup fetch-ca` anchor) without a
+	// --force recreate. Best-effort: a renewal failure must not block the
+	// start — the current cert is very likely still valid.
+	if mc.TLS {
+		if _, err := m.EnsureTLS(mc); err != nil {
+			fmt.Printf("  [!] MinIO %s TLS cert refresh skipped: %v\n", containerName, err)
+		}
+	}
+
 	running, err := m.containerRunning(containerName)
 	if err != nil {
 		return err
@@ -260,6 +271,7 @@ func (m *MinioManager) createContainer(mc *config.MinioConfig) error {
 		tlsDir = m.TLSDir(mc)
 		fmt.Printf("  [OK] TLS certs (CA: %s)\n", caPath)
 		fmt.Printf("         as pgBackRest repo CA: pg backup setup --s3-endpoint <host:port> --s3-ca-file %s\n", caPath)
+		fmt.Printf("         from another host, pull it over TLS: pg backup fetch-ca <this-host>:%d\n", mc.APIPort)
 	}
 
 	// MinIO's deployment docs recommend nofile=1048576. The podman machine VM

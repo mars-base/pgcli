@@ -4,9 +4,15 @@
 // CA itself: the leaf ships SANs for every address the MinIO is reachable at,
 // and consumers (pgBackRest via repo*-s3-ca-file) get the ca.crt to verify
 // against — certificate verification stays ON.
+//
+// The server cert (public.crt) is written as a leaf+CA chain so the TLS server
+// presents the root in its handshake: `pg backup fetch-ca` on a remote host
+// dials the endpoint and pulls the CA back out of the peer chain, closing the
+// last gap where getting ca.crt off the storage host used to be a manual scp.
 package tlsca
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -61,6 +67,12 @@ func Generate(dir string, hosts []string, renewBefore time.Duration) (string, er
 		return "", err
 	}
 	if !need {
+		// Existing leaf (possibly from before the chain was served): add the CA
+		// block in place. MinIO watches the cert files and hot-reloads, so no
+		// restart is needed and the leaf does not have to be re-signed.
+		if err := ensureChain(leafPath, caCertPath); err != nil {
+			return "", err
+		}
 		return caCertPath, nil
 	}
 
@@ -203,7 +215,70 @@ func writeLeaf(dir string, caKey *rsa.PrivateKey, caCert *x509.Certificate, host
 	if err := writePEM(filepath.Join(dir, ServerKey), "RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(key), 0600); err != nil {
 		return err
 	}
-	return writePEM(filepath.Join(dir, ServerCert), "CERTIFICATE", der, 0644)
+	if err := writePEM(filepath.Join(dir, ServerCert), "CERTIFICATE", der, 0644); err != nil {
+		return err
+	}
+	// Chain order leaf-first (RFC 4346 "certificate_sequence"): the TLS stack
+	// sends every block, so a remote `pg backup fetch-ca` sees the signing root.
+	return appendCAChain(filepath.Join(dir, ServerCert), filepath.Join(dir, CACertFile))
+}
+
+// ensureChain appends the CA block to the leaf file when it is not already
+// present, upgrading a single-cert file from before chains were served. It is
+// a no-op when the CA is already chained or the CA file is absent (a leaf
+// without a ca.crt alongside is not this package's doing).
+func ensureChain(leafPath, caCertPath string) error {
+	caPEM, err := os.ReadFile(caCertPath)
+	if err != nil {
+		return nil // no CA on disk: nothing to append
+	}
+	ca, _ := pem.Decode(caPEM)
+	if ca == nil || ca.Type != "CERTIFICATE" {
+		return fmt.Errorf("CA cert %s is not a valid PEM certificate", caCertPath)
+	}
+	data, err := os.ReadFile(leafPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // Generate regenerates from scratch; nothing to upgrade
+		}
+		return fmt.Errorf("reading leaf cert: %w", err)
+	}
+	for rest := data; ; {
+		var blk *pem.Block
+		blk, rest = pem.Decode(rest)
+		if blk == nil {
+			break
+		}
+		if blk.Type == "CERTIFICATE" && bytes.Equal(blk.Bytes, ca.Bytes) {
+			return nil // already chained
+		}
+	}
+	return appendCAChain(leafPath, caCertPath)
+}
+
+// appendCAChain appends ca.crt's PEM block to leafPath (creating no file when
+// the CA is missing). Idempotency is the caller's: see ensureChain.
+func appendCAChain(leafPath, caCertPath string) error {
+	caPEM, err := os.ReadFile(caCertPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("reading CA cert: %w", err)
+	}
+	blk, _ := pem.Decode(caPEM)
+	if blk == nil {
+		return fmt.Errorf("CA cert %s is not valid PEM", caCertPath)
+	}
+	f, err := os.OpenFile(leafPath, os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("opening leaf cert: %w", err)
+	}
+	defer f.Close()
+	if err := pem.Encode(f, blk); err != nil {
+		return fmt.Errorf("appending CA to %s: %w", leafPath, err)
+	}
+	return nil
 }
 
 // LocalHosts returns the SAN set a loopback/host-networked service on this

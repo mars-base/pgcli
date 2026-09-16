@@ -1468,6 +1468,16 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 		skipped = true
 		if running, _ := mm.ContainerRunning(mc.ContainerName); running {
 			fmt.Printf("-> MinIO container %q already running; skipping creation\n", mc.ContainerName)
+			// Still refresh cert material: MinIO hot-reloads its cert files, so
+			// this is how a running store adopts the leaf+CA chain (the
+			// `pg backup fetch-ca` anchor) without a --force recreate.
+			if mc.TLS {
+				if caPath, err := mm.EnsureTLS(&mc); err != nil {
+					fmt.Printf("  [!] TLS cert refresh failed: %v\n", err)
+				} else {
+					fmt.Printf("  [OK] TLS certs current (CA: %s)\n", caPath)
+				}
+			}
 		} else {
 			fmt.Printf("-> MinIO container %q exists but is stopped; starting it\n", mc.ContainerName)
 			if err := mm.StartContainer(&mc); err != nil {
@@ -1738,9 +1748,10 @@ func runAddonList() error {
 			if mc.TLS {
 				caPath := filepath.Join(mm.TLSDir(&mc), tlsca.CACertFile)
 				fmt.Printf("    TLS:         on (CA: %s)\n", caPath)
-				// mc.Listen is the bind address (often 0.0.0.0) — the hint uses
+				// mc.Listen is the bind address (often 0.0.0.0) — the hints use
 				// a dialable example host instead.
 				fmt.Printf("                   as pgBackRest repo CA: pg backup setup --s3-endpoint <host>:%d --s3-ca-file %s\n", mc.APIPort, caPath)
+				fmt.Printf("                   from another host:     pg backup fetch-ca <this-host>:%d\n", mc.APIPort)
 			}
 			fmt.Printf("    Data:        %s\n", mm.DataDir(&mc))
 			fmt.Printf("    Root user:   %s\n", mc.RootUser)

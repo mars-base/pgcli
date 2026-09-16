@@ -115,9 +115,28 @@ pg addon install minio --name store --tls
 出现在任何证书里。所以远端主机（虚拟机里的 Patroni
 成员、另一台机器上的备份容器）把 `backup.repo.s3.endpoint` 指向存储主机的
 某个 IP 即可（回环名与本机所有网卡 IP——含虚拟网桥——都在 SAN 里；裸主机名
-不在，除非设置了 `MINIO_SERVER_URL`，其 host 会被追加进 SAN）。把同一份
-`ca.crt` 拷进远端主机 `pg.yaml` 的 `ca_file`，就是远端消费方所需的全部配置；
-pgBackRest stanza 从不要求 MinIO 与它同机。
+不在，除非设置了 `MINIO_SERVER_URL`，其 host 会被追加进 SAN）。
+
+**远端主机取 CA——无需 scp。** 服务端证书以"叶 + CA"链形式下发，所以另一台机器
+上的消费方可以直接从 TLS 握手里把根证书拉回来：
+
+```bash
+pg backup fetch-ca <存储主机>:9002
+#   [OK] CA fetched from <存储主机>:9002
+#        saved:    ~/.pgcli/backup/repo-ca/ca-<存储主机>-9002.crt
+#        SHA-256:  c0f0…fe2e
+pg backup setup --s3-ca-file ~/.pgcli/backup/repo-ca/ca-<存储主机>-9002.crt
+```
+
+这次拉取本质是"首次使用即信任"（TOFU）——在你拿到 CA 之前，没有任何东西能
+验证它——所以信任前请把打印出的 SHA-256 与存储主机上
+`sha256sum ~/.pgcli/tls/minio/<name>/ca.crt` 的结果对拍（如同核对 SSH 主机指
+纹）。之后一次 `setup` 会把 CA 发布进 Patroni 集群的 etcd 注册表，集群里其余
+主机自动拉取、零手工步骤（见[备份 → S3 对象存储仓库](../../backup/#s3-对象存储仓库)）。手工拷
+贝 `ca.crt` 仍是可用的兜底路径，也是存储主机跑的是"链下发"之前的旧 pgcli 时的
+唯一选择——`fetch-ca` 的报错会明确指出这一点，在存储主机上重跑
+`pg addon install minio --tls` 即可升级（证书热重载，无需重启）。pgBackRest
+stanza 从不要求 MinIO 与它同机。
 
 ## 分布式 / 集群模式
 

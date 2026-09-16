@@ -129,9 +129,30 @@ hosts (a VM's Patroni member, another machine's backup container) therefore
 point `backup.repo.s3.endpoint` at one of the store host's IPs (loopback
 names and every NIC IP, virtual bridges included, are in the SAN; raw
 hostnames are not — unless you set `MINIO_SERVER_URL`, whose host is added).
-Copying the same `ca.crt` into a remote host's `pg.yaml` `ca_file` is the
-only setup a remote consumer needs; a pgBackRest stanza never requires the
-MinIO to share its host.
+
+**Getting the CA onto a remote host — no scp needed.** The server cert is
+served as a leaf+CA chain, so a consumer on another machine can pull the root
+straight out of a TLS handshake:
+
+```bash
+pg backup fetch-ca <store-host>:9002
+#   [OK] CA fetched from <store-host>:9002
+#        saved:    ~/.pgcli/backup/repo-ca/ca-<store-host>-9002.crt
+#        SHA-256:  c0f0…fe2e
+pg backup setup --s3-ca-file ~/.pgcli/backup/repo-ca/ca-<store-host>-9002.crt
+```
+
+The fetch is trust-on-first-use — the CA is the thing you cannot verify before
+you hold it — so compare the printed SHA-256 against the store host's
+`sha256sum ~/.pgcli/tls/minio/<name>/ca.crt` (the way you would an SSH host
+key) before trusting it. One `setup` then republishes the CA into the Patroni
+cluster's etcd registry, so every *other* cluster host gets it with no manual
+step at all (see [Backup → S3 object storage repository](../../backup/)).
+Copying `ca.crt` over by hand still works as the fallback, and is what you must
+do if the store host runs a pgcli from before chain distribution (the `fetch-ca`
+error says so, and re-running `pg addon install minio --tls` there upgrades it
+without a restart). A pgBackRest stanza never requires the MinIO to share its
+host.
 
 ## Distributed / Cluster Mode
 

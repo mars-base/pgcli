@@ -307,7 +307,10 @@ drops its registry key, so the next merge stops trusting it.
 The S3 repository CA is distributed the same way: the host that configured
 `ca_file` publishes the certificate to `/pgcli/ha/<scope>/.repo/ca`, and a
 joiner that leaves `ca_file` empty pulls it and points its own `ca_file` at the
-pulled copy. Only public material — SSH public keys and the self-signed CA —
+pulled copy. When the store itself lives on yet another machine, the first host
+gets the CA without any file copy too — `pg backup fetch-ca <store>:<port>`
+pulls it out of the endpoint's TLS chain (see the MinIO doc). Only public
+material — SSH public keys and the self-signed CA —
 ever enters the registry; private keys, passwords, and the S3 secret_key never
 do (the DCS link is unauthenticated).
 

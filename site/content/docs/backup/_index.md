@@ -92,6 +92,14 @@ pg backup setup
   `ca.crt` path you put in `ca_file` above. Publicly-caught endpoints (real
   AWS S3) just omit `ca_file`; if you truly cannot supply a CA, `verify_tls:
   false` is the escape hatch (no certificate verification).
+- **Fetching the CA from a remote store — no scp.** When the MinIO lives on
+  another machine, get its CA with one TLS handshake instead of copying files:
+  `pg backup fetch-ca <store-host>:9002` pulls the signing root out of the
+  endpoint's served chain, saves it under `<base-dir>/backup/repo-ca/` and
+  prints a SHA-256 fingerprint — trust-on-first-use, so cross-check the
+  fingerprint against the store host before feeding the file to
+  `pg backup setup --s3-ca-file <path>`. (Publicly-caught endpoints need no
+  `ca_file` at all, so this is specific to pgcli's self-signed MinIO.)
 - **Cross-host HA needs no key/CA hand-copy.** For a Patroni cluster spread
   over several hosts, `ca_file` and the backup SSH public key only have to be
   set up on *one* host: `pg backup setup` publishes the CA to the cluster's

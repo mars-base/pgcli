@@ -105,6 +105,103 @@ func TestGenerateIdempotentAndSANRenewal(t *testing.T) {
 	}
 }
 
+// readChain returns every CERTIFICATE block in the server cert file, in order.
+func readChain(t *testing.T, dir string) []*pem.Block {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, ServerCert))
+	if err != nil {
+		t.Fatalf("read server cert: %v", err)
+	}
+	var blocks []*pem.Block
+	for rest := data; ; {
+		blk, remainder := pem.Decode(rest)
+		if blk == nil {
+			break
+		}
+		if blk.Type == "CERTIFICATE" {
+			blocks = append(blocks, blk)
+		}
+		rest = remainder
+	}
+	return blocks
+}
+
+// The server cert is served as a leaf+CA chain so a remote `pg backup fetch-ca`
+// can pull the signing root out of the TLS handshake.
+func TestGenerateWritesLeafPlusCAChain(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := Generate(dir, []string{"localhost", "127.0.0.1"}, time.Hour); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	chain := readChain(t, dir)
+	if len(chain) != 2 {
+		t.Fatalf("server cert has %d CERTIFICATE blocks, want 2 (leaf+CA)", len(chain))
+	}
+	leaf, err := x509.ParseCertificate(chain[0].Bytes)
+	if err != nil {
+		t.Fatalf("parse leaf block: %v", err)
+	}
+	ca, err := x509.ParseCertificate(chain[1].Bytes)
+	if err != nil {
+		t.Fatalf("parse CA block: %v", err)
+	}
+	if !ca.IsCA {
+		t.Fatal("second block is not the CA")
+	}
+	if err := leaf.CheckSignatureFrom(ca); err != nil {
+		t.Fatalf("leaf is not signed by the chained CA: %v", err)
+	}
+}
+
+// A single-cert public.crt from before chain distribution gets the CA appended
+// on the next EnsureTLS without re-signing the leaf (MinIO hot-reloads the
+// file; a re-sign would be churn and would not be needed).
+func TestEnsureChainUpgradesLegacyLeafOnlyFile(t *testing.T) {
+	dir := t.TempDir()
+	hosts := []string{"localhost", "127.0.0.1"}
+	if _, err := Generate(dir, hosts, time.Hour); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	// Simulate a legacy deploy: strip the CA block back off.
+	legacy := readChain(t, dir)[0]
+	leafPath := filepath.Join(dir, ServerCert)
+	f, err := os.OpenFile(leafPath, os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pem.Encode(f, legacy); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	if _, err := Generate(dir, hosts, time.Hour); err != nil {
+		t.Fatalf("Generate (upgrade pass): %v", err)
+	}
+	chain := readChain(t, dir)
+	if len(chain) != 2 {
+		t.Fatalf("legacy file not upgraded: %d blocks, want 2", len(chain))
+	}
+	upgradedLeaf, err := x509.ParseCertificate(chain[0].Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldLeaf, err := x509.ParseCertificate(legacy.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !upgradedLeaf.Equal(oldLeaf) {
+		t.Fatal("leaf was re-signed during the chain upgrade — should have been kept")
+	}
+
+	// Running the upgrade again must not append a second CA block.
+	if err := ensureChain(leafPath, filepath.Join(dir, CACertFile)); err != nil {
+		t.Fatalf("ensureChain repeat: %v", err)
+	}
+	if got := len(readChain(t, dir)); got != 2 {
+		t.Fatalf("ensureChain is not idempotent: %d blocks after a repeat call", got)
+	}
+}
+
 func TestLocalHostsDedup(t *testing.T) {
 	hosts := LocalHosts("127.0.0.1", "", "example.local")
 	seen := map[string]bool{}
