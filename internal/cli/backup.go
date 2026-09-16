@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -143,12 +144,33 @@ any TLS S3 endpoint; regular-instance backups stay on the local repo).`,
 
 		// Override BaseDir temporarily for backup path computation (per-backup only, not persisted)
 		origBaseDir := cfg.BaseDir
-		if backupBaseDir != "" {
-			cfg.BaseDir = backupBaseDir
-			cfg.Backup.DataDir = filepath.Join(backupBaseDir, "backup", "data")
-			cfg.Backup.LogDir = filepath.Join(backupBaseDir, "backup", "log")
+		origBackupDataDir := cfg.Backup.DataDir
+		origBackupLogDir := cfg.Backup.LogDir
+		applyBaseDir := func() {
+			cfg.BaseDir = origBaseDir
+			cfg.Backup.DataDir = origBackupDataDir
+			cfg.Backup.LogDir = origBackupLogDir
+			if backupBaseDir != "" {
+				cfg.BaseDir = backupBaseDir
+				cfg.Backup.DataDir = filepath.Join(backupBaseDir, "backup", "data")
+				cfg.Backup.LogDir = filepath.Join(backupBaseDir, "backup", "log")
+			}
 		}
-		defer func() { cfg.BaseDir = origBaseDir }()
+		restoreBaseDir := func() {
+			cfg.BaseDir = origBaseDir
+			cfg.Backup.DataDir = origBackupDataDir
+			cfg.Backup.LogDir = origBackupLogDir
+		}
+		applyBaseDir()
+		defer restoreBaseDir()
+		// saveCfg persists pg.yaml without the --base-dir override leaking in
+		// (a pulled repo CA path saved under a temp base_dir would be wrong
+		// for every later run).
+		saveCfg := func() error {
+			restoreBaseDir()
+			defer applyBaseDir()
+			return cfg.Save(path)
+		}
 
 		bm, err := podman.NewBackupManager(cfg)
 		if err != nil {
@@ -207,6 +229,15 @@ any TLS S3 endpoint; regular-instance backups stay on the local repo).`,
 			return err
 		}
 
+		// 2b. Cross-host backup trust: resolve the S3 repository CA against the
+		// DCS member registry BEFORE generating configs, so this run's backup
+		// and member containers mount the right ca_file. A host that set
+		// --s3-ca-file publishes it for peers; a joiner that left it empty
+		// pulls the cluster's CA and points ca_file at the pulled copy.
+		if err := syncRepoCA(cfg, bm, saveCfg); err != nil {
+			fmt.Printf("  [!] repo CA sync failed (falling back to local ca_file): %v\n", err)
+		}
+
 		// 3. Generate pgbackrest.conf (backup-container view, pg1-host set)
 		// and the member-local archive view (no pg1-host, required for
 		// archive-push — [072]).
@@ -226,9 +257,12 @@ any TLS S3 endpoint; regular-instance backups stay on the local repo).`,
 			return err
 		}
 
-		// 5. Patroni members: pick up the archive conf + archive parameters.
-		// Stale members are recreated replicas-first inside a pause window.
+		// 5. Patroni members: distribute cross-host backup trust (pubkey merge +
+		// repo CA are already handled above), then pick up the archive conf +
+		// archive parameters. Stale members are recreated replicas-first
+		// inside a pause window.
 		fmt.Println("\n-> Step 5/6: Patroni WAL archiving...")
+		setupPatroniBackupTrust(cfg, bm)
 		if err := setupPatroniArchiving(cfg, bm); err != nil {
 			return err
 		}
@@ -254,6 +288,140 @@ any TLS S3 endpoint; regular-instance backups stay on the local repo).`,
 		}
 		return nil
 	},
+}
+
+// syncRepoCA reconciles the S3 repository CA with the DCS member registry
+// before backup configs are generated. pgBackRest's repo1-s3-ca-file names a
+// *host* path, so the CA has to exist locally (and be recorded in pg.yaml)
+// before Step 3 renders the configs and Step 4/5 mount the file.
+//
+// Two roles, decided by this host's local config:
+//
+//   - ca_file set (operator ran setup --s3-ca-file): publish the PEM into every
+//     Patroni scope's registry key, so hosts that join later pick it up.
+//   - ca_file empty but a peer published one: pull it to a pgcli-managed path
+//     and point cfg.Backup.Repo.S3.CAFile at it, then persist pg.yaml — the
+//     joiner needs no manual scp of ca.crt.
+//
+// The registry link is plaintext etcd with no auth, which is fine here: a CA
+// certificate is public material (publishing it grants nothing; only the S3
+// secret_key is sensitive and that never enters the registry).
+//
+// No-op without an S3 repo or without Patroni clusters (no registry to talk
+// to). A failure to reach the DCS is returned for the caller to warn about —
+// the run continues on whatever ca_file the host already has.
+func syncRepoCA(cfg *config.Config, bm *podman.BackupManager, saveCfg func() error) error {
+	s3 := cfg.Backup.Repo.S3
+	if s3 == nil || len(cfg.Addons.Patroni) == 0 {
+		return nil
+	}
+	pm, err := podman.NewPatroniManager(cfg)
+	if err != nil {
+		return err
+	}
+
+	if s3.CAFile != "" {
+		pem, err := os.ReadFile(s3.CAFile)
+		if err != nil {
+			return fmt.Errorf("reading ca_file %s: %w", s3.CAFile, err)
+		}
+		var firstErr error
+		for scope, cluster := range cfg.Addons.Patroni {
+			if err := pm.PublishRepoCA(&cluster, string(pem)); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("publishing repo CA for cluster %s: %w", scope, err)
+			}
+		}
+		if firstErr == nil {
+			fmt.Printf("  [OK] repo CA published to %d cluster registry/registries (from %s)\n",
+				len(cfg.Addons.Patroni), s3.CAFile)
+		}
+		return firstErr
+	}
+
+	// ca_file empty: pull from whichever scope has published one. The S3 repo
+	// is shared, so any published CA applies to the endpoint everywhere; the
+	// local file is named after the scope it came from so it is re-pullable.
+	var pulled, pulledScope string
+	for scope, cluster := range cfg.Addons.Patroni {
+		if ca := pm.RepoCAFromDCS(&cluster); ca != "" {
+			pulled, pulledScope = ca, scope
+			break
+		}
+	}
+	if pulled == "" {
+		// Nothing published yet (this is likely the first host). Continue with
+		// system CAs; a later setup re-run or the operator's --s3-ca-file
+		// seeds the registry.
+		fmt.Println("  (no repo CA in the cluster registry yet; using system CAs)")
+		return nil
+	}
+	caPath := bm.RepoCAPath(cfg.PatroniScope(pulledScope))
+	if err := os.MkdirAll(filepath.Dir(caPath), 0700); err != nil {
+		return fmt.Errorf("creating repo CA dir: %w", err)
+	}
+	if err := os.WriteFile(caPath, []byte(pulled), 0644); err != nil {
+		return fmt.Errorf("writing repo CA: %w", err)
+	}
+	s3.CAFile = caPath
+	if err := saveCfg(); err != nil {
+		return fmt.Errorf("saving config with pulled repo CA: %w", err)
+	}
+	fmt.Printf("  [OK] repo CA pulled from the cluster registry -> %s (ca_file set in pg.yaml)\n", caPath)
+	return nil
+}
+
+// setupPatroniBackupTrust distributes cross-host backup trust through the DCS
+// member registry, right before the stale-member check:
+//
+//  1. Re-register each local member's ports+backup pubkey (idempotent, and it
+//     carries the pubkey for hosts that created members before this field
+//     existed).
+//  2. Merge every cluster member's backup pubkey into this host's
+//     authorized_keys_cluster file. Patroni members bind-mount that file, so
+//     the same-inode rewrite is live inside running containers — a member only
+//     needs the *mount* (recreate, handled by the readiness check below), not
+//     the *content*, to arrive.
+//
+// Called once per setup run. Best effort per scope: a DCS that is temporarily
+// unreachable must not abort setup, since WAL archiving works without
+// cross-host trust (only the full-backup/check SSH probe needs it).
+func setupPatroniBackupTrust(cfg *config.Config, bm *podman.BackupManager) {
+	if len(cfg.Addons.Patroni) == 0 {
+		return
+	}
+	pm, err := podman.NewPatroniManager(cfg)
+	if err != nil {
+		fmt.Printf("  [!] backup trust: patroni manager unavailable: %v\n", err)
+		return
+	}
+	for scope, cluster := range cfg.Addons.Patroni {
+		for member := range cluster.Members {
+			if cluster.Members[member].RemoteHost != "" {
+				continue // only local members register into the shared DCS
+			}
+			if err := pm.RegisterMemberPorts(&cluster, member); err != nil {
+				fmt.Printf("  [!] backup trust: registering %s/%s pubkey failed: %v\n", scope, member, err)
+			}
+		}
+
+		members, err := pm.DiscoverAllMembers(&cluster)
+		if err != nil {
+			fmt.Printf("  [!] backup trust: cluster %s topology unavailable, skipping pubkey merge: %v\n", scope, err)
+			continue
+		}
+		var keys []string
+		for _, cm := range members {
+			if cm.BackupPubKey != "" {
+				keys = append(keys, cm.BackupPubKey)
+			}
+		}
+		nsScope := cfg.PatroniScope(scope)
+		if _, err := bm.WriteClusterAuthKeys(nsScope, keys); err != nil {
+			fmt.Printf("  [!] backup trust: writing merged authorized_keys for %s failed: %v\n", scope, err)
+			continue
+		}
+		fmt.Printf("  [OK] %s: cross-host backup trust merged %d member key(s)\n", scope, len(keys))
+	}
 }
 
 // setupPatroniArchiving brings every local Patroni member up to the current

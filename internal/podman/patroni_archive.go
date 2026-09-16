@@ -51,19 +51,31 @@ func (m *PatroniManager) MemberArchiveReady(cluster *config.PatroniClusterConfig
 		return true, "", nil
 	}
 
-	out, err := m.run("inspect", "--format", "{{range .Mounts}}{{.Source}}\n{{end}}", mb.ContainerName)
+	out, err := m.run("inspect", "--format", "{{range .Mounts}}{{.Source}}\t{{.Destination}}\n{{end}}", mb.ContainerName)
 	if err != nil {
 		return false, "", fmt.Errorf("inspecting member container %s: %w", mb.ContainerName, err)
 	}
-	mounted := false
-	for _, line := range strings.Split(out, "\n") {
-		if strings.TrimSpace(line) == hostMountPath(archivePath) {
-			mounted = true
-			break
+	mountedArchive := false
+	mountedClusterKeys := false
+	for line := range strings.SplitSeq(out, "\n") {
+		src, dst, _ := strings.Cut(line, "\t")
+		switch strings.TrimSpace(dst) {
+		case "/etc/pgbackrest.conf":
+			if strings.TrimSpace(src) == hostMountPath(archivePath) {
+				mountedArchive = true
+			}
+		case "/run/pgcli/authorized_keys_cluster":
+			mountedClusterKeys = true
 		}
 	}
-	if !mounted {
+	if !mountedArchive {
 		return false, "mounts the backup-side pgbackrest.conf (pg1-host breaks archive-push)", nil
+	}
+	if !mountedClusterKeys {
+		// Predates cross-host backup trust: without the merged cluster
+		// authorized_keys mount this member's sshd only trusts its own host's
+		// backup key, so a peer host's full-backup SSH probe is refused.
+		return false, "predates the cluster authorized_keys mount (cross-host backup)", nil
 	}
 
 	if m.cfg.Backup.Repo.S3 != nil {

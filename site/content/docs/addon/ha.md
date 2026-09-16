@@ -288,9 +288,28 @@ Just refresh the backup config:
 pg backup setup
 ```
 
-The remote member's sshd must still trust this host's backup public key, and its
-`--advertise-host` already flipped its listener to `0.0.0.0` (see above), so
-cross-host SSH reaches it.
+Cross-host backup **trust is now automatic**. A cluster-wide stanza lists every
+member as a `pg*-host`, so a full backup / `check` from any host SSH-probes the
+members on all hosts to find the primary — each of those member sshd processes
+must therefore accept the *initiating* host's backup key, and its
+`--advertise-host` already flipped the listener to `0.0.0.0` (see above) so
+cross-host SSH reaches it. `pg backup setup`
+handles this: each host's `create` publishes its backup **public** key into the
+same `/pgcli/ha/<scope>/<member>` registry, `setup` merges every member's key
+into a per-cluster `authorized_keys` file, and each member container bind-mounts
+that file as an extra `AuthorizedKeysFile`. Because sshd re-reads it on every
+login and the merge rewrites the file in place, a host that joins later is
+trusted by the running members **without a restart** (the file only needs the
+one-time recreate to add the mount, which `setup` does inside the pause window
+alongside the archive-config recreate). A member removed with `pg ha remove`
+drops its registry key, so the next merge stops trusting it.
+
+The S3 repository CA is distributed the same way: the host that configured
+`ca_file` publishes the certificate to `/pgcli/ha/<scope>/.repo/ca`, and a
+joiner that leaves `ca_file` empty pulls it and points its own `ca_file` at the
+pulled copy. Only public material — SSH public keys and the self-signed CA —
+ever enters the registry; private keys, passwords, and the S3 secret_key never
+do (the DCS link is unauthenticated).
 
 **Fallback**: a remote member created on its host *before* that host upgraded
 pgcli has no registry entry, so the generators fall back to this scope's base

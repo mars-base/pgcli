@@ -92,6 +92,14 @@ pg backup setup
   `ca.crt` path you put in `ca_file` above. Publicly-caught endpoints (real
   AWS S3) just omit `ca_file`; if you truly cannot supply a CA, `verify_tls:
   false` is the escape hatch (no certificate verification).
+- **Cross-host HA needs no key/CA hand-copy.** For a Patroni cluster spread
+  over several hosts, `ca_file` and the backup SSH public key only have to be
+  set up on *one* host: `pg backup setup` publishes the CA to the cluster's
+  etcd registry and a joiner with `ca_file` empty pulls it; each host's backup
+  public key is likewise published on `pg ha create` and merged into every
+  member's authorized_keys by `setup`. Only public material (the CA
+  certificate, SSH public keys) enters the registry — never private keys or
+  the S3 secret_key. See the HA doc, "Backing up a cross-host leader".
 - **Archiving is automated.** When setup finds a Patroni member whose archiving
   config is stale, it pauses the cluster, recreates members replicas-first
   (the recreate restarts PostgreSQL, which postmaster-level `archive_mode`

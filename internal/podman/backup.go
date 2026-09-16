@@ -67,6 +67,56 @@ func (m *BackupManager) SSHConfigPath() string {
 	return filepath.Join(m.dataDir, "backup", "ssh_config")
 }
 
+// RepoCAPath is where a repository CA pulled from the DCS member registry is
+// written on this host, so backup.repo.s3.ca_file can point at a stable
+// pgcli-managed location instead of an operator hand-copy.
+func (m *BackupManager) RepoCAPath(nsScope string) string {
+	return filepath.Join(m.dataDir, "backup", "repo-ca", nsScope+".crt")
+}
+
+// ClusterAuthKeysPath is the host file holding every cluster member's backup
+// public key, merged. Patroni member containers mount it as
+// /run/pgcli/authorized_keys_cluster so their sshd authorizes peers' backup
+// containers (cluster-wide stanzas make check/backup SSH-probe all pg*-host
+// entries, which live on other hosts). Like pgbackrest.conf it is rewritten in
+// place, so content updates reach running containers through the existing bind.
+func (m *BackupManager) ClusterAuthKeysPath(nsScope string) string {
+	return filepath.Join(m.dataDir, "backup", "authorized_keys", nsScope)
+}
+
+// WriteClusterAuthKeys merges public-key lines (deduplicated, sorted for a
+// stable diff), ensures the parent dir, and writes the file. The mode is
+// 0644, not 0600: the file holds only PUBLIC keys, and on root-run hosts the
+// member containers execute as the image's postgres uid, which cannot read a
+// root-owned 0600 bind mount (the entrypoint's cat then aborts the container).
+// The write replaces content via os.WriteFile (same inode) so live bind
+// mounts keep working; the explicit Chmod fixes files an earlier build left
+// at 0600.
+func (m *BackupManager) WriteClusterAuthKeys(nsScope string, keys []string) (string, error) {
+	set := map[string]bool{}
+	var lines []string
+	for _, k := range keys {
+		k = strings.TrimSpace(k)
+		if k == "" || set[k] {
+			continue
+		}
+		set[k] = true
+		lines = append(lines, k)
+	}
+	sort.Strings(lines)
+	path := m.ClusterAuthKeysPath(nsScope)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return "", fmt.Errorf("creating authorized_keys dir: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
+		return "", fmt.Errorf("writing cluster authorized keys: %w", err)
+	}
+	if err := os.Chmod(path, 0644); err != nil {
+		return "", fmt.Errorf("chmod cluster authorized keys: %w", err)
+	}
+	return path, nil
+}
+
 // patroniBackupTarget is one Patroni member normalized for the backup
 // generators: the same value feeds both the SSH `Host` alias / `HostName` and
 // the pgBackRest `pg1-host` / `pg1-port`, so the two files can never disagree.
@@ -232,7 +282,11 @@ func (m *BackupManager) EnsureSSHKey() (*SSHKeyPair, error) {
 	if err != nil {
 		return nil, fmt.Errorf("formatting public key: %w", err)
 	}
-	if err := os.WriteFile(keys.Public, []byte(pub), 0644); err != nil {
+	// The trailing newline matters: the key file is cat-concatenated into
+	// sshd's authorized_keys alongside other keys — without it the next key
+	// would merge onto this line and sshd rejects the whole file. (sshPublicKey
+	// is trimmed for the same reason elsewhere.)
+	if err := os.WriteFile(keys.Public, []byte(pub+"\n"), 0644); err != nil {
 		return nil, fmt.Errorf("writing public key: %w", err)
 	}
 

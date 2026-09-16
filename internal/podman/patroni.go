@@ -395,6 +395,10 @@ func (m *PatroniManager) createMemberContainer(cluster *config.PatroniClusterCon
 
 	// Mount backup container's public key for SSH-based backup support.
 	// The entrypoint script installs it in sshd's authorized_keys.
+	//
+	// Two sources land in authorized_keys: the local backup key here, and a
+	// cluster-wide merged file (below). The entrypoint concatenates both, so a
+	// key appearing in each is harmless (sshd reads line by line).
 	bm, err := NewBackupManager(m.cfg)
 	if err == nil {
 		keys, err := bm.EnsureSSHKey()
@@ -402,6 +406,29 @@ func (m *PatroniManager) createMemberContainer(cluster *config.PatroniClusterCon
 			args = append(args,
 				"-v", fmt.Sprintf("%s:/run/pgcli/backup_id_rsa.pub:ro,z", hostMountPath(keys.Public)),
 			)
+			// Ensure the merged cluster authorized_keys host file exists before
+			// bind-mounting it (podman would otherwise create a root-owned
+			// directory). Seed with the local key ONLY when absent — on a
+			// recreate the file already holds every peer's key merged by
+			// `pg backup setup`, and overwriting it here would drop them. The
+			// bind mount stays, so later content updates are live.
+			mergedPath := bm.ClusterAuthKeysPath(nsScope)
+			if _, err := os.Stat(mergedPath); os.IsNotExist(err) {
+				var seed []string
+				if data, err := os.ReadFile(keys.Public); err == nil {
+					seed = append(seed, string(data))
+				}
+				if p, err := bm.WriteClusterAuthKeys(nsScope, seed); err == nil {
+					mergedPath = p
+				} else {
+					mergedPath = ""
+				}
+			}
+			if mergedPath != "" {
+				args = append(args,
+					"-v", fmt.Sprintf("%s:/run/pgcli/authorized_keys_cluster:ro,z", hostMountPath(mergedPath)),
+				)
+			}
 		}
 	}
 

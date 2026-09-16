@@ -84,6 +84,12 @@ pg backup setup
   HTTPS —— pgcli 会生成自签 CA，并把 `ca.crt` 路径填进上面的 `ca_file`。
   外部端点（真实 AWS S3 等公签证书）留空 `ca_file` 即可；实在无法提供 CA 时
   可用 `verify_tls: false` 逃生（不做证书校验）。
+- **跨机 HA 免手工分发。** Patroni 集群分散在多台主机时，`ca_file` 与备份 SSH
+  公钥只需在*一台*主机配好：`pg backup setup` 把 CA 发布进集群的 etcd 注册表，
+  `ca_file` 留空的加入者自动拉取；各主机的备份公钥在 `pg ha create` 时发布，
+  由 `setup` 合并进每个成员的 authorized_keys。注册表里只放**公开材料**（CA
+  证书、SSH 公钥），绝不含私钥或 S3 secret_key。详见 HA 文档"备份跨机
+  leader"一节。
 - **归档自动化。** setup 检测到 Patroni 成员的归档配置过期时，会 pause 集群、
   按"副本先、leader 后"重建成员容器（recreate 即重启，`archive_mode` 是
   postmaster 级参数）、resume。每个成员的 patroni.yml 会注入同一份

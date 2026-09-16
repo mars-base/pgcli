@@ -265,8 +265,22 @@ autostart 与 `pg ha extension` 会跳过非本机成员 —— 它们归各自�
 pg backup setup
 ```
 
-远端成员的 sshd 仍需信任本机备份公钥，且 `--advertise-host` 已把它的监听翻成
-`0.0.0.0`（见上文），所以跨机 SSH 可达。
+跨机备份**互信现在全自动**。cluster-wide stanza 把每个成员列成一个 `pg*-host`，
+所以从任意主机发起全量备份 / `check`，pgBackRest 会 SSH 探测**所有主机**的成员来
+找 primary——这些成员的 sshd 都必须接受*发起方*主机的备份公钥，且其
+`--advertise-host` 已把监听翻成 `0.0.0.0`（见上文），跨机 SSH 才可达。
+`pg backup setup` 负责打通：各主机 `create` 时把本机备份**公钥**发布进同一个
+`/pgcli/ha/<scope>/<member>` 注册表；`setup` 把全集群成员的公钥合并成一个每集群
+一份的 `authorized_keys` 文件，成员容器把它作为额外的 `AuthorizedKeysFile`
+bind-mount 进去。sshd 每次登录都重新读该文件，合并又是原地覆写，所以**后来加入的
+主机无需重启就被运行中的成员信任**（该挂载只在首次出现时随归档配置的 pause 窗口
+recreate 一次性补上）。`pg ha remove` 掉成员会同时删其注册表 key，下次合并就不再
+信任它。
+
+S3 仓库 CA 也走同一条路：配了 `ca_file` 的主机把证书发布到
+`/pgcli/ha/<scope>/.repo/ca`，`ca_file` 留空的加入者自动拉取、并把本地 `ca_file`
+指到拉下来的副本。注册表里只允许**公开材料**——SSH 公钥与自签 CA 证书；私钥、
+密码、S3 secret_key 绝不写入（etcd 这条链路无认证）。
 
 **兜底**：若某远端成员是那台主机升级 pgcli 之前创建的、尚未注册端口，生成器会把
 它的 SSH 端口回退到本 scope 的基础端口（每台主机都从 `patroni_ssh_start_port`
