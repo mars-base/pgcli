@@ -31,6 +31,8 @@ backup, PITR (Point-In-Time Recovery), and snapshot management.`,
 
 // Execute runs the root command.
 func Execute() {
+	rootCmd.Version = Version
+	rootCmd.SetVersionTemplate("pg " + Version + " (built " + BuildTime + ")\n")
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
