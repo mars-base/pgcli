@@ -259,6 +259,7 @@ func (m *MinioManager) createContainer(mc *config.MinioConfig) error {
 		}
 		tlsDir = m.TLSDir(mc)
 		fmt.Printf("  [OK] TLS certs (CA: %s)\n", caPath)
+		fmt.Printf("         as pgBackRest repo CA: pg backup setup --s3-endpoint <host:port> --s3-ca-file %s\n", caPath)
 	}
 
 	// MinIO's deployment docs recommend nofile=1048576. The podman machine VM
