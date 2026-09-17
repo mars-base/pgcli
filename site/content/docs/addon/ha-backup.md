@@ -135,8 +135,10 @@ pg exec --dsn "postgres://<user>@<leader_host>:<port>/postgres" \
 pg exec --dsn "postgres://<user>@<replica_host>:<port>/postgres" \
   "SELECT status FROM pg_stat_wal_receiver"
 
-# 3) the replica container log loops the same two lines:
-podman logs --tail 50 pgcli-patroni-<ns>-<scope>-<member> 2>&1 | grep -iE "prev-link|waiting for WAL"
+# 3) the replica container log loops the same two lines (pg logs addon patroni
+#    fetches by scope + member name, no container-name arithmetic; -f follows,
+#    -n takes more lines):
+pg logs addon patroni --scope <scope> --name <member> -n 50 | grep -iE "prev-link|waiting for WAL"
 #   LOG: record with incorrect prev-link ... at 0/20000060
 #   LOG: waiting for WAL to become available at 0/20000078
 ```
