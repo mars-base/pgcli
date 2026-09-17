@@ -60,6 +60,13 @@ pg backup stop
 
 # Show backup container status
 pg backup status
+
+# Refresh stanza metadata after a data directory was rebuilt (restore,
+# recreate, reinit). Backups then fail with "[051] system-id ... do not match
+# stanza"; stanza-upgrade re-syncs it without deleting existing backups.
+# No argument = every stanza (instances + Patroni clusters).
+pg backup stanza-upgrade
+pg backup stanza-upgrade pgcli_default
 ```
 
 Backup infrastructure (network, image, directories, config, container) is prepared automatically on `pg start`; run `pg backup setup` manually to reinitialize, e.g. after changing the base directory.

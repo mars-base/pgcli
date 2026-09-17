@@ -53,6 +53,12 @@ pg backup stop
 
 # 显示备份容器状态
 pg backup status
+
+# 数据目录被重建后（restore、recreate、reinit）刷新 stanza 元数据。此后
+# 备份会报 "[051] system-id ... do not match stanza"；stanza-upgrade 重新
+# 同步它而不删除已有备份。不带参数 = 全部 stanza（实例 + Patroni 集群）。
+pg backup stanza-upgrade
+pg backup stanza-upgrade pgcli_default
 ```
 
 备份基础设施（网络、镜像、目录、配置、容器）在 `pg start` 时自动准备；手动运行 `pg backup setup` 重新初始化，例如更改基础目录之后。
