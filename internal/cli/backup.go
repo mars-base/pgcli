@@ -33,6 +33,7 @@ func init() {
 	backupCmd.AddCommand(backupStopCmd)
 	backupCmd.AddCommand(backupStatusCmd)
 	backupCmd.AddCommand(backupFetchCACmd)
+	backupCmd.AddCommand(backupStanzaUpgradeCmd)
 
 	backupSetupCmd.Flags().StringVar(&backupBaseDir, "base-dir", "", "base directory for backup data and logs (overrides config base_dir)")
 	backupSetupCmd.Flags().StringVar(&s3Endpoint, "s3-endpoint", "", "S3 repository host:port (pgBackRest forces HTTPS - use a TLS-terminated endpoint, e.g. a MinIO installed with 'pg addon install minio --tls')")
@@ -56,11 +57,12 @@ The backup container is shared across all database instances -- each instance
 gets its own pgbackrest stanza, but they all share a single pgbackrest repository.
 
 Subcommands:
-  setup     Build image, create directories, generate config, start container
-  start     Start the backup container
-  stop      Stop the backup container
-  status    Show backup container status
-  fetch-ca  Fetch an S3 endpoint's TLS CA certificate over the network`,
+  setup           Build image, create directories, generate config, start container
+  start           Start the backup container
+  stop            Stop the backup container
+  status          Show backup container status
+  stanza-upgrade  Refresh stanza metadata after a data directory was rebuilt
+  fetch-ca        Fetch an S3 endpoint's TLS CA certificate over the network`,
 }
 
 // loadRawConfig loads config without calling SetInstance (for backup commands
@@ -620,6 +622,83 @@ var backupStatusCmd = &cobra.Command{
 		}
 
 		fmt.Println()
+		return nil
+	},
+}
+
+// --- backup stanza-upgrade ----------------------------------------
+
+var backupStanzaUpgradeCmd = &cobra.Command{
+	Use:   "stanza-upgrade [stanza...]",
+	Short: "Refresh stanza metadata after an instance's data directory was rebuilt",
+	Long: `Refresh the repository metadata (db:history) of pgBackRest stanzas against
+the PostgreSQL instances running today.
+
+Needed when a database's data directory was reinitialized — PITR restore,
+recreate, reinit — while the repository still remembers the old system
+identifier: subsequent backups abort with
+  ERROR: [051] ... system-id ... do not match stanza
+This command is the standard fix (stanza-reset deletes backups, upgrade does
+not). Existing backups are kept.
+
+With no arguments every managed stanza is upgraded: one per PITR-enabled
+instance plus one per Patroni cluster. Pass stanza names to be selective.
+
+Examples:
+  pg backup stanza-upgrade                       # all stanzas
+  pg backup stanza-upgrade pgcli_default         # just one
+  pg backup stanza-upgrade pgcli_app-default     # a Patroni cluster stanza`,
+	Args: cobra.ArbitraryArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := loadRawConfig()
+		if err != nil {
+			return fmt.Errorf("failed to load config: %w", err)
+		}
+		bm, err := podman.NewBackupManager(cfg)
+		if err != nil {
+			return err
+		}
+		running, err := bm.CheckContainerRunning(cfg.Backup.ContainerName)
+		if err != nil {
+			return err
+		}
+		if !running {
+			return fmt.Errorf("backup container %s is not running (start it with 'pg backup start')", cfg.Backup.ContainerName)
+		}
+
+		all := bm.StanzaNames()
+		stanzas := args
+		if len(stanzas) == 0 {
+			if len(all) == 0 {
+				fmt.Println("-> no stanzas to upgrade (no PITR-enabled instance, no Patroni cluster)")
+				return nil
+			}
+			stanzas = all
+		} else {
+			known := map[string]bool{}
+			for _, s := range all {
+				known[s] = true
+			}
+			for _, s := range stanzas {
+				if !known[s] {
+					return fmt.Errorf("unknown stanza %q (managed stanzas: %s)", s, strings.Join(all, ", "))
+				}
+			}
+		}
+
+		var failed int
+		for _, s := range stanzas {
+			if err := bm.StanzaUpgrade(s); err != nil {
+				fmt.Printf("  [!!] %s: %v\n", s, err)
+				failed++
+				continue
+			}
+			fmt.Printf("  [OK] %s upgraded\n", s)
+		}
+		if failed > 0 {
+			return fmt.Errorf("%d/%d stanza(s) failed to upgrade", failed, len(stanzas))
+		}
+		fmt.Printf("-> %d stanza(s) upgraded\n", len(stanzas))
 		return nil
 	},
 }

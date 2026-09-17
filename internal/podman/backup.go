@@ -499,6 +499,34 @@ func PatroniStanzaForScope(c *config.Config, scope string) string {
 	return patroniStanzaName(c.PatroniScope(scope))
 }
 
+// instanceStanzaName is the single source of truth for a PITR-enabled
+// instance's stanza name (explicit config, else pgcli_<instance>).
+func instanceStanzaName(name string, inst config.InstanceConfig) string {
+	if inst.PITR.PgBackRestStanza != "" {
+		return inst.PITR.PgBackRestStanza
+	}
+	return "pgcli_" + name
+}
+
+// StanzaNames lists every stanza the backup container manages: one per
+// PITR-enabled instance plus one per Patroni cluster (same source as
+// WritePgbackrestConf). Used by `pg backup stanza-upgrade` to default to all
+// stanzas.
+func (m *BackupManager) StanzaNames() []string {
+	var out []string
+	for name, inst := range m.cfg.Instances {
+		if !inst.PITR.Enabled {
+			continue
+		}
+		out = append(out, instanceStanzaName(name, inst))
+	}
+	for _, t := range m.PatroniStanzaNames() {
+		out = append(out, t.Stanza)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // s3StanzaLines returns the repo1 S3 override block emitted *inside* each
 // Patroni stanza, or "" when no S3 repo is configured. Deliberately per-stanza
 // rather than in [global]: the shared [global] repo1-path stays local, so the
@@ -930,6 +958,19 @@ func (m *BackupManager) StanzaCreatePatroni() error {
 			continue
 		}
 		fmt.Printf("  [OK] check %s\n", t.Stanza)
+	}
+	return nil
+}
+
+// StanzaUpgrade refreshes a stanza's repository metadata (db:history) against
+// the current PostgreSQL system identifier. Needed when an instance's data
+// directory was reinitialized (restore, recreation) while the repo still holds
+// the old id: backups then abort with [051] "system-id do not match stanza".
+// Non-destructive — existing backups are kept.
+func (m *BackupManager) StanzaUpgrade(stanza string) error {
+	out, err := m.BackupExec(false, "pgbackrest", "--stanza="+stanza, "stanza-upgrade")
+	if err != nil {
+		return fmt.Errorf("stanza-upgrade %s: %w\n%s", stanza, err, strings.TrimSpace(out))
 	}
 	return nil
 }
