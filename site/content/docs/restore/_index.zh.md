@@ -42,3 +42,50 @@ pg restore --time "2026-08-26 15:30:00+00" --promote --force
 **恢复工作流：** 停止 → 恢复 → 启动 → WAL 重放到目标时间
 
 **注意：** `--promote` 之后，在进行进一步的 PITR 之前需要创建新的完整快照。
+
+## Patroni 集群
+
+Patroni HA 集群用 `pg ha restore` 恢复，是上面单实例命令的集群版对应物。它接受
+相同的 `--time`（全部格式），并支持 `--dry-run`、`--tail-logs`、`--force`。
+
+```bash
+# 预览恢复计划，不触碰集群
+pg ha restore app --time "2026-08-26 15:30:00+00" --dry-run
+
+# 恢复，同时流式输出承载 bootstrap 成员的恢复日志
+pg ha restore app --time "2026-08-26 15:30:00+00" --tail-logs
+
+# 指定由哪个本机成员承载 bootstrap（默认：第一个本机成员）
+pg ha restore app --time "2026-08-26 15:30:00+00" --member node1
+
+# 跳过确认提示
+pg ha restore app --time "2026-08-26 15:30:00+00" --force
+```
+
+**原理：** 先移除集群的 DCS 身份，然后让一个**本机**成员通过 Patroni 的自定义
+bootstrap 方法，从 pgBackRest 仓库把（已清空的）数据目录恢复到目标时间点。该成员
+在**新时间线**上启动并自动 promote 成可写 leader；其余成员——本机的、跨主机的——
+都经 DCS 重新加入它。前提是该 stanza 已配好 WAL 归档，由带 S3 仓库的
+`pg backup setup` 预置（见 [HA 备份插件](../addon/ha-backup)）。
+
+**与单实例恢复的差异：**
+
+- **总是 promote。** 没有"pause 只读、检查、再换个时间重试"的两步——集群在目标点
+  直接以可写状态起来。执行前用 `--dry-run` 确认目标时间。
+- **必须在拥有成员的主机上运行，且动手前先检测 leader。** `pg ha restore` 在执行
+  任何破坏性操作**之前**，会先从 DCS 读取当前 leader，判断它是否是本机的可控成员。
+  真实执行时若 leader 不在本机（远端成员，或本机视图里根本没有的跨主机成员），会
+  **直接拒绝**；`--dry-run` 则只是告警。原因：破坏性路径会清掉 DCS 身份并让本机
+  成员重新 bootstrap，若本机停不掉当前 leader，它会在 **旧时间线** 上抢先重新抢回
+  DCS，与 bootstrap 竞态。先把 leader 切到本机（`pg ha switchover`/`failover`），
+  或到 leader 所在主机执行。leader 读不到/为空时不阻断（覆盖首次 bootstrap 的场景）。
+- **没有 `--promote` flag** —— promote 是自动的。
+
+**恢复工作流：** 预检（leader 必须是本机成员）→ 停本机成员 → 清 DCS → 清空并用仓库
+bootstrap 一个成员 → 它 promote 成新时间线的 leader → 其余成员作为副本重新加入。
+
+**恢复之后：** 建一个新的完整快照以给新时间线重新定位——
+`pg ha snapshot create app --type full`。由于数据目录被重建，system-id 会变化，
+首个快照可能报 `[051] system-id ... do not match stanza`；用非破坏性的
+`pg backup stanza-upgrade pgcli_app-<ns>` 修复（见备份文档）。若有副本没有自动重新
+加入，用 `pg ha ctl app -- reinit app-<ns> <member> --force` 重建它。
