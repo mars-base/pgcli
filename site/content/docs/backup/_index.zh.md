@@ -54,11 +54,16 @@ pg backup stop
 # 显示备份容器状态
 pg backup status
 
+# 列出 backup 容器管理的全部 stanza（每个 PITR 实例一个、每个 Patroni 集群
+# 一个）。下面的 stanza-upgrade 用的就是这些名字——它们是仓库里的备份对象
+# 标识，不是容器名。
+pg backup list-stanza
+
 # 数据目录被重建后（restore、recreate、reinit）刷新 stanza 元数据。此后
 # 备份会报 "[051] system-id ... do not match stanza"；stanza-upgrade 重新
-# 同步它而不删除已有备份。不带参数 = 全部 stanza（实例 + Patroni 集群）。
-pg backup stanza-upgrade
+# 同步它而不删除已有备份。必须显式给出 stanza 名（有意不提供全量升级）。
 pg backup stanza-upgrade pgcli_default
+pg backup stanza-upgrade pgcli_default pgcli_app-default
 ```
 
 备份基础设施（网络、镜像、目录、配置、容器）在 `pg start` 时自动准备；手动运行 `pg backup setup` 重新初始化，例如更改基础目录之后。

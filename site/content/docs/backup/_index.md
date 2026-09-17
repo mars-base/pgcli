@@ -61,12 +61,17 @@ pg backup stop
 # Show backup container status
 pg backup status
 
+# List every stanza the backup container manages (one per PITR instance,
+# one per Patroni cluster). These names feed stanza-upgrade below — they are
+# repository labels, not container names.
+pg backup list-stanza
+
 # Refresh stanza metadata after a data directory was rebuilt (restore,
 # recreate, reinit). Backups then fail with "[051] system-id ... do not match
 # stanza"; stanza-upgrade re-syncs it without deleting existing backups.
-# No argument = every stanza (instances + Patroni clusters).
-pg backup stanza-upgrade
+# Pass the stanza name(s) explicitly (upgrade-all is intentionally not offered).
 pg backup stanza-upgrade pgcli_default
+pg backup stanza-upgrade pgcli_default pgcli_app-default
 ```
 
 Backup infrastructure (network, image, directories, config, container) is prepared automatically on `pg start`; run `pg backup setup` manually to reinitialize, e.g. after changing the base directory.
