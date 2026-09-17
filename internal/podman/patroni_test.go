@@ -305,3 +305,77 @@ func TestPatroniPickMemberYMLPrefersOnDisk(t *testing.T) {
 		t.Errorf("must prefer the on-disk member config %s, got %s", want, ymlPath)
 	}
 }
+
+// WriteMemberRestoreConfig replaces the default initdb bootstrap with a
+// pgBackRest custom-bootstrap PITR. The custom `method` and its block must be
+// SIBLINGS of bootstrap.dcs (as Patroni parses it), NOT nested inside it — and
+// the DCS dynamic config must stay clean: recovery_target_* injected into
+// bootstrap.dcs would be applied as live GUCs post-promote and break the leader.
+func TestPatroniWriteMemberRestoreConfigLayout(t *testing.T) {
+	cfg := config.Default()
+	m := &PatroniManager{cfg: cfg, dataDir: t.TempDir()}
+	cluster := testPatroniCluster()
+	cluster.EtcdEndpoints = []string{"127.0.0.1:2379"}
+
+	restoreCmd := `pgbackrest --stanza=pgcli_app --type=time --target="2026-09-17 12:00:00+00" --target-action=promote --delta restore`
+	path, err := m.WriteMemberRestoreConfig(cluster, "node1", PatroniRestoreBootstrap{RestoreCmd: restoreCmd})
+	if err != nil {
+		t.Fatalf("WriteMemberRestoreConfig: %v", err)
+	}
+	out, _ := os.ReadFile(path)
+	var doc map[string]any
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	boot := doc["bootstrap"].(map[string]any)
+
+	// method is a sibling of dcs.
+	if boot["method"] != "pgbackrest" {
+		t.Errorf("bootstrap.method = %v, want pgbackrest (custom bootstrap)", boot["method"])
+	}
+	dcs, ok := boot["dcs"].(map[string]any)
+	if !ok {
+		t.Fatalf("bootstrap.dcs must still exist (standard dynamic config), got %v", boot["dcs"])
+	}
+
+	// The pgbackrest method block sits at bootstrap level, keyed by the method
+	// name, with the recovery knobs Patroni needs.
+	pgbr, ok := boot["pgbackrest"].(map[string]any)
+	if !ok {
+		t.Fatalf("bootstrap.pgbackrest method block missing, got %v", boot["pgbackrest"])
+	}
+	if pgbr["command"] != restoreCmd {
+		t.Errorf("bootstrap.pgbackrest.command = %v, want the restore command", pgbr["command"])
+	}
+	if pgbr["no_params"] != true {
+		t.Errorf("no_params must be true (pgbackrest rejects Patroni's --scope/--datadir, [031])")
+	}
+	if pgbr["keep_existing_recovery_conf"] != true {
+		t.Errorf("keep_existing_recovery_conf must be true (preserve pgbackrest's recovery.signal)")
+	}
+
+	// dcs must NOT have absorbed the restore block.
+	if _, leaked := dcs["method"]; leaked {
+		t.Error("method must not be nested inside bootstrap.dcs")
+	}
+	if _, leaked := dcs["pgbackrest"]; leaked {
+		t.Error("pgbackrest method block must not be nested inside bootstrap.dcs")
+	}
+	// DCS dynamic config stays clean: no recovery_target_* leaking into the
+	// GUC parameters the promoted leader would run with.
+	params, _ := dcs["postgresql"].(map[string]any)
+	if params != nil {
+		if p, ok := params["parameters"].(map[string]any); ok {
+			for _, bad := range []string{"recovery_target_time", "recovery_target_action", "restore_command"} {
+				if _, present := p[bad]; present {
+					t.Errorf("bootstrap.dcs.postgresql.parameters must not contain %q (it would be a live GUC on the promoted leader)", bad)
+				}
+			}
+		}
+	}
+
+	if perm := (func() os.FileMode { fi, _ := os.Stat(path); return fi.Mode().Perm() })(); perm != 0o600 {
+		t.Errorf("restore patroni.yml mode = %o, want 600 (embeds passwords)", perm)
+	}
+}

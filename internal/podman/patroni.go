@@ -259,7 +259,75 @@ func (m *PatroniManager) WriteMemberConfig(cluster *config.PatroniClusterConfig,
 	return path, nil
 }
 
-// --- image ------------------------------------------------------------
+// PatroniRestoreBootstrap is the pgBackRest custom-bootstrap block injected
+// into a member's patroni.yml for a cluster PITR. The DCS is cleared first, so
+// Patroni re-runs bootstrap on the member's empty data dir via this method
+// instead of initdb, recovering the cluster to a point in time.
+type PatroniRestoreBootstrap struct {
+	RestoreCmd string // the pgbackrest restore command Patroni executes as the bootstrap method
+}
+
+// WriteMemberRestoreConfig renders patroni.yml for one member exactly like
+// WriteMemberConfig but replacing the default initdb bootstrap with a
+// pgBackRest custom-bootstrap PITR. It exists so `pg ha restore` can rebuild a
+// cluster back to a point in time: the member runs this on an empty data dir +
+// absent DCS, recovers via pgBackRest, and promotes to the writable leader on
+// the new timeline. The archive_command (and S3 reachability) is untouched —
+// the member already mounts its pgbackrest-archive.conf at /etc/pgbackrest.conf.
+func (m *PatroniManager) WriteMemberRestoreConfig(cluster *config.PatroniClusterConfig, member string, rb PatroniRestoreBootstrap) (string, error) {
+	mb, ok := cluster.Members[member]
+	if !ok {
+		return "", fmt.Errorf("member %q is not part of cluster %q", member, cluster.Name)
+	}
+	endpoints, err := m.dcsEndpoints(cluster)
+	if err != nil {
+		return "", err
+	}
+	nsScope := m.cfg.PatroniScope(cluster.Name)
+	doc, err := m.renderPatroniYML(cluster, member, mb, nsScope, endpoints)
+	if err != nil {
+		return "", err
+	}
+
+	// A custom bootstrap `method` and its block are SIBLINGS of bootstrap.dcs
+	// (like initdb/pg_hba), not entries inside it — the recovery target belongs
+	// to the one-time bootstrap, never the DCS dynamic config (recovery_target_*
+	// injected there would be applied as live GUCs post-promote and conflict).
+	// `no_params` stops Patroni appending --scope/--datadir, which pgbackrest
+	// rejects as unknown options ([031], verified). `keep_existing_recovery_conf`
+	// makes Patroni preserve the recovery.signal + restore_command +
+	// recovery_target_* that `pgbackrest restore --type=time` writes itself — so
+	// the restore command (with its --target/--target-action) is the single
+	// source of truth, and the bootstrapped member stops at the point and
+	// promotes. bootstrap.dcs stays intact so the new cluster republishes the
+	// standard dynamic config.
+	boot := doc["bootstrap"].(map[string]any)
+	boot["method"] = "pgbackrest"
+	boot["pgbackrest"] = map[string]any{
+		"command":                     rb.RestoreCmd,
+		"no_params":                   true,
+		"keep_existing_recovery_conf": true,
+	}
+
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return "", fmt.Errorf("rendering patroni.yml: %w", err)
+	}
+	dir := m.memberConfigDir(nsScope, member)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("creating patroni member dir: %w", err)
+	}
+	path := filepath.Join(dir, "patroni.yml")
+	if err := os.WriteFile(path, out, 0600); err != nil {
+		return "", fmt.Errorf("writing patroni.yml: %w", err)
+	}
+	if os.Geteuid() == 0 {
+		if err := os.Chown(path, 999, 999); err != nil {
+			return "", fmt.Errorf("chown patroni.yml to postgres: %w", err)
+		}
+	}
+	return path, nil
+}
 
 // EnsurePatroniImage makes the Patroni image available: try the registry, then
 // build from the embedded Containerfile. Mirrors EnsureBackupImage's
@@ -461,11 +529,11 @@ func (m *PatroniManager) createMemberContainer(cluster *config.PatroniClusterCon
 }
 
 // patroniUserFlags returns podman flags for Patroni member containers.
-// - Root users: no flags needed, root can access any file.
-// - Non-root users: --userns=keep-id + --user <uid>:<gid> maps the container
-//   process to the host user's UID so bind-mounted 0600 config files are
-//   readable. This overrides the image's USER postgres, so a custom /etc/passwd
-//   with a pgbackrest user at the host UID must be bind-mounted for SSH auth.
+//   - Root users: no flags needed, root can access any file.
+//   - Non-root users: --userns=keep-id + --user <uid>:<gid> maps the container
+//     process to the host user's UID so bind-mounted 0600 config files are
+//     readable. This overrides the image's USER postgres, so a custom /etc/passwd
+//     with a pgbackrest user at the host UID must be bind-mounted for SSH auth.
 func patroniUserFlags() []string {
 	if os.Geteuid() == 0 {
 		return []string{}

@@ -20,7 +20,7 @@ var (
 
 func init() {
 	rootCmd.AddCommand(restoreCmd)
-	restoreCmd.Flags().StringVar(&restoreTime, "time", "", "Restore to specified time (e.g. '2026-06-14 15:04:05+00' or '2026-06-14 15:04:05')")
+	restoreCmd.Flags().StringVar(&restoreTime, "time", "", "Restore to specified time, in UTC (e.g. '2026-06-14 15:04:05+00'; a time without a timezone is assumed UTC, e.g. '2026-06-14 15:04:05')")
 	restoreCmd.Flags().BoolVar(&restoreDryRun, "dry-run", false, "Only show what would be done, do not execute")
 	restoreCmd.Flags().BoolVar(&restoreForce, "force", false, "Skip confirmation prompt")
 	restoreCmd.Flags().BoolVar(&restorePromote, "promote", false, "Promote the instance to read-write after recovery (switches timeline). By default the instance is left paused at the target time in read-only state so you can inspect the data and restore again to a different point.")
@@ -65,29 +65,9 @@ Examples:
 			return fmt.Errorf("Please specify restore time: --time \"2026-06-14 15:04:05\"")
 		}
 
-		var targetTime time.Time
-		var err error
-		for _, layout := range []string{
-			"2006-01-02 15:04:05-07:00",
-			"2006-01-02 15:04:05-0700",
-			"2006-01-02 15:04:05-07",
-			"2006-01-02 15:04:05Z07:00",
-			"2006-01-02 15:04:05Z0700",
-			"2006-01-02 15:04:05",
-		} {
-			targetTime, err = time.Parse(layout, restoreTime)
-			if err == nil {
-				break
-			}
-		}
+		targetTime, err := parseRestoreTime(restoreTime)
 		if err != nil {
-			return fmt.Errorf("Invalid time format: %w (use: YYYY-MM-DD HH:MM:SS+00 or YYYY-MM-DD HH:MM:SS)", err)
-		}
-
-		// If no timezone was parsed, treat as UTC.
-		if targetTime.Location() == time.UTC && !strings.Contains(restoreTime, "+") && !strings.Contains(restoreTime, "Z") {
-			targetTime = time.Date(targetTime.Year(), targetTime.Month(), targetTime.Day(),
-				targetTime.Hour(), targetTime.Minute(), targetTime.Second(), 0, time.UTC)
+			return err
 		}
 
 		// Validate target time against the latest backup stop time.
@@ -180,4 +160,35 @@ Examples:
 
 		return pt.Restore(targetTime, restorePromote, false, restoreTailLogs)
 	},
+}
+
+// parseRestoreTime accepts the PITR target in any of the formats the restore
+// docs list. A value with no timezone suffix is read as UTC. Shared by the
+// single-instance `pg restore` and the Patroni `pg ha restore`.
+func parseRestoreTime(raw string) (time.Time, error) {
+	var targetTime time.Time
+	var err error
+	for _, layout := range []string{
+		"2006-01-02 15:04:05-07:00",
+		"2006-01-02 15:04:05-0700",
+		"2006-01-02 15:04:05-07",
+		"2006-01-02 15:04:05Z07:00",
+		"2006-01-02 15:04:05Z0700",
+		"2006-01-02 15:04:05",
+	} {
+		targetTime, err = time.Parse(layout, raw)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("Invalid time format: %w (use: YYYY-MM-DD HH:MM:SS+00 or YYYY-MM-DD HH:MM:SS)", err)
+	}
+
+	// If no timezone was parsed, treat as UTC.
+	if targetTime.Location() == time.UTC && !strings.Contains(raw, "+") && !strings.Contains(raw, "Z") {
+		targetTime = time.Date(targetTime.Year(), targetTime.Month(), targetTime.Day(),
+			targetTime.Hour(), targetTime.Minute(), targetTime.Second(), 0, time.UTC)
+	}
+	return targetTime, nil
 }
