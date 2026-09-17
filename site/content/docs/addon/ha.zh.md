@@ -319,11 +319,28 @@ recreate 语义相同。
 的格式，供其它主机复用：
 
 ```bash
-pg ha passwords app --file app-passwd.yml   # 即 --passwords-file 的格式，写入权限 0600
+pg ha passwords app                          # 把存储的这套以 YAML 打到 stdout
+pg ha passwords app --file app-passwd.yml    # 或写入文件（权限 0600）
 ```
 
 （不加 `--file` 则输出到 stdout —— 建议用 `--file`，免得密码落进 shell 历史和
 滚屏。）
+
+四个角色及其**默认用户名**（由 pgcli 固定 —— 你只设置*密码*，密码默认按每个角色
+生成随机 16 位字符串）。长度可用 `--password-length` 覆盖（`pg ha create` /
+`pg create`，8–64）；它只对"生成"这条路径生效，对 `--passwords-file` 或已存储的
+密码集无效：
+
+| pg.yaml 键 | 用途 | 默认用户名 | 默认密码 |
+|------------|------|------------|----------|
+| `superuser` | PostgreSQL 超级用户 | `postgres` | 随机 16 位，自动生成 |
+| `replication` | 复制 / 流复制 | `replicator` | 随机 16 位，自动生成 |
+| `rewind` | `pg_rewind` 角色 | `rewind_user` | 随机 16 位，自动生成 |
+| `restapi_user` / `restapi_password` | Patroni REST API basic-auth | `postgres` | 随机 16 位，自动生成 |
+
+`postgres` / `replicator` / `rewind_user` 这些用户名被写进渲染出的 `patroni.yml`
+（`postgresql.authentication`）；可生成 / 用 `--passwords-file` 提供的只是密码部分。
+`restapi_user` 是唯一可通过密码文件覆盖的用户名。
 
 需要完全自己掌控（或想手写这份文件）时，用同样格式配 `--passwords-file`：
 

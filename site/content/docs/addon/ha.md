@@ -355,11 +355,29 @@ pass passwords on the command line: the first member generates them, and
 `pg ha passwords` exports the stored set:
 
 ```bash
-pg ha passwords app --file app-passwd.yml   # the exact --passwords-file format, mode 0600
+pg ha passwords app                          # print the stored set (YAML) to stdout
+pg ha passwords app --file app-passwd.yml    # write it to a file (mode 0600) instead
 ```
 
 (Without `--file` the YAML goes to stdout — prefer `--file` so the secrets stay
 out of shell history and scrollback.)
+
+The four roles and their **default usernames** (fixed by pgcli — you only ever set
+the *passwords*, which default to a random 16-char string per role). Override the
+length with `--password-length` on `pg ha create` / `pg create` (8–64; it only
+applies to the generate path, not to a `--passwords-file` or an already-stored set):
+
+| pg.yaml key        | Role                          | Default username | Default password            |
+|--------------------|-------------------------------|------------------|-----------------------------|
+| `superuser`        | PostgreSQL superuser          | `postgres`       | random 16-char, generated   |
+| `replication`      | replication / streaming       | `replicator`     | random 16-char, generated   |
+| `rewind`           | `pg_rewind` role              | `rewind_user`    | random 16-char, generated   |
+| `restapi_user` / `restapi_password` | Patroni REST API basic-auth | `postgres`       | random 16-char, generated   |
+
+The `postgres` / `replicator` / `rewind_user` usernames are baked into the rendered
+`patroni.yml` (`postgresql.authentication`); only the passwords are the generated /
+`--passwords-file` part. `restapi_user` is the one username you can override, via the
+passwords file.
 
 For full control (or when you'd rather author the file yourself) use the same
 format with `--passwords-file`:
