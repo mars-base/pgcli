@@ -149,7 +149,7 @@ Examples:
 		restoreCmd := buildRestoreCmd(stanza, targetTime)
 
 		if haRestoreDryRun {
-			printRestorePlan(scope, cluster, stanza, boot, others, targetTime, restoreCmd, leaderName, !leaderLocal)
+			printRestorePlan(scope, stanza, boot, targetTime, leaderName, leaderLocal)
 			return nil
 		}
 
@@ -427,29 +427,23 @@ func currentLeaderName(pm *podman.PatroniManager, cluster *config.PatroniCluster
 	return podman.PatroniLeaderFromListJSON(out)
 }
 
-// printRestorePlan renders the destructive sequence without touching anything.
-func printRestorePlan(scope string, cluster *config.PatroniClusterConfig, stanza, boot string, others []string, target time.Time, restoreCmd, leaderName string, leaderRemote bool) {
-	fmt.Println("[DRY RUN] Would restore the Patroni cluster with a custom-bootstrap PITR:")
+// printRestorePlan shows the operational picture for --dry-run: where to run
+// the restore and what to do first, without enumerating the internal steps.
+func printRestorePlan(scope, stanza, boot string, target time.Time, leaderName string, leaderLocal bool) {
+	fmt.Println("[DRY RUN] Restore plan (no changes made):")
 	fmt.Printf("  Scope:        %s\n", scope)
 	fmt.Printf("  Stanza:       %s\n", stanza)
 	fmt.Printf("  Target time:  %s\n", target.Format("2006-01-02 15:04:05"))
-	if leaderName != "" {
-		fmt.Printf("  Current leader: %s\n", leaderName)
+	fmt.Printf("  Bootstrap on: %s (local member; the cluster rebuilds around it)\n", boot)
+	if leaderLocal {
+		fmt.Println("  Leader:       local — this host can run the restore.")
+		fmt.Println("  Run:          pg ha restore " + scope + ` --time "` + target.Format("2006-01-02 15:04:05-07") + `" --tail-logs`)
+	} else {
+		fmt.Printf("  Leader:       %s is NOT on this host — the real run REFUSES until it is.\n", leaderName)
+		fmt.Println("  Do one of:")
+		fmt.Printf("    a. move leadership local: pg ha switchover %s --candidate %s --yes\n", scope, boot)
+		fmt.Printf("       then re-run:          pg ha restore %s --time \"<target>\"\n", scope)
+		fmt.Printf("    b. or run the restore on the leader's host instead.\n")
 	}
-	if leaderRemote {
-		fmt.Printf("  [!!] current leader %q is NOT a local member — the real run REFUSES until leadership\n", leaderName)
-		fmt.Printf("       is on this host (switchover/failover to a local member, or restore on the leader's host).\n")
-	}
-	fmt.Println("  Steps:")
-	fmt.Printf("    1. stop local members (%v)\n", localMembers(cluster))
-	fmt.Printf("    2. patronictl remove %s (clear DCS identity)\n", cfg.PatroniScope(scope))
-	fmt.Printf("    3. wipe %s data dir; write patroni.yml with bootstrap method:\n        %s\n", boot, restoreCmd)
-	fmt.Printf("    4. start %s — Patroni recovers to the target and promotes to leader on a NEW timeline\n", boot)
-	if len(others) > 0 {
-		fmt.Printf("    5. wipe + restart %v as standard replicas; they basebackup the new leader\n", others)
-	}
-	if hasRemoteMembers(cluster) {
-		fmt.Println("    6. remote members rejoin via the DCS (reinit if they do not return)")
-	}
-	fmt.Println("  No changes made. Re-run without --dry-run to execute.")
+	fmt.Println("  See the docs for the full procedure (post-restore snapshot + stanza-upgrade).")
 }
