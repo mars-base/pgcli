@@ -34,6 +34,7 @@ func init() {
 	backupCmd.AddCommand(backupStatusCmd)
 	backupCmd.AddCommand(backupFetchCACmd)
 	backupCmd.AddCommand(backupStanzaUpgradeCmd)
+	backupCmd.AddCommand(backupListStanzaCmd)
 
 	backupSetupCmd.Flags().StringVar(&backupBaseDir, "base-dir", "", "base directory for backup data and logs (overrides config base_dir)")
 	backupSetupCmd.Flags().StringVar(&s3Endpoint, "s3-endpoint", "", "S3 repository host:port (pgBackRest forces HTTPS - use a TLS-terminated endpoint, e.g. a MinIO installed with 'pg addon install minio --tls')")
@@ -61,6 +62,7 @@ Subcommands:
   start           Start the backup container
   stop            Stop the backup container
   status          Show backup container status
+  list-stanza     List all pgBackRest stanzas managed by the backup container
   stanza-upgrade  Refresh stanza metadata after a data directory was rebuilt
   fetch-ca        Fetch an S3 endpoint's TLS CA certificate over the network`,
 }
@@ -629,7 +631,7 @@ var backupStatusCmd = &cobra.Command{
 // --- backup stanza-upgrade ----------------------------------------
 
 var backupStanzaUpgradeCmd = &cobra.Command{
-	Use:   "stanza-upgrade [stanza...]",
+	Use:   "stanza-upgrade <stanza>...",
 	Short: "Refresh stanza metadata after an instance's data directory was rebuilt",
 	Long: `Refresh the repository metadata (db:history) of pgBackRest stanzas against
 the PostgreSQL instances running today.
@@ -641,14 +643,14 @@ identifier: subsequent backups abort with
 This command is the standard fix (stanza-reset deletes backups, upgrade does
 not). Existing backups are kept.
 
-With no arguments every managed stanza is upgraded: one per PITR-enabled
-instance plus one per Patroni cluster. Pass stanza names to be selective.
+Pass one or more stanza names (list them with 'pg backup list-stanza');
+upgrade-all is deliberately not offered — refreshing metadata you did not ask
+for is never a safe default.
 
 Examples:
-  pg backup stanza-upgrade                       # all stanzas
-  pg backup stanza-upgrade pgcli_default         # just one
+  pg backup stanza-upgrade pgcli_default         # a PITR instance stanza
   pg backup stanza-upgrade pgcli_app-default     # a Patroni cluster stanza`,
-	Args: cobra.ArbitraryArgs,
+	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadRawConfig()
 		if err != nil {
@@ -667,27 +669,18 @@ Examples:
 		}
 
 		all := bm.StanzaNames()
-		stanzas := args
-		if len(stanzas) == 0 {
-			if len(all) == 0 {
-				fmt.Println("-> no stanzas to upgrade (no PITR-enabled instance, no Patroni cluster)")
-				return nil
-			}
-			stanzas = all
-		} else {
-			known := map[string]bool{}
-			for _, s := range all {
-				known[s] = true
-			}
-			for _, s := range stanzas {
-				if !known[s] {
-					return fmt.Errorf("unknown stanza %q (managed stanzas: %s)", s, strings.Join(all, ", "))
-				}
+		known := map[string]bool{}
+		for _, s := range all {
+			known[s] = true
+		}
+		for _, s := range args {
+			if !known[s] {
+				return fmt.Errorf("unknown stanza %q (managed stanzas: %s)", s, strings.Join(all, ", "))
 			}
 		}
 
 		var failed int
-		for _, s := range stanzas {
+		for _, s := range args {
 			if err := bm.StanzaUpgrade(s); err != nil {
 				fmt.Printf("  [!!] %s: %v\n", s, err)
 				failed++
@@ -696,9 +689,45 @@ Examples:
 			fmt.Printf("  [OK] %s upgraded\n", s)
 		}
 		if failed > 0 {
-			return fmt.Errorf("%d/%d stanza(s) failed to upgrade", failed, len(stanzas))
+			return fmt.Errorf("%d/%d stanza(s) failed to upgrade", failed, len(args))
 		}
-		fmt.Printf("-> %d stanza(s) upgraded\n", len(stanzas))
+		fmt.Printf("-> %d stanza(s) upgraded\n", len(args))
+		return nil
+	},
+}
+
+// --- backup list-stanza --------------------------------------------
+
+var backupListStanzaCmd = &cobra.Command{
+	Use:   "list-stanza",
+	Short: "List all pgBackRest stanzas managed by the backup container",
+	Long: `List every pgBackRest stanza the shared backup container manages: one per
+PITR-enabled instance plus one per Patroni HA cluster.
+
+These are the names accepted by 'pg backup stanza-upgrade' (they are not
+container names — a stanza is the repository's label for one backup target).`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := loadRawConfig()
+		if err != nil {
+			return fmt.Errorf("failed to load config: %w", err)
+		}
+		bm, err := podman.NewBackupManager(cfg)
+		if err != nil {
+			return err
+		}
+
+		stanzas := bm.ListStanzas()
+		if len(stanzas) == 0 {
+			fmt.Println("(no stanzas — no PITR-enabled instance, no Patroni cluster)")
+			return nil
+		}
+
+		fmt.Printf("%-24s  %-9s  %s\n", "STANZA", "KIND", "TARGET")
+		fmt.Println("------------------------------------------------------------")
+		for _, s := range stanzas {
+			fmt.Printf("%-24s  %-9s  %s\n", s.Stanza, s.Kind, s.Target)
+		}
 		return nil
 	},
 }

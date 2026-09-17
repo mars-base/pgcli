@@ -510,8 +510,8 @@ func instanceStanzaName(name string, inst config.InstanceConfig) string {
 
 // StanzaNames lists every stanza the backup container manages: one per
 // PITR-enabled instance plus one per Patroni cluster (same source as
-// WritePgbackrestConf). Used by `pg backup stanza-upgrade` to default to all
-// stanzas.
+// WritePgbackrestConf). Used to validate the stanza names given to
+// `pg backup stanza-upgrade`.
 func (m *BackupManager) StanzaNames() []string {
 	var out []string
 	for name, inst := range m.cfg.Instances {
@@ -524,6 +524,31 @@ func (m *BackupManager) StanzaNames() []string {
 		out = append(out, t.Stanza)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// StanzaInfo describes one managed stanza for `pg backup list-stanza`: the
+// pgBackRest stanza name plus what it maps to.
+type StanzaInfo struct {
+	Stanza string
+	Kind   string // "instance" (PITR) or "patroni" (HA cluster)
+	Target string // instance name, or cluster scope
+}
+
+// ListStanzas returns every managed stanza annotated with its origin, sorted
+// by stanza name (same source of truth as StanzaNames/WritePgbackrestConf).
+func (m *BackupManager) ListStanzas() []StanzaInfo {
+	var out []StanzaInfo
+	for name, inst := range m.cfg.Instances {
+		if !inst.PITR.Enabled {
+			continue
+		}
+		out = append(out, StanzaInfo{Stanza: instanceStanzaName(name, inst), Kind: "instance", Target: name})
+	}
+	for _, t := range m.PatroniStanzaNames() {
+		out = append(out, StanzaInfo{Stanza: t.Stanza, Kind: "patroni", Target: t.Scope})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Stanza < out[j].Stanza })
 	return out
 }
 
