@@ -117,6 +117,26 @@ pg logs addon minio --name store -f    # Follow
 MinIO logs to stdout: startup lines (the `API:` / `Console:` addresses it is
 serving) and request errors.
 
+### Patroni members
+
+Patroni is not an `pg addon`-managed component — it is a top-level `pg ha`
+cluster — so it has its own shorthand, `pg logs ha <scope> --member <name>`:
+
+```bash
+pg logs ha app --member node1     # node1's logs (scope app)
+pg logs ha app -m node1 -f        # Follow
+pg logs ha app -m node1 -n 200    # Last 200 lines
+```
+
+`pg logs ha` is equivalent to `pg logs addon patroni --scope <scope> --name
+<member>`; the scope is required and the member name selects one node within
+that cluster.
+
+Patroni members log the HA loop each cycle (`no action. I am (node1), a
+secondary, and following a leader (node3)`) plus PostgreSQL startup/recovery
+output — useful for spotting a stuck replica (repeating `record with incorrect
+prev-link` / `waiting for WAL to become available`).
+
 ## Options
 
 | Option | Short | Description |
@@ -125,7 +145,9 @@ serving) and request errors.
 | `--tail N` | `-n N` | Show last N lines (default: 50, use 0 for all) |
 | `--instance NAME` | `-i NAME` | Instance name (default: `default`) |
 | `--pg-name NAME` | | Remote addon name (for remote PgBouncer) |
-| `--name NAME` | | etcd member / PgDog proxy / HAProxy / MinIO instance name (default: `etcd` / `pgdog` / `haproxy` / `minio`) |
+| `--name NAME` | | etcd member / PgDog proxy / HAProxy / MinIO instance name (default: `etcd` / `pgdog` / `haproxy` / `minio`); Patroni member name (required with `--scope`) |
+| `--scope NAME` | | Patroni cluster scope (only for addon type `patroni`) |
+| `--member NAME` | `-m NAME` | Patroni member name (only for `pg logs ha <scope>`) |
 
 ## Examples
 
@@ -153,6 +175,9 @@ pg logs addon haproxy --name lb -f
 
 # Watch MinIO request errors
 pg logs addon minio --name store -f
+
+# Watch a Patroni member / diagnose a stuck replica
+pg logs ha app --member node1 -f
 ```
 
 ## Notes

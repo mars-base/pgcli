@@ -124,9 +124,9 @@ pg exec --dsn "postgres://<user>@<leader_host>:<port>/postgres" \
 pg exec --dsn "postgres://<user>@<replica_host>:<port>/postgres" \
   "SELECT status FROM pg_stat_wal_receiver"
 
-# 3) 副本容器日志在反复刷同一条（pg logs addon patroni 按 scope+成员名取，
-#    免去手拼容器名；-f 持续跟随，-n 取更多行）：
-pg logs addon patroni --scope <scope> --name <member> -n 50 | grep -iE "prev-link|waiting for WAL"
+# 3) 副本容器日志在反复刷同一条（pg logs ha 按 scope+成员名取，
+#    -f 持续跟随，-n 取更多行）：
+pg logs ha <scope> -m <member> -n 50 | grep -iE "prev-link|waiting for WAL"
 #   LOG: record with incorrect prev-link ... at 0/20000060
 #   LOG: waiting for WAL to become available at 0/20000078
 ```

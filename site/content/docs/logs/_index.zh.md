@@ -111,6 +111,25 @@ pg logs addon minio --name store -f    # 持续跟踪
 
 MinIO 日志走 stdout：启动行（其服务的 `API:` / `Console:` 地址）与请求错误。
 
+### Patroni 成员
+
+Patroni 不是通过 `pg addon` 管理的组件——它是独立的顶层命令 `pg ha` 集群——
+因此有自己的简写形式 `pg logs ha <scope> --member <name>`：
+
+```bash
+pg logs ha app --member node1     # scope app 下 node1 的日志
+pg logs ha app -m node1 -f        # 持续跟踪
+pg logs ha app -m node1 -n 200    # 最后 200 行
+```
+
+`pg logs ha` 等价于 `pg logs addon patroni --scope <scope> --name <member>`；
+scope 必填，成员名在该集群内定位一个节点。
+
+Patroni 成员每个周期都记录 HA 主循环（`no action. I am (node1), a secondary,
+and following a leader (node3)`）以及 PostgreSQL 启动/恢复输出——适合发现卡住的
+副本（反复出现 `record with incorrect prev-link` / `waiting for WAL to become
+available`）。
+
 ## 选项说明
 
 | 选项 | 简写 | 描述 |
@@ -119,7 +138,9 @@ MinIO 日志走 stdout：启动行（其服务的 `API:` / `Console:` 地址）�
 | `--tail N` | `-n N` | 显示最后 N 行（默认：50，0 表示全部） |
 | `--instance NAME` | `-i NAME` | 实例名称（默认：`default`） |
 | `--pg-name NAME` | | 远程插件名称（用于远程 PgBouncer） |
-| `--name NAME` | | etcd 成员 / PgDog 代理 / HAProxy / MinIO 实例名称（默认：`etcd` / `pgdog` / `haproxy` / `minio`） |
+| `--name NAME` | | etcd 成员 / PgDog 代理 / HAProxy / MinIO 实例名称（默认：`etcd` / `pgdog` / `haproxy` / `minio`）；Patroni 成员名（与 `--scope` 搭配，必填） |
+| `--scope NAME` | | Patroni 集群 scope（仅用于插件类型 `patroni`） |
+| `--member NAME` | `-m NAME` | Patroni 成员名（仅用于 `pg logs ha <scope>`） |
 
 ## 示例
 
@@ -147,6 +168,9 @@ pg logs addon haproxy --name lb -f
 
 # 观察 MinIO 请求错误
 pg logs addon minio --name store -f
+
+# 观察 Patroni 成员 / 排查卡住的副本
+pg logs ha app --member node1 -f
 ```
 
 ## 注意事项
@@ -159,3 +183,4 @@ pg logs addon minio --name store -f
 - MinIO 日志走 stdout，输出启动行与请求错误
 - 跟踪模式（`-f`）会保持连接直到按 Ctrl+C 中断
 - 远程插件使用 `--pg-name` 而不是 `-i` 来标识目标连接池；etcd 成员、PgDog 代理、HAProxy 实例和 MinIO 实例使用 `--name`
+- Patroni 成员不属于 `pg addon` 管理，用 `pg logs ha <scope> --member <name>` 查看（等价于 `pg logs addon patroni --scope --name`）
