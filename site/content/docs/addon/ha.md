@@ -410,11 +410,11 @@ Container name is `pgcli-patroni-<scope>-<member>` (namespace-prefixed when a
 
 Clients connect to the **leader's** PostgreSQL port. Find the leader with
 `pg ha status app` (the `Leader` row's `Host` is its `connect_address`), then
-point psql/pgcli at it. On a single host with default loopback-only members,
+point `pg psql` at it. On a single host with default loopback-only members,
 that is `127.0.0.1:<host_port>`.
 
 ```bash
-psql "host=127.0.0.1 port=<leader_port> user=postgres dbname=postgres"
+pg psql --dsn postgres://postgres@127.0.0.1:<leader_port>/postgres
 ```
 
 After a failover the leader changes, so a fixed connection string should be

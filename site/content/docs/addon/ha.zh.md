@@ -369,11 +369,11 @@ pg logs addon patroni --scope app --name node1 -f       # 跟踪
 ## 连接
 
 客户端连的是 **leader** 的 PostgreSQL 端口。用 `pg ha status app` 找 leader
-（`Leader` 行的 `Host` 就是它的 `connect_address`），再把 psql/pgcli 指过去。
+（`Leader` 行的 `Host` 就是它的 `connect_address`），再把 `pg psql` 指过去。
 单机默认（仅回环）成员下，就是 `127.0.0.1:<host_port>`。
 
 ```bash
-psql "host=127.0.0.1 port=<leader_port> user=postgres dbname=postgres"
+pg psql --dsn postgres://postgres@127.0.0.1:<leader_port>/postgres
 ```
 
 failover 后 leader 会变，所以固定连接串应当避免 —— 除非前面有连接池或 Patroni
