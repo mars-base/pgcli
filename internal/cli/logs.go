@@ -114,21 +114,14 @@ Examples:
 			if scope == "" {
 				return fmt.Errorf("--scope is required for Patroni members, e.g. pg logs addon patroni --scope app --name node1")
 			}
-			if cfg.Addons.Patroni == nil {
-				return fmt.Errorf("no Patroni HA clusters configured")
-			}
-			cluster, ok := cfg.Addons.Patroni[scope]
-			if !ok {
-				return fmt.Errorf("Patroni cluster %q not found (use 'pg ha status' to list scopes)", scope)
-			}
 			if etcdName == "" {
 				return fmt.Errorf("--name is required: the Patroni member, e.g. pg logs addon patroni --scope %s --name node1", scope)
 			}
-			mb, ok := cluster.Members[etcdName]
-			if !ok {
-				return fmt.Errorf("Patroni member %q not found in cluster %q (this host's view: %s)", etcdName, scope, patroniMemberNames(cluster))
+			var err error
+			containerName, err = resolvePatroniContainer(scope, etcdName)
+			if err != nil {
+				return err
 			}
-			containerName = mb.ContainerName
 		case "etcd", "pgdog", "haproxy", "minio":
 			// (patroni is handled above; it shares --name but requires --scope.)
 			if pgName != "" {
@@ -212,6 +205,62 @@ Examples:
 }
 
 // ---------------------------------------------------------------------------
+// Subcommand: pg logs ha <scope> --member <name>
+// ---------------------------------------------------------------------------
+
+var logsHaCmd = &cobra.Command{
+	Use:   "ha <scope>",
+	Short: "Show Patroni HA cluster member logs",
+	Long: `View console output logs for a member of a Patroni HA cluster (scope).
+
+This is shorthand for "pg logs addon patroni --scope <scope> --name <member>"
+(Patroni is managed by "pg ha", not "pg addon", so this is the natural fit
+next to the rest of the "pg ha" command family).
+
+Examples:
+  pg logs ha app --member node1     # node1's logs (scope app)
+  pg logs ha app -m node1 -f        # Follow node1
+  pg logs ha app -m node1 -n 200    # Last 200 lines`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		follow, _ := cmd.Flags().GetBool("follow")
+		tail, _ := cmd.Flags().GetInt("tail")
+		member, _ := cmd.Flags().GetString("member")
+
+		if err := loadConfigForDSN(); err != nil {
+			return err
+		}
+		containerName, err := resolvePatroniContainer(args[0], member)
+		if err != nil {
+			return err
+		}
+		return runPodmanLogs(containerName, tail, follow)
+	},
+}
+
+// resolvePatroniContainer validates a scope + member name against the loaded
+// cfg (must be populated via loadConfigForDSN first) and returns the member's
+// container name. Shared by `pg logs addon patroni` and the `pg logs ha`
+// shorthand so the two can't drift apart on validation or lookup.
+func resolvePatroniContainer(scope, member string) (string, error) {
+	if cfg.Addons.Patroni == nil {
+		return "", fmt.Errorf("no Patroni HA clusters configured")
+	}
+	cluster, ok := cfg.Addons.Patroni[scope]
+	if !ok {
+		return "", fmt.Errorf("Patroni cluster %q not found (use 'pg ha status' to list scopes)", scope)
+	}
+	if member == "" {
+		return "", fmt.Errorf("--member is required: the Patroni member, e.g. pg logs ha %s --member node1", scope)
+	}
+	mb, ok := cluster.Members[member]
+	if !ok {
+		return "", fmt.Errorf("Patroni member %q not found in cluster %q (this host's view: %s)", member, scope, patroniMemberNames(cluster))
+	}
+	return mb.ContainerName, nil
+}
+
+// ---------------------------------------------------------------------------
 // init
 // ---------------------------------------------------------------------------
 
@@ -227,8 +276,14 @@ func init() {
 	logsAddonCmd.Flags().String("name", "", "etcd member name, pgdog proxy name, haproxy instance name, minio instance name, or Patroni member name")
 	logsAddonCmd.Flags().String("scope", "", "Patroni cluster scope (required only with addon type patroni)")
 
+	// Flags on ha subcommand
+	logsHaCmd.Flags().BoolP("follow", "f", false, "Stream logs continuously")
+	logsHaCmd.Flags().IntP("tail", "n", 50, "Number of lines to show (0 = all)")
+	logsHaCmd.Flags().StringP("member", "m", "", "Patroni member name")
+
 	rootCmd.AddCommand(logsCmd)
 	logsCmd.AddCommand(logsAddonCmd)
+	logsCmd.AddCommand(logsHaCmd)
 }
 
 // ---------------------------------------------------------------------------
