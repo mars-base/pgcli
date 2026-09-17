@@ -13,10 +13,32 @@ import (
 )
 
 var createBaseDir string
+var createPasswordLength int
 
 func init() {
 	rootCmd.AddCommand(createCmd)
 	createCmd.Flags().StringVar(&createBaseDir, "base-dir", "", "custom base directory for data and wal (overrides config base_dir)")
+	createCmd.Flags().IntVar(&createPasswordLength, "password-length", defaultPasswordLength, "length of the generated password (8-64)")
+}
+
+// defaultPasswordLength is the length used when --password-length is not given,
+// with passwordLengthFloor / passwordLengthCeiling as the accepted range.
+// Passwords are drawn from a 62-char set (a-z A-Z 0-9) via crypto/rand, so 16
+// chars is ~95 bits of entropy; the bounds only guard against a mistyped,
+// effectively-brute-forceable or absurdly long value.
+const (
+	defaultPasswordLength = 16
+	passwordLengthFloor   = 8
+	passwordLengthCeiling = 64
+)
+
+// validatePasswordLength rejects a length outside [floor, ceiling].
+func validatePasswordLength(n int) error {
+	if n < passwordLengthFloor || n > passwordLengthCeiling {
+		return fmt.Errorf("--password-length must be between %d and %d (got %d)",
+			passwordLengthFloor, passwordLengthCeiling, n)
+	}
+	return nil
 }
 
 var createCmd = &cobra.Command{
@@ -30,6 +52,9 @@ Database name is derived as <instance>_db.
 Data directory uses the base_dir from config if set,
 otherwise defaults to ~/.pgcli/dbdata/<instance>/.
 Use --base-dir to override the config base_dir for this instance.
+
+The password is a random string (a-z A-Z 0-9, crypto/rand); its length defaults to
+16 and is adjustable with --password-length (8-64).
 
 Examples:
   pg create -i proj01
@@ -59,7 +84,10 @@ Examples:
 		}
 
 		// Generate random password
-		password, err := generatePassword(16)
+		if err := validatePasswordLength(createPasswordLength); err != nil {
+			return err
+		}
+		password, err := generatePassword(createPasswordLength)
 		if err != nil {
 			return fmt.Errorf("failed to generate password: %w", err)
 		}

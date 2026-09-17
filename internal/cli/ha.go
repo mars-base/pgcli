@@ -91,6 +91,9 @@ replication, rewind and REST-API credentials and stores them in pg.yaml. For
 cross-host members the ENTIRE set must be identical on every host (Patroni's
 REST/rewind/replication auth is cluster-wide), so export the first host's
 passwords to a file and pass it with --passwords-file on the others.
+Generated passwords are random a-z A-Z 0-9 (crypto/rand); --password-length
+(default 16, 8-64) sets their length, but only for that generate path — it is
+ignored when --passwords-file is given or the scope already has a stored set.
 
 Examples:
   pg ha create app --member node1 --etcd m1
@@ -112,6 +115,7 @@ func runHACreate(cmd *cobra.Command, args []string) error {
 	hostPort, _ := cmd.Flags().GetInt("host-port")
 	restapiPort, _ := cmd.Flags().GetInt("restapi-port")
 	passFile, _ := cmd.Flags().GetString("passwords-file")
+	passwordLength, _ := cmd.Flags().GetInt("password-length")
 
 	if member == "" {
 		return fmt.Errorf("--member is required")
@@ -163,12 +167,17 @@ func runHACreate(cmd *cobra.Command, args []string) error {
 
 	// Passwords: load (cross-host must match) or, for a brand-new scope,
 	// generate once and persist. An existing scope keeps its stored set.
+	// --password-length only affects the generate path; it is a no-op when a
+	// password file is supplied or the scope already has a stored set.
 	if passFile != "" {
 		if err := loadPasswordsFile(&cluster.Passwords, passFile); err != nil {
 			return err
 		}
 	} else if !existed || cluster.Passwords.Superuser == "" {
-		if err := fillGeneratedPasswords(&cluster.Passwords); err != nil {
+		if err := validatePasswordLength(passwordLength); err != nil {
+			return err
+		}
+		if err := fillGeneratedPasswords(&cluster.Passwords, passwordLength); err != nil {
 			return fmt.Errorf("generating passwords: %w", err)
 		}
 	}
@@ -261,20 +270,20 @@ func patroniYMLPath(c *config.Config, nsScope, member string) string {
 	return fmt.Sprintf("%s/addon/patroni/%s/%s/patroni.yml", strings.TrimSuffix(base, "/"), nsScope, member)
 }
 
-func fillGeneratedPasswords(p *config.PatroniPasswords) error {
-	su, err := generatePassword(16)
+func fillGeneratedPasswords(p *config.PatroniPasswords, length int) error {
+	su, err := generatePassword(length)
 	if err != nil {
 		return err
 	}
-	repl, err := generatePassword(16)
+	repl, err := generatePassword(length)
 	if err != nil {
 		return err
 	}
-	rw, err := generatePassword(16)
+	rw, err := generatePassword(length)
 	if err != nil {
 		return err
 	}
-	rest, err := generatePassword(16)
+	rest, err := generatePassword(length)
 	if err != nil {
 		return err
 	}
@@ -1015,6 +1024,7 @@ func init() {
 	haCreateCmd.Flags().Int("host-port", 0, "explicit PG port (auto-assigned from the patroni pool if 0; set explicitly and identically on cross-host peers)")
 	haCreateCmd.Flags().Int("restapi-port", 0, "explicit Patroni REST API port (auto-assigned if 0)")
 	haCreateCmd.Flags().String("passwords-file", "", "YAML file with the cluster password set (required for cross-host members; must match on every host)")
+	haCreateCmd.Flags().Int("password-length", defaultPasswordLength, "length of each GENERATED password (8-64); ignored with --passwords-file or an existing scope")
 
 	haRemoveCmd.Flags().String("member", "", "remove a single member")
 	haRemoveCmd.Flags().Bool("scope-all", false, "remove every local member and clear the cluster from the DCS")
