@@ -148,11 +148,17 @@ func (m *PatroniManager) renderPatroniYML(cluster *config.PatroniClusterConfig, 
 				"data-checksums",
 			},
 			// pg_hba is rendered into the running PG every DCS cycle, so any
-			// hand-edit is lost — this list is the source of truth. "all" for
-			// the address because rootless podman's pasta rewrites loopback
-			// connections to arrive from 192.168.10.1; a 127.0.0.1/32-only
-			// rule would lock Patroni out of its own postmaster.
+			// hand-edit is lost — this list is the source of truth. The two
+			// `local` lines match Patroni's own unix-socket connections to its
+			// postmaster (use_unix_socket below); they are trust because only
+			// the postgres/Patroni processes live in the container and the
+			// socket dir is outside any host mount. The `host ... all` lines
+			// cover peer TCP: rootless podman's pasta rewrites loopback
+			// connections to arrive from the host IP, so a 127.0.0.1/32-only
+			// rule would lock out both Patroni and cross-host replicas.
 			"pg_hba": []string{
+				"local all all trust",
+				"local replication all trust",
 				"host all all all scram-sha-256",
 				"host replication all all scram-sha-256",
 			},
@@ -163,6 +169,20 @@ func (m *PatroniManager) renderPatroniYML(cluster *config.PatroniClusterConfig, 
 			"data_dir":        "/var/lib/postgresql/data",
 			"bin_dir":         "/usr/lib/postgresql/18/bin",
 			"pgpass":          pgPassPath,
+			// Patroni reaches its OWN postmaster over a unix socket, not TCP.
+			// Rootless podman's pasta rewrites a loopback-originated TCP
+			// connection so it arrives from the host IP (10.241.21.97), not
+			// 127.0.0.1 — and during a custom bootstrap Patroni's generated
+			// pg_hba only trusts the resolved loopback addresses (see
+			// ConfigHandler.replace_pg_hba), so that rewritten source is
+			// rejected and Patroni can never observe its own recovery,
+			// dead-locking `pg ha restore`. A socket connection is local for
+			// pg_hba purposes and immune to the rewrite. The socket dir is set
+			// to /var/lib/postgresql (below), outside PGDATA and writable by
+			// the container user. connect_address still advertises the TCP
+			// endpoint to peers, so replicas are unaffected.
+			"use_unix_socket":      true,
+			"use_unix_socket_repl": true,
 			"authentication": map[string]any{
 				"superuser": map[string]string{
 					"username": "postgres",
@@ -519,6 +539,36 @@ func (m *PatroniManager) createMemberContainer(cluster *config.PatroniClusterCon
 				"-v", fmt.Sprintf("%s:/etc/pgbackrest/ca.crt:ro,z", hostMountPath(ca.CAFile)),
 			)
 		}
+
+		// pgBackRest's async spool + console log need a writable path; the
+		// image's baked-in /var/spool/pgbackrest, /var/log/pgbackrest are
+		// root-owned and unwritable by the container user (host uid under
+		// keep-id). archive-push is synchronous and never touches spool, but a
+		// PITR restore drives async archive-get and fails [053] "Permission
+		// denied" there. Bind-mount member-local dirs over both defaults,
+		// owned as the container's effective uid: under rootless pgcli that is
+		// already os.Getuid() (no chown needed); under root, no user flags are
+		// passed, so the container runs as the image's postgres (uid 999) and
+		// must be chowned to match — leaving it root-owned would be worse than
+		// the image's own baked-in dirs.
+		spoolDir := filepath.Join(dir, "pgbackrest-spool")
+		logDir := filepath.Join(dir, "pgbackrest-log")
+		uid, gid := os.Getuid(), os.Getgid()
+		if os.Geteuid() == 0 {
+			uid, gid = 999, 999
+		}
+		for _, d := range []string{spoolDir, logDir} {
+			if err := os.MkdirAll(d, 0o750); err != nil {
+				return fmt.Errorf("creating pgbackrest dir %s: %w", d, err)
+			}
+			if err := os.Chown(d, uid, gid); err != nil {
+				return fmt.Errorf("chowning pgbackrest dir %s: %w", d, err)
+			}
+		}
+		args = append(args,
+			"-v", fmt.Sprintf("%s:/var/spool/pgbackrest:z", hostMountPath(spoolDir)),
+			"-v", fmt.Sprintf("%s:/var/log/pgbackrest:z", hostMountPath(logDir)),
+		)
 	}
 
 	args = append(args, mb.ImageTag)
@@ -819,9 +869,23 @@ func (m *PatroniManager) PatronictlCapture(cluster *config.PatroniClusterConfig,
 func (m *PatroniManager) RemoveScopeFromDCS(cluster *config.PatroniClusterConfig) error {
 	nsScope := m.cfg.PatroniScope(cluster.Name)
 
+	// The leader name is only known while a leader is published in the DCS. The
+	// restore path pauses the cluster before stopping members precisely so this
+	// list is stable, but the capture is still best-effort retried: an empty
+	// leader for a cluster that still has members means an election is in flight
+	// (or the read raced a flap), and feeding a blank answer to the healthy-
+	// cluster prompt is what makes patronictl abort and orphan the DCS keys.
 	leader := ""
-	if out, err := m.PatronictlCapture(cluster, "list", nsScope, "-f", "json"); err == nil {
+	for attempt := 0; attempt < 5; attempt++ {
+		out, err := m.PatronictlCapture(cluster, "list", nsScope, "-f", "json")
+		if err != nil {
+			break // DCS/list unreadable — fall through with the best answer we have
+		}
 		leader = PatroniLeaderFromListJSON(out)
+		if leader != "" || !strings.Contains(out, `"Member":`) {
+			break // got the leader, or the scope is already gone (empty roster)
+		}
+		time.Sleep(time.Second)
 	}
 
 	script := strings.Join([]string{nsScope, "Yes I am aware", leader}, "\n") + "\n"

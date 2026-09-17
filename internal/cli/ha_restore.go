@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -266,9 +267,32 @@ func buildRestoreCmd(stanza string, target time.Time) string {
 
 // runClusterRestore is the destructive execution path. See the plan's steps 1-8.
 func runClusterRestore(pm *podman.PatroniManager, cluster *config.PatroniClusterConfig, stanza, boot string, others []string, targetTime time.Time, restoreCmd string) error {
-	// 2. Stop all local members so none keeps writing the old timeline or races
-	//    the bootstrap. Remote members are left running — they lose the leader /
-	//    DCS key and wait; the caller is told to reinit them afterward.
+	// 2a. Freeze automatic failover BEFORE stopping anything. Stopping the
+	//     local leader with the cluster live lets Patroni promote a REMOTE
+	//     replica (which this host cannot stop), and that new remote leader
+	//     then races the local bootstrap to re-claim the DCS on the old
+	//     timeline — exactly what the leader-locality pre-check guards
+	//     against, defeated from inside the destructive path. pause stops
+	//     elections/ promotions; remote replicas stay put as replicas.
+	//
+	//     Tolerate "no accessible member": a restore re-run against a cluster a
+	//     previous attempt already tore down (DCS cleared, members stopped) has
+	//     nothing live to freeze, and pause fails on an empty DCS. That is the
+	//     already-frozen state we want — fall through to remove (a clean no-op
+	//     on an absent scope) and the bootstrap. A real live cluster still gets
+	//     paused; any other pause error aborts.
+	fmt.Println("-> Pausing the cluster (freeze failover)...")
+	nsScope := cfg.PatroniScope(cluster.Name)
+	if err := pauseCluster(pm, cluster, nsScope); err != nil {
+		if !pauseFailedOnEmptyDCS(err) {
+			return fmt.Errorf("pausing cluster before restore: %w", err)
+		}
+		fmt.Println("  (no accessible cluster member — nothing to pause, continuing)")
+	}
+
+	// 2b. Stop all local members so none keeps writing the old timeline or races
+	//     the bootstrap. Remote members are left running — they lose the leader /
+	//     DCS key and wait; the caller is told to reinit them afterward.
 	fmt.Println("-> Stopping local member containers...")
 	for name, mb := range cluster.Members {
 		if mb.RemoteHost != "" {
@@ -446,4 +470,13 @@ func printRestorePlan(scope, stanza, boot string, target time.Time, leaderName s
 		fmt.Printf("    b. or run the restore on the leader's host instead.\n")
 	}
 	fmt.Println("  See the docs for the full procedure (post-restore snapshot + stanza-upgrade).")
+}
+
+// pauseFailedOnEmptyDCS reports whether a pauseCluster error is exactly
+// patronictl's "no member is reachable" complaint — the shape of a DCS whose
+// cluster identity is already gone (a torn-down restore re-run). patronictl
+// exits 1 with this text when no live member serves the REST API; any other
+// failure (auth, network to a LIVE cluster, wrong scope) must not be swallowed.
+func pauseFailedOnEmptyDCS(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "Can not find accessible cluster member")
 }
