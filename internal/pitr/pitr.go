@@ -122,7 +122,7 @@ func (m *Manager) CreateSnapshot(backupType string, tailLogs bool) (*Snapshot, e
 	}
 
 	// Parse backup label
-	label := extractLabel(out)
+	label := ExtractLabel(out)
 	snap := &Snapshot{
 		Name:      label,
 		Timestamp: time.Now(),
@@ -159,7 +159,7 @@ func (m *Manager) CreateSnapshotToWriter(w io.Writer, backupType string) (*Snaps
 		fmt.Fprintf(w, "  [!] repo readability warning: %v\n", err)
 	}
 
-	label := extractLabel(out)
+	label := ExtractLabel(out)
 	snap := &Snapshot{
 		Name:      label,
 		Timestamp: time.Now(),
@@ -183,7 +183,7 @@ func (m *Manager) ListSnapshots(limit int) ([]Snapshot, error) {
 		return nil, fmt.Errorf("listing backups: %w\n%s", err, out)
 	}
 
-	snapshots := parseInfoOutput(out)
+	snapshots := ParseInfoOutput(out)
 	if limit > 0 && limit < len(snapshots) {
 		snapshots = snapshots[:limit]
 	}
@@ -437,8 +437,8 @@ func targetActionName(promote bool) string {
 	return "pause"
 }
 
-// extractLabel extracts the backup label from pgBackRest output.
-func extractLabel(out string) string {
+// ExtractLabel extracts the backup label from pgBackRest output.
+func ExtractLabel(out string) string {
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		for _, prefix := range []string{"full backup:", "incr backup:", "diff backup:"} {
@@ -453,8 +453,8 @@ func extractLabel(out string) string {
 	return ""
 }
 
-// parseInfoOutput parses pgbackrest info output into a Snapshot list.
-func parseInfoOutput(out string) []Snapshot {
+// ParseInfoOutput parses pgbackrest info output into a Snapshot list.
+func ParseInfoOutput(out string) []Snapshot {
 	var snapshots []Snapshot
 
 	// pgbackrest info output format example:

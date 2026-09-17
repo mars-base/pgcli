@@ -491,6 +491,14 @@ func patroniStanzaName(nsScope string) string {
 	return fmt.Sprintf("pgcli_%s", nsScope)
 }
 
+// PatroniStanzaForScope returns the pgBackRest stanza name for a cluster scope,
+// resolving the namespace suffix itself. This is the exported entry point for
+// callers outside the podman package (e.g. `pg ha snapshot`) so a stanza name is
+// never hand-assembled in two places.
+func PatroniStanzaForScope(c *config.Config, scope string) string {
+	return patroniStanzaName(c.PatroniScope(scope))
+}
+
 // s3StanzaLines returns the repo1 S3 override block emitted *inside* each
 // Patroni stanza, or "" when no S3 repo is configured. Deliberately per-stanza
 // rather than in [global]: the shared [global] repo1-path stays local, so the
