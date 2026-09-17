@@ -384,7 +384,11 @@ pull_images() {
     yellow "-> Pulling container images..."
     podman pull "$PG_IMAGE" 2>/dev/null && green "  [OK] PostgreSQL image pulled" || yellow "  [!] Failed to pull PostgreSQL image (will pull on first use)"
     podman pull "$BACKUP_IMAGE" 2>/dev/null && green "  [OK] Backup image pulled" || yellow "  [!] Failed to pull backup image (will pull on first use)"
-    podman pull "$PATRONI_IMAGE" 2>/dev/null && green "  [OK] Patroni image pulled" || yellow "  [!] Failed to pull Patroni image (will pull on first use)"
+    # Patroni needs rootless podman host networking, which macOS (podman
+    # machine) does not provide — `pg ha` is Linux-only, so skip its image.
+    if $IS_LINUX; then
+        podman pull "$PATRONI_IMAGE" 2>/dev/null && green "  [OK] Patroni image pulled" || yellow "  [!] Failed to pull Patroni image (will pull on first use)"
+    fi
     podman pull "$ETCD_IMAGE" 2>/dev/null && green "  [OK] etcd image pulled" || yellow "  [!] Failed to pull etcd image (will pull on first use)"
 }
 
