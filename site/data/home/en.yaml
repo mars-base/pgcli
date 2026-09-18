@@ -28,34 +28,18 @@ cards:
       desc: Point-in-time recovery (PITR) to any moment after your first backup, with dry-run preview.
       icon: fa-solid fa-clock-rotate-left
       url: docs/restore/
-    - title: Replication
-      desc: Create read-only replicas with WAL streaming, automatic slot management, and cascading replication.
+    - title: Replication & Failover
+      desc: Read-only replicas with WAL streaming and cascading replication; promote one to take over when the primary is lost.
       icon: fa-solid fa-arrows-turn-to-dots
       url: docs/replica/
-    - title: Failover
-      desc: 3-step manual failover — promote a replica, clean up the old primary, and repoint remaining replicas.
-      icon: fa-solid fa-triangle-exclamation
-      url: docs/failover/
+    - title: HA Cluster
+      desc: Patroni high availability — automatic failover, a DCS-backed cluster, cross-host members, cluster PITR, and direct SQL.
+      icon: fa-solid fa-sitemap
+      url: docs/ha-cluster/
     - title: Extensions
       desc: Install and manage 440+ PostgreSQL extensions from the Pigsty catalog, baked into container images.
       icon: fa-solid fa-puzzle-piece
       url: docs/extensions/
-    - title: Clone
-      desc: Stream-clone an instance or remote database into a new instance with no temporary files on disk.
-      icon: fa-solid fa-clone
-      url: docs/clone/
-    - title: Import & Export
-      desc: Export and import databases in custom or SQL format, with gzip compression and piping between instances.
-      icon: fa-solid fa-file-arrow-down
-      url: docs/import-export/
-    - title: Exec & psql
-      desc: Run SQL, container commands, or interactive psql sessions — locally or against remote databases via DSN.
-      icon: fa-solid fa-terminal
-      url: docs/exec-psql/
-    - title: Administration
-      desc: Shell completion, config management, PostgreSQL tuning, and instance rebuild for a fresh start.
-      icon: fa-solid fa-gear
-      url: docs/administration/
 
 cta:
   title: Ready to get started?
