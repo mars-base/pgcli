@@ -202,6 +202,8 @@ Patroni 只需要一个可达的 etcd 集群，因此有两种布局：
 | `pg ha remote <scope> [--member m] [--ssh-port P]` | 登记另一台主机上的成员（典型为跨主机 leader），供备份 SSH 使用 |
 | `pg ha remote remove <scope> --member m` | 撤销上述登记（不触碰远端容器） |
 | `pg ha extension install/remove/list/apply` | 安装、卸载或列出 PostgreSQL 扩展（见 [HA 集群扩展](./ha-extensions/)） |
+| `pg ha exec <scope> "<sql>" [--member m] [--database db]` | 对 leader（或指定成员）跑一次性 SQL —— 免 dsn、免进容器 |
+| `pg ha psql <scope> [--member m] [--database db] [-- <psql 参数>…]` | 交互式 psql，目标解析方式同上 |
 | `pg ha ctl <scope> -- <patronictl 参数…>` | 透传任意 `patronictl` 命令 |
 
 `--` 之后的 flag 原样到达 `patronictl`（cobra 会剥掉 `--`），所以
@@ -385,7 +387,15 @@ pg logs addon patroni --scope app --name node1 -f       # 跟踪
 
 ## 连接
 
-客户端连的是 **leader** 的 PostgreSQL 端口。用 `pg ha status app` 找 leader
+`pg ha exec` 和 `pg ha psql` 是零配置路径：pgcli 自己从 DCS 解析出 leader，用存储的超管密码认证，在一次性的临时容器里跑 psql —— 不用手拼 dsn、不用进成员容器，而且远端成员同样可达（就是普通 TCP + scram，所以另一台主机上的副本也能连；用 `--member` 指定具体节点）。
+
+```bash
+pg ha exec app "SELECT version()"
+pg ha exec app --member node2 "SELECT pg_is_in_recovery()"   # 只读，打在副本上
+pg ha psql app                                               # 交互式
+```
+
+pgcli 之外的客户端，连的是 **leader** 的 PostgreSQL 端口。用 `pg ha status app` 找 leader
 （`Leader` 行的 `Host` 就是它的 `connect_address`），再把 `pg psql` 指过去。
 单机默认（仅回环）成员下，就是 `127.0.0.1:<host_port>`。
 

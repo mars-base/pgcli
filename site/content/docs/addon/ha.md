@@ -216,6 +216,8 @@ co-locating is fine for dev and small footprints.
 | `pg ha remote <scope> [--member m] [--ssh-port P]` | Register a member living on another host (typically the cross-host leader) for backup SSH |
 | `pg ha remote remove <scope> --member m` | Undo such a registration (the remote container is untouched) |
 | `pg ha extension install/remove/list/apply` | Install, remove, or list PostgreSQL extensions (see [Extensions in HA](./ha-extensions/)) |
+| `pg ha exec <scope> "<sql>" [--member m] [--database db]` | Run one-shot SQL against the leader (or a named member) — no dsn, no container exec |
+| `pg ha psql <scope> [--member m] [--database db] [-- <psql-args>…]` | Interactive psql against the cluster, same resolved target |
 | `pg ha ctl <scope> -- <patronictl args…>` | Passthrough to any `patronictl` command |
 
 Flags after `--` reach `patronictl` verbatim (cobra strips the `--`), so
@@ -426,10 +428,22 @@ Container name is `pgcli-patroni-<scope>-<member>` (namespace-prefixed when a
 
 ## Connecting
 
-Clients connect to the **leader's** PostgreSQL port. Find the leader with
-`pg ha status app` (the `Leader` row's `Host` is its `connect_address`), then
-point `pg psql` at it. On a single host with default loopback-only members,
-that is `127.0.0.1:<host_port>`.
+`pg ha exec` and `pg ha psql` are the zero-config path: pgcli resolves the
+leader from the DCS itself, authenticates with the stored superuser password,
+and runs psql in a throwaway container — no dsn to assemble, no member
+container to enter, and remote members are reachable (plain TCP + scram, so a
+replica on another host works too; `--member` aims at a specific node).
+
+```bash
+pg ha exec app "SELECT version()"
+pg ha exec app --member node2 "SELECT pg_is_in_recovery()"   # read-only, on a replica
+pg ha psql app                                               # interactive
+```
+
+For clients outside pgcli, connect to the **leader's** PostgreSQL port. Find the
+leader with `pg ha status app` (the `Leader` row's `Host` is its
+`connect_address`), then point `pg psql` at it. On a single host with default
+loopback-only members, that is `127.0.0.1:<host_port>`.
 
 ```bash
 pg psql --dsn postgres://postgres@127.0.0.1:<leader_port>/postgres
