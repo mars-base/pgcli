@@ -9,10 +9,13 @@ LDFLAGS = -s -w \
 
 PLATFORMS = linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
-.PHONY: build clean test lint install build-all container-build container-push container-build-minio container-push-minio container-build-mc container-push-mc container-build-patroni container-push-patroni
+.PHONY: build clean test lint install build-all gencert container-build container-push container-build-minio container-push-minio container-build-mc container-push-mc container-build-patroni container-push-patroni
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) .
+
+gencert:
+	go build -o bin/gencert ./tools/gencert
 
 install:
 	go build -ldflags "$(LDFLAGS)" -o $(GOPATH)/bin/$(BINARY) .
