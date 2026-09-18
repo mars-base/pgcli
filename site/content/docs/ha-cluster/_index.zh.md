@@ -36,6 +36,7 @@ postmaster 的生命周期、在成员间流式复制、并在 leader 失联时�
 | [集群备份](./ha-backup/) | `pg backup setup` + `pg ha snapshot` —— stanza、WAL 归档到 S3、跨主机的备份 SSH 通道 |
 | [集群恢复](./ha-restore/) | `pg ha restore` —— 走自定义 bootstrap 机制的集群 PITR、leader 本机性预检、恢复后的重新基线 |
 | [Exec / psql](./ha-exec/) | `pg ha exec` / `pg ha psql` —— 直连 leader 或任意成员跑 SQL，免 dsn、免进容器 |
+| [示例：HA 集群 + 自签 CA 的 MinIO](./ha-example-minio/) | 实测通过的端到端流程：集群备份到一台服务自带证书的 MinIO，全程在完全隔离的第二套环境里 |
 
 ## 典型路径
 

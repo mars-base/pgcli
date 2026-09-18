@@ -39,6 +39,7 @@ rather than a plain `pg` instance or an addon installed with `pg addon install`.
 | [Cluster Backup](./ha-backup/) | `pg backup setup` + `pg ha snapshot` — stanza, WAL archiving to S3, cross-host trust |
 | [Cluster Restore](./ha-restore/) | `pg ha restore` — cluster PITR via the custom-bootstrap mechanism, the leader-locality pre-check, the post-restore re-baseline |
 | [Exec / psql](./ha-exec/) | `pg ha exec` / `pg ha psql` — run SQL against the leader or any member directly, no dsn, no container exec |
+| [Example: HA + self-CA MinIO](./ha-example-minio/) | A verified end-to-end walkthrough: a cluster backed up to a MinIO serving a bring-your-own cert, in a fully isolated second environment |
 
 ## The typical path
 
