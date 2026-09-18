@@ -13,9 +13,9 @@ folding it into the plain `pg` instance path.
 > **This is a separate mode, not an addon subcommand.** Patroni (not pgcli) owns
 > the PostgreSQL process. `pg ha` members do **not** appear in `cfg.Instances`,
 > share no instance lifecycle code, and are not created by `pg create`. The one
-> thing it borrows from the addon system is the [etcd](./etcd/) DCS.
+> thing it borrows from the addon system is the [etcd](../addon/etcd/) DCS.
 
-**Linux only**, like the [etcd](./etcd/) addon: Patroni members rely on
+**Linux only**, like the [etcd](../addon/etcd/) addon: Patroni members rely on
 podman host networking. Both root and rootless podman are supported. On macOS
 the commands fail fast with a clear message.
 
@@ -53,7 +53,7 @@ Because Patroni is PID 1 inside its container:
 ## How It Works
 
 `pg ha` runs one Patroni container per member. All members of a scope point at
-the same **DCS** (a [etcd](./etcd/) cluster) which holds the cluster's dynamic
+the same **DCS** (a [etcd](../addon/etcd/) cluster) which holds the cluster's dynamic
 configuration and leader lock:
 
 1. **The first `pg ha create` for a scope** bootstraps: Patroni runs `initdb`,
@@ -453,7 +453,7 @@ After a failover the leader changes, so a fixed connection string should be
 avoided unless fronted by a pooler or the Patroni REST API's leader redirect.
 
 For a stable endpoint that survives failover — and optional read/write
-separation — put [HAProxy](./haproxy/) in front of the cluster.
+separation — put [HAProxy](../addon/haproxy/) in front of the cluster.
 
 ## Planned leader changes
 
@@ -739,7 +739,7 @@ pg ha extension remove app pg_cron                        # remove
   Tightening the allow-list to a fixed set is a planned future refinement — do
   not expose these ports to untrusted networks yet.
 - **The DCS (etcd) has its own security caveats** — see the
-  [etcd](./etcd/) page: pgcli-managed etcd runs without TLS or auth.
+  [etcd](../addon/etcd/) page: pgcli-managed etcd runs without TLS or auth.
 - **No `init.sh` / `docker-entrypoint-initdb.d`.** Patroni bootstraps the
   cluster itself, so the `admin`/default-db convention of plain instances does
   not exist here; use `postgres` (superuser) to connect and create roles.

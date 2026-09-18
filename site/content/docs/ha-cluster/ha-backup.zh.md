@@ -63,7 +63,7 @@ setup 做的事（配了 S3 仓库时，动手前先做一次 **endpoint 预检*
 > **HTTPS 是硬性要求。** pgBackRest 拒绝明文 S3。要接收集群归档的 MinIO 必须以
 > TLS 提供服务——用 `pg addon install minio --tls`（pgcli 自签 CA，把 `ca.crt`
 > 填进 `--s3-ca-file`）。MinIO 在另一台机器时，用 `pg backup fetch-ca <存储主机>:<端口>`
-> 一次 TLS 握手取回 CA，免 scp（见 [MinIO → 远端主机取 CA](../minio/#tls--tls)）。
+> 一次 TLS 握手取回 CA，免 scp（见 [MinIO → 远端主机取 CA](../addon/minio/#tls--tls)）。
 
 配好后确认：
 

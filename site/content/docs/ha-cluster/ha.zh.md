@@ -12,9 +12,9 @@ weight: 45
 > **这是独立模式，不是 addon 子命令。** 拥有 PostgreSQL 进程的是 Patroni
 > （不是 pgcli）。`pg ha` 成员**不会**出现在 `cfg.Instances` 里，不复用实例
 > 生命周期代码，也不是 `pg create` 创建的。它唯一借鉴 addon 体系的地方，是
-> 用 [etcd](./etcd/) 做 DCS。
+> 用 [etcd](../addon/etcd/) 做 DCS。
 
-**仅支持 Linux**，与 [etcd](./etcd/) addon 一样：Patroni 成员依赖 podman 的
+**仅支持 Linux**，与 [etcd](../addon/etcd/) addon 一样：Patroni 成员依赖 podman 的
 host 网络。root 和 rootless podman 均可使用。macOS 上这些命令会快速失败并给出
 清晰提示。
 
@@ -48,7 +48,7 @@ pgcli 从不直接编辑运行中 PostgreSQL 的配置，也从不跑 `initdb` �
 ## 工作原理
 
 `pg ha` 每个成员跑一个 Patroni 容器。同一 scope 的所有成员指向同一个
-**DCS**（一个 [etcd](./etcd/) 集群），DCS 保存集群的动态配置和 leader 锁：
+**DCS**（一个 [etcd](../addon/etcd/) 集群），DCS 保存集群的动态配置和 leader 锁：
 
 1. **某个 scope 的第一次 `pg ha create`** 完成 bootstrap：Patroni 跑
    `initdb`，抢下 leader，成为 leader。
@@ -407,7 +407,7 @@ failover 后 leader 会变，所以固定连接串应当避免 —— 除非前�
 REST API 的 leader 重定向兜着。
 
 如果需要稳定的、能扛住故障切换的连接端点 —— 以及可选的读写分离 —— 在集群前面
-放一个 [HAProxy](./haproxy/)。
+放一个 [HAProxy](../addon/haproxy/)。
 
 ## 计划内主从切换
 
@@ -672,7 +672,7 @@ pg ha extension remove app pg_cron                        # 卸载
   `postgresql.use_unix_socket`/`use_unix_socket_repl` 被设为 `true`，让 Patroni
   改用 unix socket 连自己的 postmaster，绕过改写。收紧成固定白名单是后续待做的
   改进 —— 现阶段别把这些端口暴露给不受信网络。
-- **DCS（etcd）本身也有安全注意事项** —— 见 [etcd](./etcd/) 页面：pgcli 管理
+- **DCS（etcd）本身也有安全注意事项** —— 见 [etcd](../addon/etcd/) 页面：pgcli 管理
   的 etcd 不启用 TLS 或鉴权。
 - **没有 `init.sh` / `docker-entrypoint-initdb.d`。** Patroni 自己 bootstrap
   集群，所以普通实例的 `admin`/默认库约定在这里不存在；连 `postgres`

@@ -97,7 +97,7 @@ tooling or use `pg ha exec app "..." --csv`-style psql flags via `pg ha psql app
 ## Where these fit
 
 For a **stable client endpoint** that survives failover independently of pgcli,
-put [HAProxy](../haproxy/) in front of the cluster and connect through it.
+put [HAProxy](../addon/haproxy/) in front of the cluster and connect through it.
 `pg ha exec`/`psql` are for operators and scripts driving a cluster directly,
 not a substitute for a pooler in front of an application.
 

@@ -83,7 +83,7 @@ printf '\conninfo\n' | pg ha psql app   # 脚本化单行，输出流回终端
 ## 定位
 
 如果你要一个**独立于 pgcli、能扛故障切换的稳定客户端端点**，在集群前面放
-[HAProxy](../haproxy/)，通过它连。`pg ha exec`/`psql` 是给运维和脚本直接驱动集群用的，
+[HAProxy](../addon/haproxy/)，通过它连。`pg ha exec`/`psql` 是给运维和脚本直接驱动集群用的，
 不是应用前面连接池的替代品。
 
 `pg ha status` / `pg ha ctl` 仍是查看集群状态、以及触达未被包装的 `patronictl` 命令的方式；

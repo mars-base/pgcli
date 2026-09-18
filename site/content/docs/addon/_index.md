@@ -28,9 +28,13 @@ The following addons are currently supported:
 | [`pgdog`](./pgdog/) | Postgres proxy — connection pooling, load balancing and sharding |
 | [`haproxy`](./haproxy/) | TCP load balancer in front of a Patroni cluster — unified or read/write split (Linux only) |
 | [`minio`](./minio/) | S3-compatible object storage with web console — standalone or distributed erasure-coded cluster across hosts (Linux and macOS) |
-| [`ha`](./ha/) | Patroni high availability — automatic failover. **Not installed via `pg addon`**: it is its own top-level command, `pg ha` |
 
 Each addon has its own page with commands, parameters, and troubleshooting.
+
+> **Patroni HA (`pg ha`) is not on this list** — it is not installed via
+> `pg addon` but is its own top-level command, and its documentation now lives in
+> a dedicated **[HA Cluster](../ha-cluster/)** section. [etcd](./etcd/) and
+> [HAProxy](./haproxy/) here are addons a `pg ha` cluster can use.
 
 ## How It Works
 
@@ -52,4 +56,4 @@ pg addon remove <addon> [flags]     # remove the addon, container, and data
 ```
 
 See each addon's page for its specific flags and examples:
-[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [HAProxy](./haproxy/) · [MinIO](./minio/) · [Patroni HA](./ha/) · [Patroni Dynamic Configuration](./ha-dynamic/) · [Patroni REST API](./ha-rest-api/) · [Patroni Cluster Backup](./ha-backup/) · [Patroni Cluster Restore](./ha-restore/)
+[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [HAProxy](./haproxy/) · [MinIO](./minio/). Patroni pages live in [HA Cluster](../ha-cluster/).

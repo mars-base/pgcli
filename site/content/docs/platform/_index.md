@@ -91,10 +91,10 @@ Addon networking differs per component:
   networking and advertise their client/peer URLs into the raft membership list
   as **permanent cluster state**; retrofitting the macOS bridge + container-name
   model would rewrite that state. Kept Linux-only until that is designed in.
-- **[Patroni](/docs/addon/ha/)** (`pg ha`) — **Linux only.** Members rely on
+- **[Patroni](/docs/ha-cluster/ha/)** (`pg ha`) — **Linux only.** Members rely on
   podman host networking; both root and rootless podman are supported. The
   `podman machine` VM's uid mapping does not align with host networking.
-  The commands fail fast on macOS with a clear message. See [Patroni HA](/docs/addon/ha/).
+  The commands fail fast on macOS with a clear message. See [Patroni HA](/docs/ha-cluster/ha/).
 - **[HAProxy](/docs/addon/haproxy/)** — **Linux only.** It fronts Patroni
   members over host networking, which the podman machine VM does not provide to
   containers; the manager fails fast on macOS.

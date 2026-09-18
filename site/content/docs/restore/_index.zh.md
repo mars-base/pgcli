@@ -67,7 +67,7 @@ promote 抢走 leadership），再移除集群的 DCS 身份，然后让一个**
 Patroni 的自定义 bootstrap 方法，从 pgBackRest 仓库把（已清空的）数据目录恢复到目标
 时间点。该成员在**新时间线**上启动并自动 promote 成可写 leader；其余成员——本机的、
 跨主机的——都经 DCS 重新加入它。前提是该 stanza 已配好 WAL 归档，由带 S3 仓库的
-`pg backup setup` 预置（见 [HA 备份插件](../addon/ha-backup)）。
+`pg backup setup` 预置（见 [HA 备份插件](../ha-cluster/ha-backup)）。
 
 **与单实例恢复的差异：**
 

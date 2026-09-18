@@ -75,7 +75,7 @@ buries the real cause):
 > (pgcli's self-signed CA; point `--s3-ca-file` at its `ca.crt`). When the MinIO is on
 > another machine, pull its CA with one TLS handshake — `pg backup fetch-ca
 > <store-host>:<port>` — no scp needed (see [MinIO → Getting the CA onto a remote
-> host](../minio/#tls---tls)).
+> host](../addon/minio/#tls---tls)).
 
 Confirm after setup:
 

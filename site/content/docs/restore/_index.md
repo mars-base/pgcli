@@ -77,7 +77,7 @@ from the pgBackRest repo at the target time via Patroni's custom-bootstrap metho
 That member comes up on a **new timeline** and promotes itself to the writable
 leader; the other members — this host's and cross-host ones alike — rejoin it
 through the DCS. This needs a stanza with WAL archiving, provisioned by
-`pg backup setup` with an S3 repo (see the [HA backup addon](../addon/ha-backup)).
+`pg backup setup` with an S3 repo (see the [HA backup addon](../ha-cluster/ha-backup)).
 
 **Differences from single-instance restore:**
 
