@@ -79,8 +79,19 @@ func (m *MinioManager) TLSDir(mc *config.MinioConfig) string {
 // the CA cert path. Called before container creation whenever mc.TLS is set.
 // SANs cover every address a client can dial: loopback names, this host's NIC
 // IPs (members/backup containers run on host networking), the configured
-// Listen bind, and the host MINIO_SERVER_URL advertises.
+// Listen bind, and the host MINIO_SERVER_URL advertises. In BYO mode it never
+// generates — it validates the user's pair instead and returns an empty CA
+// path (the cert bundle itself is the client trust anchor).
 func (m *MinioManager) EnsureTLS(mc *config.MinioConfig) (string, error) {
+	if mc.TLS && (mc.CertFile != "") != (mc.KeyFile != "") {
+		fmt.Printf("  [!] MinIO %s has only one of cert_file/key_file set — ignoring the pair and using generated certs\n", mc.ContainerName)
+	}
+	if BYOTLS(mc) {
+		if _, err := ValidateBYOCert(mc.CertFile, mc.KeyFile); err != nil {
+			return "", err
+		}
+		return "", nil
+	}
 	hosts := tlsca.LocalHosts(mc.Listen)
 	if u := m.serverURL(mc); u != "" {
 		if h, _, err := net.SplitHostPort(strings.TrimPrefix(strings.TrimPrefix(u, "https://"), "http://")); err == nil {
@@ -197,14 +208,21 @@ func (m *MinioManager) EnsureContainer(mc *config.MinioConfig) error {
 func (m *MinioManager) StartContainer(mc *config.MinioConfig) error {
 	containerName := mc.ContainerName
 
-	// TLS: run the cert refresh even against a live container. MinIO watches
-	// its cert files and hot-reloads, so this is how an existing deployment
-	// picks up the leaf+CA chain (the `pg backup fetch-ca` anchor) without a
-	// --force recreate. Best-effort: a renewal failure must not block the
-	// start — the current cert is very likely still valid.
+	// TLS: run the cert check even against a live container. Generated mode
+	// refreshes the leaf here — MinIO watches its cert files and hot-reloads,
+	// which is how a deployment picks up a re-signed leaf+CA chain (the
+	// `pg backup fetch-ca` anchor) without a --force recreate. BYO mode has
+	// nothing to refresh (pgcli never re-signs the operator's files), so this
+	// only re-validates the pair. Best-effort either way: a failure must not
+	// block the start — the mounted cert is very likely still valid.
 	if mc.TLS {
 		if _, err := m.EnsureTLS(mc); err != nil {
-			fmt.Printf("  [!] MinIO %s TLS cert refresh skipped: %v\n", containerName, err)
+			if BYOTLS(mc) {
+				fmt.Printf("  [!] MinIO %s BYO certificate problem: %v\n", containerName, err)
+				fmt.Printf("      fix the files, or switch cert material with: pg addon install minio --name %s --tls-cert ... --tls-key ... --force\n", mc.Name)
+			} else {
+				fmt.Printf("  [!] MinIO %s TLS cert refresh skipped: %v\n", containerName, err)
+			}
 		}
 	}
 
@@ -261,17 +279,31 @@ func (m *MinioManager) createContainer(mc *config.MinioConfig) error {
 	// TLS: MinIO serves HTTPS natively from --certs-dir (public.crt +
 	// private.key). pgBackRest refuses plaintext HTTP for S3 repos, so a MinIO
 	// feeding Patroni archive-push must be TLS; pgcli's own CA (tlsca) covers
-	// every address clients dial and is distributed as repo*-s3-ca-file.
-	var tlsDir string
+	// every address clients dial and is distributed as repo*-s3-ca-file. BYO
+	// mode (cert_file/key_file) validates the operator's pair and mounts it at
+	// the two file names MinIO wants, skipping tlsca entirely.
 	if mc.TLS {
 		caPath, err := m.EnsureTLS(mc)
 		if err != nil {
 			return err
 		}
-		tlsDir = m.TLSDir(mc)
-		fmt.Printf("  [OK] TLS certs (CA: %s)\n", caPath)
-		fmt.Printf("         as pgBackRest repo CA: pg backup setup --s3-endpoint <host:port> --s3-ca-file %s\n", caPath)
-		fmt.Printf("         from another host, pull it over TLS: pg backup fetch-ca <this-host>:%d\n", mc.APIPort)
+		if BYOTLS(mc) {
+			ci, err := ValidateBYOCert(mc.CertFile, mc.KeyFile)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("  [OK] TLS certs (BYO: %s, valid %s → %s)\n", mc.CertFile,
+				ci.NotBefore.Format("2006-01-02"), ci.NotAfter.Format("2006-01-02"))
+			if !ci.SelfSigned {
+				fmt.Printf("         issued by %q — clients chained to that CA need no --s3-ca-file\n", ci.Issuer)
+			} else {
+				fmt.Printf("         self-signed: clients pin the issuing CA (pg backup setup --s3-ca-file <ca.pem>)\n")
+			}
+		} else {
+			fmt.Printf("  [OK] TLS certs (CA: %s)\n", caPath)
+			fmt.Printf("         as pgBackRest repo CA: pg backup setup --s3-endpoint <host:port> --s3-ca-file %s\n", caPath)
+			fmt.Printf("         from another host, pull it over TLS: pg backup fetch-ca <this-host>:%d\n", mc.APIPort)
+		}
 	}
 
 	// MinIO's deployment docs recommend nofile=1048576. The podman machine VM
@@ -301,10 +333,8 @@ func (m *MinioManager) createContainer(mc *config.MinioConfig) error {
 		"-e", "MINIO_ROOT_USER="+mc.RootUser,
 		"-e", "MINIO_ROOT_PASSWORD="+mc.RootPassword,
 	)
-	if tlsDir != "" {
-		args = append(args,
-			"-v", fmt.Sprintf("%s:/opt/minio/certs:ro,z", hostMountPath(tlsDir)),
-		)
+	if mc.TLS {
+		args = append(args, tlsMountFlags(mc, m.TLSDir(mc))...)
 	}
 	// MINIO_SERVER_URL must be byte-identical on every node or MinIO refuses to
 	// form the cluster ("Mismatching environment values: [MINIO_SERVER_URL]",
@@ -331,7 +361,7 @@ func (m *MinioManager) createContainer(mc *config.MinioConfig) error {
 		"--address", fmt.Sprintf("%s:%d", bind, mc.APIPort),
 		"--console-address", fmt.Sprintf("%s:%d", bind, mc.ConsolePort),
 	)
-	if tlsDir != "" {
+	if mc.TLS {
 		args = append(args, "--certs-dir", "/opt/minio/certs")
 	}
 

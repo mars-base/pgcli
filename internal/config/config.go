@@ -390,6 +390,16 @@ type MinioConfig struct {
 	// since mc has no clean per-alias CA hook.
 	TLS bool `yaml:"tls,omitempty"`
 
+	// CertFile / KeyFile bring your own certificate instead of the generated
+	// self-signed pair: host paths to a PEM leaf (+ intermediates chain, mounted
+	// read-only as /opt/minio/certs/public.crt) and its private key (as
+	// private.key). Implies TLS. Setting either without the other falls back to
+	// generated certs. pgcli never copies or re-signs them — renewing means
+	// replacing the files and recreating the container (install --force), since
+	// single-file bind mounts pin the source inode.
+	CertFile string `yaml:"cert_file,omitempty"`
+	KeyFile  string `yaml:"key_file,omitempty"`
+
 	// Endpoints switches this addon to distributed (cluster) mode when non-empty:
 	// the list is passed verbatim to `minio server <ep1> <ep2> ...` instead of the
 	// single-node `/data`, e.g. http://10.0.0.1:9000/data. The URL path is the

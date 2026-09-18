@@ -282,6 +282,8 @@ func init() {
 	addonInstallCmd.Flags().String("root-password", "", "MinIO root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand)")
 	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (path is the in-container export dir; keep it under /data where --data-dir is mounted; repeat for each node; the list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
 	addonInstallCmd.Flags().Bool("tls", false, "MinIO: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/minio/<name>/; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a MinIO used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Changing this needs --force to recreate")
+	addonInstallCmd.Flags().String("tls-cert", "", "MinIO: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
+	addonInstallCmd.Flags().String("tls-key", "", "MinIO: private key for --tls-cert (PEM; mounted read-only as private.key). Must pair with the cert; both are required to enable BYO TLS")
 	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO container even if one already exists (to apply changed ports/listen/credentials)")
 
 	// start / stop flags
@@ -1382,6 +1384,8 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	endpoints, _ := cmd.Flags().GetStringSlice("endpoint")
 	force, _ := cmd.Flags().GetBool("force")
 	tls, _ := cmd.Flags().GetBool("tls")
+	tlsCert, _ := cmd.Flags().GetString("tls-cert")
+	tlsKey, _ := cmd.Flags().GetString("tls-key")
 
 	path := cfgPath
 	if path == "" {
@@ -1432,6 +1436,17 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	if tls {
 		existing.TLS = true
 	}
+	if tlsCert != "" {
+		existing.TLS = true
+		existing.CertFile = podman.HostMountPath(tlsCert)
+	}
+	if tlsKey != "" {
+		existing.TLS = true
+		existing.KeyFile = podman.HostMountPath(tlsKey)
+	}
+	if (existing.CertFile == "") != (existing.KeyFile == "") {
+		return fmt.Errorf("--tls-cert and --tls-key must be given together (a bring-your-own TLS pair needs both the cert and its key)")
+	}
 	if existing.Name == "" {
 		existing.Name = name
 	}
@@ -1442,6 +1457,24 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	// there — they are a secret the install path owns.
 	cfg.ApplyDefaults()
 	mc := cfg.Addons.Minio[name]
+
+	// BYO TLS: fail fast at install on a bad pair (mismatch, expired, CA-only,
+	// unparseable) rather than letting the container crash-loop on handshake.
+	// The SAN check is advisory: a domain cert is often meant to be dialed by a
+	// name behind DNS/LB that is not this host's Listen, so only warn — and
+	// never for a wildcard bind.
+	if podman.BYOTLS(&mc) {
+		ci, err := podman.ValidateBYOCert(mc.CertFile, mc.KeyFile)
+		if err != nil {
+			return fmt.Errorf("MinIO --tls-cert/--tls-key: %w", err)
+		}
+		fmt.Printf("-> MinIO BYO cert: CN=%q issuer=%q valid %s → %s\n",
+			ci.Subject, ci.Issuer, ci.NotBefore.Format("2006-01-02"), ci.NotAfter.Format("2006-01-02"))
+		if h := strings.TrimSuffix(mc.Listen, ":0"); h != "" && h != "0.0.0.0" && h != "::" && !podman.CertCoversHost(ci, h) {
+			fmt.Printf("  [!] listen address %q is not a SAN of the cert (SANs: %s) — clients must reach MinIO by a name the cert does cover\n",
+				mc.Listen, strings.Join(append(append([]string{}, ci.DNSNames...), ci.IPs...), ", "))
+		}
+	}
 
 	// macOS: the store serves on the pgcli-net bridge with published ports, so
 	// bring up the machine and the bridge first (no-ops on Linux, where MinIO
@@ -1474,6 +1507,8 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 			if mc.TLS {
 				if caPath, err := mm.EnsureTLS(&mc); err != nil {
 					fmt.Printf("  [!] TLS cert refresh failed: %v\n", err)
+				} else if podman.BYOTLS(&mc) {
+					fmt.Printf("  [OK] TLS cert pair validated (BYO: %s)\n", mc.CertFile)
 				} else {
 					fmt.Printf("  [OK] TLS certs current (CA: %s)\n", caPath)
 				}
@@ -1537,7 +1572,11 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	fmt.Printf("  Root user:     %s\n", mc.RootUser)
 	fmt.Printf("  Root password: %s\n", mc.RootPassword)
 	if mc.TLS {
-		fmt.Printf("  TLS CA cert:   %s\n", filepath.Join(mm.TLSDir(&mc), "ca.crt"))
+		if podman.BYOTLS(&mc) {
+			fmt.Printf("  TLS cert:      %s (BYO, key: %s)\n", mc.CertFile, mc.KeyFile)
+		} else {
+			fmt.Printf("  TLS CA cert:   %s\n", filepath.Join(mm.TLSDir(&mc), "ca.crt"))
+		}
 	}
 	if len(mc.Endpoints) > 0 {
 		fmt.Println()
@@ -1745,7 +1784,10 @@ func runAddonList() error {
 				scheme = "https"
 			}
 			fmt.Printf("    Console URL: %s://%s:%d/\n", scheme, mc.Listen, mc.ConsolePort)
-			if mc.TLS {
+			if podman.BYOTLS(&mc) {
+				fmt.Printf("    TLS:         on (BYO cert: %s, key: %s)\n", mc.CertFile, mc.KeyFile)
+				fmt.Printf("                   replace files + pg addon install minio --name %s --tls-cert ... --tls-key ... --force to renew\n", name)
+			} else if mc.TLS {
 				caPath := filepath.Join(mm.TLSDir(&mc), tlsca.CACertFile)
 				fmt.Printf("    TLS:         on (CA: %s)\n", caPath)
 				// mc.Listen is the bind address (often 0.0.0.0) — the hints use
