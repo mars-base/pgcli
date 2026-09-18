@@ -2,6 +2,7 @@ package podman
 
 import (
 	"crypto/tls"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -111,5 +112,44 @@ func TestFetchRepoCAPlainHTTPTEndpoint(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "must serve HTTPS") {
 		t.Fatalf("error = %v, want the HTTPS-required hint", err)
+	}
+}
+
+func TestCheckEndpointReachableDialable(t *testing.T) {
+	// An httptest server gives a real, listening 127.0.0.1:port.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer srv.Close()
+	hostport := strings.TrimPrefix(srv.URL, "http://")
+	if err := checkEndpointReachable(hostport, time.Second); err != nil {
+		t.Fatalf("reachable endpoint reported unreachable: %v", err)
+	}
+}
+
+func TestCheckEndpointReachableRefused(t *testing.T) {
+	// Bind then close a port so the address is almost certainly refused.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	err = checkEndpointReachable(addr, time.Second)
+	if err == nil {
+		t.Fatal("closed port reported reachable")
+	}
+	if !strings.Contains(err.Error(), "cannot reach S3 endpoint") {
+		t.Fatalf("error = %v, want the cannot-reach message", err)
+	}
+}
+
+func TestCheckEndpointReachableNormalizesEndpoint(t *testing.T) {
+	// A scheme + missing default port must normalize before dialing; the error
+	// text should carry the normalized host:443, proving NormalizeS3Endpoint ran.
+	err := checkEndpointReachable("https://127.0.0.1", time.Second)
+	if err == nil {
+		t.Fatal("expected an error dialing 127.0.0.1:443")
+	}
+	if !strings.Contains(err.Error(), "127.0.0.1:443") {
+		t.Fatalf("error = %v, want the normalized 127.0.0.1:443", err)
 	}
 }

@@ -57,6 +57,35 @@ func FetchRepoCA(endpoint string) (string, error) {
 	return "", fmt.Errorf("%s did not present its CA in the TLS chain (only %d certificate(s)) — the storage host runs a pgcli from before CA distribution; re-run `pg addon install minio --tls` there (which hot-reloads the chain) or copy its tls/minio/<name>/ca.crt over manually", hostport, len(chain))
 }
 
+// s3EndpointDialTimeout bounds the reachability probe: an unreachable storage
+// host must fail a setup fast, at the network layer, before any image pull or
+// container start spends minutes and buries the real cause.
+const s3EndpointDialTimeout = 5 * time.Second
+
+// CheckEndpointReachable dials the S3 endpoint's host:port over plain TCP and
+// returns a normalized error if the socket cannot be established. This is a
+// network-layer preflight only — it proves nothing about TLS, credentials, or
+// the bucket (VerifyRepoConnectivity's repo-ls does that later); it exists so
+// a mistyped host or a store that is simply down aborts `pg backup setup`
+// immediately with a clear message rather than after the slow steps. The
+// endpoint is normalized first, so a scheme or a missing :443 is tolerated the
+// same way every other consumer reads it.
+func CheckEndpointReachable(endpoint string) error {
+	return checkEndpointReachable(endpoint, s3EndpointDialTimeout)
+}
+
+// checkEndpointReachable is the testable core: the timeout is a parameter so a
+// test can force the unreachable path on a guaranteed-dead address quickly.
+func checkEndpointReachable(endpoint string, timeout time.Duration) error {
+	hostport := NormalizeS3Endpoint(endpoint)
+	conn, err := net.DialTimeout("tcp", hostport, timeout)
+	if err != nil {
+		return fmt.Errorf("cannot reach S3 endpoint %s: %w (check backup.repo.s3.endpoint, that the store is running, and that this host has network route to it)", hostport, err)
+	}
+	_ = conn.Close()
+	return nil
+}
+
 // NormalizeS3Endpoint turns a repo endpoint (config convention: "host:port",
 // no scheme, but a scheme is tolerated) into a dialable "host:port",
 // defaulting to :443 when the port is omitted.

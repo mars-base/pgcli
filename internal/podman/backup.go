@@ -951,6 +951,67 @@ func (m *BackupManager) BackupExec(tailLogs bool, args ...string) (string, error
 	return execWithTimeout(m.podman, podmanArgs, 10*time.Minute)
 }
 
+// VerifyRepoConnectivity probes the configured repository from inside the
+// backup container with `pgbackrest repo-ls` — the cheapest request that
+// exercises the full S3 stack (endpoint reachability, TLS/CA trust,
+// credentials, bucket + path prefix) without touching any database. It exists
+// because a wrong repo setting otherwise stays invisible until stanza-create
+// (setup step 6) or, worse, until the first backup/restore needs the repo.
+// The stanza is only a handle for the [global] repo options; any known stanza
+// works, and with no stanza at all (no PITR instance, no Patroni cluster)
+// there is nothing to anchor the probe to, so it is skipped.
+func (m *BackupManager) VerifyRepoConnectivity() error {
+	stanza := ""
+	if ts := m.PatroniStanzaNames(); len(ts) > 0 {
+		stanza = ts[0].Stanza
+	} else {
+		for name, inst := range m.cfg.Instances {
+			if !inst.PITR.Enabled {
+				continue
+			}
+			stanza = inst.PITR.PgBackRestStanza
+			if stanza == "" {
+				stanza = "pgcli_" + name
+			}
+			break
+		}
+	}
+	if stanza == "" {
+		return nil
+	}
+	out, err := m.BackupExec(false, "pgbackrest", "--stanza="+stanza, "repo-ls")
+	if err != nil {
+		msg := strings.TrimSpace(out)
+		if msg == "" {
+			msg = err.Error()
+		}
+		return fmt.Errorf("%s\n  %s", msg, repoProbeHint(msg))
+	}
+	return nil
+}
+
+// repoProbeHint maps pgBackRest's wire errors to the one command that fixes
+// them, because the raw [0xx]/TLS texts name the symptom but not the lever.
+func repoProbeHint(msg string) string {
+	switch {
+	case strings.Contains(msg, "unable to verify certificate"),
+		strings.Contains(msg, "certificate verify failed"),
+		strings.Contains(msg, "self signed"):
+		return "the endpoint's TLS certificate is not trusted — fetch it with `pg backup fetch-ca <endpoint>` and re-run setup with --s3-ca-file (or set backup.repo.s3.ca_file in pg.yaml)"
+	case strings.Contains(msg, "access denied"),
+		strings.Contains(msg, "AccessDenied"),
+		strings.Contains(msg, "InvalidAccessKeyId"),
+		strings.Contains(msg, "SignatureDoesNotMatch"):
+		return "credentials rejected — check backup.repo.s3.access_key/secret_key in pg.yaml"
+	case strings.Contains(msg, "connection refused"),
+		strings.Contains(msg, "timed out"),
+		strings.Contains(msg, "could not resolve"):
+		return "endpoint unreachable — check backup.repo.s3.endpoint (host:port, HTTPS only) and that the store is running"
+	default:
+		return "repository not usable — verify endpoint, credentials and bucket in backup.repo.s3 (pg.yaml)"
+	}
+}
+
 // StanzaCreatePatroni runs `pgbackrest stanza-create` + `check` for every
 // Patroni cluster stanza (the ones the S3 repo covers). Existing valid
 // stanzas are tolerated, so this is safe to re-run on every `pg backup setup`.

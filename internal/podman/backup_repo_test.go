@@ -212,3 +212,24 @@ func TestPatroniArchiveParamsGatedOnS3Repo(t *testing.T) {
 		t.Error("archive_command must not be in bootstrap.dcs (DCS is edit-config's territory)")
 	}
 }
+
+func TestRepoProbeHint(t *testing.T) {
+	cases := []struct {
+		msg  string
+		want string
+	}{
+		{"[083] unable to verify certificate", "fetch-ca"},
+		{"SSL: certificate verify failed", "fetch-ca"},
+		{"[035] access denied", "access_key"},
+		{"AccessDenied: InvalidAccessKeyId", "access_key"},
+		{"unable to connect to endpoint: connection refused", "endpoint"},
+		{"could not resolve host: s3.example", "endpoint"},
+		{"some totally unknown failure", "endpoint, credentials and bucket"},
+	}
+	for _, c := range cases {
+		got := repoProbeHint(c.msg)
+		if !strings.Contains(got, c.want) {
+			t.Errorf("repoProbeHint(%q) = %q, want it to contain %q", c.msg, got, c.want)
+		}
+	}
+}

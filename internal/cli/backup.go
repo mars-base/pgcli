@@ -190,6 +190,19 @@ any TLS S3 endpoint; regular-instance backups stay on the local repo).`,
 
 		// -- Pre-flight checks ----------------------------------
 
+		// 0. Network reachability of the S3 endpoint. Fail before EnsureNetwork,
+		// the image build, and container start — an unreachable store is a
+		// misconfiguration, not something to discover after minutes of setup and
+		// buried in a repo-ls error. TLS/credentials/bucket are checked later by
+		// VerifyRepoConnectivity (4b); this is purely "is the host:port dialable".
+		if s3 := cfg.Backup.Repo.S3; s3 != nil && s3.Endpoint != "" {
+			fmt.Println("\n-> Checking S3 endpoint reachability...")
+			if err := podman.CheckEndpointReachable(s3.Endpoint); err != nil {
+				return err
+			}
+			fmt.Printf("  [OK] %s reachable\n", podman.NormalizeS3Endpoint(s3.Endpoint))
+		}
+
 		// 1. Ensure shared network (PG <-> backup containers communicate via bridge)
 		fmt.Println("\n-> Ensuring shared network...")
 		if err := bm.EnsureNetwork(); err != nil {
@@ -264,6 +277,19 @@ any TLS S3 endpoint; regular-instance backups stay on the local repo).`,
 
 		if err := bm.EnsureBackupContainer(confPath); err != nil {
 			return err
+		}
+
+		// 4b. Probe the repository now that the container is up. A wrong S3
+		// endpoint / CA / credential otherwise stays invisible until stanza-create
+		// in step 6 (or until the first backup actually needs the repo), buried
+		// under a low-level pgBackRest error. Only for a remote repo — a local
+		// POSIX repo is a directory the container already owns.
+		if cfg.Backup.Repo.S3 != nil {
+			fmt.Println("-> Checking repository connectivity...")
+			if err := bm.VerifyRepoConnectivity(); err != nil {
+				return fmt.Errorf("repository connectivity check failed: %w", err)
+			}
+			fmt.Println("  [OK] repository reachable")
 		}
 
 		// 5. Patroni members: distribute cross-host backup trust (pubkey merge +
