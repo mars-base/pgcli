@@ -62,15 +62,16 @@ pg ha restore app --time "2026-08-26 15:30:00+00" --member node1
 pg ha restore app --time "2026-08-26 15:30:00+00" --force
 ```
 
-**原理：** 先移除集群的 DCS 身份，然后让一个**本机**成员通过 Patroni 的自定义
-bootstrap 方法，从 pgBackRest 仓库把（已清空的）数据目录恢复到目标时间点。该成员
-在**新时间线**上启动并自动 promote 成可写 leader；其余成员——本机的、跨主机的——
-都经 DCS 重新加入它。前提是该 stanza 已配好 WAL 归档，由带 S3 仓库的
+**原理：** 先 **pause 集群**（冻结 failover，免得本机停掉 leader 时远端副本被
+promote 抢走 leadership），再移除集群的 DCS 身份，然后让一个**本机**成员通过
+Patroni 的自定义 bootstrap 方法，从 pgBackRest 仓库把（已清空的）数据目录恢复到目标
+时间点。该成员在**新时间线**上启动并自动 promote 成可写 leader；其余成员——本机的、
+跨主机的——都经 DCS 重新加入它。前提是该 stanza 已配好 WAL 归档，由带 S3 仓库的
 `pg backup setup` 预置（见 [HA 备份插件](../addon/ha-backup)）。
 
 **与单实例恢复的差异：**
 
-- **总是 promote。** 没有"pause 只读、检查、再换个时间重试"的两步——集群在目标点
+- **总是 promote。** 没有"挂起只读、检查、再换个时间重试"的两步——集群在目标点
   直接以可写状态起来。执行前用 `--dry-run` 确认目标时间。
 - **必须在拥有成员的主机上运行，且动手前先检测 leader。** `pg ha restore` 在执行
   任何破坏性操作**之前**，会先从 DCS 读取当前 leader，判断它是否是本机的可控成员。
@@ -81,11 +82,12 @@ bootstrap 方法，从 pgBackRest 仓库把（已清空的）数据目录恢复�
   或到 leader 所在主机执行。leader 读不到/为空时不阻断（覆盖首次 bootstrap 的场景）。
 - **没有 `--promote` flag** —— promote 是自动的。
 
-**恢复工作流：** 预检（leader 必须是本机成员）→ 停本机成员 → 清 DCS → 清空并用仓库
-bootstrap 一个成员 → 它 promote 成新时间线的 leader → 其余成员作为副本重新加入。
+**恢复工作流：** 预检（leader 必须是本机成员）→ pause 集群 → 停本机成员 → 清 DCS →
+清空并用仓库 bootstrap 一个成员 → 它 promote 成新时间线的 leader → 其余成员作为副本
+重新加入。
 
 **恢复之后：** 建一个新的完整快照以给新时间线重新定位——
-`pg ha snapshot create app --type full`。由于数据目录被重建，system-id 会变化，
-首个快照可能报 `[051] system-id ... do not match stanza`；用非破坏性的
-`pg backup stanza-upgrade pgcli_app-<ns>` 修复（见备份文档）。若有副本没有自动重新
-加入，用 `pg ha ctl app -- reinit app-<ns> <member> --force` 重建它。
+`pg ha snapshot create app --type full`。这步通常直接成功：同一 stanza 的
+pgBackRest 恢复在时间线切换时保持 system-id 不变，所以首个快照不会报
+`[051] system-id ... do not match stanza`，也不需要 `stanza-upgrade`。若有副本没有
+自动重新加入，用 `pg ha ctl app -- reinit app-<ns> <member> --force` 重建它。

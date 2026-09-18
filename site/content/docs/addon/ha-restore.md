@@ -43,7 +43,7 @@ up.** This is stricter than it sounds for a cross-host cluster:
   start the backup container — so bring it up first (`pg backup setup`, or
   `pg backup status` to confirm it is `Up`). If the backup container is down, the
   pre-checks are skipped and the real failure surfaces only during the bootstrap;
-  the post-restore `stanza-upgrade` and fresh snapshot need it running anyway.
+  the post-restore fresh snapshot needs it running anyway.
 
 In short: run `pg ha restore` on a host where `pg backup setup` has provisioned the
 S3 repo and the backup container is `Up`.
@@ -54,10 +54,18 @@ A Patroni cluster cannot be PITR'd by running `pgbackrest restore` under a live
 postmaster — Patroni owns the data directory, the timeline, and the DCS identity.
 `pg ha restore` instead follows Patroni's **custom-bootstrap** recipe:
 
-1. **Clear the cluster's DCS identity** (`patronictl remove`). Patroni's
+1. **Pause the cluster** (`patronictl pause`). This freezes failover *before*
+   anything is stopped: stopping the local leader while the cluster is live lets
+   Patroni promote a **remote** replica this host cannot stop, and that new remote
+   leader then races the local bootstrap to re-claim the DCS on the old timeline —
+   defeating the leader-locality pre-check from inside the destructive path. A
+   restore re-run against a cluster a previous attempt already tore down (DCS
+   cleared, members stopped) has nothing live to pause; that is the already-frozen
+   state, so the pause failure on an empty DCS is tolerated and the run continues.
+2. **Clear the cluster's DCS identity** (`patronictl remove`). Patroni's
    `bootstrap.dcs` block only runs when the DCS has no config key, so removing it is
    what re-arms the bootstrap path.
-2. **Pick one LOCAL member** and rewrite its `patroni.yml` so the default initdb
+3. **Pick one LOCAL member** and rewrite its `patroni.yml` so the default initdb
    bootstrap is replaced by a `pgbackrest restore` method targeting the point in
    time:
 
@@ -76,11 +84,11 @@ postmaster — Patroni owns the data directory, the timeline, and the DCS identi
    that `pgbackrest restore` writes itself. The `method`/`pgbackrest` keys are
    **siblings** of `bootstrap.dcs`, never nested inside it — recovery GUCs leaked
    into the DCS config would apply as live settings on the promoted leader.
-3. **Wipe that member's PGDATA** and recreate its container. Patroni sees an empty
+4. **Wipe that member's PGDATA** and recreate its container. Patroni sees an empty
    data dir with no DCS config, runs the method, recovers to the target on a **new
    timeline**, and — via `--target-action=promote` — promotes itself to the writable
    leader.
-4. **The remaining members rejoin** the new leader: this host's other local members
+5. **The remaining members rejoin** the new leader: this host's other local members
    are wiped and restarted as standard replicas (they `pg_basebackup` the new
    leader); cross-host members rejoin through the DCS (or are reinitialized).
 
@@ -123,9 +131,12 @@ leader (e.g. the very first bootstrap, before any member has published itself) d
 
 ## Differences from single-instance `pg restore`
 
-- **It always promotes.** There is no read-only "pause, inspect, retry another time"
+- **It always promotes.** There is no read-only "hold, inspect, retry another time"
   two-step — the bootstrap recovery ends on a writable leader on a new timeline.
-  Confirm the target with `--dry-run` first.
+  Confirm the target with `--dry-run` first. (The `patronictl pause` in step 1 of
+  the mechanism is unrelated: it freezes failover during the restore, it is not a
+  read-only inspection window and the cluster is resumed implicitly when the new
+  bootstrap republishes the DCS config.)
 - **There is no `--promote` flag** — promotion is automatic (it is baked into the
   bootstrap command).
 - **It must run on a host that owns a member**, and the leader must be local (see the
@@ -182,14 +193,13 @@ are required before the cluster is backup-ready again:
    pg ha snapshot create app --type full
    ```
 
-   A rebuilt data dir changes the PostgreSQL **system-id**, so this first snapshot
-   may fail with `[051] system-id ... do not match stanza`. Fix it **non-destructively**
-   with a stanza upgrade, then retry the snapshot:
-
-   ```bash
-   pg backup stanza-upgrade pgcli_app-<ns>
-   pg ha snapshot create app --type full
-   ```
+   This usually succeeds directly: a pgBackRest restore of the same stanza
+   **preserves the PostgreSQL system-id across the timeline switch** (verified),
+   so the post-restore snapshot does not hit `[051] system-id ... do not match
+   stanza`. You do **not** need `pg backup stanza-upgrade` after a cluster
+   restore. (A real system-id change — a fresh initdb into the same stanza, e.g.
+   a brand-new cluster reusing an old stanza name — is what `[051]` and
+   stanza-upgrade are for.)
 
 2. **Bring back any member that did not auto-rejoin** — typically a cross-host
    member that lost the old leader. Reinitialize it from the new leader (destructive
@@ -212,5 +222,14 @@ are required before the cluster is backup-ready again:
 - **Recovery exceeds the last archived WAL** — you cannot restore past what was
   archived. Reduce the target time, or ensure `archive_command` is flowing
   (`pg backup status`) before retrying.
-- **First post-restore snapshot fails `[051]`** — expected after a data-dir rebuild;
-  run `pg backup stanza-upgrade` (above), it is non-destructive.
+- **First post-restore snapshot fails `[051]`** — not expected: a same-stanza
+  restore keeps the system-id (see the re-baseline section). If you do hit it, a
+  `pg backup stanza-upgrade` fixes it non-destructively.
+- **`FATAL: recovery ended before configured recovery target was reached`** on a
+  *repeat* PITR into the same repo — the stanza already hosts a previously
+  promoted timeline, and the default `recovery_target_timeline=latest` jumps onto
+  that branch, which has no commits before your target. Restore again with an
+  explicit older timeline pinned on the command, e.g.
+  `--recovery-option=recovery_target_timeline=<old-tl>` (added to the bootstrap
+  `pgbackrest ... restore` command in the member's `patroni.yml`). A first PITR
+  after the target — no branch crossing — never hits this.

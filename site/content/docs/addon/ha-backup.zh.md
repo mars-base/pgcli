@@ -34,19 +34,22 @@ pgBackRest 自己 SSH 探测、定位当前的 primary，并在 failover 后自�
 # 最简（备份数据落在默认 base-dir 下）
 pg backup setup
 
-# 指定备份数据/日志的根目录
-pg backup setup --base-dir /mnt/backup
-
-# S3 对象仓库（Patroni 集群归档到 MinIO / AWS S3 的前提）
+# S3 对象仓库（Patroni 集群归档到 MinIO / AWS S3 的前提）。
+# 存储主机在别处、手头还没有 ca.crt 时，先用一次 TLS 握手把它拉下来——无需 scp：
+pg backup fetch-ca 10.0.0.9:9000          # 打印 SHA-256 指纹供核对
 pg backup setup --s3-endpoint 10.0.0.9:9000 --s3-bucket pgbackrest \
-    --s3-access-key admin --s3-ca-file ~/.pgcli/tls/minio/store/ca.crt
+    --s3-access-key admin --s3-ca-file ~/.pgcli/backup/repo-ca/ca-10.0.0.9-9000.crt
 ```
 
-setup 做的事：
+setup 做的事（配了 S3 仓库时，动手前先做一次 **endpoint 预检**：普通 TCP
+拨号，打错主机名或存储没起会立刻失败退出，而不是拖到镜像拉取 / 容器启动之后才
+把真正原因埋进噪声里）：
 
 1. 构建/拉取 pgbackrest 镜像、建网络与目录、生成 backup 容器视图的
    `pgbackrest.conf` 与成员本地归档视图的 `pgbackrest-archive.conf`。
-2. 拉起共享 backup 容器。
+2. 拉起共享 backup 容器，随后**验证仓库连通性**：跑一次 `pgbackrest repo-ls`，
+   验证整条链路（TLS、凭证、bucket），并把失败映射成可操作的提示——证书错误指向
+   `pg backup fetch-ca`、access-denied 指向凭证、拒绝/超时指向 endpoint。
 3. **打通跨主机备份互信**：各主机 `pg ha create` 时把本机备份**公钥**发布进集群的
    etcd 注册表，`setup` 把全集群成员公钥合并成一份每集群一份的 `authorized_keys`
    bind-mount 进成员容器——sshd 每次登录重读该文件，所以**后加入的主机无需重启就被
@@ -69,6 +72,14 @@ pg backup status
 ```
 
 backup 容器 `Up` 且 stanza 就绪，即可开始备份。
+
+> **每个主机都要先 setup，再 create 成员。** 成员的归档能力在**创建时**就被冻结：
+> 容器只有在 `pgbackrest-archive.conf` 已存在时才挂载它，渲染出的 `patroni.yml`
+> 也只有在配置了 S3 仓库时才带归档 GUC。所以在某主机跑 `pg backup setup` *之前*
+> `pg ha create` 出来的成员，天生**不带 WAL 归档**——`pg ha snapshot`/`pg ha
+> restore` 覆盖不到它，要等之后的某次 `setup` 把它标记为过期、在 pause 窗口内
+> 重建才能补上。`pg ha create` 会提前就此发出告警；每台主机先跑
+> `pg backup setup`，创建出来即是可备份的。
 
 ## 快照操作：`pg ha snapshot`
 

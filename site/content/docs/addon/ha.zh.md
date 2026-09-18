@@ -519,6 +519,8 @@ bootstrap:
         - encoding: UTF8
         - data-checksums
     pg_hba:
+        - local all all trust
+        - local replication all trust
         - host all all all scram-sha-256
         - host replication all all scram-sha-256
 
@@ -528,6 +530,8 @@ postgresql:
     data_dir: /var/lib/postgresql/data
     bin_dir: /usr/lib/postgresql/18/bin
     pgpass: /patroni/.pgpass
+    use_unix_socket: true
+    use_unix_socket_repl: true
     authentication:
         superuser:
             username: postgres
@@ -651,9 +655,13 @@ pg ha extension remove app pg_cron                        # 卸载
 - **仅 Linux（root 或 rootless）。** rootless 成员通过 `--userns=keep-id`
   以宿主用户身份运行；root 成员会将配置和数据目录 chown 给 postgres
   （uid 999），这样容器才能读 `0600` 的配置、写自己的数据目录。
-- **`pg_hba.conf` 有意保持宽松**（`host all all all scram-sha-256` + 一行
-  `replication`）。rootless podman 的 pasta 会改写回环源地址，收紧成固定白名
-  单是后续待做的改进 —— 现阶段别把这些端口暴露给不受信网络。
+- **`pg_hba.conf` 有意保持宽松**（`host all all all scram-sha-256` + `replication`
+  一行，另加两行 `local ... trust`）。rootless podman 的 pasta 会改写回环源地址，
+  而 Patroni 在自定义 bootstrap 期间生成的 `pg_hba` 只放行它自己解析出的回环 TCP
+  地址——两者相加会让 Patroni 连不上自己的实例、卡死 `pg ha restore`。所以
+  `postgresql.use_unix_socket`/`use_unix_socket_repl` 被设为 `true`，让 Patroni
+  改用 unix socket 连自己的 postmaster，绕过改写。收紧成固定白名单是后续待做的
+  改进 —— 现阶段别把这些端口暴露给不受信网络。
 - **DCS（etcd）本身也有安全注意事项** —— 见 [etcd](./etcd/) 页面：pgcli 管理
   的 etcd 不启用 TLS 或鉴权。
 - **没有 `init.sh` / `docker-entrypoint-initdb.d`。** Patroni 自己 bootstrap

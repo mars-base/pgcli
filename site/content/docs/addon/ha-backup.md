@@ -36,20 +36,27 @@ One idempotent run brings up the whole backup path and gives the cluster archivi
 # simplest (backup data lands under the default base-dir)
 pg backup setup
 
-# explicit root for backup data and logs
-pg backup setup --base-dir /mnt/backup
-
-# S3 object repository (the prerequisite for archiving to MinIO / AWS S3)
+# S3 object repository (the prerequisite for archiving to MinIO / AWS S3).
+# When the store is on another host and you have no ca.crt yet, pull it with
+# one TLS handshake first — no scp:
+pg backup fetch-ca 10.0.0.9:9000          # prints a SHA-256 fingerprint to cross-check
 pg backup setup --s3-endpoint 10.0.0.9:9000 --s3-bucket pgbackrest \
-    --s3-access-key admin --s3-ca-file ~/.pgcli/tls/minio/store/ca.crt
+    --s3-access-key admin --s3-ca-file ~/.pgcli/backup/repo-ca/ca-10.0.0.9-9000.crt
 ```
 
-What setup does:
+What setup does (when an S3 repo is configured, it first runs an **endpoint
+preflight** — a plain TCP dial that fails the run immediately on a mistyped host
+or a store that is down, rather than after the image pull / container start
+buries the real cause):
 
 1. Build/pull the pgbackrest image, create the network and dirs, generate the
    backup-container `pgbackrest.conf` and the member-local archive view
    `pgbackrest-archive.conf`.
-2. Start the shared backup container.
+2. Start the shared backup container, then **verify repository connectivity**: a
+   `pgbackrest repo-ls` proves the whole stack (TLS, credentials, bucket) and
+   maps a failure to an actionable hint — a cert error points at
+   `pg backup fetch-ca`, access-denied at the credentials, a refused/timeout
+   connection at the endpoint.
 3. **Wire up cross-host backup trust**: each host publishes its backup **public key**
    into the cluster's etcd registry at `pg ha create`; `setup` merges every member's
    key into one per-cluster `authorized_keys` bind-mounted into each member container.
@@ -77,6 +84,15 @@ pg backup status
 ```
 
 Once the backup container is `Up` and the stanzas are ready, start backing up.
+
+> **Create members *after* setup, on every host.** A member's archiving is fixed
+> at creation time: the container only mounts `pgbackrest-archive.conf` if that
+> file already exists, and the rendered `patroni.yml` only carries the archive
+> GUCs if an S3 repo is configured. A member `pg ha create`d before `pg backup
+> setup` on its host therefore starts **without WAL archiving** — `pg
+> ha snapshot`/`pg ha restore` cannot cover it until a later `setup` flags it
+> stale and recreates it inside a pause window. `pg ha create` warns about this
+> up front; run `pg backup setup` first on each host for a backup-ready create.
 
 ## Snapshot operations: `pg ha snapshot`
 

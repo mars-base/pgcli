@@ -35,7 +35,7 @@ PITR 只能重放到已经归档的部分。恢复前，集群必须已经具备
   `pg ha restore` 只会 best-effort 刷新共享的 `pgbackrest.conf`，**不会**生成成员的
   archive 配置，也**不会**启动 backup 容器——所以要先把容器拉起来（`pg backup setup`，
   或用 `pg backup status` 确认它是 `Up`）。backup 容器没起时，预检会被跳过，真正的失败
-  要拖到 bootstrap 阶段才暴露；而恢复之后的 `stanza-upgrade` 与新快照本来就依赖它在运行。
+  要拖到 bootstrap 阶段才暴露；而恢复之后的新快照本来就依赖它在运行。
 
 一句话：在**已用 `pg backup setup` 预置好 S3 仓库、且 backup 容器为 `Up`** 的主机上
 运行 `pg ha restore`。
@@ -46,9 +46,16 @@ Patroni 集群不能在存活的 postmaster 下直接 `pgbackrest restore` 来�
 时间线、DCS 身份都归 Patroni 管。`pg ha restore` 走的是 Patroni 的**自定义 bootstrap**
 配方：
 
-1. **清除集群的 DCS 身份**（`patronictl remove`）。Patroni 的 `bootstrap.dcs` 只在 DCS
+1. **先 pause 集群**（`patronictl pause`）。在任何东西被停止*之前*先冻结
+   failover：集群存活时停掉本机 leader，会让 Patroni 把一台本机停不掉的**远端**
+   副本 promote 成新 leader，那个远端 leader 随后会抢着在旧时间线上重新夺回
+   DCS——从破坏路径内部瓦解了 leader 本机性预检。pause 正是为了堵住这一点。
+   若上一次尝试已经把集群拆掉（DCS 已清、成员已停），重跑的 restore 没有可 pause
+   的活集群；那本就是我们要的"已冻结"状态，因此空 DCS 下的 pause 失败被容忍，
+   流程继续。
+2. **清除集群的 DCS 身份**（`patronictl remove`）。Patroni 的 `bootstrap.dcs` 只在 DCS
    没有 config key 时才执行，所以移除它正是重新武装 bootstrap 路径的动作。
-2. **选一个本机成员**，改写它的 `patroni.yml`，把默认的 initdb bootstrap 替换成一条指向
+3. **选一个本机成员**，改写它的 `patroni.yml`，把默认的 initdb bootstrap 替换成一条指向
    目标时间点的 `pgbackrest restore` method：
 
    ```yaml
@@ -65,10 +72,10 @@ Patroni 集群不能在存活的 postmaster 下直接 `pgbackrest restore` 来�
    restore` 自己写下的 `recovery.signal` + `restore_command` + `recovery_target_*`。
    `method`/`pgbackrest` 这两个键是 `bootstrap.dcs` 的**兄弟**，绝不嵌进它里面——恢复相关的
    GUC 若泄漏进 DCS 配置，会在 promote 后的 leader 上作为运行时参数生效。
-3. **清空该成员的 PGDATA** 并重建其容器。Patroni 面对空数据目录 + 无 DCS 配置，跑该
+4. **清空该成员的 PGDATA** 并重建其容器。Patroni 面对空数据目录 + 无 DCS 配置，跑该
    method，在**新时间线**上恢复到目标点，并借 `--target-action=promote` 把自己 promote
    成可写 leader。
-4. **其余成员重新加入**新 leader：本机其它成员被清空并作为标准副本重启（对新 leader 做
+5. **其余成员重新加入**新 leader：本机其它成员被清空并作为标准副本重启（对新 leader 做
    `pg_basebackup`）；跨主机成员经 DCS 重新加入（或被 reinit）。
 
 ## leader 本机性预检
@@ -107,8 +114,10 @@ pg ha status app        # 确认 leader 现在是本机成员
 
 ## 与单实例 `pg restore` 的差异
 
-- **总是 promote。** 没有"只读 pause、检查、再换个时间重试"的两步——bootstrap 恢复以一个
-  新时间线上的可写 leader 收场。执行前先用 `--dry-run` 确认目标时间。
+- **总是 promote。** 没有"只读挂起、检查、再换个时间重试"的两步——bootstrap 恢复以一个
+  新时间线上的可写 leader 收场。执行前先用 `--dry-run` 确认目标时间。（机制第 1 步的
+  `patronictl pause` 与此无关：它是在恢复期间冻结 failover，不是只读检查窗口；而且
+  DCS 被清除后由新 bootstrap 重新发布配置，其中没有 pause 键，集群自动处于未暂停状态。）
 - **没有 `--promote` flag**——promote 是自动的（它烧进了 bootstrap 命令里）。
 - **必须在拥有成员的主机上运行**，且 leader 必须是本机的（见上文预检）。
 
@@ -160,14 +169,12 @@ pg exec --dsn "postgres://<user>@<leader_host>:<port>/postgres" \
    pg ha snapshot create app --type full
    ```
 
-   重建数据目录会改变 PostgreSQL 的 **system-id**，所以这个首快照可能报
-   `[051] system-id ... do not match stanza`。用 stanza 升级**非破坏性**地修复，然后重试
-   快照：
-
-   ```bash
-   pg backup stanza-upgrade pgcli_app-<ns>
-   pg ha snapshot create app --type full
-   ```
+   这步通常直接成功：同一 stanza 的 pgBackRest 恢复在时间线切换时**保持 PostgreSQL
+   的 system-id 不变**（实测验证），所以恢复后的首个快照不会撞上
+   `[051] system-id ... do not match stanza`。集群恢复之后**不需要**
+   `pg backup stanza-upgrade`。（真正会改 system-id 的是往同一个 stanza 里重新
+   initdb——比如全新集群复用了旧 stanza 名——那才是 `[051]` 和 stanza-upgrade
+   的适用场景。）
 
 2. **拉回任何没有自动重新加入的成员**——通常是丢了旧 leader 的跨主机成员。从新 leader
    重新初始化它（只破坏该副本的数据目录）：
@@ -186,5 +193,11 @@ pg exec --dsn "postgres://<user>@<leader_host>:<port>/postgres" \
   时间；报错会打印它并给出建议的 `--time`。若需要更晚的基点，先做一个更新的全量快照。
 - **恢复超出最后归档的 WAL**——不能恢复到没归档过的时间点。调早目标时间，或先确保
   `archive_command` 在正常投递（`pg backup status`）再重试。
-- **恢复后首个快照报 `[051]`**——数据目录重建后属预期；跑 `pg backup stanza-upgrade`（见上），
-  它是非破坏性的。
+- **恢复后首个快照报 `[051]`**——按新结论不该出现：同 stanza 恢复会保持 system-id
+  不变（见"重新基线"一节）。万一真撞上，`pg backup stanza-upgrade` 能非破坏性地修好。
+- **对同一仓库*重复*做 PITR 时报 `FATAL: recovery ended before configured recovery
+  target was reached`**——stanza 里已经住着一条此前 promote 出来的时间线，默认的
+  `recovery_target_timeline=latest` 会跳到那条分支上，而它在目标时间点之前没有提交。
+  恢复时显式钉住较旧的时间线，即在成员 `patroni.yml` 的 bootstrap
+  `pgbackrest ... restore` 命令上加 `--recovery-option=recovery_target_timeline=<旧TL>`。
+  目标时间点不跨越已 promote 分支的首次 PITR 不会遇到这个。

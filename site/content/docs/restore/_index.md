@@ -70,13 +70,14 @@ pg ha restore app --time "2026-08-26 15:30:00+00" --member node1
 pg ha restore app --time "2026-08-26 15:30:00+00" --force
 ```
 
-**How it works:** the cluster's DCS identity is removed, then one **local**
-member re-bootstraps its (emptied) data directory from the pgBackRest repo at
-the target time via Patroni's custom-bootstrap method. That member comes up on a
-**new timeline** and promotes itself to the writable leader; the other members —
-this host's and cross-host ones alike — rejoin it through the DCS. This needs a
-stanza with WAL archiving, provisioned by `pg backup setup` with an S3 repo (see
-the [HA backup addon](../addon/ha-backup)).
+**How it works:** the cluster is first **paused** (freeze failover, so no remote
+replica is promoted while this host stops its local leader), then its DCS identity
+is removed, and one **local** member re-bootstraps its (emptied) data directory
+from the pgBackRest repo at the target time via Patroni's custom-bootstrap method.
+That member comes up on a **new timeline** and promotes itself to the writable
+leader; the other members — this host's and cross-host ones alike — rejoin it
+through the DCS. This needs a stanza with WAL archiving, provisioned by
+`pg backup setup` with an S3 repo (see the [HA backup addon](../addon/ha-backup)).
 
 **Differences from single-instance restore:**
 
@@ -94,14 +95,15 @@ the [HA backup addon](../addon/ha-backup)).
   leader does not block the run (it covers the first bootstrap).
 - **No `--promote` flag** — promotion is automatic.
 
-**Recovery workflow:** Pre-flight (leader must be a local member) → Stop local
-members → remove DCS → wipe + bootstrap one member from the repo → it promotes to
-leader on a new timeline → remaining members rejoin as replicas.
+**Recovery workflow:** Pre-flight (leader must be a local member) → pause the
+cluster → stop local members → remove DCS → wipe + bootstrap one member from the
+repo → it promotes to leader on a new timeline → remaining members rejoin as
+replicas.
 
 **After the restore:** take a fresh full snapshot to re-baseline the new
-timeline — `pg ha snapshot create app --type full`. Because the data directory
-was rebuilt, the system-id changes, so the first snapshot may fail with
-`[051] system-id ... do not match stanza`; fix it non-destructively with
-`pg backup stanza-upgrade pgcli_app-<ns>` (see the Backup doc). If a replica
-does not rejoin on its own, rebuild it with
+timeline — `pg ha snapshot create app --type full`. This usually succeeds
+directly: a same-stanza pgBackRest restore **keeps the system-id across the
+timeline switch**, so the first post-restore snapshot does not hit
+`[051] system-id ... do not match stanza` and no `stanza-upgrade` is needed.
+If a replica does not rejoin on its own, rebuild it with
 `pg ha ctl app -- reinit app-<ns> <member> --force`.

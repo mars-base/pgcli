@@ -569,6 +569,8 @@ bootstrap:
         - encoding: UTF8
         - data-checksums
     pg_hba:
+        - local all all trust
+        - local replication all trust
         - host all all all scram-sha-256
         - host replication all all scram-sha-256
 
@@ -578,6 +580,8 @@ postgresql:
     data_dir: /var/lib/postgresql/data
     bin_dir: /usr/lib/postgresql/18/bin
     pgpass: /patroni/.pgpass
+    use_unix_socket: true
+    use_unix_socket_repl: true
     authentication:
         superuser:
             username: postgres
@@ -712,9 +716,14 @@ pg ha extension remove app pg_cron                        # remove
   `--userns=keep-id`; root members chown config and data dirs to postgres
   (uid 999) so the container can read `0600` config and write its data dir.
 - **`pg_hba.conf` is permissive by design** (`host all all all scram-sha-256`
-  + a `replication` line). Rootless podman's pasta rewrites loopback sources,
-  and tightening to a fixed allow-list is a planned future refinement — do not
-  expose these ports to untrusted networks yet.
+  + a `replication` line, plus `local` trust lines). Rootless podman's pasta
+  rewrites loopback sources, and Patroni's own `replace_pg_hba` step only ever
+  grants its *resolved loopback* TCP address during `custom bootstrap` — so
+  `postgresql.use_unix_socket`/`use_unix_socket_repl` are set to make Patroni
+  connect to its own instance over the unix socket instead, which is unaffected
+  by the rewrite and keeps bootstrap from deadlocking on its own pg_hba.
+  Tightening the allow-list to a fixed set is a planned future refinement — do
+  not expose these ports to untrusted networks yet.
 - **The DCS (etcd) has its own security caveats** — see the
   [etcd](./etcd/) page: pgcli-managed etcd runs without TLS or auth.
 - **No `init.sh` / `docker-entrypoint-initdb.d`.** Patroni bootstraps the
