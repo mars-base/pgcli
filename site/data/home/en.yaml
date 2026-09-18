@@ -20,14 +20,10 @@ cards:
       desc: Create, start, stop, and destroy isolated PostgreSQL instances with one command.
       icon: fa-solid fa-database
       url: docs/quickstart/
-    - title: Backup
-      desc: Full, differential, and incremental snapshots with pgBackRest and a shared backup container.
+    - title: Backup & PITR
+      desc: Full, differential, and incremental snapshots with pgBackRest, and point-in-time recovery to any moment after them.
       icon: fa-solid fa-shield-halved
       url: docs/backup/
-    - title: Restore
-      desc: Point-in-time recovery (PITR) to any moment after your first backup, with dry-run preview.
-      icon: fa-solid fa-clock-rotate-left
-      url: docs/restore/
     - title: Replication & Failover
       desc: Read-only replicas with WAL streaming and cascading replication; promote one to take over when the primary is lost.
       icon: fa-solid fa-arrows-turn-to-dots
@@ -36,6 +32,10 @@ cards:
       desc: Patroni high availability — automatic failover, a DCS-backed cluster, cross-host members, cluster PITR, and direct SQL.
       icon: fa-solid fa-sitemap
       url: docs/ha-cluster/
+    - title: Addons
+      desc: "One-command companion containers around an instance or cluster: pgbouncer, PgDog, etcd, HAProxy, and MinIO."
+      icon: fa-solid fa-cubes
+      url: docs/addon/
     - title: Extensions
       desc: Install and manage 440+ PostgreSQL extensions from the Pigsty catalog, baked into container images.
       icon: fa-solid fa-puzzle-piece

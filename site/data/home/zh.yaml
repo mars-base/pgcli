@@ -20,14 +20,10 @@ cards:
       desc: 一个命令创建、启动、停止和销毁隔离的 PostgreSQL 实例。
       icon: fa-solid fa-database
       url: docs/quickstart/
-    - title: 备份
-      desc: 使用 pgBackRest 和共享备份容器进行全量、差异和增量快照。
+    - title: 备份与 PITR
+      desc: 使用 pgBackRest 进行全量、差异和增量快照，并可恢复到快照之后的任意时刻。
       icon: fa-solid fa-shield-halved
       url: docs/backup/
-    - title: 恢复
-      desc: 时间点恢复（PITR），可恢复到首次备份后的任意时刻，支持试运行预览。
-      icon: fa-solid fa-clock-rotate-left
-      url: docs/restore/
     - title: 复制与故障转移
       desc: WAL 流式复制的只读副本，支持级联复制；主实例失联时提升副本接管。
       icon: fa-solid fa-arrows-turn-to-dots
@@ -36,6 +32,10 @@ cards:
       desc: Patroni 高可用——自动故障切换、DCS 驱动的集群、跨主机成员、集群 PITR 与直连 SQL。
       icon: fa-solid fa-sitemap
       url: docs/ha-cluster/
+    - title: 插件
+      desc: 围绕实例或集群的一条命令配套容器：pgbouncer、PgDog、etcd、HAProxy 与 MinIO。
+      icon: fa-solid fa-cubes
+      url: docs/addon/
     - title: 扩展
       desc: 从 Pigsty 目录安装和管理 440+ PostgreSQL 扩展，烘焙到容器镜像中。
       icon: fa-solid fa-puzzle-piece
