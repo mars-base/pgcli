@@ -207,6 +207,9 @@ func runHACreate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if warn := pm.BackupProvisioningWarning(); warn != "" {
+		fmt.Print(warn)
+	}
 	if err := pm.EnsurePatroniImage(mb.ImageTag); err != nil {
 		return fmt.Errorf("preparing Patroni image: %w", err)
 	}

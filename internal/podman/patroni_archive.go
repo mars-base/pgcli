@@ -33,6 +33,25 @@ func (m *BackupManager) PatroniStanzaNames() []PatroniStanzaTarget {
 	return out
 }
 
+// BackupProvisioningWarning checks the host-side backup provisioning a new
+// member container depends on, and returns a warning when it is missing
+// ("" when the host is ready). The dependency is creation-time-frozen:
+// createMemberContainer mounts the member-local pgbackrest-archive.conf only
+// when the file exists, and renderPatroniYML injects the archive parameters
+// only when an S3 repo is configured. A member created before `pg backup
+// setup` therefore ships with no WAL archiving — until a later setup flags it
+// stale (MemberArchiveReady) and recreates it inside a pause window. Not a
+// hard error: an HA cluster with no backup repo at all is a supported mode.
+func (m *PatroniManager) BackupProvisioningWarning() string {
+	if _, err := os.Stat(filepath.Join(m.dataDir, "pgbackrest-archive.conf")); err == nil {
+		return ""
+	}
+	if m.cfg.Backup.Repo.S3 == nil {
+		return "!  No S3 backup repo configured on this host (backup.repo.s3): the member will be created WITHOUT WAL archiving, so pg ha snapshot/restore cannot cover it. Configure a repo and run `pg backup setup` to wire archiving in (it recreates members as needed).\n"
+	}
+	return "!  An S3 backup repo is configured but `pg backup setup` has not run on this host (no pgbackrest-archive.conf): the member would be created WITHOUT WAL archiving and flagged stale by the next setup, which recreates it inside a pause window. Run `pg backup setup` first for a backup-ready create.\n"
+}
+
 // MemberArchiveReady reports whether a local Patroni member container is ready
 // to push WAL archives under the current backup configuration. It must mount
 // the member-local pgbackrest-archive.conf — the shared pgbackrest.conf names
