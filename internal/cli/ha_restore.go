@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -317,11 +319,15 @@ func runClusterRestore(pm *podman.PatroniManager, cluster *config.PatroniCluster
 		return err
 	}
 
-	// Optionally stream the member's logs while it recovers.
-	var stopTail func()
+	// Optionally stream the member's logs while it recovers. The stream exists
+	// only for the recovery itself: it stops the moment a leader appears (and
+	// on any early return), NOT at function exit — otherwise the tail keeps
+	// printing Patroni's steady-state chatter over the completion summary and,
+	// when the user Ctrl-Cs the next steps, orphans into the background.
+	stopTail := func() {}
+	defer func() { stopTail() }()
 	if haRestoreTailLogs {
 		stopTail = startMemberLogTail(cluster.Members[boot].ContainerName)
-		defer stopTail()
 	}
 
 	// 6. Wait for the new leader to appear in the DCS.
@@ -330,6 +336,8 @@ func runClusterRestore(pm *podman.PatroniManager, cluster *config.PatroniCluster
 	if err != nil {
 		return fmt.Errorf("restore bootstrap did not yield a leader: %w", err)
 	}
+	stopTail()
+	stopTail = func() {}
 	fmt.Printf("  [OK] new leader: %s\n", leader)
 
 	// 7. Rejoin the remaining local members on standard bootstrap: wipe, write
@@ -360,8 +368,8 @@ func runClusterRestore(pm *podman.PatroniManager, cluster *config.PatroniCluster
 	fmt.Printf("  Restored to:  %s\n", targetTime.Format("2006-01-02 15:04:05"))
 	fmt.Println("  Next steps:")
 	fmt.Printf("    - re-baseline: pg ha snapshot create %s --type full\n", cluster.Name)
-	fmt.Println("    - a data-dir rebuild changes the system-id, so the first snapshot may")
-	fmt.Printf("      fail with [051]; fix with: pg backup stanza-upgrade %s\n", stanza)
+	fmt.Println("      (a same-stanza restore keeps the system-id across the timeline switch,")
+	fmt.Println("      so the first snapshot normally succeeds without stanza-upgrade)")
 	if hasRemoteMembers(cluster) {
 		fmt.Println("    - remote members rebuild themselves from the new leader; if one stays")
 		fmt.Printf("      down: pg ha ctl %s -- reinit %s <member> --force\n", cluster.Name, cfg.PatroniScope(cluster.Name))
@@ -398,6 +406,12 @@ func wipeMemberDataDir(mb config.PatroniMemberConfig) error {
 	return os.RemoveAll(filepath.Join(mb.DataDir, "data"))
 }
 
+// startMemberLogTail streams a member container's logs for the duration of the
+// recovery and returns a stop function. The follow child is tied to the
+// process lifetime: a SIGINT/SIGTERM would otherwise kill pg while deferred
+// cleanup is skipped, orphaning `podman logs -f` (reparented to systemd, still
+// printing). We intercept the signal, kill the child, then re-raise it with the
+// default disposition so the exit status still reflects Ctrl-C.
 func startMemberLogTail(container string) func() {
 	cmd := exec.Command("podman", "logs", "-f", container)
 	cmd.Stdout = os.Stdout
@@ -406,11 +420,31 @@ func startMemberLogTail(container string) func() {
 		fmt.Printf("  [!] could not stream logs: %v\n", err)
 		return func() {}
 	}
-	done := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(done) }()
+	childDone := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(childDone) }()
+
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, stopSignal)
+	stopCh := make(chan struct{})
+	var once sync.Once
+	go func() {
+		select {
+		case sig := <-sigs:
+			once.Do(func() { close(stopCh) })
+			_ = cmd.Process.Kill()
+			<-childDone
+			signal.Stop(sigs)
+			killSelf(sig)
+			select {} // blocked until the re-raised signal terminates us
+		case <-stopCh:
+			signal.Stop(sigs)
+		}
+	}()
+
 	return func() {
+		once.Do(func() { close(stopCh) })
 		_ = cmd.Process.Kill()
-		<-done
+		<-childDone
 	}
 }
 
@@ -469,7 +503,7 @@ func printRestorePlan(scope, stanza, boot string, target time.Time, leaderName s
 		fmt.Printf("       then re-run:          pg ha restore %s --time \"<target>\"\n", scope)
 		fmt.Printf("    b. or run the restore on the leader's host instead.\n")
 	}
-	fmt.Println("  See the docs for the full procedure (post-restore snapshot + stanza-upgrade).")
+	fmt.Println("  See the docs for the full procedure (post-restore snapshot re-baseline).")
 }
 
 // pauseFailedOnEmptyDCS reports whether a pauseCluster error is exactly
