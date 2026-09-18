@@ -61,6 +61,9 @@ pg addon install minio --name store --listen 0.0.0.0
 
 # HTTPS（pgBackRest S3 仓库的前提）：pgcli 自签 CA + 原生 TLS
 pg addon install minio --name store --tls
+
+# 用你自己已有的证书对外提供 HTTPS（公共 CA 或私有 CA 签发的域证书）
+pg addon install minio --name store --tls-cert /etc/ssl/minio.test.crt --tls-key /etc/ssl/minio.test.key
 ```
 
 输出会报告端点与 root 凭据：
@@ -137,6 +140,53 @@ pg backup setup --s3-ca-file ~/.pgcli/backup/repo-ca/ca-<存储主机>-9002.crt
 唯一选择——`fetch-ca` 的报错会明确指出这一点，在存储主机上重跑
 `pg addon install minio --tls` 即可升级（证书热重载，无需重启）。pgBackRest
 stanza 从不要求 MinIO 与它同机。
+
+### 使用自带证书（`--tls-cert` / `--tls-key`）
+
+`--tls` 只会下发 pgcli 自签的那对证书。如果你想对外提供自己已有的证书——某
+个公共 CA 为真实域名签发的，或你的私有 CA 签发的——改用
+`--tls-cert <leaf(+链).pem> --tls-key <key.pem>`。它与 `--tls`（会被隐式打开，
+无需重复传）配合，取代生成的证书：两个文件被只读挂载到 MinIO `--certs-dir`
+要求的文件名上（`/opt/minio/certs/public.crt`、`/opt/minio/certs/private.key`），
+pgcli 从不复制或重签它们——私钥只留在你放置的那一个地方。
+
+```bash
+pg addon install minio --name store \
+  --tls-cert /etc/ssl/wildcard.hi.163.com.crt \
+  --tls-key  /etc/ssl/wildcard.hi.163.com.key
+```
+
+**安装时校验什么、不校验什么。** `--tls-cert`/`--tls-key` 会在任何容器启动前，
+通过 Go 自身的 TLS 加载器配对校验，所以密钥与证书不匹配、证书其实只是一张
+CA、证书已过期、或证书被限定用于服务端以外的用途——都会在安装时直接失败，而
+不会延后成一个反复崩溃重启的容器。证书 SAN 是否覆盖所配置的 `--listen` 地址
+也会被检查，但只作告警——域证书常常是通过 DNS 或负载均衡器背后的名字被访问
+的，与它运行在哪台主机无关，所以这里的不匹配是提示、不是致命错误。
+
+**续期。** 替换证书/密钥文件后重建容器：
+
+```bash
+pg addon install minio --name store --tls-cert <new.crt> --tls-key <new.key> --force
+```
+
+重建是必需、而非可选的：文件以只读方式 bind 进容器后，运行中的 MinIO 不会
+感知被替换的证书——既不会感知"写新文件再覆盖旧文件"（那会换掉单文件挂载所钉
+住的 inode），甚至连原地重写同一个文件也不感知。已实测：改写宿主文件后，容器
+仍继续下发旧的证书对，直到 `--force` 重建为止。pgcli 从不重签自带证书——证书
+生命周期由运维方掌握——所以没有可依赖的自动刷新。
+
+**客户端。** 用受公共 CA 签发的证书时，S3 客户端（`mc` 系、`aws` CLI、
+pgBackRest 经 `repo*-s3-ca-file`）完全不需要额外信任材料——信任链本就锚定在
+它们已信任的 CA 里。私有 CA 证书的用法与自签证书一贯的做法相同：把签发
+CA（或完整的叶+中间证书链）作为 `backup.repo.s3.ca_file` / `--s3-ca-file` 交给
+客户端。`pg backup fetch-ca` 有意不纳入这条路径：它存在的意义是取回 pgcli
+为 `--tls` 生成的那把特定自签根证书，而域证书的信任锚是签发它的 CA——公共
+CA 你根本不需要这一步，私有 CA 你本就有现成的答案。
+
+**关闭自带证书模式。** 没有 `--tls-cert=`/关闭 这类 flag——跨重跑的配置合并是
+单向的，与 `--tls` 本身的行为一致。要回到生成证书模式，从 `pg.yaml` 里该实例
+下删掉 `cert_file`/`key_file`，再用 `pg addon install minio --name store --force`
+重建即可。
 
 ## 分布式 / 集群模式
 
@@ -338,6 +388,9 @@ addons:
       root_user: admin
       root_password: <generated>   # 首次 install 时写入
       autostart: false             # pg autostart enable --minio --name store
+      # tls: true                  # 以 HTTPS 提供服务（自签 CA，或下面的自带证书）
+      # cert_file: /etc/ssl/minio.test.crt   # 自带叶证书(+链)，隐含 tls；见"使用自带证书"
+      # key_file:  /etc/ssl/minio.test.key   # 自带私钥，须与 cert_file 配对
       # endpoints:                 # 省略即单机；见"分布式 / 集群模式"
       #   - http://10.0.0.11:9000/data
       #   - http://10.0.0.12:9000/data
@@ -345,9 +398,10 @@ addons:
       #   - http://10.0.0.21:9000/data
 ```
 
-修改 `listen`、端口、`root_user`、`root_password`、`image_tag`、`data_dir` 或
-`endpoints` 后，执行 `pg addon install minio --name store --force` 即生效——普通
-install 会跳过已存在的容器，`--force` 会重建它（数据目录永不受影响）。
+修改 `listen`、端口、`root_user`、`root_password`、`image_tag`、`data_dir`、
+`tls`/`cert_file`/`key_file` 或 `endpoints` 后，执行
+`pg addon install minio --name store --force` 即生效——普通 install 会跳过已存在
+的容器，`--force` 会重建它（数据目录永不受影响）。
 
 ### 查看列表
 

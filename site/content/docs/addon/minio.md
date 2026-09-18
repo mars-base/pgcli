@@ -67,6 +67,9 @@ pg addon install minio --name store --listen 0.0.0.0
 
 # HTTPS via pgcli's self-signed CA (the prerequisite for a pgBackRest S3 repo)
 pg addon install minio --name store --tls
+
+# HTTPS with a certificate you already have (public-CA or private-CA domain cert)
+pg addon install minio --name store --tls-cert /etc/ssl/minio.test.crt --tls-key /etc/ssl/minio.test.key
 ```
 
 The output reports endpoints and the root credentials:
@@ -153,6 +156,71 @@ do if the store host runs a pgcli from before chain distribution (the `fetch-ca`
 error says so, and re-running `pg addon install minio --tls` there upgrades it
 without a restart). A pgBackRest stanza never requires the MinIO to share its
 host.
+
+### Bring your own certificate (`--tls-cert` / `--tls-key`)
+
+`--tls` only ever serves pgcli's own self-signed pair. To serve a certificate
+you already hold — one signed by a public CA for a real domain, or one issued
+by your private CA — pass `--tls-cert <leaf(+chain).pem> --tls-key <key.pem>`
+instead. Together with `--tls` (which it implies, so you don't need to also
+pass it), this replaces the generated certs: the two files are mounted
+read-only straight at the names MinIO's `--certs-dir` requires
+(`/opt/minio/certs/public.crt`, `/opt/minio/certs/private.key`), and pgcli
+never copies or re-signs them — the private key stays in exactly the one place
+you put it.
+
+```bash
+pg addon install minio --name store \
+  --tls-cert /etc/ssl/wildcard.hi.163.com.crt \
+  --tls-key  /etc/ssl/wildcard.hi.163.com.key
+```
+
+**What install checks, and what it does not.** `--tls-cert`/`--tls-key` are
+paired through Go's own TLS loader before anything starts, so a key that
+doesn't match the cert, a cert that is really just a CA certificate, an
+expired cert, or one restricted to a use other than server auth all fail the
+install outright rather than surfacing later as a crash-looping container.
+Whether the cert's SANs cover the configured `--listen` address is checked
+too, but only warned about — a domain cert is routinely dialed through a name
+behind DNS or a load balancer that has nothing to do with the host it runs on,
+so a mismatch here is informational, not fatal.
+
+**Renewing.** Replace the cert/key files and recreate the container:
+
+```bash
+pg addon install minio --name store --tls-cert <new.crt> --tls-key <new.key> --force
+```
+
+Recreate is required, not optional: with the files bind-mounted read-only into
+the container, a running MinIO does not pick up a replaced certificate — not a
+new file moved over the old one (that swaps the inode a single-file mount
+pins), and not even an in-place rewrite of the same file. Verified: after
+overwriting the host file the container keeps serving the old pair until
+`--force` recreates it. pgcli never re-signs a BYO certificate — the operator
+owns its lifetime — so there is no automatic refresh to rely on.
+
+`pg addon start`/`stop` re-validate the pair on every start but never
+regenerate it (there is nothing to regenerate — pgcli does not own your
+certificate's lifetime). A start-time validation failure is reported as a
+warning, not a blocker, matching the existing tolerance around a cert that is
+very likely still fine: the fix is always to correct the files (or swap to a
+new pair) and recreate with `--force`.
+
+**Clients.** With a certificate from a publicly-trusted CA, S3 clients (the
+`mc` family, `aws` CLI, pgBackRest via `repo*-s3-ca-file`) need no extra
+trust material at all — the chain is already rooted in a CA they trust. A
+private-CA cert works the same way the self-signed one always has: hand the
+client the issuing CA (or the full leaf+intermediate bundle) as
+`backup.repo.s3.ca_file` / `--s3-ca-file`. `pg backup fetch-ca` is deliberately
+left out of this path: it exists to pull back the specific self-signed root
+pgcli generates for `--tls`, and a domain certificate's trust anchor is
+whatever CA signed it — a step you do not need for a public CA, and one you
+already have the answer to for a private one.
+
+**Turning BYO off.** There is no `--tls-cert=`/off flag — the config merge
+across re-runs is one-way, matching how `--tls` itself works. To go back to
+generated certs, remove `cert_file`/`key_file` under this addon in `pg.yaml`
+and recreate with `pg addon install minio --name store --force`.
 
 ## Distributed / Cluster Mode
 
@@ -377,6 +445,9 @@ addons:
       root_user: admin
       root_password: <generated>   # written on first install
       autostart: false             # pg autostart enable --minio --name store
+      # tls: true                  # serve HTTPS (self-signed CA, or BYO below)
+      # cert_file: /etc/ssl/minio.test.crt   # BYO leaf(+chain), implies tls; see "Bring your own certificate"
+      # key_file:  /etc/ssl/minio.test.key   # BYO private key, must pair with cert_file
       # endpoints:                 # omit for single-node; see "Distributed / Cluster Mode"
       #   - http://10.0.0.11:9000/data
       #   - http://10.0.0.12:9000/data
@@ -385,9 +456,10 @@ addons:
 ```
 
 Edits to `listen`, ports, `root_user`, `root_password`, `image_tag`, `data_dir`,
-or `endpoints` take effect after the next `pg addon install minio --name store
---force` — the plain install skips a still-present container, `--force`
-recreates it (the data directory is never touched).
+`tls`/`cert_file`/`key_file`, or `endpoints` take effect after the next
+`pg addon install minio --name store --force` — the plain install skips a
+still-present container, `--force` recreates it (the data directory is never
+touched).
 
 ### List
 
