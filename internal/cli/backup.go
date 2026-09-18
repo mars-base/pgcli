@@ -805,7 +805,22 @@ was asked to look at.`,
 		fmt.Printf("  [OK] CA fetched from %s\n", podman.NormalizeS3Endpoint(endpoint))
 		fmt.Printf("       saved:    %s\n", out)
 		fmt.Printf("       SHA-256:  %x\n", sum)
-		fmt.Printf("Next:         pg backup setup --s3-ca-file %s\n", out)
+		// A runnable next step: the endpoint comes from this very command's
+		// argument and the S3 user is usually the repo config's access key, so
+		// both fill in; only the secret is deliberately absent (a flag value
+		// lands in shell history — the setup help says to edit pg.yaml).
+		next := fmt.Sprintf("pg backup setup --s3-endpoint %s", podman.NormalizeS3Endpoint(endpoint))
+		if cfg.Backup.Repo.S3 != nil {
+			if cfg.Backup.Repo.S3.Bucket != "" {
+				next += " --s3-bucket " + cfg.Backup.Repo.S3.Bucket
+			}
+			if cfg.Backup.Repo.S3.AccessKey != "" {
+				next += " --s3-access-key " + cfg.Backup.Repo.S3.AccessKey
+			}
+		}
+		next += " --s3-ca-file " + out
+		fmt.Printf("Next:         %s\n", next)
+		fmt.Println("              (add the secret via backup.repo.s3.secret_key in pg.yaml)")
 		return nil
 	},
 }
