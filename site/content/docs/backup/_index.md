@@ -69,6 +69,13 @@ pg backup setup --base-dir /mnt/backup
 pg backup start
 pg backup stop
 
+# Remove the backup container and its generated configs (pgbackrest.conf,
+# ssh_config). Backup data and the SSH key pair are kept, so a later
+# `pg backup setup` re-attaches to the same repository; --clean-data also
+# deletes the local repository, logs and credentials.
+pg backup remove
+pg backup remove --clean-data
+
 # Show backup container status
 pg backup status
 

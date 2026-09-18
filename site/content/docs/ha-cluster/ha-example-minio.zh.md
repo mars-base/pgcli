@@ -240,7 +240,7 @@ pg ha exec app1 "SELECT archived_count, failed_count, last_archived_wal
 
 ```bash
 pg -c ~/.pgcli-app1/pg.yaml ha remove app1 --member nodea --clean-data
-pg -c ~/.pgcli-app1/pg.yaml backup stop;  podman rm -f pgcli-backup-app1
+pg -c ~/.pgcli-app1/pg.yaml backup remove --clean-data
 pg -c ~/.pgcli-app1/pg.yaml addon remove minio --name store1 --clean-data
 rm -rf ~/.pgcli-app1 /home/fish/bucket/pgcli-data-app1
 ```

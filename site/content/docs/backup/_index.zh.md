@@ -59,6 +59,12 @@ pg backup setup --base-dir /mnt/backup
 pg backup start
 pg backup stop
 
+# 删除备份容器及其生成的配置（pgbackrest.conf、ssh_config）。备份数据与
+# SSH 密钥对会保留，之后 `pg backup setup` 可直接重新接上同一个仓库；
+# --clean-data 则连本地仓库、日志与凭据一起删除。
+pg backup remove
+pg backup remove --clean-data
+
 # 显示备份容器状态
 pg backup status
 
