@@ -30,10 +30,26 @@ CA、企业 CA 证书同一种形态，只是没去买），并把集群的 pgBa
 | 配置 | `~/.pgcli-app1/pg.yaml` | 与生产的 `~/.pgcli/pg.yaml` 分开 |
 | 数据根目录 | `/home/fish/bucket/pgcli-data-app1` | 完全不碰生产数据目录 |
 | 命名空间 | `app1` | 给所有容器名加前缀——`pgcli-minio-app1-store1`、`pgcli-patroni-app1-app1-nodea`、`pgcli-backup-app1` |
-| DCS | 复用生产环境运行中的 etcd `m1`（`127.0.0.1:2379`） | 以*外部*端点接入；集群成员按 scope 归组，新 scope 天然隔离 |
+| DCS | 复用生产环境运行中的 etcd `m1`（`127.0.0.1:2379`） | 早于本示例就在生产配置里创建——见[前置](#前置--etcd-dcs-是怎么来的)；此处以*外部*端点复用，集群成员按 scope 归组，新 scope 天然隔离 |
 | MinIO | `store1`，端口 9010/9011，监听 `0.0.0.0` | 自带自签证书，SAN 为 `minio1.test,127.0.0.1,<主机IP>` |
 | Patroni | scope `app1`、成员 `nodea`、PG `<主机IP>:35632` | 单成员，即 Leader |
 | 备份容器 | `pgcli-backup-app1` | 与生产的 `pgcli-backup-default` 并存 |
+
+## 前置 —— etcd DCS 是怎么来的
+
+示例复用了这台主机上早已为生产集群服务的那套 etcd。若是从零开始，第一块要
+装的也是这个插件，一次一个成员——单成员就是一个健康的单节点 etcd 集群，跑
+HA 开发/测试绰绰有余：
+
+```bash
+pg addon install etcd --name m1
+# pgcli-etcd-default-m1，client 127.0.0.1:2379，peer 2380，cluster "pgcli-etcd"
+```
+
+（如果要把这个 DCS 交给其他主机的成员加入，安装时就给它一个可达地址——
+`--advertise-host <主机IP>`——让它的 peer/client URL 播报该 IP 而非回环；同
+法 `--name m2`/`--name m3` 就能扩成真正的 3 节点组。本示例都不需要：集群与
+它同机，拨的是 `127.0.0.1:2379`。）
 
 ## 第 0 步 —— 一张域名证书
 

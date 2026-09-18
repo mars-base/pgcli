@@ -34,10 +34,28 @@ Two ideas make the example worth reading rather than skimming:
 | Config | `~/.pgcli-app1/pg.yaml` | separate from the production `~/.pgcli/pg.yaml` |
 | Base dir | `/home/fish/bucket/pgcli-data-app1` | nothing touches the production data dir |
 | Namespace | `app1` | prefixes every container name — `pgcli-minio-app1-store1`, `pgcli-patroni-app1-app1-nodea`, `pgcli-backup-app1` |
-| DCS | existing etcd `m1` at `127.0.0.1:2379` | reused as an *external* endpoint; cluster membership is keyed by scope, so a new scope is naturally isolated |
+| DCS | existing etcd `m1` at `127.0.0.1:2379` | created on the production config long before this example — see [Prerequisite](#prerequisite--the-etcd-dcs); reused here as an *external* endpoint, and cluster membership is keyed by scope, so a new scope is naturally isolated |
 | MinIO | `store1`, ports 9010/9011, listen `0.0.0.0` | BYO self-signed cert, SANs `minio1.test,127.0.0.1,<host-ip>` |
 | Patroni | scope `app1`, member `nodea`, PG `<host-ip>:35632` | single member; the leader by definition |
 | Backup container | `pgcli-backup-app1` | coexists with the production `pgcli-backup-default` |
+
+## Prerequisite — the etcd DCS
+
+The example reuses the etcd that already serves this host's production
+clusters. If you are starting from scratch, that first piece to install is the
+same addon, one member at a time — a lone member is a healthy one-node etcd
+cluster, plenty for HA dev/test:
+
+```bash
+pg addon install etcd --name m1
+# pgcli-etcd-default-m1, client 127.0.0.1:2379, peer 2380, cluster "pgcli-etcd"
+```
+
+(For members other hosts will join as a DCS, give it a reachable address at
+install time — `--advertise-host <host-ip>` — so its peer/client URLs announce
+that IP instead of loopback; and grow it to a real 3-node ensemble with
+`--name m2`/`--name m3` the same way. None of that matters for this example:
+the cluster lives on the same host and dials `127.0.0.1:2379`.)
 
 ## Step 0 — a domain certificate
 
