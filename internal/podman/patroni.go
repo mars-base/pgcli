@@ -1053,41 +1053,162 @@ func (m *PatroniManager) BuildExtensionImage(fromTag string, pkgList []string, p
 // DiscoverLeader queries the cluster via patronictl list -f json and returns
 // the leader member's name, host, and port. If the leader is not found or
 // the cluster is unhealthy, returns an error.
-func (m *PatroniManager) DiscoverLeader(cluster *config.PatroniClusterConfig) (memberName, host string, port int, err error) {
+// haRoster fetches the cluster membership from the DCS via
+// `patronictl list -f json`. The roster is the only view that spans local AND
+// remote members — each host's pg.yaml registers only its own — so leader
+// discovery and cross-host member resolution both go through it.
+func (m *PatroniManager) haRoster(cluster *config.PatroniClusterConfig) ([]map[string]any, error) {
 	nsScope := m.cfg.PatroniScope(cluster.Name)
 	out, err := m.PatronictlCapture(cluster, "list", nsScope, "-f", "json")
 	if err != nil {
-		return "", "", 0, fmt.Errorf("querying cluster state: %w", err)
+		return nil, fmt.Errorf("querying cluster state: %w", err)
 	}
-
-	var members []map[string]any
-	if err := json.Unmarshal([]byte(out), &members); err != nil {
-		return "", "", 0, fmt.Errorf("parsing patronictl output: %w", err)
+	var roster []map[string]any
+	if err := json.Unmarshal([]byte(out), &roster); err != nil {
+		return nil, fmt.Errorf("parsing patronictl output: %w", err)
 	}
+	return roster, nil
+}
 
-	for _, mm := range members {
+// haPickTarget resolves one roster row to a client endpoint. When member is
+// empty it selects the leader; otherwise the named member. patronictl puts
+// host:port in the "Host" field (e.g. "10.0.0.1:35532"); there is no separate
+// Port key. found is false only when a named member is absent from the roster.
+func haPickTarget(roster []map[string]any, member string) (name, host string, port int, found bool) {
+	wantLeader := member == ""
+	for _, mm := range roster {
+		mmName, _ := mm["Member"].(string)
 		role, _ := mm["Role"].(string)
-		name, _ := mm["Member"].(string)
-
 		role = strings.ToLower(role)
-		if name == "" || (!strings.Contains(role, "leader") && role != "primary") {
+		isLeader := strings.Contains(role, "leader") || role == "primary"
+		if wantLeader {
+			if mmName == "" || !isLeader {
+				continue
+			}
+		} else if mmName != member {
 			continue
 		}
-
-		// patronictl list JSON puts host:port in the "Host" field (e.g.
-		// "10.0.0.1:35532"); there is no separate "Port" key. Split it.
 		hostField, _ := mm["Host"].(string)
 		h, pStr, splitErr := net.SplitHostPort(hostField)
 		if splitErr != nil {
-			return name, hostField, 0, nil
+			return mmName, hostField, 0, true
 		}
 		p, parseErr := strconv.Atoi(pStr)
 		if parseErr != nil {
-			return name, h, 0, nil
+			return mmName, h, 0, true
 		}
-		return name, h, p, nil
+		return mmName, h, p, true
 	}
-	return "", "", 0, fmt.Errorf("no leader found in cluster %q", cluster.Name)
+	return "", "", 0, false
+}
+
+// DiscoverLeader finds the cluster's current leader (which may live on a remote
+// host) and returns its advertised connect endpoint.
+func (m *PatroniManager) DiscoverLeader(cluster *config.PatroniClusterConfig) (memberName, host string, port int, err error) {
+	roster, err := m.haRoster(cluster)
+	if err != nil {
+		return "", "", 0, err
+	}
+	name, h, p, found := haPickTarget(roster, "")
+	if !found {
+		return "", "", 0, fmt.Errorf("no leader found in cluster %q", cluster.Name)
+	}
+	return name, h, p, nil
+}
+
+// haTarget resolves the host:port to open a client connection to: the current
+// leader when member is empty, otherwise that named member. The Host field
+// patronictl reports is each member's advertised connect_address — exactly the
+// TCP endpoint replicas and clients use — and pg_hba
+// (`host all all all scram-sha-256`) authenticates any source with the cluster
+// superuser password, so remote members are reachable from any host.
+func (m *PatroniManager) haTarget(cluster *config.PatroniClusterConfig, member string) (string, int, error) {
+	roster, err := m.haRoster(cluster)
+	if err != nil {
+		return "", 0, err
+	}
+	_, host, port, found := haPickTarget(roster, member)
+	if !found {
+		if member == "" {
+			return "", 0, fmt.Errorf("no leader found in cluster %q", cluster.Name)
+		}
+		return "", 0, fmt.Errorf("member %q not found in cluster %q", member, cluster.Name)
+	}
+	return host, port, nil
+}
+
+// haDSN builds the client connection string for a resolved target. The
+// superuser is the only role pgcli manages credentials for, so it is not
+// configurable.
+func (m *PatroniManager) haDSN(cluster *config.PatroniClusterConfig, database, host string, port int) string {
+	return fmt.Sprintf("postgres://postgres:%s@%s:%d/%s",
+		url.QueryEscape(cluster.Passwords.Superuser), host, port, database)
+}
+
+// haPSQLImage picks the image for a throwaway client container: any local
+// member's tag (remote members carry no local ImageTag), else the default.
+func (m *PatroniManager) haPSQLImage(cluster *config.PatroniClusterConfig) string {
+	for _, mb := range cluster.Members {
+		if mb.ImageTag != "" {
+			return mb.ImageTag
+		}
+	}
+	return DefaultPatroniImageTag
+}
+
+// ExecHA streams a one-shot SQL run against the leader (or --member target) to
+// the terminal. Unlike ExecLeaderQuery it does not capture output: this is a
+// user-facing command, so psql's own formatting, column headers and errors go
+// straight through. The Patroni image's entrypoint is patroni, so psql must be
+// forced via --entrypoint.
+func (m *PatroniManager) ExecHA(cluster *config.PatroniClusterConfig, member, database, sql string) error {
+	host, port, err := m.haTarget(cluster, member)
+	if err != nil {
+		return err
+	}
+	containerName := fmt.Sprintf("pgcli-ha-exec-%d", time.Now().UnixNano())
+	defer m.run("rm", "-f", containerName)
+
+	return m.runInteractive(
+		"run", "--rm", "--name", containerName,
+		"--network", "host",
+		"--entrypoint", "psql",
+		m.haPSQLImage(cluster),
+		"--dbname="+m.haDSN(cluster, database, host, port),
+		"-c", sql,
+	)
+}
+
+// PsqlHA opens an interactive psql session against the leader (or --member
+// target), the cluster-side twin of `pg psql`. Like PsqlDSN it allocates a TTY
+// only when stdin is one, and turns the pager off when it is not so piped
+// scripts terminate instead of blocking in less.
+func (m *PatroniManager) PsqlHA(cluster *config.PatroniClusterConfig, member, database string, psqlArgs []string) error {
+	host, port, err := m.haTarget(cluster, member)
+	if err != nil {
+		return err
+	}
+	containerName := fmt.Sprintf("pgcli-ha-psql-%d", time.Now().UnixNano())
+	defer m.run("rm", "-f", containerName)
+
+	runFlags := "-i"
+	psqlCmdArgs := []string{"--dbname=" + m.haDSN(cluster, database, host, port)}
+	if isTerminal(os.Stdin) {
+		runFlags = "-it"
+	} else {
+		psqlCmdArgs = append(psqlCmdArgs, "-P", "pager=off")
+	}
+	psqlCmdArgs = append(psqlCmdArgs, psqlArgs...)
+
+	return m.runInteractive(
+		append([]string{
+			"run", "--rm", "--name", containerName,
+			"--network", "host",
+			runFlags,
+			"--entrypoint", "psql",
+			m.haPSQLImage(cluster),
+		}, psqlCmdArgs...)...,
+	)
 }
 
 // ExecLeaderQuery runs a SQL query against the cluster leader via a temporary
@@ -1095,27 +1216,12 @@ func (m *PatroniManager) DiscoverLeader(cluster *config.PatroniClusterConfig) (m
 // which may be on a remote host. The DSN is built from the leader's advertised
 // host:port and the cluster's superuser password.
 func (m *PatroniManager) ExecLeaderQuery(cluster *config.PatroniClusterConfig, database, sql string) (string, error) {
-	_, host, port, err := m.DiscoverLeader(cluster)
+	host, port, err := m.haTarget(cluster, "")
 	if err != nil {
 		return "", err
 	}
-
-	dsn := fmt.Sprintf("postgres://postgres:%s@%s:%d/%s",
-		url.QueryEscape(cluster.Passwords.Superuser),
-		host, port, database)
-
-	// Use any local member's image tag for the throwaway container
-	imageTag := ""
-	for _, mb := range cluster.Members {
-		if mb.ImageTag == "" {
-			continue // remote members carry no local image tag
-		}
-		imageTag = mb.ImageTag
-		break
-	}
-	if imageTag == "" {
-		imageTag = DefaultPatroniImageTag
-	}
+	dsn := m.haDSN(cluster, database, host, port)
+	imageTag := m.haPSQLImage(cluster)
 
 	containerName := fmt.Sprintf("pgcli-ha-query-%d", time.Now().UnixNano())
 	defer m.run("rm", "-f", containerName)
