@@ -31,6 +31,7 @@ func init() {
 	backupCmd.AddCommand(backupSetupCmd)
 	backupCmd.AddCommand(backupStartCmd)
 	backupCmd.AddCommand(backupStopCmd)
+	backupCmd.AddCommand(backupRemoveCmd)
 	backupCmd.AddCommand(backupStatusCmd)
 	backupCmd.AddCommand(backupFetchCACmd)
 	backupCmd.AddCommand(backupStanzaUpgradeCmd)
@@ -47,6 +48,7 @@ func init() {
 	backupSetupCmd.Flags().BoolVar(&s3NoVerify, "s3-no-verify-tls", false, "skip TLS certificate verification (repo1-s3-verify-tls=n) — escape hatch for self-signed endpoints you cannot hand a CA for")
 
 	backupFetchCACmd.Flags().StringVar(&fetchCAOut, "out", "", "where to write the fetched CA (default <base-dir>/backup/repo-ca/ca-<endpoint>.crt)")
+	backupRemoveCmd.Flags().BoolVar(&backupCleanData, "clean-data", false, "also delete the local repository, logs, config and credentials")
 }
 
 var backupCmd = &cobra.Command{
@@ -61,6 +63,7 @@ Subcommands:
   setup           Build image, create directories, generate config, start container
   start           Start the backup container
   stop            Stop the backup container
+  remove          Remove the backup container (--clean-data also deletes host data)
   status          Show backup container status
   list-stanza     List all pgBackRest stanzas managed by the backup container
   stanza-upgrade  Refresh stanza metadata after a data directory was rebuilt
@@ -597,6 +600,62 @@ var backupStopCmd = &cobra.Command{
 			return err
 		}
 		fmt.Println("[OK] Backup container stopped")
+		return nil
+	},
+}
+
+// --- backup remove ------------------------------------------------
+
+var backupCleanData bool
+
+var backupRemoveCmd = &cobra.Command{
+	Use:   "remove",
+	Short: "Remove the backup container",
+	Long: `remove stops and deletes the shared backup container of THIS config (its
+namespace-qualified container), tearing down one pgcli environment's backup
+infrastructure without leaving the shell — the teardown counterpart of setup.
+
+The generated config (pgbackrest.conf, SSH client config) goes with it; backup
+data and the SSH key pair are kept — the key pair is the trust anchor Patroni
+members already baked into sshd, so it must survive for a later
+'pg backup setup' to re-attach cleanly. Pass --clean-data to delete the local
+repository, logs and credentials too.
+
+Removing it while instances remain is supported: the container is rebuilt
+automatically on the next pg start or pg backup setup — a remove is an
+unplug, not a loss.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := loadRawConfig()
+		if err != nil {
+			return fmt.Errorf("failed to load config: %w", err)
+		}
+
+		bm, err := podman.NewBackupManager(cfg)
+		if err != nil {
+			return err
+		}
+
+		if n := len(cfg.Instances) + len(cfg.Addons.Patroni); n > 0 {
+			fmt.Printf("  [!] %d database(s) still configured — their backups resume when the container is rebuilt (pg start / pg backup setup)\n", n)
+		}
+
+		fmt.Printf("-> Removing backup container %s...\n", cfg.Backup.ContainerName)
+		if err := bm.Destroy(); err != nil {
+			return err
+		}
+		fmt.Println("[OK] Backup container removed")
+
+		if backupCleanData {
+			if err := bm.RemoveHostData(); err != nil {
+				return err
+			}
+			fmt.Println("[OK] Backup host data cleaned")
+		} else {
+			if err := bm.RemoveHostConfig(); err != nil {
+				return err
+			}
+			fmt.Println("[OK] Generated config removed (backup data and SSH keys kept)")
+		}
 		return nil
 	},
 }

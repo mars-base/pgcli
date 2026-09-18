@@ -845,16 +845,19 @@ func (m *BackupManager) Destroy() error {
 	return nil
 }
 
-// RemoveHostConfig deletes the backup infrastructure's config and credential
-// files (pgbackrest.conf, SSH config and keys) while leaving backup data on
-// disk. Used when the last instance is destroyed without --clean-data so the
-// data stays available for a rebuild.
+// RemoveHostConfig deletes the backup infrastructure's generated config files
+// (pgbackrest.conf, SSH client config) while leaving backup data on disk. Used
+// when the last instance is destroyed without --clean-data so the data stays
+// available for a rebuild. The SSH key pair is deliberately kept: it is not
+// regenerable in place — Patroni members install it into sshd's
+// authorized_keys at container start, so replacing it silently breaks the
+// cluster's cross-host backup trust until every member is recreated. Only
+// RemoveHostData (--clean-data), which takes the whole backup dir with it,
+// discards the keys.
 func (m *BackupManager) RemoveHostConfig() error {
 	for _, p := range []string{
 		filepath.Join(m.dataDir, "pgbackrest.conf"),
 		filepath.Join(m.dataDir, "backup", "ssh_config"),
-		filepath.Join(m.dataDir, "backup", "id_rsa"),
-		filepath.Join(m.dataDir, "backup", "id_rsa.pub"),
 	} {
 		if err := os.Remove(p); err == nil {
 			fmt.Printf("  [OK] removed: %s\n", p)
@@ -1128,7 +1131,13 @@ func (m *BackupManager) containerRunning(name string) (bool, error) {
 }
 
 func (m *BackupManager) createBackupContainer(confPath string) error {
-	keys := m.SSHKeyPaths()
+	// CreateBackupContainer is also the rebuild path after `backup remove`
+	// deleted the key pair, so ensure (generate if absent) rather than just
+	// resolve the paths — podman would fail statfs on the missing mounts.
+	keys, err := m.EnsureSSHKey()
+	if err != nil {
+		return err
+	}
 
 	// Ensure SSH config is written before mounting.
 	sshConfPath, err := m.WriteSSHConfig()
