@@ -239,11 +239,15 @@ pg ha exec app1 "SELECT archived_count, failed_count, last_archived_wal
 除）：
 
 ```bash
-pg -c ~/.pgcli-app1/pg.yaml ha remove app1 --member nodea --clean-data
+pg -c ~/.pgcli-app1/pg.yaml ha remove app1 --scope-all --clean-data
 pg -c ~/.pgcli-app1/pg.yaml backup remove --clean-data
 pg -c ~/.pgcli-app1/pg.yaml addon remove minio --name store1 --clean-data
 rm -rf ~/.pgcli-app1 /home/fish/bucket/pgcli-data-app1
 ```
+
+要用 `--scope-all`（而不是 `--member`）：它会 `patronictl remove` 整个
+scope 的 DCS 键并清空 pgcli 成员注册表；逐个 member 删除会把这些残留留在
+共享 etcd 里。
 
 etcd `m1` 属于生产环境——上面所有操作都碰不到它，这正是隔离的用意。
 

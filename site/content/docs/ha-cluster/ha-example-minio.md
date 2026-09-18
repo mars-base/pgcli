@@ -261,11 +261,15 @@ Everything the example created lives under the app1 config, so teardown is
 ordered through that same `-c` (data directories deleted explicitly):
 
 ```bash
-pg -c ~/.pgcli-app1/pg.yaml ha remove app1 --member nodea --clean-data
+pg -c ~/.pgcli-app1/pg.yaml ha remove app1 --scope-all --clean-data
 pg -c ~/.pgcli-app1/pg.yaml backup remove --clean-data
 pg -c ~/.pgcli-app1/pg.yaml addon remove minio --name store1 --clean-data
 rm -rf ~/.pgcli-app1 /home/fish/bucket/pgcli-data-app1
 ```
+
+`--scope-all` (not `--member`) is what clears the scope's DCS keys in the
+shared etcd — `patronictl remove` plus the pgcli member registry. Removing
+members one by one leaves both behind.
 
 The etcd `m1` belonged to the production environment — it is untouched by all
 of the above, which is exactly the point of the isolation.
