@@ -115,6 +115,14 @@ must speak TLS. Point `backup.repo.s3.ca_file` at `ca.crt` and pgBackRest
 connects with full certificate verification — see
 [Backup → S3 object storage repository](../../backup/#s3-object-storage-repository).
 
+One note on pairing stores with clusters: `backup.repo.s3` is a single, global
+repo per config file, so the *first* TLS MinIO you wire up receives every
+stanza in that environment — installing a second MinIO does not give clusters a
+per-cluster store to choose. If you truly need two destinations, run a second
+config (see [Backup → Shared Backup Container](../../backup/#shared-backup-container),
+and the worked
+[Example: HA Cluster with a Self-CA MinIO](../../ha-cluster/ha-example-minio/)).
+
 `pg mc` adds `--insecure` automatically when a command targets a TLS store via
 a loopback alias (mc persists no CA trust per alias; same-host loopback makes
 this acceptable). An alias to a LAN-IP endpoint is not loopback — append

@@ -40,6 +40,14 @@ pg snapshot delete 20260826-073712F -i proj01
 
 所有实例共享单个 pgbackrest 容器；每个实例在存储库中都有自己的 stanza。
 
+> **一份配置一个仓库。** 这个容器只服务**一个**仓库——`data_dir` 下的本地目
+> 录，或配置了 `backup.repo.s3` 时那唯一的一个 S3 端点——环境里的每个 stanza
+> （普通实例与 Patroni 集群一视同仁）都推给它。不存在按实例或按集群选仓库：
+> 于是一个 pgcli 环境就只备份到一个 store。若想把第二个 store（比如再
+> `pg addon install minio` 一个）只喂给部分集群，就跑**第二份配置**
+> （`pg config init --namespace …`）、配上它自己的备份容器——完整走法见
+> [示例：HA 集群 + 自签 CA 的 MinIO](../ha-cluster/ha-example-minio/)。
+
 ```bash
 # 初始化共享 pgbackrest 容器（构建镜像、创建目录、生成配置）
 pg backup setup

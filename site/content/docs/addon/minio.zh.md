@@ -106,6 +106,12 @@ pg addon install minio --name store --tls-cert /etc/ssl/minio.test.crt --tls-key
 `backup.repo.s3.ca_file`，pgBackRest 就会以完整证书校验连接它——见
 [备份 → S3 对象存储仓库](../../backup/#s3-对象存储仓库)。
 
+关于"store 与集群怎么配对"的一点说明：`backup.repo.s3` 是一份配置文件里唯一
+的全局仓库，所以最先接上的那台 TLS MinIO 会收到该环境里的**所有** stanza——
+再装一台 MinIO 并不会让集群们多出一个可按集群选择的 store。确需两个目的地
+时，跑第二份配置（见[备份 → 共享备份容器](../../backup/#共享备份容器)，以及完
+整示例[示例：HA 集群 + 自签 CA 的 MinIO](../../ha-cluster/ha-example-minio/)）。
+
 `pg mc` 在命令通过回环别名访问 TLS 存储时会自动附加 `--insecure`（`mc` 无法
 按别名持久化 CA 信任；同机 `127.0.0.1` 回环可接受）。指向局域网 IP 的别名不算
 回环——需自己加 `-- --insecure`，或正确配置 CA 信任。外部 `https://` 端点仍

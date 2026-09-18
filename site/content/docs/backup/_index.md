@@ -47,6 +47,17 @@ pg snapshot delete 20260826-073712F -i proj01
 
 All instances share a single pgbackrest container; each instance gets its own stanza in the repository.
 
+> **One repository per config file.** The container serves exactly **one**
+> repository — the local directory under `data_dir`, or the single
+> `backup.repo.s3` endpoint when configured — and every stanza in the
+> environment (regular instances and Patroni clusters alike) pushes to it.
+> There is no per-instance or per-cluster repo choice: one pgcli environment
+> therefore backs up to one store. To aim a second store (e.g. a second
+> `pg addon install minio`) at a subset of clusters, run a **second config**
+> (`pg config init --namespace …`) with its own backup container — worked out
+> end to end in
+> [Example: HA Cluster with a Self-CA MinIO](../ha-cluster/ha-example-minio/).
+
 ```bash
 # Initialize the shared pgbackrest container (build image, create dirs, generate config)
 pg backup setup
