@@ -53,24 +53,26 @@ pg addon install etcd --name m1
 
 ## 第 0 步 —— 一张域名证书
 
-任何 PEM 叶证书 + 密钥都行。演示用 CFSSL 的 `generate_cert` 造了一张自签的
-（有效期 1 年，SAN 覆盖客户端将要拨号的名字与 IP）：
+任何 PEM 叶证书 + 密钥都行。演示用 pgcli 自带的 `pg cert` 造了一张自签的
+（`--valid-duration` 控制有效期，SAN 覆盖客户端将要拨号的名字与 IP）：
 
 ```bash
-mkdir -p ~/.pgcli-app1/certs && cd ~/.pgcli-app1/certs
-generate_cert -host "minio1.test,127.0.0.1,<主机IP>" -duration 8760h \
-    # 产出 cert.pem + key.pem
-mv cert.pem store1.crt && mv key.pem store1.key && chmod 600 store1.key
+mkdir -p ~/.pgcli-app1/certs
+pg cert --host "minio1.test,127.0.0.1,<主机IP>" --valid-duration 8760h \
+    --cert-file ~/.pgcli-app1/certs/store1.crt --key-file ~/.pgcli-app1/certs/store1.key
+chmod 600 ~/.pgcli-app1/certs/store1.key
 
-openssl x509 -in store1.crt -noout -subject -issuer -ext subjectAltName -dates
-# subject=O = Acme Co
-# issuer=O = Acme Co                     <- 自签：叶证书与根证书就是同一张
+openssl x509 -in ~/.pgcli-app1/certs/store1.crt -noout -subject -issuer -ext subjectAltName -dates
+# subject=...
+# issuer=...                         <- 自签：叶证书与根证书就是同一张
 # DNS:minio1.test, IP Address:127.0.0.1, IP Address:<主机IP>
 ```
 
-若是**公共 CA**（或企业 CA）证书，这一步就只是"文件你本来就有"——把 flag 指
-向你的 `fullchain.pem`（先叶、后中间证书）和私钥即可，客户端侧反而更简单：锚
-定在受信 CA 的链**根本不需要** `--s3-ca-file`。
+`pg cert` 写出的是单张自签叶证书（`CA:FALSE`、服务端认证用途），它自己就是自
+己的信任锚——形态与公共 CA/企业 CA 签发的证书一致，只是没花钱去买。若是**公
+共 CA**（或企业 CA）证书，这一步就只是"文件你本来就有"——把 flag 指向你的
+`fullchain.pem`（先叶、后中间证书）和私钥即可，客户端侧反而更简单：锚定在受信
+CA 的链**根本不需要** `--s3-ca-file`。
 
 ## 第 1 步 —— 隔离环境
 

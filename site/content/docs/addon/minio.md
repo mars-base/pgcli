@@ -230,6 +230,59 @@ across re-runs is one-way, matching how `--tls` itself works. To go back to
 generated certs, remove `cert_file`/`key_file` under this addon in `pg.yaml`
 and recreate with `pg addon install minio --name store --force`.
 
+### Generating a test certificate: `pg cert`
+
+You don't need a real CA to try BYO — `pg cert` mints a self-signed cert whose
+SANs cover any mix of DNS names and IPs you ask for:
+
+```bash
+# A leaf cert valid for a hostname AND two IPs, ECDSA P-256 (the default),
+# 825 days (the default validity) — the shape most BYO installs want:
+pg cert --host "minio.test,127.0.0.1,10.0.0.9" \
+  --cert-file minio.crt --key-file minio.key
+
+# Then serve it:
+pg addon install minio --name store --tls-cert minio.crt --tls-key minio.key
+```
+
+Nothing it generates touches `pg.yaml` or a container — it just writes two PEM
+files wherever you point it and prints the SANs. Flags:
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--host` | `127.0.0.1` | Comma-separated DNS names and/or IPs to encode as SANs (repeatable). Entries are auto-detected as one or the other, so `"minio.test,10.0.0.9"` needs no special syntax; `*.wild.test` works as a wildcard DNS entry. |
+| `--cert-file` | `cert.pem` | Path to write the PEM certificate. |
+| `--key-file` | `key.pem` | Path to write the PEM private key (PKCS8). |
+| `--valid-duration` | `825` days (`19800h`) | How long the cert stays valid, e.g. `--valid-duration 8760h` for a year. |
+| `--ecdsa` | `P-256` | Curve: `P-224`/`P-256`/`P-384`/`P-521`. Set to `""` to disable ECDSA (and pair with `--rsa`). |
+| `--rsa` | *(off)* | RSA key size (e.g. `2048`, `4096`); set only when you specifically need RSA instead of the default ECDSA key. |
+| `--ca` | `false` | Make the cert its own CA (`CA:TRUE`, `keyCertSign`) — for when you want a private root to sign further certs with, not the usual case for `--tls-cert`. |
+
+The same generator is also built as a standalone binary for use outside `pg` —
+`make gencert` → `bin/gencert`, with the identical flag set in single-dash
+form (`-host`, `-cert-file`, …). Both front the one `internal/certgen` package,
+so their output is byte-for-byte the same kind of certificate.
+
+**What `pg cert` writes is one self-signed leaf, not a chain.** The PEM in
+`--cert-file` holds exactly one `CERTIFICATE` block — the cert signs itself
+(`IsCA: false`, `serverAuth` EKU, your SANs). It is deliberately *not* a
+leaf+intermediate+root bundle: there is no issuing CA above it, so there is
+nothing to chain, and `ValidateBYOCert` only inspects the first certificate in
+the file and rejects one that is a CA (`leaf.IsCA`), which is precisely why
+the `--ca` output is **not** something to point `--tls-cert` at — it is the
+trust anchor itself, not a server cert.
+
+Since the result is self-signed, treat the generated `minio.crt` exactly
+like pgcli's own `--tls`-generated `ca.crt` on the client side — the served
+leaf *is* its own trust anchor, so point `backup.repo.s3.ca_file` /
+`pg backup setup --s3-ca-file` at the same file (see
+[Backup → S3 Object Storage Repository](../../backup/#s3-object-storage-repository)).
+This is not a workaround pgBackRest merely tolerates: OpenSSL's trust store
+treats whatever you hand it via `-CAfile`/`SSL_CTX` as an anchor, `CA:TRUE`
+not required, and pgBackRest's S3 TLS path (curl over OpenSSL) is that same
+mechanism — verified directly: `openssl verify -CAfile <pg cert's cert>
+<pg cert's cert>` on the self-signed, `CA:FALSE` leaf returns `OK`.
+
 ## Distributed / Cluster Mode
 
 MinIO's erasure-coded (EC) cluster mode is available too. It requires **at

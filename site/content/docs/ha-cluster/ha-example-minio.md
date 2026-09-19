@@ -59,26 +59,28 @@ the cluster lives on the same host and dials `127.0.0.1:2379`.)
 
 ## Step 0 — a domain certificate
 
-Any PEM leaf + key works. For the demo we minted a self-signed one with a CFSSL
-`generate_cert` helper (duration 1 year, SANs covering the name and IPs clients
-will dial):
+Any PEM leaf + key works. For the demo we minted a self-signed one with pgcli's
+own `pg cert` (validity via `--valid-duration`, SANs covering the name and IPs
+clients will dial):
 
 ```bash
-mkdir -p ~/.pgcli-app1/certs && cd ~/.pgcli-app1/certs
-generate_cert -host "minio1.test,127.0.0.1,<host-ip>" -duration 8760h \
-    # writes cert.pem + key.pem
-mv cert.pem store1.crt && mv key.pem store1.key && chmod 600 store1.key
+mkdir -p ~/.pgcli-app1/certs
+pg cert --host "minio1.test,127.0.0.1,<host-ip>" --valid-duration 8760h \
+    --cert-file ~/.pgcli-app1/certs/store1.crt --key-file ~/.pgcli-app1/certs/store1.key
+chmod 600 ~/.pgcli-app1/certs/store1.key
 
-openssl x509 -in store1.crt -noout -subject -issuer -ext subjectAltName -dates
-# subject=O = Acme Co
-# issuer=O = Acme Co                     <- self-signed: leaf and root are one and the same
+openssl x509 -in ~/.pgcli-app1/certs/store1.crt -noout -subject -issuer -ext subjectAltName -dates
+# subject=...
+# issuer=...                         <- self-signed: leaf and root are one and the same
 # DNS:minio1.test, IP Address:127.0.0.1, IP Address:<host-ip>
 ```
 
-With a **public-CA** (or corporate-CA) cert this step is simply "you already
-have the files" — point the flags at your `fullchain.pem` (leaf first, then
-intermediates) and key, and the client-side story gets *easier*: chains rooted
-in a trusted CA need no `--s3-ca-file` at all.
+`pg cert` writes a single self-signed leaf (`CA:FALSE`, server-auth) that is its
+own trust anchor — exactly the shape a public- or corporate-CA cert has, minus
+having bought one. With a **public-CA** (or corporate-CA) cert this step is
+simply "you already have the files" — point the flags at your `fullchain.pem`
+(leaf first, then intermediates) and key, and the client-side story gets
+*easier*: chains rooted in a trusted CA need no `--s3-ca-file` at all.
 
 ## Step 1 — an isolated environment
 

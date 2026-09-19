@@ -194,6 +194,55 @@ CA 你根本不需要这一步，私有 CA 你本就有现成的答案。
 下删掉 `cert_file`/`key_file`，再用 `pg addon install minio --name store --force`
 重建即可。
 
+### 生成测试证书：`pg cert`
+
+尝试自带证书模式不必先有一套真的 CA——`pg cert` 签发一张自签证书，SAN 覆盖你
+要求的任意域名 / IP 组合：
+
+```bash
+# 一张同时对一个主机名和两个 IP 生效的叶证书，ECDSA P-256（默认），
+# 825 天有效期（默认）——这正是多数自带证书场景要的形态：
+pg cert --host "minio.test,127.0.0.1,10.0.0.9" \
+  --cert-file minio.crt --key-file minio.key
+
+# 然后对外提供它：
+pg addon install minio --name store --tls-cert minio.crt --tls-key minio.key
+```
+
+它产出的任何东西都不碰 `pg.yaml`、也不碰容器——只是往你指定的路径写两个 PEM
+文件并打印 SAN。flag 一览：
+
+| flag | 默认值 | 含义 |
+|------|--------|------|
+| `--host` | `127.0.0.1` | 逗号分隔的域名和/或 IP，编码进 SAN（可重复传）。条目会自动识别是域名还是 IP，`"minio.test,10.0.0.9"` 不需要特殊语法；`*.wild.test` 会作为通配符域名条目。 |
+| `--cert-file` | `cert.pem` | 写出证书 PEM 的路径。 |
+| `--key-file` | `key.pem` | 写出私钥 PEM（PKCS8）的路径。 |
+| `--valid-duration` | 825 天（`19800h`） | 证书有效期，例如 `--valid-duration 8760h` 是一年。 |
+| `--ecdsa` | `P-256` | 曲线：`P-224`/`P-256`/`P-384`/`P-521`。置为空字符串则不生成 ECDSA 密钥（配合 `--rsa` 用）。 |
+| `--rsa` | *（关）* | RSA 密钥位数（如 `2048`、`4096`）；只在明确需要 RSA 而非默认 ECDSA 密钥时才设。 |
+| `--ca` | `false` | 让这张证书自成一个 CA（`CA:TRUE`、`keyCertSign`）——用于你想拿它当私有根再去签别的证书，而非常规的 `--tls-cert` 用法。 |
+
+同一套签发逻辑也编成了一个可脱离 `pg` 使用的独立二进制：`make gencert` →
+`bin/gencert`，flag 完全相同、只是用单横线形式（`-host`、`-cert-file`……）。两
+者背后是同一个 `internal/certgen` 包，产出的证书类型逐字节一致。
+
+**`pg cert` 写出的是单张自签叶证书，不是一条链。** `--cert-file` 里的 PEM 恰好
+只有一块 `CERTIFICATE`——这张证书自我签名（`IsCA: false`、`serverAuth` EKU、
+你要求的 SAN）。它有意不是"叶+中间+根"的打包链：它上面没有签发 CA，所以没有
+东西可以拼进链；`ValidateBYOCert` 只看文件里的第一块证书，并拒绝 CA 证书
+（`leaf.IsCA`）——这也正是 `--ca` 产出的那张证书**不能**拿去喂 `--tls-cert`
+的原因：它是信任锚本身，不是服务端证书。
+
+既然产出是自签证书，在客户端侧就把生成的 `minio.crt` 当作 pgcli 自己为
+`--tls` 生成的那张 `ca.crt` 同样使用——被下发的那张叶证书*本身*就是自己的
+信任锚，所以 `backup.repo.s3.ca_file` / `pg backup setup --s3-ca-file` 直接
+指向同一个文件即可（见
+[备份 → S3 对象存储仓库](../../backup/#s3-对象存储仓库)）。这不是 pgBackRest
+勉强容忍的旁门做法：OpenSSL 的信任库把通过 `-CAfile`/`SSL_CTX` 交给它的任何
+证书都当作锚点，并不要求 `CA:TRUE`，而 pgBackRest 的 S3 TLS 路径（curl 走
+OpenSSL）用的正是这一套机制——直接实测过：对 `pg cert` 产出的自签、`CA:FALSE`
+叶证书跑 `openssl verify -CAfile <证书> <证书>`，返回 `OK`。
+
 ## 分布式 / 集群模式
 
 也支持 MinIO 的纠删码（EC）集群模式。它要求**至少 4 个互不相同的
