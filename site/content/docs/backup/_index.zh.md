@@ -110,11 +110,13 @@ pg backup setup
   外部端点（真实 AWS S3 等公签证书）留空 `ca_file` 即可；实在无法提供 CA 时
   可用 `verify_tls: false` 逃生（不做证书校验）。
 - **远端存储主机取 CA——无需 scp。** MinIO 在另一台机器时，用一次 TLS 握手就
-  能取回 CA，不必拷贝文件：`pg backup fetch-ca <存储主机>:9002` 从端点下发的
-  证书链里取出签名根，存到 `<base-dir>/backup/repo-ca/` 下并打印 SHA-256
+  能取回信任锚，不必拷贝文件：`pg backup fetch-ca <存储主机>:9002` 从端点下发
+  的证书里取出信任锚，存到 `<base-dir>/backup/repo-ca/` 下并打印 SHA-256
   指纹——这本质是"首次使用即信任"（TOFU），所以信任前先把指纹与存储主机对拍
-  一次，再把文件交给 `pg backup setup --s3-ca-file <路径>`。（公签端点根本
-  不需要 `ca_file`，此命令只针对 pgcli 自签的 MinIO。）
+  一次，再把文件交给 `pg backup setup --s3-ca-file <路径>`。它覆盖 pgcli 会提供
+  的两种 TLS 形态：开 `--tls` 的 MinIO（下发的是生成好的"叶+CA"链，取出的是
+  签名根）；以及喂了 `pg cert` 自签叶证书的 MinIO（叶本身就是信任锚，原样保存
+  即可）。公共 CA 签发的端点根本不需要 `ca_file`，此命令对它们没有意义。
 - **跨机 HA 免手工分发。** Patroni 集群分散在多台主机时，`ca_file` 与备份 SSH
   公钥只需在*一台*主机配好：`pg backup setup` 把 CA 发布进集群的 etcd 注册表，
   `ca_file` 留空的加入者自动拉取；各主机的备份公钥在 `pg ha create` 时发布，
