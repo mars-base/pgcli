@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mars-base/pgcli/internal/certgen"
 	"github.com/mars-base/pgcli/internal/tlsca"
 )
 
@@ -63,6 +64,34 @@ func TestFetchRepoCAEndToEnd(t *testing.T) {
 	}
 	if strings.TrimSpace(got) != strings.TrimSpace(string(wantPEM)) {
 		t.Fatal("fetched CA differs from the generated ca.crt")
+	}
+}
+
+// A server presenting a single self-signed leaf — exactly what `pg cert` mints
+// for MinIO's BYO mode — must hand that leaf back as the trust anchor instead
+// of erroring that no CA was found in the chain.
+func TestFetchRepoCASelfSignedLeaf(t *testing.T) {
+	res, err := certgen.Generate(certgen.Options{
+		Hosts: []string{"127.0.0.1", "minio.test"},
+	})
+	if err != nil {
+		t.Fatalf("certgen.Generate: %v", err)
+	}
+	cert, err := tls.X509KeyPair(res.CertPEM, res.KeyPEM)
+	if err != nil {
+		t.Fatalf("X509KeyPair: %v", err)
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
+	srv.StartTLS()
+	defer srv.Close()
+
+	got, err := FetchRepoCA(strings.TrimPrefix(srv.URL, "https://"))
+	if err != nil {
+		t.Fatalf("FetchRepoCA: %v", err)
+	}
+	if strings.TrimSpace(got) != strings.TrimSpace(string(res.CertPEM)) {
+		t.Fatal("fetched cert differs from the self-signed leaf the server served")
 	}
 }
 

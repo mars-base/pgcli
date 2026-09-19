@@ -14,15 +14,19 @@ import (
 // host should fail fast, not hang a setup run.
 const caFetchDialTimeout = 5 * time.Second
 
-// FetchRepoCA dials a TLS S3 endpoint and returns the self-signed CA that
-// signed its leaf, PEM-encoded, taken from the server's certificate chain.
+// FetchRepoCA dials a TLS S3 endpoint and returns the CA that should be
+// trusted for it, PEM-encoded, taken from the server's certificate chain.
 //
-// This closes the first hop of cross-host backup trust: pgcli's MinIO addon
-// serves a leaf+CA chain (internal/tlsca), so a Patroni host that has never
-// seen ca.crt can pull it with one command instead of an scp from the storage
-// host. Everything after that is already automated — `pg backup setup`
-// publishes the pulled CA to the cluster's etcd registry for the remaining
-// hosts.
+// Two shapes resolve to an anchor: a self-signed leaf is returned as-is (it is
+// its own trust anchor — `pg cert` mints this shape for MinIO's BYO mode), and
+// otherwise the first self-signed CA in the chain that actually signed the leaf
+// is returned (pgcli's generated `--tls` leaf+CA chain).
+//
+// This closes the first hop of cross-host backup trust: a Patroni host that has
+// never seen the storage side's certificate can pull it with one command
+// instead of an scp from the storage host. Everything after that is already
+// automated — `pg backup setup` publishes the pulled CA to the cluster's etcd
+// registry for the remaining hosts.
 //
 // The connection is trust-on-first-use: the CA we are fetching is the trust
 // anchor, so it cannot also be the thing we verify against. The command-side
@@ -45,6 +49,12 @@ func FetchRepoCA(endpoint string) (string, error) {
 		return "", fmt.Errorf("%s presented no certificate", hostport)
 	}
 	leaf := chain[0]
+	// A self-signed leaf *is* its own anchor — there is no separate CA to
+	// find, and none of the chain-scanning below applies (see `pg cert`,
+	// which mints exactly this shape for MinIO's BYO mode).
+	if bytes.Equal(leaf.RawSubject, leaf.RawIssuer) {
+		return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw})), nil
+	}
 	for _, cert := range chain[1:] {
 		if !cert.IsCA || !bytes.Equal(cert.RawSubject, cert.RawIssuer) {
 			continue // not self-signed: an intermediate, or not ours

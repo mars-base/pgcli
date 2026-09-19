@@ -824,26 +824,30 @@ var fetchCAOut string
 var backupFetchCACmd = &cobra.Command{
 	Use:   "fetch-ca [endpoint]",
 	Short: "Fetch an S3 endpoint's TLS CA certificate over the network",
-	Long: `fetch-ca dials the S3 repository endpoint over TLS and saves the CA
-certificate that signed its leaf, so a Patroni host on a different machine than
-the storage host can trust it without anyone scp'ing ca.crt across.
+	Long: `fetch-ca dials the S3 repository endpoint over TLS and saves the certificate
+its clients should trust, so a Patroni host on a different machine than the
+storage host can trust it without anyone scp'ing a file across. Two shapes
+resolve: a self-signed leaf (what `+"`pg cert`"+` mints for MinIO's BYO mode) is
+saved as-is — it is its own trust anchor — and otherwise the self-signed CA that
+signed the served leaf, taken from the endpoint's TLS chain.
 
 The endpoint argument defaults to backup.repo.s3.endpoint from pg.yaml. The
 command prints the saved path and a sha256 fingerprint — cross-check the
-fingerprint against the storage host (sha256sum of its tls/minio/<name>/ca.crt)
-the way you would an SSH host key, since fetching a trust anchor before you
-trust anything is inherently trust-on-first-use.
+fingerprint against the storage host (sha256sum of its tls/minio/<name>/ca.crt,
+or of the .crt given to --tls-cert) the way you would an SSH host key, since
+fetching a trust anchor before you trust anything is inherently
+trust-on-first-use.
 
 Then hand the file to setup, which publishes it to the cluster's etcd registry
 so the remaining hosts need nothing at all:
 
   pg backup setup --s3-ca-file <path>
 
-Works against a pgcli-served MinIO (pgcli's own CA sits in its TLS chain). A
-publicly-caught endpoint (real AWS S3) needs no ca_file and this command is
-pointless there. This is a deliberate one-shot rather than something setup runs
-on its own: a silent TOFU dial on every setup would bury the fingerprint nobody
-was asked to look at.`,
+Works against a pgcli-served MinIO (its own CA or a `+"`pg cert`"+` BYO leaf sits in
+the TLS chain). An endpoint served with a public CA's certificate needs no
+ca_file and this command is pointless there. This is a deliberate one-shot
+rather than something setup runs on its own: a silent TOFU dial on every setup
+would bury the fingerprint nobody was asked to look at.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadRawConfig()
