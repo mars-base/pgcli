@@ -99,6 +99,19 @@ pg backup setup --s3-endpoint <主机IP>:9000 --s3-bucket pgbackrest \
   --s3-access-key admin --s3-ca-file ~/.pgcli/certs/store.crt
 ```
 
+第 3 步直接引用你刚造好的 `.crt`，因为本机已经持有它。**从没见过这个文件的
+远端主机**则用一次握手把它取回来，无需 scp——`fetch-ca` 能认出 MinIO 提供的
+自签叶证书并把它作为锚保存：
+
+```bash
+# 在另一台主机上，替代把 ~/.pgcli/certs/store.crt 拷过去：
+pg backup fetch-ca <主机IP>:9000
+#   [OK] CA fetched from <主机IP>:9000
+#        saved:    <base-dir>/backup/repo-ca/ca-<主机IP>-9000.crt
+#        SHA-256:  d4df…81e2   （与存储主机的 sha256sum 对拍）
+pg backup setup --s3-ca-file <base-dir>/backup/repo-ca/ca-<主机IP>-9000.crt
+```
+
 ## 相关
 
 - [MinIO](../addon/minio/) —— 插件本体，及其

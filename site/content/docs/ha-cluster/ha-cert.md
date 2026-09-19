@@ -107,6 +107,20 @@ pg backup setup --s3-endpoint <host-ip>:9000 --s3-bucket pgbackrest \
   --s3-access-key admin --s3-ca-file ~/.pgcli/certs/store.crt
 ```
 
+Step 3 references the `.crt` you minted, because on this host you already hold
+it. A **remote host that never saw the file** pulls it back with one handshake
+instead of an scp — `fetch-ca` recognizes the self-signed leaf MinIO serves and
+saves it as the anchor:
+
+```bash
+# on another host, instead of copying ~/.pgcli/certs/store.crt over:
+pg backup fetch-ca <host-ip>:9000
+#   [OK] CA fetched from <host-ip>:9000
+#        saved:    <base-dir>/backup/repo-ca/ca-<host-ip>-9000.crt
+#        SHA-256:  d4df…81e2   (cross-check against the store host's sha256sum)
+pg backup setup --s3-ca-file <base-dir>/backup/repo-ca/ca-<host-ip>-9000.crt
+```
+
 ## Related
 
 - [MinIO](../addon/minio/) — the addon itself, and its
