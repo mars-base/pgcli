@@ -221,10 +221,22 @@ any other cert you hand the client the trust anchor as
 `backup.repo.s3.ca_file` / `--s3-ca-file`: the issuing CA (or the full
 leaf+intermediate bundle) for a private-CA cert, or — since a self-signed cert
 is its own anchor — the served `.crt` itself when you minted it with `pg cert`.
-`pg backup fetch-ca` works on the `pg cert` path too: a remote host that never
-saw the file can pull the self-signed leaf straight out of the TLS handshake,
-the way it pulls pgcli's generated root for `--tls`. For a public CA it stays
-pointless — there is nothing to fetch that isn't already trusted.
+A remote host that never saw that `.crt` can pull it out of the TLS handshake
+automatically instead of an scp — `fetch-ca` recognizes a self-signed leaf and
+saves it for you:
+
+```bash
+pg backup fetch-ca <store-host>:9010
+#   [OK] CA fetched from <store-host>:9010
+#        saved:    ~/.pgcli/backup/repo-ca/ca-<store-host>-9010.crt
+#        SHA-256:  d4df…81e2
+pg backup setup --s3-ca-file ~/.pgcli/backup/repo-ca/ca-<store-host>-9010.crt
+```
+
+Cross-check the SHA-256 against the store host's `sha256sum` of the `.crt` you
+gave `--tls-cert` (trust-on-first-use, same as the generated-CA fetch above).
+For a public-CA cert the command stays pointless — there is nothing to fetch
+that isn't already trusted.
 
 **Turning BYO off.** There is no `--tls-cert=`/off flag — the config merge
 across re-runs is one-way, matching how `--tls` itself works. To go back to

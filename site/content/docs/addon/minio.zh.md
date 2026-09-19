@@ -186,9 +186,20 @@ pgBackRest 经 `repo*-s3-ca-file`）完全不需要额外信任材料——信�
 它们已信任的 CA 里。其余证书则把信任锚交给客户端的
 `backup.repo.s3.ca_file` / `--s3-ca-file`：私有 CA 证书交签发 CA（或完整的
 叶+中间证书链）；自签证书既然自身即锚，`pg cert` 造的那张就直接交被服务的
-`.crt` 本身。`pg backup fetch-ca` 在 `pg cert` 这条路上同样可用：没见过这个
-文件的远端主机，能像拉取 `--tls` 生成的那把根证书一样，直接从 TLS 握手里把
-自签叶证书捞回来。公共 CA 场景下它仍然多余——该信任的东西本就已经被信任。
+`.crt` 本身。从没见过这个文件的远端主机，可以不用 scp，直接从 TLS 握手里自动
+把它拉回来——`fetch-ca` 会识别自签叶证书并替你保存：
+
+```bash
+pg backup fetch-ca <存储主机>:9010
+#   [OK] CA fetched from <存储主机>:9010
+#        saved:    ~/.pgcli/backup/repo-ca/ca-<存储主机>-9010.crt
+#        SHA-256:  d4df…81e2
+pg backup setup --s3-ca-file ~/.pgcli/backup/repo-ca/ca-<存储主机>-9010.crt
+```
+
+请把打印的 SHA-256 与存储主机上对你交给 `--tls-cert` 的那个 `.crt` 跑
+`sha256sum` 的结果对拍（首次使用即信任，与上面取回生成 CA 的用法同理）。公共
+CA 证书则仍然用不上这条命令——没有需要去取回、且尚未被信任的东西。
 
 **关闭自带证书模式。** 没有 `--tls-cert=`/关闭 这类 flag——跨重跑的配置合并是
 单向的，与 `--tls` 本身的行为一致。要回到生成证书模式，从 `pg.yaml` 里该实例
