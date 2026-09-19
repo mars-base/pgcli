@@ -41,10 +41,12 @@ Because it is self-signed, **the leaf is its own trust anchor** — hand the sam
 `.crt` to any TLS client that lets you point at a CA file or bundle (curl
 `--cacert`, a browser's import, an app's `SSL_CERT_FILE` …). For pgBackRest's
 S3 path specifically that means `backup.repo.s3.ca_file` /
-`pg backup setup --s3-ca-file minio.crt`. This is not a workaround pgBackRest
-merely tolerates: OpenSSL treats whatever you hand its trust store as an
-anchor regardless of `CA:TRUE`, and pgBackRest's S3 path (curl over OpenSSL)
-is that mechanism — verified directly,
+`pg backup setup --s3-ca-file minio.crt`. A remote host that never saw the
+file needs no scp either: `pg backup fetch-ca <endpoint>` recognizes a
+self-signed leaf in the TLS handshake and saves it back as the anchor. This is
+not a workaround pgBackRest merely tolerates: OpenSSL treats whatever you hand
+its trust store as an anchor regardless of `CA:TRUE`, and pgBackRest's S3 path
+(curl over OpenSSL) is that mechanism — verified directly,
 `openssl verify -CAfile minio.crt minio.crt` returns `OK`.
 
 With a real **public- or private-CA** certificate none of the self-anchor

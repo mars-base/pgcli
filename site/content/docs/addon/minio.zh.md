@@ -183,11 +183,12 @@ pg addon install minio --name store --tls-cert <new.crt> --tls-key <new.key> --f
 
 **客户端。** 用受公共 CA 签发的证书时，S3 客户端（`mc` 系、`aws` CLI、
 pgBackRest 经 `repo*-s3-ca-file`）完全不需要额外信任材料——信任链本就锚定在
-它们已信任的 CA 里。私有 CA 证书的用法与自签证书一贯的做法相同：把签发
-CA（或完整的叶+中间证书链）作为 `backup.repo.s3.ca_file` / `--s3-ca-file` 交给
-客户端。`pg backup fetch-ca` 有意不纳入这条路径：它存在的意义是取回 pgcli
-为 `--tls` 生成的那把特定自签根证书，而域证书的信任锚是签发它的 CA——公共
-CA 你根本不需要这一步，私有 CA 你本就有现成的答案。
+它们已信任的 CA 里。其余证书则把信任锚交给客户端的
+`backup.repo.s3.ca_file` / `--s3-ca-file`：私有 CA 证书交签发 CA（或完整的
+叶+中间证书链）；自签证书既然自身即锚，`pg cert` 造的那张就直接交被服务的
+`.crt` 本身。`pg backup fetch-ca` 在 `pg cert` 这条路上同样可用：没见过这个
+文件的远端主机，能像拉取 `--tls` 生成的那把根证书一样，直接从 TLS 握手里把
+自签叶证书捞回来。公共 CA 场景下它仍然多余——该信任的东西本就已经被信任。
 
 **关闭自带证书模式。** 没有 `--tls-cert=`/关闭 这类 flag——跨重跑的配置合并是
 单向的，与 `--tls` 本身的行为一致。要回到生成证书模式，从 `pg.yaml` 里该实例

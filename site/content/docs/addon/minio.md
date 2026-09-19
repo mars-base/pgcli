@@ -216,14 +216,15 @@ new pair) and recreate with `--force`.
 
 **Clients.** With a certificate from a publicly-trusted CA, S3 clients (the
 `mc` family, `aws` CLI, pgBackRest via `repo*-s3-ca-file`) need no extra
-trust material at all — the chain is already rooted in a CA they trust. A
-private-CA cert works the same way the self-signed one always has: hand the
-client the issuing CA (or the full leaf+intermediate bundle) as
-`backup.repo.s3.ca_file` / `--s3-ca-file`. `pg backup fetch-ca` is deliberately
-left out of this path: it exists to pull back the specific self-signed root
-pgcli generates for `--tls`, and a domain certificate's trust anchor is
-whatever CA signed it — a step you do not need for a public CA, and one you
-already have the answer to for a private one.
+trust material at all — the chain is already rooted in a CA they trust. For
+any other cert you hand the client the trust anchor as
+`backup.repo.s3.ca_file` / `--s3-ca-file`: the issuing CA (or the full
+leaf+intermediate bundle) for a private-CA cert, or — since a self-signed cert
+is its own anchor — the served `.crt` itself when you minted it with `pg cert`.
+`pg backup fetch-ca` works on the `pg cert` path too: a remote host that never
+saw the file can pull the self-signed leaf straight out of the TLS handshake,
+the way it pulls pgcli's generated root for `--tls`. For a public CA it stays
+pointless — there is nothing to fetch that isn't already trusted.
 
 **Turning BYO off.** There is no `--tls-cert=`/off flag — the config merge
 across re-runs is one-way, matching how `--tls` itself works. To go back to

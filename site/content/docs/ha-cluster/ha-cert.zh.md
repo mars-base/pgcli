@@ -37,9 +37,11 @@ pg cert --host "minio.test,127.0.0.1,10.0.0.9" \
 因为是自签，**这张叶证书就是它自己的信任锚**——把同一张 `.crt` 交给任何允许
 指定 CA 文件/证书串的 TLS 客户端即可（curl `--cacert`、浏览器导入、应用的
 `SSL_CERT_FILE`……）。具体到 pgBackRest 的 S3 路径，就是把 `backup.repo.s3.ca_file`
-/ `pg backup setup --s3-ca-file minio.crt` 指向它。这不是 pgBackRest 勉强容忍
-的旁门做法：OpenSSL 把交给它信任库的任何证书都当作锚点，并不要求 `CA:TRUE`，
-而 pgBackRest 的 S3 路径（curl 走 OpenSSL）用的正是这一套机制——直接实测过：
+/ `pg backup setup --s3-ca-file minio.crt` 指向它。从没见过这个文件的远端主机
+也不必 scp：`pg backup fetch-ca <endpoint>` 能识别 TLS 握手里的自签叶证书，并
+直接把它作为锚保存下来。这不是 pgBackRest 勉强容忍的旁门做法：OpenSSL 把交给
+它信任库的任何证书都当作锚点，并不要求 `CA:TRUE`，而 pgBackRest 的 S3 路径
+（curl 走 OpenSSL）用的正是这一套机制——直接实测过：
 `openssl verify -CAfile minio.crt minio.crt` 返回 `OK`。
 
 换成真正的**公共 CA / 私有 CA** 证书，这套自锚机制就都不需要了：锚定在受信
