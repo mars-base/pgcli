@@ -298,6 +298,20 @@ not required, and pgBackRest's S3 TLS path (curl over OpenSSL) is that same
 mechanism — verified directly: `openssl verify -CAfile <pg cert's cert>
 <pg cert's cert>` on the self-signed, `CA:FALSE` leaf returns `OK`.
 
+## Deployment modes
+
+MinIO/silo classifies its layouts; the addon supports the two that matter
+here:
+
+| Mode | Shape | Use it for |
+|------|-------|------------|
+| **SNSD** (single-node, single-drive) | one node, one data directory — the default when no `--endpoint` is given | dev, test, demos |
+| **MNSD** (multi-node, single-drive) | several nodes, one data disk per node — the distributed mode below | compact high-availability deployments |
+
+SNSD is what `pg addon install minio` gives you out of the box. To get
+MNSD, pass the cluster's endpoint list (at least four nodes) — see
+[Distributed / Cluster Mode](#distributed--cluster-mode) below.
+
 ## Distributed / Cluster Mode
 
 MinIO's erasure-coded (EC) cluster mode is available too. It requires **at

@@ -180,6 +180,18 @@ pg addon install silo --name store --tls-cert silo.crt --tls-key silo.key
 本身一致。要回到生成模式，删除 `pg.yaml` 里该插件下的
 `cert_file`/`key_file`，再 `pg addon install silo --name store --force` 重建。
 
+## 部署形态
+
+silo/MinIO 对自身的部署布局有明确分类；本插件支持其中最常用的两种：
+
+| 形态 | 结构 | 适用场景 |
+|------|------|----------|
+| **SNSD**（单机单盘） | 单节点、单个数据目录——不给 `--endpoint` 时的默认 | 开发、测试、演示 |
+| **MNSD**（多机单盘） | 多节点、每节点一块数据盘——即下文的分布式模式 | 紧凑的高可用部署 |
+
+`pg addon install silo` 开箱即是 SNSD。要得到 MNSD，传入集群的
+endpoint 列表（至少四节点）——见下文[分布式 / 集群模式](#分布式--集群模式)。
+
 ## 分布式 / 集群模式
 
 silo 的纠删码（EC）集群模式与 MinIO 完全一致——命令形状相同，规则也相同。

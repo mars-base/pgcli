@@ -202,6 +202,20 @@ one-way, matching how `--tls` itself works. To go back to generated certs,
 remove `cert_file`/`key_file` under this addon in `pg.yaml` and recreate with
 `pg addon install silo --name store --force`.
 
+## Deployment modes
+
+silo/MinIO classifies its layouts; the addon supports the two that matter
+here:
+
+| Mode | Shape | Use it for |
+|------|-------|------------|
+| **SNSD** (single-node, single-drive) | one node, one data directory — the default when no `--endpoint` is given | dev, test, demos |
+| **MNSD** (multi-node, single-drive) | several nodes, one data disk per node — the distributed mode below | compact high-availability deployments |
+
+SNSD is what `pg addon install silo` gives you out of the box. To get
+MNSD, pass the cluster's endpoint list (at least four nodes) — see
+[Distributed / Cluster Mode](#distributed--cluster-mode) below.
+
 ## Distributed / Cluster Mode
 
 silo's erasure-coded (EC) cluster mode works exactly like MinIO's — same

@@ -257,6 +257,18 @@ pg addon install minio --name store --tls-cert minio.crt --tls-key minio.key
 OpenSSL）用的正是这一套机制——直接实测过：对 `pg cert` 产出的自签、`CA:FALSE`
 叶证书跑 `openssl verify -CAfile <证书> <证书>`，返回 `OK`。
 
+## 部署形态
+
+MinIO/silo 对自身的部署布局有明确分类；本插件支持其中最常用的两种：
+
+| 形态 | 结构 | 适用场景 |
+|------|------|----------|
+| **SNSD**（单机单盘） | 单节点、单个数据目录——不给 `--endpoint` 时的默认 | 开发、测试、演示 |
+| **MNSD**（多机单盘） | 多节点、每节点一块数据盘——即下文的分布式模式 | 紧凑的高可用部署 |
+
+`pg addon install minio` 开箱即是 SNSD。要得到 MNSD，传入集群的
+endpoint 列表（至少四节点）——见下文[分布式 / 集群模式](#分布式--集群模式)。
+
 ## 分布式 / 集群模式
 
 也支持 MinIO 的纠删码（EC）集群模式。它要求**至少 4 个互不相同的
