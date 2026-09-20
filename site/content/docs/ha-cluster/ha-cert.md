@@ -11,9 +11,9 @@ service whose clients you control. The certificate it writes is a normal TLS
 server leaf, usable anywhere.
 
 The use this docs tree exercises is pgBackRest's S3 path: a Patroni cluster's
-backups push to an S3 store (MinIO, typically) that must serve **TLS** —
-pgBackRest refuses plaintext S3 — and pgcli's MinIO addon can serve a
-**bring-your-own certificate** (`pg addon install minio --tls-cert ... --tls-key
+backups push to an S3 store (MinIO or silo, typically) that must serve
+**TLS** — pgBackRest refuses plaintext S3 — and pgcli's MinIO/silo addons can
+serve a **bring-your-own certificate** (`pg addon install minio --tls-cert ... --tls-key
 ...`). The quickest way to get a cert to try that with is `pg cert`:
 
 ```bash
@@ -123,6 +123,7 @@ pg backup setup --s3-ca-file <base-dir>/backup/repo-ca/ca-<host-ip>-9000.crt
 
 ## Related
 
+- [Silo](../addon/silo/) — the same BYO TLS surface on Pigsty's MinIO fork
 - [MinIO](../addon/minio/) — the addon itself, and its
   [bring-your-own certificate](../addon/minio/#bring-your-own-certificate---tls-cert----tls-key)
   and [generating a test certificate](../addon/minio/#generating-a-test-certificate-pg-cert)

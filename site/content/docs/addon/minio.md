@@ -9,7 +9,9 @@ weight: 49
 sidecar — with the web console included. It defaults to **single-node** mode and
 supports a genuinely distributed **cluster mode** across hosts
 ([see below](#distributed--cluster-mode)). Either way it is a general-purpose
-object store.
+object store. [silo](../silo/) — Pigsty's MinIO fork, kept wire-compatible —
+is available as a sibling addon with the identical feature surface; the two
+share one port pool and can coexist on a host.
 
 > **Platform support:** the MinIO addon works on **both platforms**. Linux
 > serves over host networking; macOS joins the `pgcli-net` bridge with its two

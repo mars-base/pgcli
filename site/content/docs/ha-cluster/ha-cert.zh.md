@@ -9,8 +9,8 @@ weight: 54
 客户端归你可控的服务。它写出的就是一张普通的 TLS 服务端叶证书，哪里都能用。
 
 本文档树里演练的用例是 pgBackRest 的 S3 路径：Patroni 集群的备份要推给一个
-S3 存储（通常是 MinIO），而它必须对外提供 **TLS**——pgBackRest 明确拒绝明文
-S3——pgcli 的 MinIO 插件支持**自带证书**（`pg addon install minio --tls-cert
+S3 存储（通常是 MinIO 或 silo），而它必须对外提供 **TLS**——pgBackRest 明确
+拒绝明文 S3——pgcli 的 MinIO/silo 插件都支持**自带证书**（`pg addon install minio --tls-cert
 ... --tls-key ...`）。想快速拿到一张证书来走通这条路，最省事的办法就是
 `pg cert`：
 
@@ -114,6 +114,7 @@ pg backup setup --s3-ca-file <base-dir>/backup/repo-ca/ca-<主机IP>-9000.crt
 
 ## 相关
 
+- [Silo](../addon/silo/) —— Pigsty 的 MinIO 分支，自带证书形态相同
 - [MinIO](../addon/minio/) —— 插件本体，及其
   [使用自带证书](../addon/minio/#使用自带证书--tls-cert----tls-key)
   与[生成测试证书](../addon/minio/#生成测试证书pg-cert)两节

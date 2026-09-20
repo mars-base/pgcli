@@ -28,6 +28,7 @@ The following addons are currently supported:
 | [`pgdog`](./pgdog/) | Postgres proxy — connection pooling, load balancing and sharding |
 | [`haproxy`](./haproxy/) | TCP load balancer in front of a Patroni cluster — unified or read/write split (Linux only) |
 | [`minio`](./minio/) | S3-compatible object storage with web console — standalone or distributed erasure-coded cluster across hosts (Linux and macOS) |
+| [`silo`](./silo/) | S3-compatible object storage (Pigsty's MinIO fork) — same feature surface as the minio addon, shares one port pool; ships its own `mcli` client (Linux and macOS) |
 
 Each addon has its own page with commands, parameters, and troubleshooting.
 
@@ -56,4 +57,4 @@ pg addon remove <addon> [flags]     # remove the addon, container, and data
 ```
 
 See each addon's page for its specific flags and examples:
-[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [HAProxy](./haproxy/) · [MinIO](./minio/). Patroni pages live in [HA Cluster](../ha-cluster/).
+[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [HAProxy](./haproxy/) · [MinIO](./minio/) · [Silo](./silo/). Patroni pages live in [HA Cluster](../ha-cluster/).
