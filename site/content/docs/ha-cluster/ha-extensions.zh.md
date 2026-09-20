@@ -257,9 +257,7 @@ pg ha extension install app pg_stat_statements,pg_cron --database mydb --auto-re
 ### 安装 Citus（必须排在 preload 第一位）
 
 ```bash
-pg ha extension install app citus pg_stat_statements
-# 或等价写法：
-pg ha extension install app citus,pg_stat_statements
+pg ha extension install app pg_stat_statements,citus
 ```
 
 即使 `citus` 列在第二位，preload CSV 也会生成为

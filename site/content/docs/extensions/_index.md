@@ -40,10 +40,7 @@ Benefits of this approach:
 # Install a single extension
 pg extension install pg_stat_statements
 
-# Install multiple extensions (single image build)
-pg extension install pgmq uuid-ossp pg_stat_statements
-
-# Comma-separated (same result)
+# Install multiple extensions (single image build, comma-separated)
 pg extension install pgmq,uuid-ossp,pg_stat_statements
 
 # Target a specific instance

@@ -264,9 +264,7 @@ This builds an `-ext` image, recreates all members (with pause/resume), sets
 ### Install Citus (must be first in preload)
 
 ```bash
-pg ha extension install app citus pg_stat_statements
-# or equivalently:
-pg ha extension install app citus,pg_stat_statements
+pg ha extension install app pg_stat_statements,citus
 ```
 
 Even though `citus` is listed second, the preload CSV is generated as

@@ -17,7 +17,7 @@ Usage examples for the most commonly used PostgreSQL extensions, tested on **PG 
 
 ```bash
 # Install all at once
-pg extension install pg_stat_statements pg_repack pg_prewarm --auto-restart
+pg extension install pg_stat_statements,pg_repack,pg_prewarm --auto-restart
 
 # Find top 5 slow queries
 pg exec "SELECT query, calls, total_exec_time::numeric(10,2) AS ms

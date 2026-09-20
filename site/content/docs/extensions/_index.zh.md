@@ -33,10 +33,7 @@ pgcli 支持从 [Pigsty DEB 仓库](https://pigsty.io/ext/)安装和管理 Postg
 # 安装单个扩展
 pg extension install pg_stat_statements
 
-# 安装多个扩展（单次镜像构建）
-pg extension install pgmq uuid-ossp pg_stat_statements
-
-# 逗号分隔（相同结果）
+# 安装多个扩展（单次镜像构建，逗号分隔）
 pg extension install pgmq,uuid-ossp,pg_stat_statements
 
 # 针对特定实例

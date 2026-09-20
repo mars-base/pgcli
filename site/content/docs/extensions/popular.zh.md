@@ -17,7 +17,7 @@ weight: 20
 
 ```bash
 # 一次性安装所有扩展
-pg extension install pg_stat_statements pg_repack pg_prewarm --auto-restart
+pg extension install pg_stat_statements,pg_repack,pg_prewarm --auto-restart
 
 # 查找 top 5 慢查询
 pg exec "SELECT query, calls, total_exec_time::numeric(10,2) AS ms
