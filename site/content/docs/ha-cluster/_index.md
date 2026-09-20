@@ -41,6 +41,7 @@ rather than a plain `pg` instance or an addon installed with `pg addon install`.
 | [Exec / psql](./ha-exec/) | `pg ha exec` / `pg ha psql` — run SQL against the leader or any member directly, no dsn, no container exec |
 | [Example: HA + self-CA MinIO](./ha-example-minio/) | A verified end-to-end walkthrough: a cluster backed up to a MinIO serving a bring-your-own cert, in a fully isolated second environment |
 | [Generating a Certificate](./ha-cert/) | `pg cert` — self-signed cert with DNS and IP SANs for any TLS you need without a CA (dev/test servers, an internal endpoint, or a MinIO serving a bring-your-own cert): its flags, and how the single self-signed leaf acts as its own trust anchor |
+| [S3 Storage High Availability](./ha-s3-storage/) | Making the MinIO/silo repo itself fault-tolerant: the SNSD and MNSD modes pgcli exposes and why only those two, plus ZFS under the data directory — single-host raidz, per-node pools in a distributed cluster, heterogeneous nodes |
 
 ## The typical path
 

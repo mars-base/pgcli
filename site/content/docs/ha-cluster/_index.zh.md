@@ -38,6 +38,7 @@ postmaster 的生命周期、在成员间流式复制、并在 leader 失联时�
 | [Exec / psql](./ha-exec/) | `pg ha exec` / `pg ha psql` —— 直连 leader 或任意成员跑 SQL，免 dsn、免进容器 |
 | [示例：HA 集群 + 自签 CA 的 MinIO](./ha-example-minio/) | 实测通过的端到端流程：集群备份到一台服务自带证书的 MinIO，全程在完全隔离的第二套环境里 |
 | [生成证书](./ha-cert/) | `pg cert` —— 签发带域名与 IP SAN 的自签证书，服务于任何不想走 CA 又需要 TLS 的场合（开发测试服务器、内部端点，或服务自带证书的 MinIO）：flag 一览，以及单张自签叶证书如何充当自己的信任锚 |
+| [S3 存储高可用](./ha-s3-storage/) | 让仓库本身（MinIO/silo）也容错：pgcli 暴露的 SNSD 与 MNSD 两种形态及为何只有这两种，加上在数据目录之下用 ZFS —— 单机 raidz、分布式集群每节点各自建池、异构节点 |
 
 ## 典型路径
 

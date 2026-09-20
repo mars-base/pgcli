@@ -216,6 +216,14 @@ SNSD is what `pg addon install silo` gives you out of the box. To get
 MNSD, pass the cluster's endpoint list (at least four nodes) — see
 [Distributed / Cluster Mode](#distributed--cluster-mode) below.
 
+MinIO's third shape, **SNMD** (single-node, multi-drive), is deliberately
+absent: silo (like MinIO) rejects a same-host endpoint list outright, so
+disk-level redundancy on one host belongs one layer down, under the data
+directory. [S3 Storage High
+Availability](../../ha-cluster/ha-s3-storage/) covers why only these two
+modes, and how to put ZFS under either — including the 4-hosts-each-with-
+several-disks hybrid that survives both a disk and a node.
+
 ## Distributed / Cluster Mode
 
 silo's erasure-coded (EC) cluster mode works exactly like MinIO's — same
