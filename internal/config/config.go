@@ -83,6 +83,7 @@ type TopAddonsConfig struct {
 	Patroni   map[string]PatroniClusterConfig `yaml:"patroni,omitempty"`
 	HAProxy   map[string]HAProxyConfig        `yaml:"haproxy,omitempty"`
 	Minio     map[string]MinioConfig          `yaml:"minio,omitempty"`
+	Silo      map[string]SiloConfig           `yaml:"silo,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -344,6 +345,16 @@ func (h HAProxyConfig) EffectiveMode() string {
 // the single source of truth, so ApplyDefaults and the podman manager agree.
 const DefaultMinioImageTag = "ghcr.io/mars-base/pgcli/pgcli-minio:20250422221226"
 
+// DefaultSiloImageTag is the public Pigsty silo image — a MinIO fork that keeps
+// the S3 API, the MINIO_* env contract, the `server /data --address :9000
+// --console-address :9001` command line, and the --certs-dir file names, but
+// ships the web console and its mcli client in one multi-arch image on
+// docker.io (pull-only, like etcd/haproxy — pgcli never builds it). Both the
+// silo addon and the `pg mcli` client use this image; `pg mcli` selects mcli
+// via --entrypoint. It is a const here, the single source of truth, so
+// ApplyDefaults and the podman managers agree.
+const DefaultSiloImageTag = "docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z"
+
 // DefaultMCImageTag is the public pre-built MinIO client (mc) image: the
 // static upstream binary on scratch with a CA bundle. `pg mc` runs it in a
 // throwaway container. Not a yaml field — mc is a client, not an addon — so
@@ -414,6 +425,54 @@ type MinioConfig struct {
 
 	// Autostart brings this container up on host boot via the boot service
 	// (pg autostart enable --minio). Start-only: it starts the existing
+	// container, so install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// SiloConfig holds a standalone silo addon — the Pigsty fork of MinIO. It is
+// the field-for-field twin of MinioConfig: silo keeps the S3 API, the MINIO_*
+// env contract, the `server /data --address --console-address` command line,
+// the --certs-dir public.crt/private.key layout, and the distributed EC
+// endpoints mode, so every knob means exactly what it means for minio. The one
+// operational difference is the image: docker.io/pgsty/silo ships the console
+// and its mcli client, so it is pulled from docker.io (public, multi-arch)
+// rather than built like pgcli-minio. Ports come from the same shared pool as
+// minio (minio_start_port), so a host can run both without colliding.
+type SiloConfig struct {
+	ContainerName string `yaml:"container_name"`      // pgcli-silo<ns>-<name>
+	Name          string `yaml:"name,omitempty"`      // addon key, defaults to the map key
+	ImageTag      string `yaml:"image_tag,omitempty"` // docker.io/pgsty/silo:... (default)
+	DataDir       string `yaml:"data_dir,omitempty"`  // host dir bound to /data; default <base-dir>/addon/silo/<name>/data
+	Listen        string `yaml:"listen,omitempty"`    // bind address, default 127.0.0.1
+	APIPort       int    `yaml:"api_port,omitempty"`  // S3 API host port, 9000+ auto-assigned
+	ConsolePort   int    `yaml:"console_port,omitempty"`
+	// RootUser / RootPassword become MINIO_ROOT_USER / MINIO_ROOT_PASSWORD (the
+	// env contract silo inherits from MinIO). The password is generated at first
+	// install and persisted here; it is never printed by pg addon list.
+	RootUser     string `yaml:"root_user,omitempty"`     // default admin
+	RootPassword string `yaml:"root_password,omitempty"` // generated on first install
+
+	// TLS turns on silo's native HTTPS (same --certs-dir contract as MinIO):
+	// pgcli generates a self-signed CA plus a leaf under
+	// <base-dir>/tls/silo/<name>/ and mounts them via --certs-dir. Required for
+	// pgBackRest S3 repositories — pgBackRest refuses plaintext HTTP for S3.
+	TLS bool `yaml:"tls,omitempty"`
+
+	// CertFile / KeyFile bring your own certificate instead of the generated
+	// pair: host paths to a PEM leaf (+ chain, mounted read-only as
+	// /opt/silo/certs/public.crt) and its private key (private.key). Implies
+	// TLS. Setting either without the other falls back to generated certs.
+	CertFile string `yaml:"cert_file,omitempty"`
+	KeyFile  string `yaml:"key_file,omitempty"`
+
+	// Endpoints switches this addon to distributed (cluster) mode when non-empty:
+	// the list is passed verbatim to `silo server <ep1> <ep2> ...` instead of the
+	// single-node `/data`. Same identical-list-and-credentials requirement as
+	// minio. Empty => single-node mode.
+	Endpoints []string `yaml:"endpoints,omitempty"`
+
+	// Autostart brings this container up on host boot via the boot service
+	// (pg autostart enable --silo). Start-only: it starts the existing
 	// container, so install first.
 	Autostart bool `yaml:"autostart,omitempty"`
 }
@@ -1115,6 +1174,28 @@ func (c *Config) ApplyDefaults() {
 		c.Addons.Minio[name] = addon
 	}
 
+	// Top-level addons defaults (silo — the Pigsty MinIO fork). Same shape as
+	// the minio block; DataDir is left empty for the manager to resolve under
+	// the base dir at container-creation time.
+	for name, addon := range c.Addons.Silo {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-silo" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultSiloImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "127.0.0.1"
+		}
+		if addon.RootUser == "" {
+			addon.RootUser = "admin"
+		}
+		c.Addons.Silo[name] = addon
+	}
+
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
 	c.autoAssignPorts()
 }
@@ -1450,11 +1531,12 @@ func (c *Config) autoAssignPorts() {
 		}
 	}
 
-	// Allocate ports for top-level addons (MinIO). Each instance takes two
-	// consecutive ports from one pool (minio_start_port base, default 9000):
-	// the S3 API and the web console. Same four-part discipline as HAProxy —
-	// reserve explicit ports, sort names, advance a shared cursor past both
-	// real listeners and already-taken ports.
+	// Allocate ports for top-level object-storage addons (MinIO and silo). Each
+	// instance takes two consecutive ports from ONE shared pool (minio_start_port
+	// base, default 9000): the S3 API and the web console. minio and silo draw
+	// from the same cursor so both can coexist on a host without colliding —
+	// reserved explicit ports from both tables feed one `assigned` set, and
+	// assignment runs the minio table first, then silo, in sorted order.
 	minioBase := c.MinioStartPort
 	assignedMinio := map[int]bool{}
 	for _, addon := range c.Addons.Minio {
@@ -1464,34 +1546,61 @@ func (c *Config) autoAssignPorts() {
 			}
 		}
 	}
+	for _, addon := range c.Addons.Silo {
+		for _, p := range []int{addon.APIPort, addon.ConsolePort} {
+			if p != 0 {
+				assignedMinio[p] = true
+			}
+		}
+	}
+	next := minioBase
+	nextFree := func() int {
+		for (usedPorts != nil && usedPorts[next]) || assignedMinio[next] {
+			next++
+		}
+		p := next
+		next++
+		return p
+	}
+	// assign draws one table's ports from the shared cursor. The else-branches
+	// (explicit port >= cursor → bump cursor past it) only fire within the
+	// table being walked, which is why an explicit port far above the pool base
+	// does not shift pairs assigned from the same table afterwards — the
+	// behaviour the minio tests have always pinned, kept identical here.
+	assign := func(apiPort, consolePort *int) {
+		if *apiPort == 0 && minioBase > 0 {
+			*apiPort = nextFree()
+		} else if *apiPort >= next {
+			next = *apiPort + 1
+		}
+		if *consolePort == 0 && minioBase > 0 {
+			*consolePort = nextFree()
+		} else if *consolePort >= next {
+			next = *consolePort + 1
+		}
+	}
 	{
 		names := make([]string, 0, len(c.Addons.Minio))
 		for name := range c.Addons.Minio {
 			names = append(names, name)
 		}
 		sort.Strings(names)
-		next := minioBase
-		nextFree := func() int {
-			for (usedPorts != nil && usedPorts[next]) || assignedMinio[next] {
-				next++
-			}
-			p := next
-			next++
-			return p
-		}
 		for _, name := range names {
 			addon := c.Addons.Minio[name]
-			if addon.APIPort == 0 && minioBase > 0 {
-				addon.APIPort = nextFree()
-			} else if addon.APIPort >= next {
-				next = addon.APIPort + 1
-			}
-			if addon.ConsolePort == 0 && minioBase > 0 {
-				addon.ConsolePort = nextFree()
-			} else if addon.ConsolePort >= next {
-				next = addon.ConsolePort + 1
-			}
+			assign(&addon.APIPort, &addon.ConsolePort)
 			c.Addons.Minio[name] = addon
+		}
+	}
+	{
+		names := make([]string, 0, len(c.Addons.Silo))
+		for name := range c.Addons.Silo {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.Silo[name]
+			assign(&addon.APIPort, &addon.ConsolePort)
+			c.Addons.Silo[name] = addon
 		}
 	}
 }

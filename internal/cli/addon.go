@@ -45,6 +45,11 @@ Infra addons (shared, not tied to one instance):
           Stored under top-level addons.haproxy in config (Linux only).
   pg addon install minio
           Stored under top-level addons.minio in config (Linux and macOS).
+  pg addon install silo
+          Stored under top-level addons.silo in config (Linux and macOS).
+          Pigsty's MinIO fork — the same S3 store, from the public
+          docker.io/pgsty/silo image (its own mcli client comes with it; see
+          "pg mcli").
 
 Commands:
   pg addon install <addon>   install an add-on
@@ -69,6 +74,7 @@ Currently supported add-ons:
   pgdog       Postgres proxy (pooling, load balancing, sharding)
   haproxy     TCP load balancer in front of a Patroni cluster (unified or read/write split)
   minio       single-node S3-compatible object storage (web console included; Linux host network, macOS bridge)
+  silo        MinIO's Pigsty fork — same S3 object storage, from the public docker.io/pgsty/silo image (console + mcli client bundled; Linux host network, macOS bridge)
 
 Two modes (pgbouncer):
   Local:  pg addon install pgbouncer -i <instance>
@@ -91,11 +97,15 @@ Infra addon (haproxy — TCP load balancer in front of a Patroni cluster, Linux 
   --ha. After adding or removing a member ("pg ha create" / "pg ha remove"),
   re-run install to re-sync the backend list.
 
-Infra addon (minio — single-node S3-compatible object storage, Linux and macOS):
+Infra addon (minio — single-node S3-compatible object storage, Linux and macOS;
+            silo — its Pigsty fork, identical flags, same shared port pool):
   pg addon install minio [--name store] [--api-port N] [--console-port N]
                          [--listen 127.0.0.1] [--root-user admin] [--data-dir ...] [--force]
+  pg addon install silo  [--name store] [--api-port N] [--console-port N]
+                         [--listen 127.0.0.1] [--root-user admin] [--data-dir ...] [--force]
   Root credentials are generated on first install, printed once for the record,
-  and stored in the config (root_user / root_password under addons.minio.<name>);
+  and stored in the config (root_user / root_password under
+  addons.minio.<name> / addons.silo.<name>);
   the web console is at http://<listen>:<console-port>/ (on macOS the store
   serves on the bridge with the ports published, so the Mac reaches both on
   127.0.0.1). An already-present container is reused (a stopped one is
@@ -115,7 +125,8 @@ Examples:
   pg addon install haproxy --ha app
   pg addon install haproxy --name lb --mode split --ha app --max-lag 1MB
   pg addon install haproxy --node node1=10.0.0.11:35532:8008 --node node2=10.0.0.11:35533:8009
-  pg addon install minio --name store --data-dir /srv/minio`,
+  pg addon install minio --name store --data-dir /srv/minio
+  pg addon install silo --name store --tls`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonInstall(args[0], cmd)
@@ -172,6 +183,7 @@ Supported add-ons:
   pgdog      pg addon start pgdog [--name proxy]
   haproxy    pg addon start haproxy [--name lb]
   minio      pg addon start minio [--name store]
+  silo       pg addon start silo [--name store]
   pgbouncer  pg addon start pgbouncer -i <instance>
              pg addon start pgbouncer --pg-name <remote-name>
 
@@ -180,6 +192,7 @@ Examples:
   pg addon start pgdog
   pg addon start haproxy --name lb
   pg addon start minio --name store
+  pg addon start silo --name store
   pg addon start pgbouncer -i proj01`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -198,6 +211,7 @@ Supported add-ons:
   pgdog      pg addon stop pgdog [--name proxy]
   haproxy    pg addon stop haproxy [--name lb]
   minio      pg addon stop minio [--name store]
+  silo       pg addon stop silo [--name store]
   pgbouncer  pg addon stop pgbouncer -i <instance>
              pg addon stop pgbouncer --pg-name <remote-name>
 
@@ -206,6 +220,7 @@ Examples:
   pg addon stop pgdog
   pg addon stop haproxy --name lb
   pg addon stop minio --name store
+  pg addon stop silo --name store
   pg addon stop pgbouncer -i proj01`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -254,16 +269,16 @@ func init() {
 	addonRemoveCmd.Flags().String("pg-name", "", "name of a remote PgBouncer to remove")
 
 	// etcd flags (top-level shared-infrastructure addon)
-	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member or pgdog proxy (default \"etcd\"/\"pgdog\")")
+	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio or silo instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\")")
 	addonInstallCmd.Flags().Int("client-port", 0, "etcd client host port (0=auto-assign from etcd_start_port)")
 	addonInstallCmd.Flags().Int("peer-port", 0, "etcd peer host port (0=auto-assign, next free port after client)")
 	addonInstallCmd.Flags().String("image", "", "etcd image tag (default quay.io/coreos/etcd:v3.5.30)")
 	addonInstallCmd.Flags().String("cluster", "", "etcd cluster name (--initial-cluster-token, default \"pgcli-etcd\")")
-	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root or a MinIO instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data)")
+	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO or a silo instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data)")
 	addonInstallCmd.Flags().String("advertise-host", "", "host advertised in this member's peer/client URLs (empty=127.0.0.1 for single-host; set a LAN IP or FQDN for cross-host clusters)")
 	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.0.0.12:2379 (implies --initial-cluster-state existing; requires --advertise-host)")
-	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy or minio instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\")")
-	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO data directory (object storage / backup repository)")
+	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio or silo instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\")")
+	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo data directory (object storage / backup repository)")
 
 	// haproxy flags (top-level load balancer in front of a Patroni cluster)
 	addonInstallCmd.Flags().String("mode", "", "HAProxy routing mode: unified (default, all traffic to the leader) or split (separate read listener for replicas)")
@@ -275,21 +290,21 @@ func init() {
 	addonInstallCmd.Flags().String("max-lag", "", "replica lag threshold for the read listener, e.g. 1MB (split mode; empty=no filter)")
 
 	// minio flags (top-level single-node S3-compatible object storage)
-	addonInstallCmd.Flags().Int("api-port", 0, "MinIO S3 API host port (0=auto-assign from minio_start_port)")
-	addonInstallCmd.Flags().Int("console-port", 0, "MinIO web console host port (0=auto-assign, next free port)")
-	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network)")
-	addonInstallCmd.Flags().String("root-user", "", "MinIO root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config)")
-	addonInstallCmd.Flags().String("root-password", "", "MinIO root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand)")
-	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (path is the in-container export dir; keep it under /data where --data-dir is mounted; repeat for each node; the list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
-	addonInstallCmd.Flags().Bool("tls", false, "MinIO: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/minio/<name>/; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a MinIO used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Changing this needs --force to recreate")
-	addonInstallCmd.Flags().String("tls-cert", "", "MinIO: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
-	addonInstallCmd.Flags().String("tls-key", "", "MinIO: private key for --tls-cert (PEM; mounted read-only as private.key). Must pair with the cert; both are required to enable BYO TLS")
-	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO container even if one already exists (to apply changed ports/listen/credentials)")
+	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo S3 API host port (0=auto-assign from the shared minio_start_port pool)")
+	addonInstallCmd.Flags().Int("console-port", 0, "MinIO/silo web console host port (0=auto-assign, next free port)")
+	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO or silo server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network)")
+	addonInstallCmd.Flags().String("root-user", "", "MinIO/silo root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config)")
+	addonInstallCmd.Flags().String("root-password", "", "MinIO/silo root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand)")
+	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO/silo distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (path is the in-container export dir; keep it under /data where --data-dir is mounted; repeat for each node; the list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
+	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo>/<name>/; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Changing this needs --force to recreate")
+	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
+	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo: private key for --tls-cert (PEM; mounted read-only as private.key). Must pair with the cert; both are required to enable BYO TLS")
+	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo container even if one already exists (to apply changed ports/listen/credentials)")
 
 	// start / stop flags
-	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy or minio instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\")")
+	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio or silo instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\")")
 	addonStartCmd.Flags().String("pg-name", "", "name of a remote PgBouncer to start")
-	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy or minio instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\")")
+	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio or silo instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\")")
 	addonStopCmd.Flags().String("pg-name", "", "name of a remote PgBouncer to stop")
 
 	// pgdog flags (top-level shared Postgres proxy addon)
@@ -316,10 +331,12 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallHAProxy(cmd)
 	case "minio":
 		return runAddonInstallMinio(cmd)
+	case "silo":
+		return runAddonInstallSilo(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -1463,7 +1480,7 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	// The SAN check is advisory: a domain cert is often meant to be dialed by a
 	// name behind DNS/LB that is not this host's Listen, so only warn — and
 	// never for a wildcard bind.
-	if podman.BYOTLS(&mc) {
+	if podman.BYOTLS(mc.TLS, mc.CertFile, mc.KeyFile) {
 		ci, err := podman.ValidateBYOCert(mc.CertFile, mc.KeyFile)
 		if err != nil {
 			return fmt.Errorf("MinIO --tls-cert/--tls-key: %w", err)
@@ -1507,7 +1524,7 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 			if mc.TLS {
 				if caPath, err := mm.EnsureTLS(&mc); err != nil {
 					fmt.Printf("  [!] TLS cert refresh failed: %v\n", err)
-				} else if podman.BYOTLS(&mc) {
+				} else if podman.BYOTLS(mc.TLS, mc.CertFile, mc.KeyFile) {
 					fmt.Printf("  [OK] TLS cert pair validated (BYO: %s)\n", mc.CertFile)
 				} else {
 					fmt.Printf("  [OK] TLS certs current (CA: %s)\n", caPath)
@@ -1572,7 +1589,7 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	fmt.Printf("  Root user:     %s\n", mc.RootUser)
 	fmt.Printf("  Root password: %s\n", mc.RootPassword)
 	if mc.TLS {
-		if podman.BYOTLS(&mc) {
+		if podman.BYOTLS(mc.TLS, mc.CertFile, mc.KeyFile) {
 			fmt.Printf("  TLS cert:      %s (BYO, key: %s)\n", mc.CertFile, mc.KeyFile)
 		} else {
 			fmt.Printf("  TLS CA cert:   %s\n", filepath.Join(mm.TLSDir(&mc), "ca.crt"))
@@ -1582,6 +1599,227 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 		fmt.Println()
 		fmt.Printf("  Distributed mode: %d endpoints\n", len(mc.Endpoints))
 		for _, ep := range mc.Endpoints {
+			fmt.Printf("    - %s\n", ep)
+		}
+		fmt.Println("  NOTE: every node's pg.yaml must carry the identical endpoint list AND identical root credentials, or the cluster will not form.")
+	}
+	return nil
+}
+
+func runAddonInstallSilo(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "silo"
+	}
+	imageTag, _ := cmd.Flags().GetString("image")
+	dataDir, _ := cmd.Flags().GetString("data-dir")
+	apiPort, _ := cmd.Flags().GetInt("api-port")
+	consolePort, _ := cmd.Flags().GetInt("console-port")
+	listenAddr, _ := cmd.Flags().GetString("listen")
+	rootUser, _ := cmd.Flags().GetString("root-user")
+	rootPassword, _ := cmd.Flags().GetString("root-password")
+	endpoints, _ := cmd.Flags().GetStringSlice("endpoint")
+	force, _ := cmd.Flags().GetBool("force")
+	tls, _ := cmd.Flags().GetBool("tls")
+	tlsCert, _ := cmd.Flags().GetString("tls-cert")
+	tlsKey, _ := cmd.Flags().GetString("tls-key")
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.Silo == nil {
+		cfg.Addons.Silo = make(map[string]config.SiloConfig)
+	}
+	existing, ok := cfg.Addons.Silo[name]
+	if !ok {
+		existing = config.SiloConfig{
+			ContainerName: "pgcli-silo" + nsSuffixCLI(cfg.Namespace) + "-" + name,
+			Name:          name,
+		}
+	}
+	if imageTag != "" {
+		existing.ImageTag = imageTag
+	}
+	if dataDir != "" {
+		existing.DataDir = dataDir
+	}
+	if apiPort != 0 {
+		existing.APIPort = apiPort
+	}
+	if consolePort != 0 {
+		existing.ConsolePort = consolePort
+	}
+	if rootUser != "" {
+		existing.RootUser = rootUser
+	}
+	if rootPassword != "" {
+		existing.RootPassword = rootPassword
+	}
+	if listenAddr != "" {
+		existing.Listen = listenAddr
+	}
+	if len(endpoints) > 0 {
+		existing.Endpoints = endpoints
+	}
+	if tls {
+		existing.TLS = true
+	}
+	if tlsCert != "" {
+		existing.TLS = true
+		existing.CertFile = podman.HostMountPath(tlsCert)
+	}
+	if tlsKey != "" {
+		existing.TLS = true
+		existing.KeyFile = podman.HostMountPath(tlsKey)
+	}
+	if (existing.CertFile == "") != (existing.KeyFile == "") {
+		return fmt.Errorf("--tls-cert and --tls-key must be given together (a bring-your-own TLS pair needs both the cert and its key)")
+	}
+	if existing.Name == "" {
+		existing.Name = name
+	}
+	cfg.Addons.Silo[name] = existing
+
+	// ApplyDefaults fills ContainerName/ImageTag/Listen/RootUser and assigns
+	// the two ports from the shared minio_start_port pool (minio and silo draw
+	// one cursor, so both can coexist). Credentials are NOT managed
+	// there — they are a secret the install path owns.
+	cfg.ApplyDefaults()
+	sc := cfg.Addons.Silo[name]
+
+	// BYO TLS: fail fast at install on a bad pair (mismatch, expired, CA-only,
+	// unparseable) rather than letting the container crash-loop on handshake.
+	// The SAN check is advisory: a domain cert is often meant to be dialed by a
+	// name behind DNS/LB that is not this host's Listen, so only warn — and
+	// never for a wildcard bind.
+	if podman.BYOTLS(sc.TLS, sc.CertFile, sc.KeyFile) {
+		ci, err := podman.ValidateBYOCert(sc.CertFile, sc.KeyFile)
+		if err != nil {
+			return fmt.Errorf("silo --tls-cert/--tls-key: %w", err)
+		}
+		fmt.Printf("-> silo BYO cert: CN=%q issuer=%q valid %s → %s\n",
+			ci.Subject, ci.Issuer, ci.NotBefore.Format("2006-01-02"), ci.NotAfter.Format("2006-01-02"))
+		if h := strings.TrimSuffix(sc.Listen, ":0"); h != "" && h != "0.0.0.0" && h != "::" && !podman.CertCoversHost(ci, h) {
+			fmt.Printf("  [!] listen address %q is not a SAN of the cert (SANs: %s) — clients must reach silo by a name the cert does cover\n",
+				sc.Listen, strings.Join(append(append([]string{}, ci.DNSNames...), ci.IPs...), ", "))
+		}
+	}
+
+	// macOS: the store serves on the pgcli-net bridge with published ports, so
+	// bring up the machine and the bridge first (no-ops on Linux, where silo
+	// uses host networking).
+	if err := ensureProxyBridge(cfg); err != nil {
+		return err
+	}
+
+	sm, err := podman.NewSiloManager(cfg)
+	if err != nil {
+		return fmt.Errorf("silo manager: %w", err)
+	}
+
+	// If a same-named container is already present, don't recreate it — reuse
+	// it (starting it if it's stopped). Reinstall is then a no-op against a
+	// live instance; --force recreates it so changed ports/listen/credentials
+	// take effect.
+	exists, err := sm.ContainerExists(sc.ContainerName)
+	if err != nil {
+		return err
+	}
+	skipped := false
+	if exists && !force {
+		skipped = true
+		if running, _ := sm.ContainerRunning(sc.ContainerName); running {
+			fmt.Printf("-> silo container %q already running; skipping creation\n", sc.ContainerName)
+			// Still refresh cert material: silo hot-reloads its cert files, so
+			// this is how a running store adopts the leaf+CA chain (the
+			// `pg backup fetch-ca` anchor) without a --force recreate.
+			if sc.TLS {
+				if caPath, err := sm.EnsureTLS(&sc); err != nil {
+					fmt.Printf("  [!] TLS cert refresh failed: %v\n", err)
+				} else if podman.BYOTLS(sc.TLS, sc.CertFile, sc.KeyFile) {
+					fmt.Printf("  [OK] TLS cert pair validated (BYO: %s)\n", sc.CertFile)
+				} else {
+					fmt.Printf("  [OK] TLS certs current (CA: %s)\n", caPath)
+				}
+			}
+		} else {
+			fmt.Printf("-> silo container %q exists but is stopped; starting it\n", sc.ContainerName)
+			if err := sm.StartContainer(&sc); err != nil {
+				return err
+			}
+		}
+	} else {
+		// Fresh install (or the config survived a `remove` that kept it):
+		// generate the root password once so the data dir stays readable.
+		if sc.RootPassword == "" {
+			pw, err := generatePassword(20)
+			if err != nil {
+				return fmt.Errorf("generating silo root password: %w", err)
+			}
+			sc.RootPassword = pw
+		}
+		fmt.Printf("-> Preparing silo image %s...\n", sc.ImageTag)
+		if err := sm.EnsureImage(sc.ImageTag); err != nil {
+			return err
+		}
+		// Distributed mode: silo refuses a drive on the root filesystem
+		// ("drive is part of root drive, will not be used"), so warn before we
+		// try to start — the container would just fail to form quorum.
+		if len(sc.Endpoints) > 0 {
+			if shared, err := sm.DataDirSharesRootDevice(&sc); err == nil && shared {
+				fmt.Printf("-> WARNING: distributed mode with data dir %q on the same device as the host root filesystem; silo will refuse this drive. Point --data-dir at a separately-mounted disk.\n", sm.DataDir(&sc))
+			}
+		}
+		fmt.Println("-> Starting silo container...")
+		if err := sm.EnsureContainer(&sc); err != nil {
+			return err
+		}
+	}
+
+	cfg.Addons.Silo[name] = sc
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	if skipped {
+		fmt.Println()
+		fmt.Printf("✓ silo already present: %q\n", name)
+	} else {
+		fmt.Println()
+		fmt.Printf("✓ silo installed: %q\n", name)
+	}
+	fmt.Printf("  Container:    %s\n", sc.ContainerName)
+	fmt.Printf("  Image:        %s\n", sc.ImageTag)
+	fmt.Printf("  Data:         %s\n", sm.DataDir(&sc))
+	scheme := "http"
+	if sc.TLS {
+		scheme = "https"
+	}
+	fmt.Printf("  S3 API:       %s://%s:%d\n", scheme, sc.Listen, sc.APIPort)
+	fmt.Printf("  Console:      %s://%s:%d\n", scheme, sc.Listen, sc.ConsolePort)
+	fmt.Println()
+	fmt.Printf("  Root user:     %s\n", sc.RootUser)
+	fmt.Printf("  Root password: %s\n", sc.RootPassword)
+	if sc.TLS {
+		if podman.BYOTLS(sc.TLS, sc.CertFile, sc.KeyFile) {
+			fmt.Printf("  TLS cert:      %s (BYO, key: %s)\n", sc.CertFile, sc.KeyFile)
+		} else {
+			fmt.Printf("  TLS CA cert:   %s\n", filepath.Join(sm.TLSDir(&sc), "ca.crt"))
+		}
+	}
+	if len(sc.Endpoints) > 0 {
+		fmt.Println()
+		fmt.Printf("  Distributed mode: %d endpoints\n", len(sc.Endpoints))
+		for _, ep := range sc.Endpoints {
 			fmt.Printf("    - %s\n", ep)
 		}
 		fmt.Println("  NOTE: every node's pg.yaml must carry the identical endpoint list AND identical root credentials, or the cluster will not form.")
@@ -1784,7 +2022,7 @@ func runAddonList() error {
 				scheme = "https"
 			}
 			fmt.Printf("    Console URL: %s://%s:%d/\n", scheme, mc.Listen, mc.ConsolePort)
-			if podman.BYOTLS(&mc) {
+			if podman.BYOTLS(mc.TLS, mc.CertFile, mc.KeyFile) {
 				fmt.Printf("    TLS:         on (BYO cert: %s, key: %s)\n", mc.CertFile, mc.KeyFile)
 				fmt.Printf("                   replace files + pg addon install minio --name %s --tls-cert ... --tls-key ... --force to renew\n", name)
 			} else if mc.TLS {
@@ -1816,6 +2054,59 @@ func runAddonList() error {
 		fmt.Println("  (none)")
 	}
 
+	// silo (Pigsty MinIO fork — S3 object storage, top-level addon)
+	fmt.Println()
+	fmt.Println("Infra add-ons (silo):")
+	hasSilo := false
+	if sm, err := podman.NewSiloManager(cfg); err == nil {
+		for name, sc := range cfg.Addons.Silo {
+			hasSilo = true
+			status := "stopped"
+			if running, err := sm.ContainerRunning(sc.ContainerName); err == nil && running {
+				status = "running"
+			}
+			fmt.Printf("  %s (name: %s)\n", "silo", name)
+			fmt.Printf("    Status:      %s\n", status)
+			fmt.Printf("    Listen:      %s\n", sc.Listen)
+			fmt.Printf("    API port:    %d\n", sc.APIPort)
+			fmt.Printf("    Console port: %d\n", sc.ConsolePort)
+			scheme := "http"
+			if sc.TLS {
+				scheme = "https"
+			}
+			fmt.Printf("    Console URL: %s://%s:%d/\n", scheme, sc.Listen, sc.ConsolePort)
+			if podman.BYOTLS(sc.TLS, sc.CertFile, sc.KeyFile) {
+				fmt.Printf("    TLS:         on (BYO cert: %s, key: %s)\n", sc.CertFile, sc.KeyFile)
+				fmt.Printf("                   replace files + pg addon install silo --name %s --tls-cert ... --tls-key ... --force to renew\n", name)
+			} else if sc.TLS {
+				caPath := filepath.Join(sm.TLSDir(&sc), tlsca.CACertFile)
+				fmt.Printf("    TLS:         on (CA: %s)\n", caPath)
+				// sc.Listen is the bind address (often 0.0.0.0) — the hints use
+				// a dialable example host instead.
+				fmt.Printf("                   as pgBackRest repo CA: pg backup setup --s3-endpoint <host>:%d --s3-ca-file %s\n", sc.APIPort, caPath)
+				fmt.Printf("                   from another host:     pg backup fetch-ca <this-host>:%d\n", sc.APIPort)
+			}
+			fmt.Printf("    Data:        %s\n", sm.DataDir(&sc))
+			fmt.Printf("    Root user:   %s\n", sc.RootUser)
+			fmt.Printf("    Image:       %s\n", sc.ImageTag)
+			fmt.Printf("    Container:   %s\n", sc.ContainerName)
+		}
+	} else if len(cfg.Addons.Silo) > 0 {
+		// Configured but the manager is unavailable (macOS/arm): still show them.
+		for name, sc := range cfg.Addons.Silo {
+			hasSilo = true
+			fmt.Printf("  %s (name: %s)\n", "silo", name)
+			fmt.Printf("    Status:      n/a (%v)\n", err)
+			fmt.Printf("    Listen:      %s\n", sc.Listen)
+			fmt.Printf("    API port:    %d\n", sc.APIPort)
+			fmt.Printf("    Console port: %d\n", sc.ConsolePort)
+			fmt.Printf("    Container:   %s\n", sc.ContainerName)
+		}
+	}
+	if !hasSilo {
+		fmt.Println("  (none)")
+	}
+
 	return nil
 }
 
@@ -1833,10 +2124,12 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemoveHAProxy(cmd)
 	case "minio":
 		return runAddonRemoveMinio(cmd)
+	case "silo":
+		return runAddonRemoveSilo(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -2051,10 +2344,12 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartHAProxy(cmd)
 	case "minio":
 		return runAddonStartMinio(cmd)
+	case "silo":
+		return runAddonStartSilo(cmd)
 	case "pgbouncer":
 		return runAddonStartPgBouncer(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo)", addonName)
 	}
 }
 
@@ -2068,10 +2363,12 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopHAProxy(cmd)
 	case "minio":
 		return runAddonStopMinio(cmd)
+	case "silo":
+		return runAddonStopSilo(cmd)
 	case "pgbouncer":
 		return runAddonStopPgBouncer(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo)", addonName)
 	}
 }
 
@@ -2372,6 +2669,54 @@ func runAddonRemoveMinio(cmd *cobra.Command) error {
 	return nil
 }
 
+func runAddonRemoveSilo(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "silo"
+	}
+	cleanData, _ := cmd.Flags().GetBool("clean-data")
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.Silo == nil {
+		return fmt.Errorf("no silo add-ons configured")
+	}
+	sc, ok := cfg.Addons.Silo[name]
+	if !ok {
+		return fmt.Errorf("silo %q not found", name)
+	}
+
+	sm, err := podman.NewSiloManager(cfg)
+	if err != nil {
+		return fmt.Errorf("silo manager: %w", err)
+	}
+
+	fmt.Printf("-> Removing silo %q...\n", name)
+	if err := sm.Remove(&sc, cleanData); err != nil {
+		return err
+	}
+
+	delete(cfg.Addons.Silo, name)
+	if len(cfg.Addons.Silo) == 0 {
+		cfg.Addons.Silo = nil
+	}
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	fmt.Printf("✓ silo %q removed\n", name)
+	return nil
+}
+
 func runAddonStartMinio(cmd *cobra.Command) error {
 	name, _ := cmd.Flags().GetString("name")
 	if name == "" {
@@ -2394,6 +2739,30 @@ func runAddonStartMinio(cmd *cobra.Command) error {
 	}
 	fmt.Printf("-> Starting minio %q...\n", name)
 	return mm.StartContainer(&mc)
+}
+
+func runAddonStartSilo(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "silo"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	if cfg.Addons.Silo == nil {
+		return fmt.Errorf("no silo add-ons configured (run 'pg addon install silo')")
+	}
+	sc, ok := cfg.Addons.Silo[name]
+	if !ok {
+		return fmt.Errorf("silo %q not found (run 'pg addon install silo --name %s')", name, name)
+	}
+	sm, err := podman.NewSiloManager(cfg)
+	if err != nil {
+		return fmt.Errorf("silo manager: %w", err)
+	}
+	fmt.Printf("-> Starting silo %q...\n", name)
+	return sm.StartContainer(&sc)
 }
 
 func runAddonStopMinio(cmd *cobra.Command) error {
@@ -2423,6 +2792,36 @@ func runAddonStopMinio(cmd *cobra.Command) error {
 		return err
 	}
 	fmt.Printf("✓ minio %q stopped\n", name)
+	return nil
+}
+
+func runAddonStopSilo(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "silo"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	sc, ok := cfg.Addons.Silo[name]
+	if !ok {
+		return fmt.Errorf("silo %q not found", name)
+	}
+	sm, err := podman.NewSiloManager(cfg)
+	if err != nil {
+		return fmt.Errorf("silo manager: %w", err)
+	}
+	running, _ := sm.ContainerRunning(sc.ContainerName)
+	if !running {
+		fmt.Printf("silo %q is not running\n", name)
+		return nil
+	}
+	fmt.Printf("-> Stopping silo %q...\n", name)
+	if _, err := sm.Stop(sc.ContainerName); err != nil {
+		return err
+	}
+	fmt.Printf("✓ silo %q stopped\n", name)
 	return nil
 }
 

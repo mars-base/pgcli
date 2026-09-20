@@ -66,8 +66,7 @@ func genSelfSignedPair(t *testing.T, dir string, cn string, dnsNames []string, i
 
 func TestTLSMountFlags(t *testing.T) {
 	t.Run("BYO mounts two files, not the dir", func(t *testing.T) {
-		mc := &config.MinioConfig{TLS: true, CertFile: "/etc/certs/pub.crt", KeyFile: "/etc/certs/priv.key"}
-		got := tlsMountFlags(mc, "/base/tls/minio/x")
+		got := tlsMountFlags(true, "/etc/certs/pub.crt", "/etc/certs/priv.key", "/base/tls/minio/x", minioCertsDir)
 		want := []string{
 			"-v", "/etc/certs/pub.crt:/opt/minio/certs/public.crt:ro,z",
 			"-v", "/etc/certs/priv.key:/opt/minio/certs/private.key:ro,z",
@@ -86,16 +85,30 @@ func TestTLSMountFlags(t *testing.T) {
 			}
 		}
 	})
+	t.Run("silo uses its own certs dir", func(t *testing.T) {
+		got := tlsMountFlags(true, "/etc/certs/pub.crt", "/etc/certs/priv.key", "/base/tls/silo/x", siloCertsDir)
+		want := []string{
+			"-v", "/etc/certs/pub.crt:/opt/silo/certs/public.crt:ro,z",
+			"-v", "/etc/certs/priv.key:/opt/silo/certs/private.key:ro,z",
+		}
+		if len(got) != len(want) {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("arg %d = %q, want %q", i, got[i], want[i])
+			}
+		}
+	})
 	t.Run("generated mode mounts the dir", func(t *testing.T) {
-		mc := &config.MinioConfig{TLS: true}
-		got := tlsMountFlags(mc, "/base/tls/minio/x")
+		got := tlsMountFlags(true, "", "", "/base/tls/minio/x", minioCertsDir)
 		want := []string{"-v", "/base/tls/minio/x:/opt/minio/certs:ro,z"}
 		if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
 	t.Run("empty tlsDir with no TLS means no flags", func(t *testing.T) {
-		if got := tlsMountFlags(&config.MinioConfig{}, ""); got != nil {
+		if got := tlsMountFlags(false, "", "", "", minioCertsDir); got != nil {
 			t.Fatalf("got %q, want nil", got)
 		}
 	})

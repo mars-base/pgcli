@@ -18,7 +18,8 @@ var mcCmd = &cobra.Command{
 	Long: `mc runs MinIO's command-line client without installing it: pgcli launches a
 short-lived container from the pgcli-mc image and passes your arguments
 straight to mc (the image entrypoint). The container is removed after each
-command.
+command. mc works against a silo store just as well — silo keeps MinIO's S3
+API (see "pg mcli" for silo's own client).
 
 Aliases persist on the host at ~/.mc/config.json — mc's native default path
 — so ` + "`pg mc alias set`" + ` once works everywhere, including a native mc

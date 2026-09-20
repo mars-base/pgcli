@@ -75,8 +75,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --etcd / --pgdog / --ha / --haproxy / --minio)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --etcd / --pgdog / --ha / --haproxy / --minio / --silo)")
 		return nil
 	}
 
@@ -147,6 +147,12 @@ func startAutostart() error {
 	// MinIO instances (top-level infra addon). Independent of the PostgreSQL
 	// stack — typically the backup repository, so bringing it up last is fine.
 	if err := startAutostartMinios(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// silo instances (top-level infra addon, Pigsty's MinIO fork). Same
+	// position as minio: independent of the PostgreSQL stack, a backup repo.
+	if err := startAutostartSilos(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -414,6 +420,50 @@ func startAutostartMinios(c *config.Config) error {
 		mc := c.Addons.Minio[name]
 		if err := mm.StartContainer(&mc); err != nil {
 			fmt.Printf("  [X] minio autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartSilo reports whether any silo instance is autostart-enabled.
+func hasAutostartSilo(c *config.Config) bool {
+	for _, sc := range c.Addons.Silo {
+		if sc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartSilos starts each autostart-enabled silo instance. Start-only
+// semantics like the other infra autostarts: the container comes up with the
+// ports/credentials already in the config, recreating it if the container was
+// removed. Order is sorted by instance name for deterministic, readable boot
+// logs.
+func startAutostartSilos(c *config.Config) error {
+	var names []string
+	for name, sc := range c.Addons.Silo {
+		if sc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	sm, err := podman.NewSiloManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		sc := c.Addons.Silo[name]
+		if err := sm.StartContainer(&sc); err != nil {
+			fmt.Printf("  [X] silo autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}

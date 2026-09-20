@@ -8,39 +8,46 @@ import (
 	"os"
 	"strings"
 	"time"
-
-	"github.com/mars-base/pgcli/internal/config"
 )
 
 // Bring-your-own certificates: instead of the pgcli-generated self-signed pair
 // (internal/tlsca), the operator can point an addon at an existing cert/key —
-// a public-CA domain cert, an internal-CA one, whatever. MinIO wants exactly
-// public.crt + private.key inside --certs-dir, so the two user files are
-// bind-mounted read-only at those names (the repo's mount-in-place pattern,
-// like the backup container's ca.crt) and tlsca is skipped entirely — no
-// copying a private key into the base dir, no regeneration over it.
+// a public-CA domain cert, an internal-CA one, whatever. MinIO and silo both
+// want exactly public.crt + private.key inside --certs-dir, so the two user
+// files are bind-mounted read-only at those names (the repo's mount-in-place
+// pattern, like the backup container's ca.crt) and tlsca is skipped entirely —
+// no copying a private key into the base dir, no regeneration over it.
+//
+// These helpers take plain field values plus the container certs dir rather
+// than a *config.MinioConfig, so the minio and silo addons share them.
+const (
+	minioCertsDir = "/opt/minio/certs"
+	siloCertsDir  = "/opt/silo/certs"
+)
 
-// BYOTLS reports whether mc is configured to serve a user-provided cert pair.
-// A half-configured pair (cert without key) is not BYO: callers fall back to
-// generated certs and say so.
-func BYOTLS(mc *config.MinioConfig) bool {
-	return mc.TLS && mc.CertFile != "" && mc.KeyFile != ""
+// BYOTLS reports whether a TLS-able addon is configured to serve a
+// user-provided cert pair (tls on, both files set). A half-configured pair
+// (cert without key) is not BYO: callers fall back to generated certs and say
+// so.
+func BYOTLS(tls bool, certFile, keyFile string) bool {
+	return tls && certFile != "" && keyFile != ""
 }
 
 // tlsMountFlags returns the podman volume args that deliver cert material to
-// /opt/minio/certs: the two user files mounted at the names MinIO requires in
-// BYO mode, else the generated TLSDir as a whole.
-func tlsMountFlags(mc *config.MinioConfig, tlsDir string) []string {
-	if BYOTLS(mc) {
+// the container certs dir (certsDir, e.g. /opt/minio/certs): the two user
+// files mounted at the names MinIO/silo require in BYO mode, else the
+// generated tlsDir as a whole.
+func tlsMountFlags(tls bool, certFile, keyFile, tlsDir, certsDir string) []string {
+	if BYOTLS(tls, certFile, keyFile) {
 		return []string{
-			"-v", fmt.Sprintf("%s:/opt/minio/certs/public.crt:ro,z", hostMountPath(mc.CertFile)),
-			"-v", fmt.Sprintf("%s:/opt/minio/certs/private.key:ro,z", hostMountPath(mc.KeyFile)),
+			"-v", fmt.Sprintf("%s:%s/public.crt:ro,z", hostMountPath(certFile), certsDir),
+			"-v", fmt.Sprintf("%s:%s/private.key:ro,z", hostMountPath(keyFile), certsDir),
 		}
 	}
 	if tlsDir == "" {
 		return nil
 	}
-	return []string{"-v", fmt.Sprintf("%s:/opt/minio/certs:ro,z", hostMountPath(tlsDir))}
+	return []string{"-v", fmt.Sprintf("%s:%s:ro,z", hostMountPath(tlsDir), certsDir)}
 }
 
 // CertInfo is the operator-facing summary of a BYO certificate.

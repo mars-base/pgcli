@@ -86,7 +86,7 @@ func (m *MinioManager) EnsureTLS(mc *config.MinioConfig) (string, error) {
 	if mc.TLS && (mc.CertFile != "") != (mc.KeyFile != "") {
 		fmt.Printf("  [!] MinIO %s has only one of cert_file/key_file set — ignoring the pair and using generated certs\n", mc.ContainerName)
 	}
-	if BYOTLS(mc) {
+	if BYOTLS(mc.TLS, mc.CertFile, mc.KeyFile) {
 		if _, err := ValidateBYOCert(mc.CertFile, mc.KeyFile); err != nil {
 			return "", err
 		}
@@ -217,7 +217,7 @@ func (m *MinioManager) StartContainer(mc *config.MinioConfig) error {
 	// block the start — the mounted cert is very likely still valid.
 	if mc.TLS {
 		if _, err := m.EnsureTLS(mc); err != nil {
-			if BYOTLS(mc) {
+			if BYOTLS(mc.TLS, mc.CertFile, mc.KeyFile) {
 				fmt.Printf("  [!] MinIO %s BYO certificate problem: %v\n", containerName, err)
 				fmt.Printf("      fix the files, or switch cert material with: pg addon install minio --name %s --tls-cert ... --tls-key ... --force\n", mc.Name)
 			} else {
@@ -287,7 +287,7 @@ func (m *MinioManager) createContainer(mc *config.MinioConfig) error {
 		if err != nil {
 			return err
 		}
-		if BYOTLS(mc) {
+		if BYOTLS(mc.TLS, mc.CertFile, mc.KeyFile) {
 			ci, err := ValidateBYOCert(mc.CertFile, mc.KeyFile)
 			if err != nil {
 				return err
@@ -334,7 +334,7 @@ func (m *MinioManager) createContainer(mc *config.MinioConfig) error {
 		"-e", "MINIO_ROOT_PASSWORD="+mc.RootPassword,
 	)
 	if mc.TLS {
-		args = append(args, tlsMountFlags(mc, m.TLSDir(mc))...)
+		args = append(args, tlsMountFlags(mc.TLS, mc.CertFile, mc.KeyFile, m.TLSDir(mc), minioCertsDir)...)
 	}
 	// MINIO_SERVER_URL must be byte-identical on every node or MinIO refuses to
 	// form the cluster ("Mismatching environment values: [MINIO_SERVER_URL]",
@@ -362,7 +362,7 @@ func (m *MinioManager) createContainer(mc *config.MinioConfig) error {
 		"--console-address", fmt.Sprintf("%s:%d", bind, mc.ConsolePort),
 	)
 	if mc.TLS {
-		args = append(args, "--certs-dir", "/opt/minio/certs")
+		args = append(args, "--certs-dir", minioCertsDir)
 	}
 
 	if _, err := m.run(args...); err != nil {

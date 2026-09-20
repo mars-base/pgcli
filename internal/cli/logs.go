@@ -36,7 +36,8 @@ Examples:
   pg logs addon etcd --name m1         # etcd member logs
   pg logs addon pgdog --name proxy     # PgDog proxy logs
   pg logs addon haproxy --name lb      # HAProxy instance logs
-  pg logs addon minio --name store     # MinIO instance logs`,
+  pg logs addon minio --name store     # MinIO instance logs
+  pg logs addon silo --name store      # silo instance logs`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		follow, _ := cmd.Flags().GetBool("follow")
 		tail, _ := cmd.Flags().GetInt("tail")
@@ -58,10 +59,11 @@ var logsAddonCmd = &cobra.Command{
 	Short: "Show addon console output logs",
 	Long: `Show addon console output logs.
 
-Requires the addon type (pgbouncer, etcd, pgdog, haproxy, minio, patroni).
+Requires the addon type (pgbouncer, etcd, pgdog, haproxy, minio, silo, patroni).
 Use -i for local instance addons, --pg-name for remote addons,
---name for an etcd member, pgdog proxy, haproxy instance, minio instance, or
-Patroni member (default "etcd"/"pgdog"/"haproxy"/"minio"; Patroni members have
+--name for an etcd member, pgdog proxy, haproxy instance, minio or silo
+instance, or Patroni member (default
+"etcd"/"pgdog"/"haproxy"/"minio"/"silo"; Patroni members have
 no default and also require --scope).
 
 Examples:
@@ -79,6 +81,8 @@ Examples:
   pg logs addon haproxy --name lb -f
   pg logs addon minio --name store
   pg logs addon minio --name store -f
+  pg logs addon silo --name store
+  pg logs addon silo --name store -f
   pg logs addon patroni --scope app --name node1
   pg logs addon patroni --scope app --name node1 -f`,
 	Args: cobra.ExactArgs(1),
@@ -122,7 +126,7 @@ Examples:
 			if err != nil {
 				return err
 			}
-		case "etcd", "pgdog", "haproxy", "minio":
+		case "etcd", "pgdog", "haproxy", "minio", "silo":
 			// (patroni is handled above; it shares --name but requires --scope.)
 			if pgName != "" {
 				return fmt.Errorf("--pg-name selects a remote PgBouncer; use --name for an %s", addonType)
@@ -169,10 +173,19 @@ Examples:
 					return fmt.Errorf("minio instance %q not found (use 'pg addon list' to see available)", name)
 				}
 				containerName = mc.ContainerName
+			case "silo":
+				if cfg.Addons.Silo == nil {
+					return fmt.Errorf("no silo addons configured")
+				}
+				sc, ok := cfg.Addons.Silo[name]
+				if !ok {
+					return fmt.Errorf("silo instance %q not found (use 'pg addon list' to see available)", name)
+				}
+				containerName = sc.ContainerName
 			}
 		case "pgbouncer":
 			if etcdName != "" {
-				return fmt.Errorf("--name selects an etcd member, pgdog proxy, haproxy instance, minio instance, or Patroni member; use -i or --pg-name for PgBouncer")
+				return fmt.Errorf("--name selects an etcd member, pgdog proxy, haproxy instance, minio or silo instance, or Patroni member; use -i or --pg-name for PgBouncer")
 			}
 			if pgName != "" {
 				// Remote mode
@@ -197,7 +210,7 @@ Examples:
 				containerName = inst.Addons.PgBouncer.ContainerName
 			}
 		default:
-			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, patroni)", addonType)
+			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, patroni)", addonType)
 		}
 
 		return runPodmanLogs(containerName, tail, follow)
