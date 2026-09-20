@@ -312,12 +312,14 @@ SNSD is what `pg addon install minio` gives you out of the box. To get
 MNSD, pass the cluster's endpoint list (at least four nodes) — see
 [Distributed / Cluster Mode](#distributed--cluster-mode) below.
 
-MinIO's third shape, **SNMD** (single-node, multi-drive), is deliberately
-absent: MinIO rejects a same-host endpoint list outright, so disk-level
-redundancy on one host belongs one layer down, under the data directory.
-[S3 Storage High Availability](../../ha-cluster/ha-s3-storage/) covers why
-only these two modes, and how to put ZFS under either — including the
-4-hosts-each-with-several-disks hybrid that survives both a disk and a node.
+MinIO also has multi-drive shapes (**SNMD** — single-node, multi-drive — and
+several drives per node in a distributed set); pgcli does not wire them in:
+`--endpoint` is one host per node and `--data-dir` is one directory. That is
+a deliberate scope call — disk redundancy belongs under the data directory,
+where ZFS does it more flexibly and serves both modes. [S3 Storage High
+Availability](../../ha-cluster/ha-s3-storage/) explains the reasoning and the
+ZFS recipes, including the 4-hosts-each-with-several-disks hybrid that
+survives both a disk and a node.
 
 ## Distributed / Cluster Mode
 

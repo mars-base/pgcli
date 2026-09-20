@@ -216,13 +216,14 @@ SNSD is what `pg addon install silo` gives you out of the box. To get
 MNSD, pass the cluster's endpoint list (at least four nodes) — see
 [Distributed / Cluster Mode](#distributed--cluster-mode) below.
 
-MinIO's third shape, **SNMD** (single-node, multi-drive), is deliberately
-absent: silo (like MinIO) rejects a same-host endpoint list outright, so
-disk-level redundancy on one host belongs one layer down, under the data
-directory. [S3 Storage High
-Availability](../../ha-cluster/ha-s3-storage/) covers why only these two
-modes, and how to put ZFS under either — including the 4-hosts-each-with-
-several-disks hybrid that survives both a disk and a node.
+silo/MinIO also has multi-drive shapes (**SNMD** — single-node, multi-drive —
+and several drives per node in a distributed set); pgcli does not wire them
+in: `--endpoint` is one host per node and `--data-dir` is one directory. That
+is a deliberate scope call — disk redundancy belongs under the data directory,
+where ZFS does it more flexibly and serves both modes. [S3 Storage High
+Availability](../../ha-cluster/ha-s3-storage/) explains the reasoning and the
+ZFS recipes, including the 4-hosts-each-with-several-disks hybrid that
+survives both a disk and a node.
 
 ## Distributed / Cluster Mode
 
@@ -271,10 +272,13 @@ pg mcli cp ./dump.pglz store/backups/
 ```
 
 mcli speaks the same alias contract as mc, so it interoperates freely —
-against a silo store, a MinIO store, or any S3 endpoint. Aliases persist on
-the host at `~/.mcli/config.json`, **separate** from mc's `~/.mc/config.json`:
-an alias registered with `pg mc` is not visible to `pg mcli` and vice versa
-(set it once per client, or use the stateless form below, which both read).
+against a silo store, a MinIO store, or any S3 endpoint. pgcli points both
+clients at **one** file: aliases persist on the host at `~/.mc/config.json`
+(mc's native default path), so an alias registered with `pg mc` is visible to
+`pg mcli` and vice versa — set it once, not once per client. (The stateless
+`MC_HOST_<name>` form works for both too.) A native mcli install left to its
+own defaults reads `~/.mcli/config.json` instead, so it will not see the
+shared file unless `MC_CONFIG_DIR` is pointed at it.
 
 `alias set` validates the credentials against the endpoint before writing, so a
 wrong password leaves the config untouched. Local file operands of `cp` /
@@ -434,8 +438,10 @@ listeners came up.
   address clients can actually reach. (Cluster mode does not set
   `MINIO_SERVER_URL` at all.)
 - **An alias set with `pg mc` isn't visible to `pg mcli` (or vice versa).**
-  By design — mc and mcli keep separate config files (`~/.mc` vs `~/.mcli`).
-  Set the alias per client, or pass `MC_HOST_<name>` in the environment.
+  They share `~/.mc/config.json` by design, so this means the alias really
+  isn't there — check `pg mc alias list` (same file), or pass
+  `MC_HOST_<name>` in the environment. A *native* mcli reads `~/.mcli`
+  instead and won't see the shared file unless `MC_CONFIG_DIR` points there.
 - **macOS.** Supported: the addon serves on the `pgcli-net` bridge with both
   ports published, so the Mac's `127.0.0.1:<port>` reaches them (the container
   binds `0.0.0.0` internally and `MINIO_SERVER_URL` advertises the loopback the

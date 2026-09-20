@@ -31,21 +31,33 @@ MinIO classifies its layouts by node count and drive count per node
 
 ### Why only two
 
-The missing mode is **SNMD** (single-node, *multi*-drive) — and it is not a
-policy choice. MinIO itself refuses a distributed endpoint list whose members
-all resolve to the same host:
+MinIO and silo support more shapes than these — **SNMD** (single-node,
+*multi*-drive) and multi-node with several drives per node are both real,
+using MinIO's path-style endpoint syntax (a single node with
+`/data{1...4}`, or a host×drive matrix). pgcli simply does not wire those
+into the addon: `--endpoint` takes one routable host per node and `--data-dir`
+is one directory, so the two modes above are what the CLI can express today.
 
-- a same-host list is rejected with `use path style endpoint for single node
-  setup`;
-- the entire `127.0.0.0/8` range is rejected with `resolves to localhost`.
+That is a deliberate scope call, not a gap we consider worth closing. Disk
+redundancy is a *filesystem* job, and ZFS does it better and more flexibly
+than MinIO's own multi-drive mode could:
 
-So the SNMD container simply never comes up — pgcli cannot ship a deployment
-shape upstream forbids. The capability SNMD would have provided (several
-disks acting as one redundant volume on one host) is instead delegated one
-layer down, to the filesystem: **ZFS gives MinIO a single drive path backed by
-as many disks as you like, with real redundancy.** The division of labor is
-clean — MinIO does node-level EC, ZFS does disk-level redundancy — and each
-layer stays simple.
+- **One mechanism serves both modes.** `raidz1` under SNSD protects a single
+  host's store; the same recipe under each node of an MNSD cluster protects a
+  distributed one. A MinIO SNMD/MNMD layout, by contrast, only ever applies to
+  whichever node it was declared on.
+- **The layout stays changeable underneath.** Swap two disks for a mirror,
+  grow the pool, migrate to `raidz2` — `--data-dir` never changes and MinIO
+  notices nothing. MinIO's drive set is fixed at install time.
+- **Nodes may be heterogeneous.** A 2-disk node and a 6-disk node look
+  identical to MinIO (one endpoint each). With MinIO-level multi-drive, every
+  member has to describe its drives to the cluster.
+- **Quorum math stays simple.** Writes need ⌈N/2⌉+1 *nodes*. When drives
+  inside a node also count as failure members, the arithmetic of "what can
+  this cluster survive" stops being legible.
+
+So the division of labor is: **MinIO does node-level EC, ZFS does disk-level
+redundancy** — and each layer stays simple.
 
 ## ZFS: the flexible disk layer
 

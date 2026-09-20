@@ -192,11 +192,12 @@ silo/MinIO 对自身的部署布局有明确分类；本插件支持其中最常
 `pg addon install silo` 开箱即是 SNSD。要得到 MNSD，传入集群的
 endpoint 列表（至少四节点）——见下文[分布式 / 集群模式](#分布式--集群模式)。
 
-MinIO 的第三种形态 **SNMD**（单机多盘）是有意不提供的：silo（与 MinIO 一样）
-直接拒绝同主机的 endpoint 列表，所以单机上的磁盘冗余应放到更低一层——数据目
-录之下。[S3 存储高可用方案](../../ha-cluster/ha-s3-storage/) 讲清楚了为什么只
-有这两种形态，以及如何在两种形态下各垫一层 ZFS——包括"4 主机、每主机多块
-盘"这个既能扛坏盘又能扛坏机的混合形态。
+silo/MinIO 其实还有多盘的形态（**SNMD**——单机多盘，以及分布式集群里每台主机
+挂多块盘）；pgcli 没有把它们做进插件：`--endpoint` 每节点一个主机、
+`--data-dir` 是单个目录。这是有意收的范围——磁盘冗余该放在数据目录之下，由
+ZFS 来做，更灵活，而且同时服务两种形态。[S3 存储高可用方案](../../ha-cluster/ha-s3-storage/)
+讲清了这份取舍的理由和 ZFS 配方，包括"4 主机、每主机多块盘"这个既能扛坏盘
+又能扛坏机的混合形态。
 
 ## 分布式 / 集群模式
 
@@ -243,9 +244,11 @@ pg mcli cp ./dump.pglz store/backups/
 ```
 
 mcli 与 mc 的 alias 契约相同，因此互通——对 silo 存储、MinIO 存储或任何 S3
-端点都可用。alias 持久化在主机 `~/.mcli/config.json`，与 mc 的
-`~/.mc/config.json` **相互独立**：`pg mc` 注册的 alias 对 `pg mcli` 不可见，
-反之亦然（每个客户端各设一次，或使用下面的无状态形式，两者都识别）。
+端点都可用。pgcli 有意把两个客户端指向**同一个**文件：alias 持久化在主机
+`~/.mc/config.json`（mc 的原生默认路径），所以 `pg mc` 注册的 alias 对
+`pg mcli` 同样可见，反之亦然——只设一次，不必每个客户端各设一次（无状态的
+`MC_HOST_<name>` 形式两边也都识别）。原生 mcli 若按自身默认运行则读
+`~/.mcli/config.json`，除非把 `MC_CONFIG_DIR` 指过去，否则看不到这个共享文件。
 
 `alias set` 在写入前会对端点校验凭据，密码错误时配置文件保持不变。`cp` /
 `mirror` / `diff` 的本地路径参数会按真实绝对路径解析并挂载，与 `pg mc` 行为
@@ -391,9 +394,10 @@ silo 输出到 stdout：启动行（`API:`/`Console:` 地址、`Documentation:`�
   端口构成；绑 `127.0.0.1` 却从其他主机访问时，客户端会被重定向到回环
   URL。把 `listen` 设成客户端真正可达的地址。（集群模式完全不设
   `MINIO_SERVER_URL`。）
-- **用 `pg mc` 设的 alias 在 `pg mcli` 里看不到（或反之）。** 设计如此——
-  mc 与 mcli 的配置文件相互独立（`~/.mc` vs `~/.mcli`）。每个客户端各设一
-  次 alias，或用环境变量传 `MC_HOST_<name>`。
+- **用 `pg mc` 设的 alias 在 `pg mcli` 里看不到（或反之）。** 两者按设计共
+  享 `~/.mc/config.json`，出现这种情况说明 alias 确实没写进去——`pg mc alias
+  list`（同一文件）核对一下，或用环境变量传 `MC_HOST_<name>`。*原生* mcli 读
+  的是 `~/.mcli`，不指 `MC_CONFIG_DIR` 就看不到这个共享文件。
 - **macOS。** 受支持：插件在 `pgcli-net` bridge 上服务并发布两个端口，Mac
   的 `127.0.0.1:<port>` 即可访问（容器内部绑 `0.0.0.0`，
   `MINIO_SERVER_URL` 声明 Mac 使用的回环地址）。改端口/凭据后 `--force`
