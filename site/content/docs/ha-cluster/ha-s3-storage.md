@@ -81,15 +81,35 @@ what [MinIO's drive check](../addon/minio/#distributed--cluster-mode) and
 pgcli's install-time advisory want (`drive is part of root drive, will not be
 used`). A ZFS mount on its own disks satisfies that trivially.
 
-### Layouts for a 4-disk host
+### Layout by disk count
 
-With four disks under SNSD, the usual choice is:
+| Data disks | SNSD (ZFS is the only defense) | MNSD node (EC above absorbs node loss) |
+|-----------|--------------------------------|------------------------------------------|
+| 1 | no redundancy — fine for dev/test, a dead disk means re-seeding the repo | one big disk per node is the plain MNSD shape; no ZFS needed |
+| 2 | `mirror` | `mirror` |
+| 3 | `raidz1` (2D usable) | `raidz1` |
+| 4 | `raidz2` on spinning disks; `raidz1` when SSD rebuilds are quick and the capacity matters; 2 × `mirror` for write-heavy stores | `raidz1` — one parity is enough to keep disk loss invisible to MinIO |
+| 5–8 | `raidz2` ((N−2)D usable) | `raidz1`, or `raidz2` with large HDDs |
+| > 8 | prefer two smaller `raidz2`/`raidz1` vdevs striped over the pool — a resilver across 12+ disks is a long exposure window | same: keep any single vdev ≤ ~8 disks |
+
+The two columns differ in one line of reasoning: under SNSD ZFS must survive
+the disk *and* whatever happens during its rebuild, so parity depth buys
+safety outright; under MNSD, ZFS only has to keep a disk failure from
+escalating into a node loss, so one parity plus quick local resilver is the
+job — and beyond that, prefer more nodes over deeper local RAID.
+
+For a 4-disk host under SNSD — the most common single-box question — the
+usual choices are:
 
 | Layout | Usable | Survives | Character |
 |--------|--------|----------|-----------|
-| `raidz1` (like RAID5) | 3 × disk | 1 disk | the default: best capacity, single-parity |
-| `raidz2` (like RAID6) | 2 × disk | 2 disks | safer on large disks (long resilvers), halves capacity |
-| 2 × `mirror` (striped) | 2 × disk | 1 disk per mirror (2 if in different mirrors) | best small-write performance |
+| `raidz2` (like RAID6) | 2 × disk | 2 disks | the safe default on spinning disks: resilvers on large drives are long, and raidz1's single parity does not survive one more loss during a rebuild |
+| `raidz1` (like RAID5) | 3 × disk | 1 disk | the capacity pick for SSDs / small disks, where a resilver takes minutes, not hours |
+| 2 × `mirror` (striped) | 2 × disk | 1 disk per mirror (2 if in different mirrors) | best small-write performance — wide raidz is the worst shape for it |
+
+Under **SNSD** ZFS is the store's only line of defense, so the default leans
+conservative: `raidz2` unless the disks are fast enough to rebuild quickly and
+the capacity is worth the thinner margin.
 
 MinIO's own guidance to avoid RAID *underneath its EC mode* targets the
 double-redundancy of RAID + cross-node EC. Under **SNSD** there is no EC —
@@ -149,12 +169,29 @@ Two properties make the scheme flexible:
   `zfs set refquota`) hides the mismatch from MinIO — the quota caps the big
   pools at the small one's size, and nothing wastes a rebuild.
 
+**Why not stripe the per-node pool to reclaim capacity.** MinIO's "no RAID
+under EC" advice is about capacity, and the arithmetic is real: a plain
+4-node MNSD EC set already halves the raw total, so an unmirrored `raidz_none`
+pool on each node (all disks striped, zero local redundancy) does squeeze out
+roughly a third more cluster capacity than `raidz1` would. But EC counts a
+failure in *nodes*, and a striped pool turns a single dead disk into a whole
+offline node — one ordinary disk failure burns a slot of the budget EC set
+aside for losing an entire machine, forcing a network-wide rebuild of that
+node's whole pool and leaving zero margin until it finishes. The capacity is
+only "free" because you quietly downgraded disk fault-tolerance to node
+fault-tolerance. `raidz1` per node is the point where the two layers stop
+stealing from each other: the pool absorbs disk loss invisibly, MinIO's EC
+budget stays reserved for node loss. (If the reclaim-everything answer truly
+fits, the shape that maximizes it is plain MNSD on one big disk per node —
+no ZFS at all — not a striped pool that hides the same single-point risk one
+layer down.)
+
 ## Choosing a shape
 
 | Situation | Shape |
 |-----------|-------|
 | laptop / demo / CI | SNSD, default data dir — nothing to decide |
-| one host with N ≥ 4 data disks, backups must survive a disk | SNSD + `raidz1` (or `raidz2` on big disks) |
+| one host with N ≥ 4 data disks, backups must survive a disk | SNSD + `raidz2` on spinning disks, `raidz1` on fast SSDs |
 | a few hosts, one data disk each, must survive a host | MNSD plain |
 | hosts with several data disks each, must survive a disk *and* a host | MNSD + per-node ZFS (layouts may differ per node; keep capacities aligned) |
 
