@@ -14,11 +14,11 @@ import (
 
 // mcliContainerConfigDir is where `pg mcli` pins mcli's config inside the
 // silo image: mcli resolves its config as $HOME/.mcli by default, but pgcli
-// pins MC_CONFIG_DIR to this path and mounts the host ~/.mcli there, so the
-// behaviour does not depend on whatever HOME the silo image happens to set
-// (its server wants /data for storage). One shared config.json on Linux and
-// macOS, the same default shape as `pg mc`.
-const mcliContainerConfigDir = "/data/.mcli"
+// pins MC_CONFIG_DIR to this path and mounts the host ~/.mc there — the same
+// file `pg mc` persists, so one `alias set` serves both clients. Pinning the
+// path keeps the behaviour independent of whatever HOME the silo image happens
+// to set (its server wants /data for storage).
+const mcliContainerConfigDir = "/data/.mc"
 
 // MCLIRunner runs silo's mcli client from the same docker.io/pgsty/silo image
 // the silo addon uses, in a short-lived container. It is the twin of MCRunner:
@@ -26,12 +26,13 @@ const mcliContainerConfigDir = "/data/.mcli"
 // --insecure logic are shared helpers with no binding to the mc binary, so only
 // the image, the container config path, and the run args (mcli is selected via
 // --entrypoint, and MC_CONFIG_DIR is pinned) differ. mcli's alias
-// configuration persists on the host at ~/.mcli via a bind mount, so
-// `pg mcli alias set` once and every later invocation sees the same aliases.
+// configuration persists on the host at ~/.mc — mc's file, shared deliberately
+// so one `pg mc`/`pg mcli alias set` is visible to both clients — via a bind
+// mount, so setting an alias once works everywhere.
 type MCLIRunner struct {
 	podman     string // podman binary path
 	imageTag   string
-	configDir  string // host ~/.mcli
+	configDir  string // host ~/.mc (shared with MCRunner on purpose)
 	useHostNet bool   // Linux: --network host reaches a loopback-bound silo; macOS: host networking binds the VM loopback, so use the default bridge
 }
 
@@ -51,7 +52,7 @@ func NewMCLIRunner() (*MCLIRunner, error) {
 	return &MCLIRunner{
 		podman:     path,
 		imageTag:   config.DefaultSiloImageTag,
-		configDir:  filepath.Join(home, ".mcli"),
+		configDir:  filepath.Join(home, ".mc"),
 		useHostNet: platform.Detect() != platform.MacOS,
 	}, nil
 }
@@ -61,7 +62,7 @@ func NewMCLIRunner() (*MCLIRunner, error) {
 // mirrors MCRunner.Run — every step (alias detection, local-path rewriting,
 // loopback --insecure, macOS home-tree mount filter) is shared logic.
 func (m *MCLIRunner) Run(args []string) error {
-	// Create ~/.mcli before mounting, or podman creates the mountpoint root-owned.
+	// Create ~/.mc before mounting, or podman creates the mountpoint root-owned.
 	if err := os.MkdirAll(m.configDir, 0700); err != nil {
 		return fmt.Errorf("creating mcli config dir %s: %w", m.configDir, err)
 	}

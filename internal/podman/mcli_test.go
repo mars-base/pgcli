@@ -7,19 +7,20 @@ import (
 
 // mcliRunArgs is mcRunArgs plus exactly two differences: the silo image needs
 // an explicit --entrypoint mcli (its default ENTRYPOINT runs the server), and
-// MC_CONFIG_DIR must be pinned to the mounted config dir (mcli's default is
-// $HOME/.mcli, and the image's HOME is not the /data pgcli mounts). Everything
+// MC_CONFIG_DIR must be pinned to the mounted config dir (mcli's own default
+// is $HOME/.mcli, and the image's HOME is not the /data pgcli mounts — so
+// pgcli pins it to the host ~/.mc mount, sharing mc's alias file). Everything
 // else — network, proxy, config mount, operand mounts, env, image, args — is
 // identical to mc, so this pins only the delta and the ordering that matters
 // (entrypoint/env/flags before the image, mcli args after it).
 func TestMCLIRunArgsEntrypointAndConfigDir(t *testing.T) {
-	got := mcliRunArgs("docker.io/pgsty/silo:TAG", "/home/u/.mcli", []string{"/home/u/f"}, true, false, []string{"MC_HOST_store=x"}, []string{"ls", "store"})
+	got := mcliRunArgs("docker.io/pgsty/silo:TAG", "/home/u/.mc", []string{"/home/u/f"}, true, false, []string{"MC_HOST_store=x"}, []string{"ls", "store"})
 	joined := strings.Join(got, " ")
 
 	for _, want := range []string{
 		"--entrypoint mcli",
 		"-e MC_CONFIG_DIR=" + mcliContainerConfigDir,
-		"-v /home/u/.mcli:" + mcliContainerConfigDir + ":z",
+		"-v /home/u/.mc:" + mcliContainerConfigDir + ":z",
 		"--network host",
 		"-e MC_HOST_store=x",
 	} {

@@ -21,12 +21,12 @@ and passes your arguments straight to mcli (selected via --entrypoint, since
 the image's default entrypoint runs the server). The container is removed after
 each command.
 
-mcli speaks the same alias/config contract as mc, so it interoperates with a
-minio or silo store alike. Aliases persist on the host at ~/.mcli/config.json —
-mcli's native default path — so ` + "`pg mcli alias set`" + ` once works everywhere,
-including a native mcli install sharing the same file. ` + "`MC_HOST_<name>`" + `
-environment variables are forwarded too, so stateless (no-config) invocations
-keep working.
+mcli speaks the same alias/config contract as mc, and pgcli deliberately
+points both at one file: aliases persist on the host at ~/.mc/config.json —
+mc's native default path — so ` + "`pg mcli alias set`" + ` once is visible to
+` + "`pg mc`" + ` (and vice versa), and to any native mc or mcli install sharing
+the same file. ` + "`MC_HOST_<name>`" + ` environment variables are forwarded
+too, so stateless (no-config) invocations keep working.
 
 On macOS the container sits on the bridge network, where a 127.0.0.1 alias is
 the container's own loopback — point an alias at a local pg addon silo instance

@@ -7,9 +7,10 @@
 # also covers the shared port pool: a minio and a silo instance in one config
 # must coexist without a port collision, and BYO TLS via `pg cert`.
 #
-# Aliases persist on the host at ~/.mcli/config.json and ~/.mc/config.json by
-# design; the test registers only uniquely-named aliases and removes them in
-# cleanup, touching nothing else. Isolation otherwise matches test_minio.sh:
+# Aliases persist on the host at ~/.mc/config.json — pg mcli and pg mc share
+# one file by design — so both clients see the same aliases. The test registers
+# only uniquely-named aliases and removes them in cleanup, touching nothing
+# else. Isolation otherwise matches test_minio.sh:
 # throwaway config file + base dir, own namespace, own minio_start_port pool
 # (sed-injected; the pool is shared with minio by design, hence a distinct
 # range here).
@@ -31,7 +32,7 @@ STORE="store"           # the silo instance under test (TLS)
 STORE2="archive"        # a second silo instance (port-pool arithmetic)
 MSTORE="mnpeer"         # a minio instance sharing the same port pool
 BUCKET="backups"
-ALIAS="sne2e-store"        # unique — alias keys share the host's ~/.mcli
+ALIAS="sne2e-store"        # unique — alias keys share the host's ~/.mc
 MCALIAS="sne2e-store-mc"   # the same store, reached via MinIO's mc client
 
 SKIP_DESTROY=false
@@ -237,6 +238,9 @@ main() {
 
     # ---- pg mc (MinIO's client) against the silo store: the S3 contract ----
     section "pg mc against silo (S3 compatibility)"
+    # pg mcli and pg mc share one host config file (~/.mc) by design, so an
+    # alias set via mcli must be visible to mc with no second `alias set`.
+    run_grep "mc alias list sees the mcli-set alias" "$ALIAS" pgmc alias list
     run_test "mc alias set (minio client reaches the silo store)" \
         pgmc alias set "$MCALIAS" "https://127.0.0.1:$API" admin "$PW"
     run_grep "mc mb via the silo store" "s3-backup" pgmc mb "$MCALIAS/s3-backup"
