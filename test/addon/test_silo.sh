@@ -31,9 +31,11 @@ MINIO_START_PORT="${PGCLI_MINIO_START_PORT:-29200}"
 STORE="store"           # the silo instance under test (TLS)
 STORE2="archive"        # a second silo instance (port-pool arithmetic)
 MSTORE="mnpeer"         # a minio instance sharing the same port pool
+SNMD="snmddisk"         # the SNMD instance under test (loop-file drives)
 BUCKET="backups"
 ALIAS="sne2e-store"        # unique — alias keys share the host's ~/.mc
 MCALIAS="sne2e-store-mc"   # the same store, reached via MinIO's mc client
+SNMD_ALIAS="sne2e-snmd"    # the SNMD store, via mcli
 
 SKIP_DESTROY=false
 if [ "${1:-}" = "--skip-destroy" ]; then
@@ -136,13 +138,51 @@ wait_live() {  # <api-port> — poll the /minio/health/live endpoint over HTTPS
     return 1
 }
 
+# ---- SNMD loop-drive fixtures (same design as test_minio.sh) --------------
+# 768M fresh ext4 loop images, one per "drive", each mounted at its own dir so
+# every drive has a distinct st_dev (what silo/MinIO require). snmd_setup
+# returns non-zero when loop mounts are impossible here; the section then fails
+# loudly rather than skipping.
+SNMD_DRIVES=4
+SNMD_DISK_DIR="$TEST_DIR/snmd-disks"
+SNMD_MNT_ROOT="$TEST_DIR/snmd-mnt"
+
+snmd_umount_all() {
+    for i in $(seq 1 "$SNMD_DRIVES"); do
+        sudo -n umount "$SNMD_MNT_ROOT/d$i" 2>/dev/null || true
+    done
+    rm -f "$SNMD_DISK_DIR"/*.img 2>/dev/null || true
+}
+
+snmd_setup() {
+    local mkfs=""
+    for c in /sbin/mkfs.ext4 /usr/sbin/mkfs.ext4 mkfs.ext4; do
+        command -v "$c" >/dev/null 2>&1 && { mkfs="$c"; break; }
+    done
+    [ -n "$mkfs" ] || return 1
+    sudo -n true 2>/dev/null || return 1
+    mkdir -p "$SNMD_DISK_DIR" "$SNMD_MNT_ROOT"
+    for i in $(seq 1 "$SNMD_DRIVES"); do
+        rm -f "$SNMD_DISK_DIR/d$i.img"
+        fallocate -l 768M "$SNMD_DISK_DIR/d$i.img" || return 1
+        "$mkfs" -q -F "$SNMD_DISK_DIR/d$i.img" || return 1
+        mkdir -p "$SNMD_MNT_ROOT/d$i"
+        sudo -n mount -o loop "$SNMD_DISK_DIR/d$i.img" "$SNMD_MNT_ROOT/d$i" || return 1
+        sudo -n chown "$(id -u):$(id -g)" "$SNMD_MNT_ROOT/d$i" || return 1
+    done
+    for i in $(seq 1 "$SNMD_DRIVES"); do echo "$SNMD_MNT_ROOT/d$i"; done
+}
+
 cleanup() {
     if [ "$SKIP_DESTROY" = true ]; then
         yellow "Skipping cleanup (--skip-destroy)"; return
     fi
     section "Cleanup"
     pgmcli alias remove "$ALIAS"  >/dev/null 2>&1 || true
+    pgmcli alias remove "$SNMD_ALIAS" >/dev/null 2>&1 || true
     pgmc   alias remove "$MCALIAS" >/dev/null 2>&1 || true
+    pg addon remove silo  --name "$SNMD"   --clean-data 2>/dev/null || true
+    snmd_umount_all
     pg addon remove silo  --name "$STORE2"  --clean-data 2>/dev/null || true
     pg addon remove silo  --name "$STORE"   --clean-data 2>/dev/null || true
     pg addon remove minio --name "$MSTORE"  --clean-data 2>/dev/null || true
@@ -343,6 +383,138 @@ main() {
     run_test "$STORE container gone" sl_gone "$STORE"
     run_test "$STORE data kept at documented path" test -d "$TEST_DIR/addon/silo/$STORE/data"
     run_not_grep "yaml silo entries removed" "silo:" cat "$CONFIG_FILE"
+
+    # ---- SNMD: single-node multi-drive over four loop-mounted "disks" ------
+    section "SNMD (--drive x4, --tls)"
+    run_fails "--drive rejects --endpoint in the same install" "cannot be combined" \
+        pg addon install silo --name snmdx --drive /a --endpoint http://10.0.0.1:9000/data
+    run_fails "--drive rejects --data-dir in the same install" "cannot be combined" \
+        pg addon install silo --name snmdx --drive /a --data-dir /b
+
+    TESTS=$((TESTS + 1))
+    DRIVES_FILE="$TEST_DIR/snmd-drives.txt"
+    if snmd_setup > "$DRIVES_FILE"; then
+        pass "loop-drive setup (4 fresh ext4 loop mounts)"
+    else
+        fail "loop-drive setup (SNMD section needs loop mounts: mkfs.ext4 + sudo mount -o loop)"
+    fi
+    if [ -s "$DRIVES_FILE" ]; then
+        D1=$(sed -n 1p "$DRIVES_FILE"); D2=$(sed -n 2p "$DRIVES_FILE")
+        D3=$(sed -n 3p "$DRIVES_FILE"); D4=$(sed -n 4p "$DRIVES_FILE")
+
+        TESTS=$((TESTS + 1))
+        if SNMD_OUT="$(pg addon install silo --name "$SNMD" --tls \
+                --drive "$D1" --drive "$D2" --drive "$D3" --drive "$D4" 2>&1)"; then
+            pass "install silo --drive x4 --tls"
+        else
+            fail "install silo --drive x4 --tls"; echo "$SNMD_OUT" | sed 's/^/      | /'
+        fi
+        echo "$SNMD_OUT" | sed 's/^/      /'
+        SAPI="$(silo_field "$SNMD" api_port)"
+        SPW="$(silo_field "$SNMD" root_password)"
+        run_grep "summary announces SNMD mode" "Multi-drive mode (SNMD): $SNMD_DRIVES drives" echo "$SNMD_OUT"
+        run_grep "summary maps drive 1 to /data1" "Drive 1:       $D1 -> /data1" echo "$SNMD_OUT"
+        run_grep "summary maps drive 4 to /data4" "Drive 4:       $D4 -> /data4" echo "$SNMD_OUT"
+        run_test "SNMD container running" sl_up "$SNMD"
+        run_test "SNMD health endpoint live over TLS" wait_live "$SAPI"
+
+        CNAME="pgcli-silo-$NAMESPACE-$SNMD"
+        MOUNTS="$(podman inspect "$CNAME" --format '{{range .Mounts}}{{.Source}}={{.Destination}} {{end}}' 2>/dev/null || true)"
+        CMD="$(podman inspect "$CNAME" --format '{{join .Config.Cmd " "}}' 2>/dev/null || true)"
+        TESTS=$((TESTS + 1))
+        if echo "$MOUNTS" | grep -qF "$D1=/data1" && echo "$MOUNTS" | grep -qF "$D2=/data2" \
+           && echo "$MOUNTS" | grep -qF "$D3=/data3" && echo "$MOUNTS" | grep -qF "$D4=/data4"; then
+            pass "4 drive mounts at /data1../data4"
+        else
+            fail "drive mounts wrong: $MOUNTS"
+        fi
+        run_grep "server argv is 'server /data1..4'" "server /data1 /data2 /data3 /data4" echo "$CMD"
+        TESTS=$((TESTS + 1))
+        podman inspect "$CNAME" --format '{{json .Config.Env}}' | grep -qF MINIO_SERVER_URL \
+            && pass "MINIO_SERVER_URL present (single node)" \
+            || fail "MINIO_SERVER_URL missing on an SNMD container"
+        # silo formatted every drive — the EC set really spans all four.
+        TESTS=$((TESTS + 1))
+        all_fmt=true
+        for d in "$D1" "$D2" "$D3" "$D4"; do
+            [ -n "$(ls -A "$d" 2>/dev/null)" ] || { all_fmt=false; echo "      | drive $d still empty (not formatted)"; }
+        done
+        $all_fmt && pass "every drive was written by silo" \
+                 || fail "a drive was not formatted by silo"
+
+        run_test "mcli alias set against the SNMD store" \
+            pgmcli alias set "$SNMD_ALIAS" "https://127.0.0.1:$SAPI" admin "$SPW"
+        run_grep "mcli mb through SNMD store" "$BUCKET" pgmcli mb "$SNMD_ALIAS/$BUCKET"
+        echo "snmd silo payload $$" > "$TEST_DIR/snmd.txt"
+        run_grep "mcli cp upload through SNMD store" "snmd.txt" \
+            pgmcli cp "$TEST_DIR/snmd.txt" "$SNMD_ALIAS/$BUCKET/snmd.txt"
+        run_test "mcli cp download byte-identical" \
+            bash -c "'$BINARY' -c '$CONFIG_FILE' mcli cp '$SNMD_ALIAS/$BUCKET/snmd.txt' '$TEST_DIR/snmd.down' 2>/dev/null && cmp -s '$TEST_DIR/snmd.txt' '$TEST_DIR/snmd.down'"
+
+        run_grep "addon list shows SNMD drives" "Drives:      $SNMD_DRIVES (SNMD)" pg addon list
+        run_grep "addon list maps the /data1 slot" "/data1 <- $D1" pg addon list
+
+        # --clean-data must REFUSE the live mount points.
+        TESTS=$((TESTS + 1))
+        RM_OUT="$(pg addon remove silo --name "$SNMD" --clean-data 2>&1)" || true
+        echo "$RM_OUT" | sed 's/^/      /'
+        if echo "$RM_OUT" | grep -qF "Refusing to delete $D1" && [ -n "$(ls -A "$D1")" ]; then
+            pass "--clean-data refuses still-mounted drives, data intact"
+        else
+            fail "--clean-data did not refuse the live mounts (or deleted through them)"
+        fi
+        run_test "SNMD container gone after refused remove" sl_gone "$SNMD"
+
+        # Reinstall over the SAME formatted drives: config entry was deleted by
+        # the refused remove, so re-read the fresh password; the bucket survives.
+        TESTS=$((TESTS + 1))
+        if RESNMD="$(pg addon install silo --name "$SNMD" --tls \
+                --drive "$D1" --drive "$D2" --drive "$D3" --drive "$D4" 2>&1)" \
+           && echo "$RESNMD" | grep -qF "Starting silo container"; then
+            pass "reinstall on the same 4 drives recreates the container"
+        else
+            fail "reinstall on same drives"; echo "$RESNMD" | sed 's/^/      | /'
+        fi
+        SAPI="$(silo_field "$SNMD" api_port)"
+        SPW="$(silo_field "$SNMD" root_password)"
+        run_test "healthy after reinstall" wait_live "$SAPI"
+        pgmcli alias set "$SNMD_ALIAS" "https://127.0.0.1:$SAPI" admin "$SPW" >/dev/null 2>&1 || true
+        run_grep "bucket survived remove + recreate" "$BUCKET" pgmcli ls "$SNMD_ALIAS"
+
+        run_test "stop SNMD" pg addon stop silo --name "$SNMD"
+        run_test "SNMD stopped" sl_down "$SNMD"
+        run_test "start SNMD" pg addon start silo --name "$SNMD"
+        run_test "healthy after start" wait_live "$SAPI"
+        run_grep "bucket survived the stop/start cycle" "$BUCKET" pgmcli ls "$SNMD_ALIAS"
+
+        # Plain remove keeps every drive dir with its format.
+        run_test "remove SNMD keeps the drive dirs" pg addon remove silo --name "$SNMD"
+        run_test "SNMD container gone" sl_gone "$SNMD"
+        TESTS=$((TESTS + 1))
+        [ -n "$(ls -A "$D1")" ] && [ -n "$(ls -A "$D4")" ] \
+            && pass "drive formats intact after plain remove" \
+            || fail "a drive format vanished with the container"
+        pgmcli alias remove "$SNMD_ALIAS" >/dev/null 2>&1 || true
+
+        # Unmount, reinstall, then --clean-data over the (now plain) dirs
+        # deletes them all.
+        snmd_umount_all
+        TESTS=$((TESTS + 1))
+        grep -q snmd-mnt /proc/mounts && fail "loop mounts still present" || pass "loop mounts released"
+        TESTS=$((TESTS + 1))
+        if pg addon install silo --name "$SNMD" --tls \
+               --drive "$D1" --drive "$D2" --drive "$D3" --drive "$D4" >/dev/null 2>&1; then
+            pass "install over the unmounted (reused) drive dirs"
+        else
+            fail "install over the unmounted drive dirs"
+        fi
+        run_test "remove --clean-data deletes the drive dirs" \
+            pg addon remove silo --name "$SNMD" --clean-data
+        TESTS=$((TESTS + 1))
+        [ ! -d "$D1" ] && [ ! -d "$D4" ] \
+            && pass "all drive dirs deleted by clean-data" \
+            || fail "drive dirs survived clean-data once unmounted"
+    fi
 
     # ---- Summary ----
     echo ""

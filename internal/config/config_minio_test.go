@@ -1,8 +1,10 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -153,5 +155,42 @@ func TestMinioEndpointsMode(t *testing.T) {
 	want := cfg.Addons.Minio["store"].Endpoints
 	if !reflect.DeepEqual(got.Addons.Minio["store"].Endpoints, want) {
 		t.Errorf("endpoints round-trip mismatch:\n got %v\nwant %v", got.Addons.Minio["store"].Endpoints, want)
+	}
+}
+
+// Drives is the SNMD axis: empty omits the key (SNSD default, zero migration),
+// non-empty round-trips in order — drive N mounts at /dataN, so order is
+// semantic and must survive save/load.
+func TestMinioDrivesRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pg.yaml")
+	cfg := Default()
+	cfg.Addons.Minio = map[string]MinioConfig{
+		"store": {ContainerName: "pgcli-minio-store", Name: "store",
+			Drives: []string{"/mnt/d1", "/mnt/d2", "/mnt/d3", "/mnt/d4"}},
+		"plain": {ContainerName: "pgcli-minio-plain", Name: "plain"},
+	}
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(raw), "drives:") {
+		t.Fatalf("SNMD instance must persist its drives key:\n%s", raw)
+	}
+	if strings.Count(string(raw), "drives:") != 1 {
+		t.Fatalf("drive-less instance must omit the key (omitempty):\n%s", raw)
+	}
+	// The drive-less instance must omit the key entirely (omitempty).
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if d := got.Addons.Minio["store"].Drives; !reflect.DeepEqual(d, []string{"/mnt/d1", "/mnt/d2", "/mnt/d3", "/mnt/d4"}) {
+		t.Errorf("drives round-trip = %v, want the 4-drive order preserved", d)
+	}
+	if d := got.Addons.Minio["plain"].Drives; len(d) != 0 {
+		t.Errorf("plain instance drives = %v, want empty", d)
 	}
 }

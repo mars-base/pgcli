@@ -107,6 +107,27 @@ func TestSiloSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+// The silo twin of the minio drives round-trip: order preserved, key omitted
+// when empty.
+func TestSiloDrivesRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pg.yaml")
+	cfg := Default()
+	cfg.Addons.Silo = map[string]SiloConfig{
+		"s1": {ContainerName: "pgcli-silo-s1", Name: "s1",
+			Drives: []string{"/mnt/d1", "/mnt/d2"}},
+	}
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if d := got.Addons.Silo["s1"].Drives; len(d) != 2 || d[0] != "/mnt/d1" || d[1] != "/mnt/d2" {
+		t.Errorf("silo drives round-trip = %v, want [/mnt/d1 /mnt/d2]", d)
+	}
+}
+
 // The shared-pool contract: minio and silo instances on one host auto-assign
 // from the same cursor, so their port pairs never overlap. Names sort within
 // each table; the minio table is assigned before silo. The base is a high

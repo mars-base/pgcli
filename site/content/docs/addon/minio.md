@@ -300,26 +300,61 @@ mechanism — verified directly: `openssl verify -CAfile <pg cert's cert>
 
 ## Deployment modes
 
-MinIO/silo classifies its layouts; the addon supports the two that matter
-here:
+MinIO/silo classifies its layouts; the addon supports three:
 
 | Mode | Shape | Use it for |
 |------|-------|------------|
-| **SNSD** (single-node, single-drive) | one node, one data directory — the default when no `--endpoint` is given | dev, test, demos |
+| **SNSD** (single-node, single-drive) | one node, one data directory — the default when no `--endpoint` or `--drive` is given | dev, test, demos |
+| **SNMD** (single-node, multi-drive) | one node, several drives — `--drive` per drive, see [SNMD](#single-node-multi-drive-snmd) below | surviving a disk loss on a single host without a filesystem layer |
 | **MNSD** (multi-node, single-drive) | several nodes, one data disk per node — the distributed mode below | compact high-availability deployments |
 
 SNSD is what `pg addon install minio` gives you out of the box. To get
 MNSD, pass the cluster's endpoint list (at least four nodes) — see
 [Distributed / Cluster Mode](#distributed--cluster-mode) below.
 
-MinIO also has multi-drive shapes (**SNMD** — single-node, multi-drive — and
-several drives per node in a distributed set); pgcli does not wire them in:
-`--endpoint` is one host per node and `--data-dir` is one directory. That is
-a deliberate scope call — disk redundancy belongs under the data directory,
-where ZFS does it more flexibly and serves both modes. [S3 Storage High
-Availability](../../ha-cluster/ha-s3-storage/) explains the reasoning and the
-ZFS recipes, including the 4-hosts-each-with-several-disks hybrid that
-survives both a disk and a node.
+Multi-node with several drives per node (MNMD) is not wired in:
+`--endpoint` takes one routable host per node, so a distributed cluster still
+means one drive per node. Disk redundancy under SNSD/MNSD also remains
+available the other way — a ZFS pool under `--data-dir` — which keeps the
+layout changeable underneath and can be more space-efficient. [S3 Storage
+High Availability](../../ha-cluster/ha-s3-storage/) compares native SNMD with
+ZFS and covers the 4-hosts-each-with-several-disks hybrid that survives both
+a disk and a node.
+
+## Single-Node Multi-Drive (SNMD)
+
+One MinIO process, several host directories, erasure-coded across them. Pass
+`--drive` once per drive instead of `--data-dir`:
+
+```bash
+pg addon install minio --name store \
+  --drive /mnt/minio/disk1 --drive /mnt/minio/disk2 \
+  --drive /mnt/minio/disk3 --drive /mnt/minio/disk4 --tls
+```
+
+Each `--drive` is a host directory on its own device; drive *N* is
+bind-mounted at container path `/dataN` and the server starts as
+`minio server /data1 /data2 ... /dataN`. `--drive` is mutually exclusive with
+`--endpoint` and with `--data-dir` — multi-drive mode takes its data
+locations from `--drive` only. Like every other MinIO drive, one that shares
+the host's root device is rejected by MinIO at startup; pgcli lists the
+offending drives and warns at install time.
+
+**What EC buys you** (measured on a live 4-drive set): MinIO splits each
+object into data + parity shards, and a 4-drive set defaults to 2 parity
+shards — it tolerates 2 drive failures. With 1 drive down, reads and writes
+both continue; with 2 down, reads still succeed and writes are refused —
+that is the quorum boundary, and it is the same arithmetic MNSD uses, just
+over drives instead of nodes. Usable capacity is roughly half the raw total
+(4 × 2 GiB drives → 3.6 GiB usable reported by `mc admin info`, `EC:2`). A
+drive that returns is healed by MinIO itself; pgcli does not need to do
+anything. The parity default scales with drive count — only the 4-drive
+shape is tested here.
+
+`pg addon remove minio --name store --clean-data` deletes each drive
+directory — but refuses any drive that is still a mount point, so an
+accidental `--clean-data` can never `rm -rf` through a live mount into the
+disk below. Unmount first if the data below is really disposable.
 
 ## Distributed / Cluster Mode
 

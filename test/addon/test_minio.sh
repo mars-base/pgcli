@@ -32,6 +32,8 @@ NAMESPACE="${PGCLI_NAMESPACE:-mne2e}"
 MINIO_START_PORT="${PGCLI_MINIO_START_PORT:-29000}"
 STORE="store"
 STORE2="archive"
+SNMD="snmddisk"            # the SNMD instance under test (loop-file drives)
+SNMD_ALIAS="mne2e-snmd"   # unique — alias keys share the host's ~/.mc
 BUCKET="backups"
 ALIAS="mne2e-store"          # unique — alias keys share the host's ~/.mc
 
@@ -124,12 +126,59 @@ wait_live() {  # <api-port> — poll the documented health endpoint
     return 1
 }
 
+# ---- SNMD loop-drive fixtures --------------------------------------------
+# The SNMD (single-node multi-drive) section needs N separate devices, because
+# MinIO rejects a drive sharing the root device. We back each "drive" with a
+# 768M ext4 loop image mounted at its own dir — real mounts, just on a file;
+# 768M clears MinIO's 512MiB-per-drive minimum. snmd_setup returns non-zero if
+# this environment cannot do loop mounts (no loop device, no privilege); the
+# caller then fails loudly rather than skipping — a silent skip here would
+# paper over regressions in the mode the section exists to cover.
+SNMD_DRIVES=4
+SNMD_DISK_DIR="$TEST_DIR/snmd-disks"
+SNMD_MNT_ROOT="$TEST_DIR/snmd-mnt"
+
+snmd_umount_all() {
+    for i in $(seq 1 "$SNMD_DRIVES"); do
+        sudo -n umount "$SNMD_MNT_ROOT/d$i" 2>/dev/null || true
+    done
+    rm -f "$SNMD_DISK_DIR"/*.img 2>/dev/null || true
+}
+
+# snmd_setup — create + mount SNMD_DRIVES fresh 768M ext4 loop images, each at
+# its own dir (a distinct st_dev, which is exactly what MinIO's per-drive check
+# demands). Echoes the drive dirs one per line on success; returns non-zero if
+# this environment cannot do loop mounts at all.
+snmd_setup() {
+    local mkfs=""
+    for c in /sbin/mkfs.ext4 /usr/sbin/mkfs.ext4 mkfs.ext4; do
+        command -v "$c" >/dev/null 2>&1 && { mkfs="$c"; break; }
+    done
+    [ -n "$mkfs" ] || return 1
+    sudo -n true 2>/dev/null || return 1
+    mkdir -p "$SNMD_DISK_DIR" "$SNMD_MNT_ROOT"
+    for i in $(seq 1 "$SNMD_DRIVES"); do
+        rm -f "$SNMD_DISK_DIR/d$i.img"
+        fallocate -l 768M "$SNMD_DISK_DIR/d$i.img" || return 1
+        "$mkfs" -q -F "$SNMD_DISK_DIR/d$i.img" || return 1
+        mkdir -p "$SNMD_MNT_ROOT/d$i"
+        sudo -n mount -o loop "$SNMD_DISK_DIR/d$i.img" "$SNMD_MNT_ROOT/d$i" || return 1
+        # root mounted it — hand the mount point to the running user or a
+        # rootless podman cannot write through the bind mount.
+        sudo -n chown "$(id -u):$(id -g)" "$SNMD_MNT_ROOT/d$i" || return 1
+    done
+    for i in $(seq 1 "$SNMD_DRIVES"); do echo "$SNMD_MNT_ROOT/d$i"; done
+}
+
 cleanup() {
     if [ "$SKIP_DESTROY" = true ]; then
         yellow "Skipping cleanup (--skip-destroy)"; return
     fi
     section "Cleanup"
     pgmc alias remove "$ALIAS" >/dev/null 2>&1 || true
+    pgmc alias remove "$SNMD_ALIAS" >/dev/null 2>&1 || true
+    pg addon remove minio --name "$SNMD" --clean-data 2>/dev/null || true
+    snmd_umount_all
     pg addon remove minio --name "$STORE2" --clean-data 2>/dev/null || true
     pg addon remove minio --name "$STORE"  --clean-data 2>/dev/null || true
     rm -rf "$CONFIG_DIR"
@@ -288,7 +337,145 @@ main() {
     run_test "$STORE data kept at documented path" test -d "$TEST_DIR/addon/minio/$STORE/data"
     run_not_grep "yaml minio entries removed" "minio:" cat "$CONFIG_FILE"
 
-    # ---- Summary ----
+    # ---- SNMD: single-node multi-drive over four loop-mounted "disks" ----
+    section "SNMD (--drive x4)"
+    run_fails "--drive rejects --endpoint in the same install" "cannot be combined" \
+        pg addon install minio --name snmdx --drive /a --endpoint http://10.0.0.1:9000/data
+    run_fails "--drive rejects --data-dir in the same install" "cannot be combined" \
+        pg addon install minio --name snmdx --drive /a --data-dir /b
+
+    TESTS=$((TESTS + 1))
+    if DRIVES_FILE="$TEST_DIR/snmd-drives.txt" && snmd_setup > "${DRIVES_FILE:=/tmp/pgcli-snmd-drives.$$}"; then
+        pass "loop-drive setup (4 fresh ext4 loop mounts)"
+    else
+        fail "loop-drive setup (SNMD section needs loop mounts: mkfs.ext4 + sudo mount -o loop)"
+    fi
+    if [ -n "${DRIVES_FILE:-}" ] && [ -s "$DRIVES_FILE" ]; then
+        D1=$(sed -n 1p "$DRIVES_FILE"); D2=$(sed -n 2p "$DRIVES_FILE")
+        D3=$(sed -n 3p "$DRIVES_FILE"); D4=$(sed -n 4p "$DRIVES_FILE")
+
+        TESTS=$((TESTS + 1))
+        if SNMD_OUT="$(pg addon install minio --name "$SNMD" \
+                --drive "$D1" --drive "$D2" --drive "$D3" --drive "$D4" 2>&1)"; then
+            pass "install minio --drive x4"
+        else
+            fail "install minio --drive x4"; echo "$SNMD_OUT" | sed 's/^/      | /'
+        fi
+        echo "$SNMD_OUT" | sed 's/^/      /'
+        SAPI="$(addon_field "$SNMD" api_port)"
+        SPW="$(addon_field "$SNMD" root_password)"
+        run_grep "summary announces SNMD mode" "Multi-drive mode (SNMD): $SNMD_DRIVES drives" echo "$SNMD_OUT"
+        run_grep "summary maps drive 1 to /data1" "Drive 1:       $D1 -> /data1" echo "$SNMD_OUT"
+        run_grep "summary maps drive 4 to /data4" "Drive 4:       $D4 -> /data4" echo "$SNMD_OUT"
+        run_test "SNMD container running" mn_up "$SNMD"
+        run_test "SNMD health endpoint live" wait_live "$SAPI"
+
+        CNAME="pgcli-minio-$NAMESPACE-$SNMD"
+        MOUNTS="$(podman inspect "$CNAME" --format '{{range .Mounts}}{{.Source}}={{.Destination}} {{end}}' 2>/dev/null || true)"
+        CMD="$(podman inspect "$CNAME" --format '{{join .Config.Cmd " "}}' 2>/dev/null || true)"
+        TESTS=$((TESTS + 1))
+        if echo "$MOUNTS" | grep -qF "$D1=/data1" && echo "$MOUNTS" | grep -qF "$D2=/data2" \
+           && echo "$MOUNTS" | grep -qF "$D3=/data3" && echo "$MOUNTS" | grep -qF "$D4=/data4" \
+           && ! echo "$MOUNTS" | grep -qE '=\/data[[:space:]]|=:/data$'; then
+            pass "4 drive mounts at /data1../data4, no plain /data mount"
+        else
+            fail "drive mounts wrong: $MOUNTS"
+        fi
+        run_grep "server argv is 'server /data1..4'" "server /data1 /data2 /data3 /data4" echo "$CMD"
+        # MINIO_SERVER_URL still set — SNMD is a single node (not distributed).
+        TESTS=$((TESTS + 1))
+        podman inspect "$CNAME" --format '{{json .Config.Env}}' | grep -qF MINIO_SERVER_URL \
+            && pass "MINIO_SERVER_URL present (single node)" \
+            || fail "MINIO_SERVER_URL missing on an SNMD container"
+        # MinIO formatted every drive — EC layout really spans all four.
+        TESTS=$((TESTS + 1))
+        all_fmt=true
+        for d in "$D1" "$D2" "$D3" "$D4"; do
+            [ -d "$d/.minio.sys" ] || { all_fmt=false; echo "      | no .minio.sys under $d"; }
+        done
+        $all_fmt && pass "every drive holds its .minio.sys format dir" \
+                 || fail "a drive was not formatted by MinIO"
+
+        run_test "mc alias set against the SNMD store" \
+            pgmc alias set "$SNMD_ALIAS" "http://127.0.0.1:$SAPI" admin "$SPW"
+        run_grep "mc mb through SNMD store" "$BUCKET" pgmc mb "$SNMD_ALIAS/$BUCKET"
+        echo "snmd payload $$" > "$TEST_DIR/snmd.txt"
+        run_grep "mc cp upload through SNMD store" "snmd.txt" \
+            pgmc cp "$TEST_DIR/snmd.txt" "$SNMD_ALIAS/$BUCKET/snmd.txt"
+        run_test "mc cp download byte-identical" \
+            bash -c "'$BINARY' -c '$CONFIG_FILE' mc cp '$SNMD_ALIAS/$BUCKET/snmd.txt' '$TEST_DIR/snmd.down' 2>/dev/null && cmp -s '$TEST_DIR/snmd.txt' '$TEST_DIR/snmd.down'"
+
+        run_grep "addon list shows SNMD drives" "Drives:      $SNMD_DRIVES (SNMD)" pg addon list
+        run_grep "addon list maps the /data1 slot" "/data1 <- $D1" pg addon list
+
+        # --clean-data must REFUSE the live mount points — the data below them
+        # is on the loop fs; walking through the mount would be nonsense.
+        TESTS=$((TESTS + 1))
+        RM_OUT="$(pg addon remove minio --name "$SNMD" --clean-data 2>&1)" || true
+        echo "$RM_OUT" | sed 's/^/      /'
+        if echo "$RM_OUT" | grep -qF "Refusing to delete $D1" && [ -d "$D1/.minio.sys" ]; then
+            pass "--clean-data refuses still-mounted drives, data intact"
+        else
+            fail "--clean-data did not refuse the live mounts (or deleted through them)"
+        fi
+        run_test "SNMD container gone after refused remove" mn_gone "$SNMD"
+
+        # Reinstall over the SAME formatted drives: the container removal above
+        # deleted no data (refused), so MinIO rejoins the existing set and the
+        # bucket is still there — per-drive persistence across a full cycle.
+        TESTS=$((TESTS + 1))
+        if RESNMD="$(pg addon install minio --name "$SNMD" --drive "$D1" --drive "$D2" --drive "$D3" --drive "$D4" 2>&1)" \
+           && echo "$RESNMD" | grep -qF "Starting MinIO container"; then
+            pass "reinstall on the same 4 drives recreates the container"
+        else
+            fail "reinstall on same drives"; echo "$RESNMD" | sed 's/^/      | /'
+        fi
+        SAPI="$(addon_field "$SNMD" api_port)"
+        # The refused remove deleted the config entry, so this install generated
+        # a fresh password — re-read it before touching mc with it.
+        SPW="$(addon_field "$SNMD" root_password)"
+        run_test "healthy after reinstall" wait_live "$SAPI"
+        pgmc alias set "$SNMD_ALIAS" "http://127.0.0.1:$SAPI" admin "$SPW" >/dev/null 2>&1 || true
+        run_grep "bucket survived remove + recreate" "$BUCKET" pgmc ls "$SNMD_ALIAS"
+
+        run_test "stop SNMD (before data assertions)" pg addon stop minio --name "$SNMD"
+        run_test "SNMD stopped" mn_down "$SNMD"
+        run_test "start SNMD" pg addon start minio --name "$SNMD"
+        run_test "healthy after start" wait_live "$SAPI"
+        run_grep "bucket survived the stop/start cycle" "$BUCKET" pgmc ls "$SNMD_ALIAS"
+
+        # Plain remove: container gone, config entry gone, every drive dir
+        # KEPT with its format — object storage outlives the container here too.
+        run_test "remove SNMD keeps the drive dirs" pg addon remove minio --name "$SNMD"
+        run_test "SNMD container gone" mn_gone "$SNMD"
+        TESTS=$((TESTS + 1))
+        [ -d "$D1/.minio.sys" ] && [ -d "$D4/.minio.sys" ] \
+            && pass "drive formats intact after plain remove" \
+            || fail "a drive format vanished with the container"
+        pgmc alias remove "$SNMD_ALIAS" >/dev/null 2>&1 || true
+
+        # --clean-data over the kept-but-unmounted set: drop the mounts first,
+        # reinstall (empty-looking fresh start on formatted dirs is MinIO's own
+        # heal/rejoin territory — here we simply prove the delete loop), then
+        # clean-remove must delete every drive dir.
+        snmd_umount_all
+        TESTS=$((TESTS + 1))
+        grep -q snmd-mnt /proc/mounts && fail "loop mounts still present" || pass "loop mounts released"
+        TESTS=$((TESTS + 1))
+        if pg addon install minio --name "$SNMD" \
+               --drive "$D1" --drive "$D2" --drive "$D3" --drive "$D4" >/dev/null 2>&1; then
+            pass "install over the unmounted (reused) drive dirs"
+        else
+            fail "install over the unmounted drive dirs"
+        fi
+        run_test "remove --clean-data deletes the drive dirs" \
+            pg addon remove minio --name "$SNMD" --clean-data
+        TESTS=$((TESTS + 1))
+        [ ! -d "$D1" ] && [ ! -d "$D4" ] \
+            && pass "all drive dirs deleted by clean-data" \
+            || fail "drive dirs survived clean-data once unmounted"
+    fi
+
     echo ""
     echo "=========================================="
     if [ "$FAILED" -eq 0 ]; then green "  ALL $TESTS TESTS PASSED"

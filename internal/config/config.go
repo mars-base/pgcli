@@ -423,6 +423,16 @@ type MinioConfig struct {
 	// single-node mode, unchanged behaviour.
 	Endpoints []string `yaml:"endpoints,omitempty"`
 
+	// Drives switches this addon to single-node multi-drive mode (SNMD) when
+	// non-empty and Endpoints is empty: each entry is a host directory on its
+	// own device (MinIO rejects a drive sharing the root device), bind-mounted
+	// in order at /data1../dataN and passed as
+	// `minio server /data1 /data2 ...`. MinIO erasure-codes across the drives
+	// of this one node. Mutually exclusive with Endpoints (MNSD) and with
+	// data_dir (the single-drive export) — mode resolution is
+	// endpoints > drives > single data_dir. Empty => unchanged.
+	Drives []string `yaml:"drives,omitempty"`
+
 	// Autostart brings this container up on host boot via the boot service
 	// (pg autostart enable --minio). Start-only: it starts the existing
 	// container, so install first.
@@ -470,6 +480,12 @@ type SiloConfig struct {
 	// single-node `/data`. Same identical-list-and-credentials requirement as
 	// minio. Empty => single-node mode.
 	Endpoints []string `yaml:"endpoints,omitempty"`
+
+	// Drives switches this addon to single-node multi-drive mode (SNMD) when
+	// non-empty and Endpoints is empty: host dirs, each on its own device,
+	// bind-mounted at /data1../dataN and passed as `silo server /data1 ...`.
+	// Mutually exclusive with Endpoints and with data_dir. Empty => unchanged.
+	Drives []string `yaml:"drives,omitempty"`
 
 	// Autostart brings this container up on host boot via the boot service
 	// (pg autostart enable --silo). Start-only: it starts the existing
