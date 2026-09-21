@@ -296,6 +296,7 @@ func init() {
 	addonInstallCmd.Flags().String("root-user", "", "MinIO/silo root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config)")
 	addonInstallCmd.Flags().String("root-password", "", "MinIO/silo root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand)")
 	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO/silo distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (path is the in-container export dir; keep it under /data where --data-dir is mounted; repeat for each node; the list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
+	addonInstallCmd.Flags().StringSlice("drive", nil, "MinIO/silo single-node multi-drive (SNMD) host dir(s), each on its own disk — e.g. --drive /mnt/minio/disk1 --drive /mnt/minio/disk2 ... (repeat for each drive; the server erasure-codes across them: 4 drives tolerate 2 failures. Mutually exclusive with --endpoint and --data-dir; MinIO/silo reject a drive sharing the root device)")
 	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo>/<name>/; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Changing this needs --force to recreate")
 	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
 	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo: private key for --tls-cert (PEM; mounted read-only as private.key). Must pair with the cert; both are required to enable BYO TLS")
@@ -1399,6 +1400,7 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	rootUser, _ := cmd.Flags().GetString("root-user")
 	rootPassword, _ := cmd.Flags().GetString("root-password")
 	endpoints, _ := cmd.Flags().GetStringSlice("endpoint")
+	drives, _ := cmd.Flags().GetStringSlice("drive")
 	force, _ := cmd.Flags().GetBool("force")
 	tls, _ := cmd.Flags().GetBool("tls")
 	tlsCert, _ := cmd.Flags().GetString("tls-cert")
@@ -1450,6 +1452,9 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	if len(endpoints) > 0 {
 		existing.Endpoints = endpoints
 	}
+	if len(drives) > 0 {
+		existing.Drives = drives
+	}
 	if tls {
 		existing.TLS = true
 	}
@@ -1463,6 +1468,16 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	}
 	if (existing.CertFile == "") != (existing.KeyFile == "") {
 		return fmt.Errorf("--tls-cert and --tls-key must be given together (a bring-your-own TLS pair needs both the cert and its key)")
+	}
+	// The three data-location axes name one mode each — endpoints (MNSD),
+	// drives (SNMD), data-dir (SNSD) — and mixing them has no sensible merge
+	// semantics, so refuse rather than silently prefer one. Checked post-merge
+	// so a stale drives/endpoints key in pg.yaml conflicts just like flags.
+	if len(existing.Drives) > 0 && len(existing.Endpoints) > 0 {
+		return fmt.Errorf("--drive (single-node multi-drive) and --endpoint (distributed cluster) cannot be combined — pick one deployment mode")
+	}
+	if len(existing.Drives) > 0 && existing.DataDir != "" {
+		return fmt.Errorf("--drive and --data-dir cannot be combined — multi-drive mode takes its data locations from --drive only")
 	}
 	if existing.Name == "" {
 		existing.Name = name
@@ -1550,12 +1565,15 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 		if err := mm.EnsureImage(mc.ImageTag); err != nil {
 			return err
 		}
-		// Distributed mode: MinIO refuses a drive on the root filesystem
-		// ("drive is part of root drive, will not be used"), so warn before we
-		// try to start — the container would just fail to form quorum.
-		if len(mc.Endpoints) > 0 {
-			if shared, err := mm.DataDirSharesRootDevice(&mc); err == nil && shared {
-				fmt.Printf("-> WARNING: distributed mode with data dir %q on the same device as the host root filesystem; MinIO will refuse this drive. Point --data-dir at a separately-mounted disk.\n", mm.DataDir(&mc))
+		// Distributed (MNSD) and single-node multi-drive (SNMD) both erase-code
+		// across drives, and MinIO refuses any drive on the root filesystem
+		// ("drive is part of root drive, will not be used"), so warn per-drive
+		// before we try to start — the container would just fail to form
+		// quorum. SNSD (single data_dir, no endpoints, no drives) has no such
+		// requirement, so it stays silent.
+		if len(mc.Endpoints) > 0 || len(mc.Drives) > 0 {
+			for _, d := range mm.DrivesSharingRootDevice(&mc) {
+				fmt.Printf("-> WARNING: drive %q is on the same device as the host root filesystem; MinIO will refuse it. Point --drive/--data-dir at separately-mounted disks.\n", d)
 			}
 		}
 		fmt.Println("-> Starting MinIO container...")
@@ -1578,7 +1596,13 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	}
 	fmt.Printf("  Container:    %s\n", mc.ContainerName)
 	fmt.Printf("  Image:        %s\n", mc.ImageTag)
-	fmt.Printf("  Data:         %s\n", mm.DataDir(&mc))
+	if len(mc.Drives) > 0 && len(mc.Endpoints) == 0 {
+		for i, d := range mm.Drives(&mc) {
+			fmt.Printf("  Drive %d:       %s -> /data%d\n", i+1, d, i+1)
+		}
+	} else {
+		fmt.Printf("  Data:         %s\n", mm.DataDir(&mc))
+	}
 	scheme := "http"
 	if mc.TLS {
 		scheme = "https"
@@ -1603,6 +1627,14 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 		}
 		fmt.Println("  NOTE: every node's pg.yaml must carry the identical endpoint list AND identical root credentials, or the cluster will not form.")
 	}
+	if len(mc.Drives) > 0 && len(mc.Endpoints) == 0 {
+		fmt.Println()
+		fmt.Printf("  Multi-drive mode (SNMD): %d drives\n", len(mc.Drives))
+		for _, d := range mc.Drives {
+			fmt.Printf("    - %s\n", d)
+		}
+		fmt.Printf("  NOTE: MinIO erasure-codes across these drives — by default roughly half are parity (a 4-drive set tolerates 2 failures), so usable capacity is about half the raw total. Each drive must sit on its own device; a drive that goes down is healed by MinIO itself when it returns.\n")
+	}
 	return nil
 }
 
@@ -1619,6 +1651,7 @@ func runAddonInstallSilo(cmd *cobra.Command) error {
 	rootUser, _ := cmd.Flags().GetString("root-user")
 	rootPassword, _ := cmd.Flags().GetString("root-password")
 	endpoints, _ := cmd.Flags().GetStringSlice("endpoint")
+	drives, _ := cmd.Flags().GetStringSlice("drive")
 	force, _ := cmd.Flags().GetBool("force")
 	tls, _ := cmd.Flags().GetBool("tls")
 	tlsCert, _ := cmd.Flags().GetString("tls-cert")
@@ -1670,6 +1703,9 @@ func runAddonInstallSilo(cmd *cobra.Command) error {
 	if len(endpoints) > 0 {
 		existing.Endpoints = endpoints
 	}
+	if len(drives) > 0 {
+		existing.Drives = drives
+	}
 	if tls {
 		existing.TLS = true
 	}
@@ -1683,6 +1719,16 @@ func runAddonInstallSilo(cmd *cobra.Command) error {
 	}
 	if (existing.CertFile == "") != (existing.KeyFile == "") {
 		return fmt.Errorf("--tls-cert and --tls-key must be given together (a bring-your-own TLS pair needs both the cert and its key)")
+	}
+	// The three data-location axes name one mode each — endpoints (MNSD),
+	// drives (SNMD), data-dir (SNSD) — and mixing them has no sensible merge
+	// semantics, so refuse rather than silently prefer one. Checked post-merge
+	// so a stale drives/endpoints key in pg.yaml conflicts just like flags.
+	if len(existing.Drives) > 0 && len(existing.Endpoints) > 0 {
+		return fmt.Errorf("--drive (single-node multi-drive) and --endpoint (distributed cluster) cannot be combined — pick one deployment mode")
+	}
+	if len(existing.Drives) > 0 && existing.DataDir != "" {
+		return fmt.Errorf("--drive and --data-dir cannot be combined — multi-drive mode takes its data locations from --drive only")
 	}
 	if existing.Name == "" {
 		existing.Name = name
@@ -1771,12 +1817,14 @@ func runAddonInstallSilo(cmd *cobra.Command) error {
 		if err := sm.EnsureImage(sc.ImageTag); err != nil {
 			return err
 		}
-		// Distributed mode: silo refuses a drive on the root filesystem
-		// ("drive is part of root drive, will not be used"), so warn before we
-		// try to start — the container would just fail to form quorum.
-		if len(sc.Endpoints) > 0 {
-			if shared, err := sm.DataDirSharesRootDevice(&sc); err == nil && shared {
-				fmt.Printf("-> WARNING: distributed mode with data dir %q on the same device as the host root filesystem; silo will refuse this drive. Point --data-dir at a separately-mounted disk.\n", sm.DataDir(&sc))
+		// Distributed (MNSD) and single-node multi-drive (SNMD) both erase-code
+		// across drives, and silo refuses any drive on the root filesystem
+		// ("drive is part of root drive, will not be used"), so warn per-drive
+		// before we try to start — the container would just fail to form
+		// quorum. SNSD has no such requirement, so it stays silent.
+		if len(sc.Endpoints) > 0 || len(sc.Drives) > 0 {
+			for _, d := range sm.DrivesSharingRootDevice(&sc) {
+				fmt.Printf("-> WARNING: drive %q is on the same device as the host root filesystem; silo will refuse it. Point --drive/--data-dir at separately-mounted disks.\n", d)
 			}
 		}
 		fmt.Println("-> Starting silo container...")
@@ -1799,7 +1847,13 @@ func runAddonInstallSilo(cmd *cobra.Command) error {
 	}
 	fmt.Printf("  Container:    %s\n", sc.ContainerName)
 	fmt.Printf("  Image:        %s\n", sc.ImageTag)
-	fmt.Printf("  Data:         %s\n", sm.DataDir(&sc))
+	if len(sc.Drives) > 0 && len(sc.Endpoints) == 0 {
+		for i, d := range sm.Drives(&sc) {
+			fmt.Printf("  Drive %d:       %s -> /data%d\n", i+1, d, i+1)
+		}
+	} else {
+		fmt.Printf("  Data:         %s\n", sm.DataDir(&sc))
+	}
 	scheme := "http"
 	if sc.TLS {
 		scheme = "https"
@@ -1823,6 +1877,14 @@ func runAddonInstallSilo(cmd *cobra.Command) error {
 			fmt.Printf("    - %s\n", ep)
 		}
 		fmt.Println("  NOTE: every node's pg.yaml must carry the identical endpoint list AND identical root credentials, or the cluster will not form.")
+	}
+	if len(sc.Drives) > 0 && len(sc.Endpoints) == 0 {
+		fmt.Println()
+		fmt.Printf("  Multi-drive mode (SNMD): %d drives\n", len(sc.Drives))
+		for _, d := range sc.Drives {
+			fmt.Printf("    - %s\n", d)
+		}
+		fmt.Printf("  NOTE: silo erasure-codes across these drives — by default roughly half are parity (a 4-drive set tolerates 2 failures), so usable capacity is about half the raw total. Each drive must sit on its own device; a drive that goes down is healed by silo itself when it returns.\n")
 	}
 	return nil
 }
@@ -2033,7 +2095,20 @@ func runAddonList() error {
 				fmt.Printf("                   as pgBackRest repo CA: pg backup setup --s3-endpoint <host>:%d --s3-ca-file %s\n", mc.APIPort, caPath)
 				fmt.Printf("                   from another host:     pg backup fetch-ca <this-host>:%d\n", mc.APIPort)
 			}
-			fmt.Printf("    Data:        %s\n", mm.DataDir(&mc))
+			if len(mc.Drives) > 0 {
+				fmt.Printf("    Drives:      %d (SNMD)\n", len(mc.Drives))
+				for i, d := range mc.Drives {
+					fmt.Printf("      - /data%d <- %s\n", i+1, d)
+				}
+			} else {
+				fmt.Printf("    Data:        %s\n", mm.DataDir(&mc))
+			}
+			if len(mc.Endpoints) > 0 {
+				fmt.Printf("    Endpoints:   %d (distributed)\n", len(mc.Endpoints))
+				for _, ep := range mc.Endpoints {
+					fmt.Printf("      - %s\n", ep)
+				}
+			}
 			fmt.Printf("    Root user:   %s\n", mc.RootUser)
 			fmt.Printf("    Image:       %s\n", mc.ImageTag)
 			fmt.Printf("    Container:   %s\n", mc.ContainerName)
@@ -2086,7 +2161,20 @@ func runAddonList() error {
 				fmt.Printf("                   as pgBackRest repo CA: pg backup setup --s3-endpoint <host>:%d --s3-ca-file %s\n", sc.APIPort, caPath)
 				fmt.Printf("                   from another host:     pg backup fetch-ca <this-host>:%d\n", sc.APIPort)
 			}
-			fmt.Printf("    Data:        %s\n", sm.DataDir(&sc))
+			if len(sc.Drives) > 0 {
+				fmt.Printf("    Drives:      %d (SNMD)\n", len(sc.Drives))
+				for i, d := range sc.Drives {
+					fmt.Printf("      - /data%d <- %s\n", i+1, d)
+				}
+			} else {
+				fmt.Printf("    Data:        %s\n", sm.DataDir(&sc))
+			}
+			if len(sc.Endpoints) > 0 {
+				fmt.Printf("    Endpoints:   %d (distributed)\n", len(sc.Endpoints))
+				for _, ep := range sc.Endpoints {
+					fmt.Printf("      - %s\n", ep)
+				}
+			}
 			fmt.Printf("    Root user:   %s\n", sc.RootUser)
 			fmt.Printf("    Image:       %s\n", sc.ImageTag)
 			fmt.Printf("    Container:   %s\n", sc.ContainerName)

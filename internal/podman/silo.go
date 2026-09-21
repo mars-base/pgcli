@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/mars-base/pgcli/internal/config"
@@ -68,6 +67,24 @@ func (m *SiloManager) resolveDataDir(sc *config.SiloConfig) string {
 	return filepath.Join(m.dataDir, "addon", "silo", sc.Name, "data")
 }
 
+// resolveDriveDirs returns the host directories backing this instance's silo
+// drives. In single-node multi-drive mode (sc.Drives non-empty, honored only
+// when Endpoints is empty — MNSD owns that axis) it returns the configured
+// drives verbatim, in order; drive N is mounted at /dataN and silo
+// erasure-codes across them. Otherwise it collapses to the single
+// resolveDataDir, so every consumer treats SNSD/MNSD as a one-drive case.
+func (m *SiloManager) resolveDriveDirs(sc *config.SiloConfig) []string {
+	if len(sc.Drives) > 0 && len(sc.Endpoints) == 0 {
+		return sc.Drives
+	}
+	return []string{m.resolveDataDir(sc)}
+}
+
+// Drives returns the resolved host drive dirs (for display).
+func (m *SiloManager) Drives(sc *config.SiloConfig) []string {
+	return m.resolveDriveDirs(sc)
+}
+
 // DataDir returns the resolved host data directory (for display).
 func (m *SiloManager) DataDir(sc *config.SiloConfig) string {
 	return m.resolveDataDir(sc)
@@ -115,20 +132,22 @@ func (m *SiloManager) EnsureTLS(sc *config.SiloConfig) (string, error) {
 // mode has no such requirement, so this only matters when Endpoints is
 // non-empty. It is advisory, never an error.
 func (m *SiloManager) DataDirSharesRootDevice(sc *config.SiloConfig) (bool, error) {
-	root, err := os.Stat("/")
-	if err != nil {
-		return false, fmt.Errorf("stat root fs: %w", err)
+	return sharesRootDevice(m.resolveDataDir(sc))
+}
+
+// DrivesSharingRootDevice returns the subset of this instance's drive dirs that
+// sit on the host root device — the drives silo/MinIO refuse at startup in
+// either multi-drive mode (MNSD's single export path or SNMD's per-drive list).
+// SNSD has no such requirement, so callers gate the warning on
+// len(Endpoints)>0 || len(Drives)>0. Advisory, never fatal.
+func (m *SiloManager) DrivesSharingRootDevice(sc *config.SiloConfig) []string {
+	var bad []string
+	for _, d := range m.resolveDriveDirs(sc) {
+		if shared, err := sharesRootDevice(d); err == nil && shared {
+			bad = append(bad, d)
+		}
 	}
-	data, err := statNearestExisting(m.resolveDataDir(sc))
-	if err != nil {
-		return false, fmt.Errorf("stat data dir: %w", err)
-	}
-	rd, ok1 := root.Sys().(*syscall.Stat_t)
-	dd, ok2 := data.Sys().(*syscall.Stat_t)
-	if !ok1 || !ok2 {
-		return false, nil // can't compare device ids on this platform; assume not-shared
-	}
-	return rd.Dev == dd.Dev, nil
+	return bad
 }
 
 // EnsureImage pulls the silo image if it is not present locally (pull-only: the
@@ -252,9 +271,11 @@ func (m *SiloManager) StartContainer(sc *config.SiloConfig) error {
 // docker-entrypoint.sh so pgcli drives the binary directly, exactly as it does
 // for MinIO.
 func (m *SiloManager) createContainer(sc *config.SiloConfig) error {
-	dataDir := m.resolveDataDir(sc)
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		return fmt.Errorf("creating silo data dir: %w", err)
+	driveDirs := m.resolveDriveDirs(sc)
+	for _, d := range driveDirs {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			return fmt.Errorf("creating silo data dir %s: %w", d, err)
+		}
 	}
 
 	bind := proxyBindHost(m.bridge, sc.Listen)
@@ -307,13 +328,19 @@ func (m *SiloManager) createContainer(sc *config.SiloConfig) error {
 		"--name", sc.ContainerName,
 	}
 	args = append(args, netFlags(m.bridge, m.cfg.Podman.Network, sc.APIPort, sc.ConsolePort)...)
+	// Data layout + server argv follow the one mode rule (endpoints=MNSD,
+	// drives=SNMD, else SNSD), shared verbatim with minio via
+	// storeMountsAndServerArgv.
+	driveMounts, serverArgs := storeMountsAndServerArgv(driveDirs, sc.Endpoints, len(sc.Drives) > 0)
 	args = append(args,
 		"--http-proxy=false",
 		"--restart", "unless-stopped",
 		"--ulimit", "nofile="+nofile+":"+nofile,
 		"--stop-timeout", "60",
 		"--entrypoint", "silo",
-		"-v", fmt.Sprintf("%s:/data:z", hostMountPath(dataDir)),
+	)
+	args = append(args, driveMounts...)
+	args = append(args,
 		"-e", "MINIO_ROOT_USER="+sc.RootUser,
 		"-e", "MINIO_ROOT_PASSWORD="+sc.RootPassword,
 	)
@@ -329,16 +356,7 @@ func (m *SiloManager) createContainer(sc *config.SiloConfig) error {
 		args = append(args, "-e", "MINIO_SERVER_URL="+m.serverURL(sc))
 	}
 	args = append(args, sc.ImageTag)
-	// Distributed mode: Endpoints is a cluster-wide list every node carries
-	// verbatim (e.g. http://10.0.0.1:9000/data). The container bind-mounts
-	// sc.DataDir at /data unconditionally, so "/data" is the correct export
-	// path for every endpoint. Single-node mode serves just /data.
-	if len(sc.Endpoints) > 0 {
-		args = append(args, "server")
-		args = append(args, sc.Endpoints...)
-	} else {
-		args = append(args, "server", "/data")
-	}
+	args = append(args, serverArgs...)
 	args = append(args,
 		"--address", fmt.Sprintf("%s:%d", bind, sc.APIPort),
 		"--console-address", fmt.Sprintf("%s:%d", bind, sc.ConsolePort),
@@ -369,8 +387,10 @@ func (m *SiloManager) serverURL(sc *config.SiloConfig) string {
 	return fmt.Sprintf("%s://%s:%d", scheme, host, sc.APIPort)
 }
 
-// Remove stops and removes the silo container. The data dir is kept by default
-// (it is the backup repository); cleanData also deletes it.
+// Remove stops and removes the silo container. The data dirs are kept by
+// default (they are the backup repository); cleanData also deletes them — each
+// SNMD drive dir in turn, refusing any that is still mounted (removing through
+// a live mount point would destroy data on the underlying device).
 func (m *SiloManager) Remove(sc *config.SiloConfig, cleanData bool) error {
 	containerName := sc.ContainerName
 
@@ -380,20 +400,30 @@ func (m *SiloManager) Remove(sc *config.SiloConfig, cleanData bool) error {
 	}
 	fmt.Println("  [OK] silo container removed")
 
-	dataDir := m.resolveDataDir(sc)
+	driveDirs := m.resolveDriveDirs(sc)
 	if !cleanData {
-		fmt.Printf("  [OK] Data directory kept: %s\n", dataDir)
+		for _, d := range driveDirs {
+			fmt.Printf("  [OK] Data directory kept: %s\n", d)
+		}
 		return nil
 	}
-	if err := os.RemoveAll(dataDir); err != nil && !os.IsNotExist(err) {
-		fmt.Printf("  [!] Warning: removing data dir %s: %v\n", dataDir, err)
-	} else {
-		fmt.Printf("  [OK] Data directory removed: %s\n", dataDir)
+	singleDefault := sc.DataDir == "" && len(sc.Drives) == 0
+	for _, d := range driveDirs {
+		if isMountpoint(d) {
+			fmt.Printf("  [!] Refusing to delete %s: it is still a mount point — unmount it first if the data below is really disposable\n", d)
+			continue
+		}
+		if err := os.RemoveAll(d); err != nil && !os.IsNotExist(err) {
+			fmt.Printf("  [!] Warning: removing data dir %s: %v\n", d, err)
+		} else {
+			fmt.Printf("  [OK] Data directory removed: %s\n", d)
+		}
 	}
-	if sc.DataDir == "" {
-		// Default layout: also prune the <name> dir when it became empty. With
-		// an override the parent belongs to the user — never touch it.
-		os.Remove(filepath.Dir(dataDir)) // ignore error — non-empty dir won't be removed
+	if singleDefault {
+		// Default single-dir layout: also prune the <name> dir when it became
+		// empty. With an override (or SNMD drives) the parent belongs to the
+		// user — never touch it.
+		os.Remove(filepath.Dir(driveDirs[0])) // ignore error — non-empty dir won't be removed
 	}
 
 	return nil
