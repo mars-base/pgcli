@@ -300,26 +300,29 @@ mechanism — verified directly: `openssl verify -CAfile <pg cert's cert>
 
 ## Deployment modes
 
-MinIO/silo classifies its layouts; the addon supports three:
+MinIO/silo classifies its layouts; the addon supports all four:
 
 | Mode | Shape | Use it for |
 |------|-------|------------|
 | **SNSD** (single-node, single-drive) | one node, one data directory — the default when no `--endpoint` or `--drive` is given | dev, test, demos |
 | **SNMD** (single-node, multi-drive) | one node, several drives — `--drive` per drive, see [SNMD](#single-node-multi-drive-snmd) below | surviving a disk loss on a single host without a filesystem layer |
 | **MNSD** (multi-node, single-drive) | several nodes, one data disk per node — the distributed mode below | compact high-availability deployments |
+| **MNMD** (multi-node, multi-drive) | several nodes, several drives each — `--drive` for this node's drives + the full `--endpoint` matrix | surviving a disk loss *and* a node loss, without a filesystem layer |
 
 SNSD is what `pg addon install minio` gives you out of the box. To get
 MNSD, pass the cluster's endpoint list (at least four nodes) — see
 [Distributed / Cluster Mode](#distributed--cluster-mode) below.
 
-Multi-node with several drives per node (MNMD) is not wired in:
-`--endpoint` takes one routable host per node, so a distributed cluster still
-means one drive per node. Disk redundancy under SNSD/MNSD also remains
-available the other way — a ZFS pool under `--data-dir` — which keeps the
-layout changeable underneath and can be more space-efficient. [S3 Storage
-High Availability](../../ha-cluster/ha-s3-storage/) compares native SNMD with
-ZFS and covers the 4-hosts-each-with-several-disks hybrid that survives both
-a disk and a node.
+MNMD combines both flags: give this node's drives with `--drive` (as under
+SNMD) and the *whole cluster's* host×drive endpoint matrix with `--endpoint`
+(one URL per drive on every node) — see
+[Multi-Node Multi-Drive (MNMD)](#multi-node-multi-drive-mnmd) below. Disk
+redundancy under SNSD/MNSD is also available the other way — a ZFS pool
+under `--data-dir` — which keeps the layout changeable underneath and can be
+more space-efficient. [S3 Storage High
+Availability](../../ha-cluster/ha-s3-storage/) compares native MNMD with the
+ZFS approach for the 4-hosts-each-with-several-disks hybrid that survives
+both a disk and a node.
 
 ## Single-Node Multi-Drive (SNMD)
 
@@ -335,10 +338,12 @@ pg addon install minio --name store \
 Each `--drive` is a host directory on its own device; drive *N* is
 bind-mounted at container path `/dataN` and the server starts as
 `minio server /data1 /data2 ... /dataN`. `--drive` is mutually exclusive with
-`--endpoint` and with `--data-dir` — multi-drive mode takes its data
-locations from `--drive` only. Like every other MinIO drive, one that shares
-the host's root device is rejected by MinIO at startup; pgcli lists the
-offending drives and warns at install time.
+`--data-dir` — multi-drive mode takes its data locations from `--drive` only.
+Combining `--drive` with `--endpoint` is MNMD, the multi-node version of this
+mode — see [Multi-Node Multi-Drive (MNMD)](#multi-node-multi-drive-mnmd)
+below. Like every other MinIO drive, one that shares the host's root device is
+rejected by MinIO at startup; pgcli lists the offending drives and warns at
+install time.
 
 **What EC buys you** (measured on a live 4-drive set): MinIO splits each
 object into data + parity shards, and a 4-drive set defaults to 2 parity
@@ -373,9 +378,11 @@ Each endpoint is `http://<host>:<port><path>`. The `host:port` is how the nodes
 reach each other to form the ring. The trailing `<path>` is **not** an HTTP
 route — clients never see it — it is the **export path**, the directory *inside
 the container* where that node keeps its own slice of the erasure-coded data.
-pgcli always bind-mounts the `--data-dir` at `/data`, so the path must start at
-`/data` — the simplest choice is literally `/data`. Keep the same path string
-across all four endpoints.
+Under MNSD (no `--drive`) pgcli bind-mounts the `--data-dir` at `/data`, so the
+path must start at `/data` — the simplest choice is literally `/data`. Keep the
+same path string across all four endpoints. (Under MNMD a node also passes
+`--drive`, and each endpoint instead names one of that node's `/data1../dataN`
+drive slots — see [MNMD](#multi-node-multi-drive-mnmd) below.)
 
 Note the endpoint path is a *container* path, independent of the host layout:
 if `/data` is a shared disk and you want to keep other things on it, point
@@ -442,11 +449,74 @@ Three things are strict in cluster mode, each learned the hard way:
 
 **Quorum (EC):** writes need `⌈N/2⌉+1` nodes up, reads need `⌈N/2⌉`. A 4-node
 set therefore keeps serving reads with 2 nodes down but rejects writes; restart
-the downed nodes and the cluster self-heals.
+the downed nodes and the cluster self-heals. Under MNMD the members being
+counted are *drives*, not nodes — see [MNMD](#multi-node-multi-drive-mnmd) for
+the measured drive-level boundary on a live 4×4 set.
 
 > **Cross-host only.** This is a genuinely distributed deployment — you run
 > pgcli on each host yourself. pgcli does not SSH between nodes or register
 > members; keeping the N `pg.yaml` files consistent is the operator's job.
+
+## Multi-Node Multi-Drive (MNMD)
+
+MNMD is MNSD with several drives per node instead of one: MinIO erasure-codes
+across the whole **host×drive matrix**, so the set survives losing individual
+disks *and* whole nodes without any filesystem layer. Give this node's drives
+with `--drive` (exactly as under [SNMD](#single-node-multi-drive-snmd)) and the
+**entire cluster's** endpoint list with `--endpoint` — one URL per drive on
+every node, not just this one.
+
+The one difference from MNSD is the export path. Each node bind-mounts its
+drives at `/data1../dataN`, so each endpoint must address one of those slots:
+`http://<host>:<port>/data<k>`. `pgcli` does not parse the URLs — it hands the
+matrix to `minio server` verbatim, the same way MinIO documents it — so every
+node carries the identical full list. The list must be a multiple of the
+per-node drive count (MinIO requires every node contribute the same number of
+drives) and must name at least one remote node; a matrix that folds onto a
+single host is rejected before the container starts, as is a `--tls` node whose
+endpoints are plaintext `http://`.
+
+```bash
+# on node 1 (10.0.0.11), four data disks mounted and passed with --drive:
+pg addon install minio --name store --tls \
+  --listen 0.0.0.0 \
+  --drive /mnt/minio/disk1 --drive /mnt/minio/disk2 \
+  --drive /mnt/minio/disk3 --drive /mnt/minio/disk4 \
+  --root-password '<shared-secret>' \
+  --endpoint https://10.0.0.11:9000/data1 --endpoint https://10.0.0.11:9000/data2 \
+  --endpoint https://10.0.0.11:9000/data3 --endpoint https://10.0.0.11:9000/data4 \
+  --endpoint https://10.0.0.12:9000/data1 --endpoint https://10.0.0.12:9000/data2 \
+  --endpoint https://10.0.0.12:9000/data3 --endpoint https://10.0.0.12:9000/data4 \
+  --endpoint https://10.0.0.20:9000/data1 --endpoint https://10.0.0.20:9000/data2 \
+  --endpoint https://10.0.0.20:9000/data3 --endpoint https://10.0.0.20:9000/data4 \
+  --endpoint https://10.0.0.21:9000/data1 --endpoint https://10.0.0.21:9000/data2 \
+  --endpoint https://10.0.0.21:9000/data3 --endpoint https://10.0.0.21:9000/data4
+
+# nodes 2-4: same command, own --drive paths, and the SAME 16-endpoint matrix
+# AND the SAME --root-password value.
+```
+
+The `--listen 0.0.0.0` is deliberate: each node must answer on the address the
+other 15 endpoints name. `--root-password` must be identical everywhere, exactly
+as under MNSD.
+
+On a live 4-node × 4-drive set (16 × 2 GiB) the measured shape, via
+`mc admin info`:
+
+- **16 drives online, EC:4** in a single erasure set of stripe size 16 — the
+  set reports 4 parity shards, so losing 4 drives of 16 stays healthy.
+- Losing **one whole node** (4 drives → 12/16 online) keeps reads *and* writes
+  working; a 64 MiB upload/download round-trips byte-identical.
+- Losing a **second node** (8/16 online): writes are refused (`Resource
+  requested is unwritable`) and reads fail too — the set is no longer safe to
+  serve. Restart the nodes and it self-heals back to 16/16.
+- Usable capacity follows the parity ratio: EC:4 over 16 drives keeps 12/16 of
+  raw bytes. `--clean-data` deletes each drive dir but refuses one still
+  mounted, and a drive that returns is healed by MinIO itself.
+
+The `pg.yaml` files on all nodes carry the identical 16-line matrix and one
+shared root password; keeping them consistent is, as under MNSD, the operator's
+job.
 
 ## Using the mc Client
 
@@ -573,6 +643,9 @@ addons:
       name: store
       image_tag: ghcr.io/mars-base/pgcli/pgcli-minio:20250422221226
       # data_dir: /srv/minio     # omit for <base-dir>/addon/minio/store/data
+      # drives:                  # multi-drive (SNMD/MNMD): one host dir per drive,
+      #   - /mnt/minio/disk1     # each mounted at its own /dataN — see SNMD/MNMD below
+      #   - /mnt/minio/disk2
       listen: 127.0.0.1
       api_port: 9000
       console_port: 9001
@@ -587,6 +660,8 @@ addons:
       #   - http://10.0.0.12:9000/data
       #   - http://10.0.0.20:9000/data
       #   - http://10.0.0.21:9000/data
+      #   (with `drives` also set this is MNMD — one /dataN endpoint per drive on
+      #    every node, and every node's list identical; see "Multi-Node Multi-Drive")
 ```
 
 Edits to `listen`, ports, `root_user`, `root_password`, `image_tag`, `data_dir`,

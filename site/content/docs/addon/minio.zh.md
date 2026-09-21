@@ -259,22 +259,24 @@ OpenSSL）用的正是这一套机制——直接实测过：对 `pg cert` 产�
 
 ## 部署形态
 
-MinIO/silo 对自身的部署布局有明确分类；本插件支持其中三种：
+MinIO/silo 对自身的部署布局有明确分类；本插件四种全部支持：
 
 | 形态 | 结构 | 适用场景 |
 |------|------|----------|
 | **SNSD**（单机单盘） | 单节点、单个数据目录——不给 `--endpoint` 也不给 `--drive` 时的默认 | 开发、测试、演示 |
 | **SNMD**（单机多盘） | 单节点、多块盘——每个 `--drive` 传一块盘，见下文 [SNMD](#单机多盘snmd) | 单机部署要扛住坏盘，又不想额外搭文件系统层 |
 | **MNSD**（多机单盘） | 多节点、每节点一块数据盘——即下文的分布式模式 | 紧凑的高可用部署 |
+| **MNMD**（多机多盘） | 多节点、每节点多块盘——`--drive` 传本节点的盘，`--endpoint` 传全集群矩阵 | 既要扛坏盘、又要扛坏机，且不额外搭文件系统层 |
 
 `pg addon install minio` 开箱即是 SNSD。要得到 MNSD，传入集群的
 endpoint 列表（至少四节点）——见下文[分布式 / 集群模式](#分布式--集群模式)。
 
-"多机且每台多盘"（MNMD）暂未做进插件：`--endpoint` 每节点只收一个可路由主
-机，所以分布式集群仍是每节点一块盘。SNSD/MNSD 下的磁盘冗余另一条路仍然可
-用——把 ZFS 池垫在 `--data-dir` 底下——它能让底层布局随时可换，空间利用上也
-往往更省。[S3 存储高可用方案](../../ha-cluster/ha-s3-storage/) 对比了原生
-SNMD 与 ZFS 两条路，也覆盖"4 主机、每主机多块盘"这个既能扛坏盘又能扛坏机的
+MNMD 把两个 flag 组合起来：`--drive` 传本节点的盘（与 SNMD 完全一致），
+`--endpoint` 传*整个集群*的 host×drive 端点矩阵（每台每个盘各一条 URL）——
+见下文[多机多盘（MNMD）](#多机多盘mnmd)。SNSD/MNSD 下的磁盘冗余另一条路仍然
+可用——把 ZFS 池垫在 `--data-dir` 底下——它能让底层布局随时可换，空间利用上
+也往往更省。[S3 存储高可用方案](../../ha-cluster/ha-s3-storage/) 对比了原生
+MNMD 与 ZFS 两条路，也覆盖"4 主机、每主机多块盘"这个既能扛坏盘又能扛坏机的
 混合形态。
 
 ## 单机多盘（SNMD）
@@ -290,9 +292,10 @@ pg addon install minio --name store \
 
 每个 `--drive` 是一块独立设备上的宿主目录；第 *N* 块盘挂到容器路径
 `/dataN`，服务进程以 `minio server /data1 /data2 ... /dataN` 启动。`--drive`
-与 `--endpoint`、与 `--data-dir` 互斥——多盘模式的数据位置只由 `--drive` 决
-定。和 MinIO 所有盘一样，与宿主根设备共享的盘会被 MinIO 在启动时拒绝；pgcli
-会列出越界的盘、在 install 时给出警告。
+与 `--data-dir` 互斥——多盘模式的数据位置只由 `--drive` 决定；`--drive` 再加
+上 `--endpoint` 就是 MNMD，即多盘模式的多机版本，见下文[多机多盘
+（MNMD）](#多机多盘mnmd)。和 MinIO 所有盘一样，与宿主根设备共享的盘会被
+MinIO 在启动时拒绝；pgcli 会列出越界的盘、在 install 时给出警告。
 
 **EC 换来什么**（在活的 4 盘集上实测）：MinIO 把每个对象切成数据片 + 校验
 片，4 盘集默认 2 片校验——可容忍 2 块盘故障。坏 1 块盘时读写都照常；坏 2 块
@@ -319,9 +322,11 @@ pg addon install minio --name store \
 每个端点的形式是 `http://<host>:<port><路径>`。`host:port` 是节点之间互相
 访问、完成组环握手的地址。尾部那段 `<路径>` **不是** HTTP 路由——客户端永远
 看不到它——它是 **export path（导出路径）**，即该节点把自己那一份纠删码分片
-数据存放在**容器内**的哪个目录。pgcli 总是把 `--data-dir` 挂载到容器的
-`/data`，所以这段路径必须从 `/data` 开始——最简单就直接写 `/data`。四个端点里
-这段路径字符串要保持一致。
+数据存放在**容器内**的哪个目录。MNSD 下（不给 `--drive`）pgcli 把 `--data-dir`
+挂载到容器的 `/data`，所以这段路径必须从 `/data` 开始——最简单就直接写
+`/data`。四个端点里这段路径字符串要保持一致。（MNMD 下节点也会传 `--drive`，
+此时每个端点改为指名该节点的一个 `/data1../dataN` 盘槽——见下文
+[MNMD](#多机多盘mnmd)。）
 
 注意端点里的路径是**容器内**路径，与宿主目录结构无关：如果 `/data` 是一块
 共享盘、还想在上面放别的东西，把 `--data-dir` 指到它的子目录即可——
@@ -380,10 +385,63 @@ pg addon install minio --name store \
   地址由端点列表决定。单机模式仍按 `listen` 设置 `MINIO_SERVER_URL`。
 
 **Quorum（EC）：** 写需要 `⌈N/2⌉+1` 个节点在线，读需要 `⌈N/2⌉`。因此 4 节点
-集群在挂掉 2 台时仍可读、但拒绝写；重启下线的节点后集群自愈。
+集群在挂掉 2 台时仍可读、但拒绝写；重启下线的节点后集群自愈。MNMD 下被计数的
+成员是*盘*而不是节点——活体 4×4 集群上实测的盘级边界见下文
+[MNMD](#多机多盘mnmd)。
 
 > **仅跨主机。** 这是真正的分布式部署——每台主机由你自己跑 pgcli。pgcli 不会
 > 在节点间 SSH、也不做成员注册；保持 N 份 `pg.yaml` 一致是运维的职责。
+
+## 多机多盘（MNMD）
+
+MNMD 就是每个节点贡献多块盘的 MNSD：MinIO 在整个 **host×drive 矩阵**上做纠删
+码，因此这套集合不需要任何文件系统层就能同时扛住单块盘故障和整台节点故障。
+用 `--drive` 传本节点的盘（与[单机多盘（SNMD）](#单机多盘snmd)完全一致），用
+`--endpoint` 传**整个集群**的端点列表——每台、每个盘各一条 URL，不只是本机。
+
+与 MNSD 唯一的区别是导出路径。每个节点把自己的盘挂到 `/data1../dataN`，所以
+每个端点必须指名其中一个槽：`http://<host>:<port>/data<k>`。`pgcli` 不解析
+URL——它把整个矩阵原样交给 `minio server`，与 MinIO 官方文档的写法一致——因
+此每个节点都要携带同一份完整列表。列表长度必须是每节点盘数的整数倍（MinIO 要
+求每个节点贡献相同数量的盘），且必须至少包含一台远端节点；会折叠到单台主机的
+矩阵会在容器启动前就被拒绝，`--tls` 节点搭配明文 `http://` 端点同样会被拒。
+
+```bash
+# 节点 1（10.0.0.11），四块数据盘已挂载并用 --drive 传入：
+pg addon install minio --name store --tls \
+  --listen 0.0.0.0 \
+  --drive /mnt/minio/disk1 --drive /mnt/minio/disk2 \
+  --drive /mnt/minio/disk3 --drive /mnt/minio/disk4 \
+  --root-password '<共享密码>' \
+  --endpoint https://10.0.0.11:9000/data1 --endpoint https://10.0.0.11:9000/data2 \
+  --endpoint https://10.0.0.11:9000/data3 --endpoint https://10.0.0.11:9000/data4 \
+  --endpoint https://10.0.0.12:9000/data1 --endpoint https://10.0.0.12:9000/data2 \
+  --endpoint https://10.0.0.12:9000/data3 --endpoint https://10.0.0.12:9000/data4 \
+  --endpoint https://10.0.0.20:9000/data1 --endpoint https://10.0.0.20:9000/data2 \
+  --endpoint https://10.0.0.20:9000/data3 --endpoint https://10.0.0.20:9000/data4 \
+  --endpoint https://10.0.0.21:9000/data1 --endpoint https://10.0.0.21:9000/data2 \
+  --endpoint https://10.0.0.21:9000/data3 --endpoint https://10.0.0.21:9000/data4
+
+# 节点 2-4：同样的命令、各自的 --drive 路径，以及完全相同的 16 条端点矩阵
+# 和完全相同的 --root-password 值。
+```
+
+`--listen 0.0.0.0` 是有意为之：每个节点都要在其他 15 条端点所指名的地址上应答。
+`--root-password` 必须处处一致，与 MNSD 的要求相同。
+
+在活体的 4 节点 × 4 盘集群（16 × 2 GiB）上，用 `mc admin info` 实测到的形状：
+
+- **16 块盘在线，EC:4**，位于单个 stripe 大小为 16 的纠删码集合里——该集合报
+  4 片校验，因此 16 块盘里坏 4 块仍然健康。
+- 损失**一整台节点**（4 块盘 → 12/16 在线）时读和写都照常工作；64 MiB 上传
+  /下载往返逐字节一致。
+- 再损失**第二台节点**（8/16 在线）：写被拒（`Resource requested is
+  unwritable`），读也失败——该集合已不再安全可服务。重启节点后自愈回 16/16。
+- 可用容量随校验比例而定：16 盘 EC:4 保留原始字节的 12/16。`--clean-data`
+  会逐盘删除目录，但拒删仍在挂载的盘；回来的盘由 MinIO 自己 heal。
+
+所有节点的 `pg.yaml` 都携带同一份 16 行矩阵和一个共享的 root 密码；保持它们
+一致，与 MNSD 一样，是运维的职责。
 
 ## 使用 mc 客户端
 
@@ -499,6 +557,9 @@ addons:
       name: store
       image_tag: ghcr.io/mars-base/pgcli/pgcli-minio:20250422221226
       # data_dir: /srv/minio     # 省略则为 <base-dir>/addon/minio/store/data
+      # drives:                  # 多盘（SNMD/MNMD）：每块盘一个宿主目录，
+      #   - /mnt/minio/disk1     # 各自挂到自己的 /dataN —— 见下文 SNMD/MNMD
+      #   - /mnt/minio/disk2
       listen: 127.0.0.1
       api_port: 9000
       console_port: 9001
@@ -513,6 +574,8 @@ addons:
       #   - http://10.0.0.12:9000/data
       #   - http://10.0.0.20:9000/data
       #   - http://10.0.0.21:9000/data
+      #   （同时设置 drives 即为 MNMD —— 每个节点的每块盘对应一条 /dataN 端点，
+      #    且各节点的列表完全一致；见"多机多盘（MNMD）"）
 ```
 
 修改 `listen`、端口、`root_user`、`root_password`、`image_tag`、`data_dir`、

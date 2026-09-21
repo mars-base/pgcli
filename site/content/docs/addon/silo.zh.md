@@ -182,22 +182,24 @@ pg addon install silo --name store --tls-cert silo.crt --tls-key silo.key
 
 ## 部署形态
 
-silo/MinIO 对自身的部署布局有明确分类；本插件支持其中三种：
+silo/MinIO 对自身的部署布局有明确分类；本插件四种全部支持：
 
 | 形态 | 结构 | 适用场景 |
 |------|------|----------|
 | **SNSD**（单机单盘） | 单节点、单个数据目录——不给 `--endpoint` 也不给 `--drive` 时的默认 | 开发、测试、演示 |
 | **SNMD**（单机多盘） | 单节点、多块盘——每个 `--drive` 传一块盘，见下文 [SNMD](#单机多盘snmd) | 单机部署要扛住坏盘，又不想额外搭文件系统层 |
 | **MNSD**（多机单盘） | 多节点、每节点一块数据盘——即下文的分布式模式 | 紧凑的高可用部署 |
+| **MNMD**（多机多盘） | 多节点、每节点多块盘——`--drive` 传本节点的盘，`--endpoint` 传全集群矩阵 | 既要扛坏盘、又要扛坏机，且不额外搭文件系统层 |
 
 `pg addon install silo` 开箱即是 SNSD。要得到 MNSD，传入集群的
 endpoint 列表（至少四节点）——见下文[分布式 / 集群模式](#分布式--集群模式)。
 
-"多机且每台多盘"（MNMD）暂未做进插件：`--endpoint` 每节点只收一个可路由主
-机，所以分布式集群仍是每节点一块盘。SNSD/MNSD 下的磁盘冗余另一条路仍然可
-用——把 ZFS 池垫在 `--data-dir` 底下——它能让底层布局随时可换，空间利用上也
-往往更省。[S3 存储高可用方案](../../ha-cluster/ha-s3-storage/) 对比了原生
-SNMD 与 ZFS 两条路，也覆盖"4 主机、每主机多块盘"这个既能扛坏盘又能扛坏机的
+MNMD 把两个 flag 组合起来：`--drive` 传本节点的盘（与 SNMD 完全一致），
+`--endpoint` 传*整个集群*的 host×drive 端点矩阵（每台每个盘各一条 URL）——
+见下文[多机多盘（MNMD）](#多机多盘mnmd)。SNSD/MNSD 下的磁盘冗余另一条路仍然
+可用——把 ZFS 池垫在 `--data-dir` 底下——它能让底层布局随时可换，空间利用上
+也往往更省。[S3 存储高可用方案](../../ha-cluster/ha-s3-storage/) 对比了原生
+MNMD 与 ZFS 两条路，也覆盖"4 主机、每主机多块盘"这个既能扛坏盘又能扛坏机的
 混合形态。
 
 ## 单机多盘（SNMD）
@@ -213,9 +215,10 @@ pg addon install silo --name store \
 
 每个 `--drive` 是一块独立设备上的宿主目录；第 *N* 块盘挂到容器路径
 `/dataN`，服务进程以 `silo server /data1 /data2 ... /dataN` 启动。`--drive`
-与 `--endpoint`、与 `--data-dir` 互斥——多盘模式的数据位置只由 `--drive` 决
-定。和 silo/MinIO 所有盘一样，与宿主根设备共享的盘会在启动时被拒绝；pgcli
-会列出越界的盘、在 install 时给出警告。
+与 `--data-dir` 互斥——多盘模式的数据位置只由 `--drive` 决定；`--drive` 再加
+上 `--endpoint` 就是 MNMD，即多盘模式的多机版本，见下文[多机多盘
+（MNMD）](#多机多盘mnmd)。和 silo/MinIO 所有盘一样，与宿主根设备共享的盘会
+在启动时被拒绝；pgcli 会列出越界的盘、在 install 时给出警告。
 
 **EC 换来什么**（在活的 4 盘 silo 集上实测）：4 盘集默认 2 片校验——可容忍
 2 块盘故障。坏 1 块盘时读写都照常；坏 2 块盘时读仍成功、写被拒——这就是
@@ -255,6 +258,21 @@ pg addon install silo --name store \
 `MINIO_SERVER_URL`）以及 quorum 计算，与
 [MinIO → 分布式 / 集群模式](../minio/#分布式--集群模式)相同；silo 因为继承
 了这些检查，执行得同样严格。
+
+## 多机多盘（MNMD）
+
+MNMD 与 MinIO 下的做法完全一致：用 `--drive` 传本节点的盘，用 `--endpoint`
+传*整个集群*的 host×drive 端点矩阵——每台、每个盘各一条 URL。每个端点必须指
+名该节点的一个 `/data1../dataN` 盘槽，矩阵长度必须是每节点盘数的整数倍且至少
+包含一台远端节点，`--tls` 节点的端点必须全部是 `https://`——这四项 pgcli 都会
+在启动容器前检查。完整步骤见
+[MinIO → 多机多盘（MNMD）](../minio/#多机多盘mnmd)。
+
+在活体的 4 节点 × 4 盘 silo 集（16 × 2 GiB）上实测到的形状与 MinIO 一致：
+**16 块盘在线，EC:4**，位于单个 stripe 大小为 16 的纠删码集合里；损失**一整台
+节点**（12/16 在线）时读和写都照常工作，64 MiB 往返逐字节一致；再损失**第二台
+节点**（8/16 在线）时写被拒（`Resource requested is unwritable`）、读也失败，
+节点重启后集合自愈回 16/16。16 盘 EC:4 保留原始字节的 12/16。
 
 ## 使用 mcli 客户端
 
@@ -316,6 +334,9 @@ addons:
       name: store
       image_tag: docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z
       # data_dir: /srv/silo     # 省略则为 <base-dir>/addon/silo/store/data
+      # drives:                  # 多盘（SNMD/MNMD）：每块盘一个宿主目录，
+      #   - /mnt/minio/disk1     # 各自挂到自己的 /dataN —— 见下文 SNMD/MNMD
+      #   - /mnt/minio/disk2
       listen: 127.0.0.1
       api_port: 9000
       console_port: 9001
@@ -330,6 +351,8 @@ addons:
       #   - http://10.0.0.12:9000/data
       #   - http://10.0.0.20:9000/data
       #   - http://10.0.0.21:9000/data
+      #   （同时设置 drives 即为 MNMD —— 每个节点的每块盘对应一条 /dataN 端点，
+      #    且各节点的列表完全一致；见"多机多盘（MNMD）"）
 ```
 
 对 `listen`、端口、`root_user`、`root_password`、`image_tag`、`data_dir`、

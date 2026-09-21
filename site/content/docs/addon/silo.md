@@ -204,26 +204,29 @@ remove `cert_file`/`key_file` under this addon in `pg.yaml` and recreate with
 
 ## Deployment modes
 
-silo/MinIO classifies its layouts; the addon supports three:
+silo/MinIO classifies its layouts; the addon supports all four:
 
 | Mode | Shape | Use it for |
 |------|-------|------------|
 | **SNSD** (single-node, single-drive) | one node, one data directory — the default when no `--endpoint` or `--drive` is given | dev, test, demos |
 | **SNMD** (single-node, multi-drive) | one node, several drives — `--drive` per drive, see [SNMD](#single-node-multi-drive-snmd) below | surviving a disk loss on a single host without a filesystem layer |
 | **MNSD** (multi-node, single-drive) | several nodes, one data disk per node — the distributed mode below | compact high-availability deployments |
+| **MNMD** (multi-node, multi-drive) | several nodes, several drives each — `--drive` for this node's drives + the full `--endpoint` matrix | surviving a disk loss *and* a node loss, without a filesystem layer |
 
 SNSD is what `pg addon install silo` gives you out of the box. To get
 MNSD, pass the cluster's endpoint list (at least four nodes) — see
 [Distributed / Cluster Mode](#distributed--cluster-mode) below.
 
-Multi-node with several drives per node (MNMD) is not wired in: `--endpoint`
-takes one routable host per node, so a distributed cluster still means one
-drive per node. Disk redundancy under SNSD/MNSD also remains available the
-other way — a ZFS pool under `--data-dir` — which keeps the layout changeable
-underneath and can be more space-efficient. [S3 Storage High
-Availability](../../ha-cluster/ha-s3-storage/) compares native SNMD with ZFS
-and covers the 4-hosts-each-with-several-disks hybrid that survives both a
-disk and a node.
+MNMD combines both flags: give this node's drives with `--drive` (as under
+SNMD) and the *whole cluster's* host×drive endpoint matrix with `--endpoint`
+(one URL per drive on every node) — see
+[Multi-Node Multi-Drive (MNMD)](#multi-node-multi-drive-mnmd) below. Disk
+redundancy under SNSD/MNSD is also available the other way — a ZFS pool
+under `--data-dir` — which keeps the layout changeable underneath and can be
+more space-efficient. [S3 Storage High
+Availability](../../ha-cluster/ha-s3-storage/) compares native MNMD with the
+ZFS approach for the 4-hosts-each-with-several-disks hybrid that survives
+both a disk and a node.
 
 ## Single-Node Multi-Drive (SNMD)
 
@@ -239,10 +242,12 @@ pg addon install silo --name store \
 Each `--drive` is a host directory on its own device; drive *N* is
 bind-mounted at container path `/dataN` and the server starts as
 `silo server /data1 /data2 ... /dataN`. `--drive` is mutually exclusive with
-`--endpoint` and with `--data-dir` — multi-drive mode takes its data locations
-from `--drive` only. Like every other silo/MinIO drive, one that shares the
-host's root device is rejected at startup; pgcli lists the offending drives
-and warns at install time.
+`--data-dir` — multi-drive mode takes its data locations from `--drive` only.
+Combining `--drive` with `--endpoint` is MNMD, the multi-node version of this
+mode — see [Multi-Node Multi-Drive (MNMD)](#multi-node-multi-drive-mnmd)
+below. Like every other silo/MinIO drive, one that shares the host's root
+device is rejected at startup; pgcli lists the offending drives and warns at
+install time.
 
 **What EC buys you** (measured on a live 4-drive silo set): a 4-drive set
 defaults to 2 parity shards — it tolerates 2 drive failures. With 1 drive
@@ -288,6 +293,26 @@ separate from root — pgcli warns when it isn't — and no per-node
 `MINIO_SERVER_URL` in cluster mode) and the quorum arithmetic are the same as
 [MinIO → Distributed / Cluster Mode](../minio/#distributed--cluster-mode);
 silo enforces the same checks because it inherited them.
+
+## Multi-Node Multi-Drive (MNMD)
+
+MNMD works exactly like it does under MinIO: give this node's drives with
+`--drive` and the *whole cluster's* host×drive endpoint matrix with
+`--endpoint`, one URL per drive on every node. Each endpoint must address one
+of that node's `/data1../dataN` drive slots, the matrix must be a multiple of
+the per-node drive count and must name at least one remote node, and a `--tls`
+node's endpoints must all be `https://` — pgcli checks all four before starting
+the container. See
+[MinIO → Multi-Node Multi-Drive (MNMD)](../minio/#multi-node-multi-drive-mnmd)
+for the full walkthrough.
+
+On a live 4-node × 4-drive silo set (16 × 2 GiB) the measured shape matches
+MinIO's: **16 drives online, EC:4** in a single erasure set of stripe size 16;
+losing **one whole node** (12/16 online) keeps reads *and* writes working, a
+64 MiB round-trip byte-identical; losing a **second node** (8/16 online)
+refuses writes (`Resource requested is unwritable`) and fails reads too, and
+the set self-heals back to 16/16 once the nodes restart. EC:4 over 16 drives
+keeps 12/16 of raw bytes.
 
 ## Using the mcli Client
 
@@ -356,6 +381,9 @@ addons:
       name: store
       image_tag: docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z
       # data_dir: /srv/silo     # omit for <base-dir>/addon/silo/store/data
+      # drives:                  # multi-drive (SNMD/MNMD): one host dir per drive,
+      #   - /mnt/minio/disk1     # each mounted at its own /dataN — see SNMD/MNMD below
+      #   - /mnt/minio/disk2
       listen: 127.0.0.1
       api_port: 9000
       console_port: 9001
@@ -370,6 +398,8 @@ addons:
       #   - http://10.0.0.12:9000/data
       #   - http://10.0.0.20:9000/data
       #   - http://10.0.0.21:9000/data
+      #   (with `drives` also set this is MNMD — one /dataN endpoint per drive on
+      #    every node, and every node's list identical; see "Multi-Node Multi-Drive")
 ```
 
 Edits to `listen`, ports, `root_user`, `root_password`, `image_tag`, `data_dir`,
