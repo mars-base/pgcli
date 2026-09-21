@@ -7,7 +7,7 @@ import (
 	"github.com/mars-base/pgcli/internal/config"
 )
 
-// storeMountsAndServerArgv is the whole SNMD/MNSD/SNSD data-layout decision —
+// storeMountsAndServerArgv is the whole SNMD/MNSD/MNMD/SNSD data-layout decision —
 // pin every shape so minio and silo cannot drift apart and the container gets
 // exactly the mount list and argv the erasure-coding mode needs.
 func TestStoreMountsAndServerArgv(t *testing.T) {
@@ -31,11 +31,19 @@ func TestStoreMountsAndServerArgv(t *testing.T) {
 			wantServer: []string{"server", "/data"},
 		},
 		{
-			name:       "MNSD beats drives when endpoints are set",
+			name:       "MNSD: endpoints only, single /data mount",
 			dirs:       single,
 			endpoints:  eps,
 			wantMounts: singleMount,
 			wantServer: append([]string{"server"}, eps...),
+		},
+		{
+			name:       "MNMD: endpoints + drives, per-drive mounts, full matrix argv",
+			dirs:       []string{"/mnt/d1", "/mnt/d2"},
+			endpoints:  []string{"http://10.0.0.1:9000/data1", "http://10.0.0.1:9000/data2", "http://10.0.0.2:9000/data1", "http://10.0.0.2:9000/data2"},
+			snmd:       true,
+			wantMounts: []string{"-v", "/mnt/d1:/data1:z", "-v", "/mnt/d2:/data2:z"},
+			wantServer: []string{"server", "http://10.0.0.1:9000/data1", "http://10.0.0.1:9000/data2", "http://10.0.0.2:9000/data1", "http://10.0.0.2:9000/data2"},
 		},
 		{
 			name:       "SNMD mounts every drive at its literal slot",
@@ -59,8 +67,9 @@ func TestStoreMountsAndServerArgv(t *testing.T) {
 	}
 }
 
-// The mode resolution rule — drives only drive SNMD while endpoints are empty —
-// must hold identically in both managers' resolveDriveDirs.
+// The mode resolution rule — a non-empty Drives list is this node's drive set
+// whether or not endpoints name a whole cluster (SNMD vs MNMD) — must hold
+// identically in both managers' resolveDriveDirs.
 func TestResolveDriveDirsModeRule(t *testing.T) {
 	mm := &MinioManager{dataDir: "/base"}
 	ms := &SiloManager{dataDir: "/base"}
@@ -71,10 +80,16 @@ func TestResolveDriveDirsModeRule(t *testing.T) {
 	if got := mm.resolveDriveDirs(mcSNMD); !reflect.DeepEqual(got, drives) {
 		t.Errorf("minio SNMD dirs = %q, want %q", got, drives)
 	}
-	// Endpoints present => drives ignored, single data dir (MNSD unchanged).
-	mcMNSD := &config.MinioConfig{Name: "n", Drives: drives, Endpoints: []string{"http://10.0.0.1:9000/data"}}
+	// Endpoints present with drives => MNMD: this node's drives still win,
+	// verbatim (the matrix rides in the endpoints, not the drive list).
+	mcMNMD := &config.MinioConfig{Name: "n", Drives: drives, Endpoints: []string{"http://10.0.0.1:9000/data1", "http://10.0.0.1:9000/data2", "http://10.0.0.2:9000/data1", "http://10.0.0.2:9000/data2"}}
+	if got := mm.resolveDriveDirs(mcMNMD); !reflect.DeepEqual(got, drives) {
+		t.Errorf("minio MNMD dirs = %q, want %q", got, drives)
+	}
+	// Endpoints with no drives => MNSD stays the single data dir.
+	mcMNSD := &config.MinioConfig{Name: "n", Endpoints: []string{"http://10.0.0.1:9000/data"}}
 	if got, want := mm.resolveDriveDirs(mcMNSD), []string{"/base/addon/minio/n/data"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("minio with endpoints dirs = %q, want %q", got, want)
+		t.Errorf("minio MNSD dirs = %q, want %q", got, want)
 	}
 	// No drives => the single resolved data dir, override respected.
 	if got, want := mm.resolveDriveDirs(&config.MinioConfig{Name: "n", DataDir: "/srv/m"}), []string{"/srv/m"}; !reflect.DeepEqual(got, want) {

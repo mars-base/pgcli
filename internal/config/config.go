@@ -414,23 +414,27 @@ type MinioConfig struct {
 	// Endpoints switches this addon to distributed (cluster) mode when non-empty:
 	// the list is passed verbatim to `minio server <ep1> <ep2> ...` instead of the
 	// single-node `/data`, e.g. http://10.0.0.1:9000/data. The URL path is the
-	// in-container export dir — pgcli bind-mounts data_dir at /data, so it must
-	// be /data (or a subdir); any other path hits the container's root fs and
-	// MinIO refuses it ("drive is part of root drive"). Every node of the
-	// cluster must carry an identical list AND identical root credentials (MinIO
-	// has no runtime membership join — all peers handshake from this list at
-	// startup), so this value is written into each node's own pg.yaml. Empty =>
+	// in-container export dir: with no Drives this is /data (pgcli bind-mounts
+	// data_dir there — MNSD, one endpoint per node); together with Drives each
+	// node contributes one endpoint per drive (/data1../dataN — MNMD, the
+	// host×drive matrix). Any other path hits the container's root fs and MinIO
+	// refuses it ("drive is part of root drive"). Every node of the cluster must
+	// carry an identical list AND identical root credentials (MinIO has no
+	// runtime membership join — all peers handshake from this list at startup),
+	// so this value is written into each node's own pg.yaml. Empty =>
 	// single-node mode, unchanged behaviour.
 	Endpoints []string `yaml:"endpoints,omitempty"`
 
-	// Drives switches this addon to single-node multi-drive mode (SNMD) when
-	// non-empty and Endpoints is empty: each entry is a host directory on its
-	// own device (MinIO rejects a drive sharing the root device), bind-mounted
-	// in order at /data1../dataN and passed as
-	// `minio server /data1 /data2 ...`. MinIO erasure-codes across the drives
-	// of this one node. Mutually exclusive with Endpoints (MNSD) and with
-	// data_dir (the single-drive export) — mode resolution is
-	// endpoints > drives > single data_dir. Empty => unchanged.
+	// Drives makes this node contribute several export drives: each entry is a
+	// host directory on its own device (MinIO rejects a drive sharing the root
+	// device), bind-mounted in order at /data1../dataN. With Endpoints empty
+	// that is single-node multi-drive (SNMD: `minio server /data1 /data2 ...`);
+	// with Endpoints non-empty it is one node of a multi-node multi-drive
+	// cluster (MNMD — argv is the shared endpoint matrix, and the matrix must
+	// carry exactly one endpoint per drive per node, pointing at /data1../dataN
+	// of each host). Mutually exclusive with data_dir (the single-drive export).
+	// Mode resolution is: endpoints+drives=MNMD, endpoints=MNSD, drives=SNMD,
+	// else single data_dir. Empty => unchanged.
 	Drives []string `yaml:"drives,omitempty"`
 
 	// Autostart brings this container up on host boot via the boot service
@@ -477,14 +481,19 @@ type SiloConfig struct {
 
 	// Endpoints switches this addon to distributed (cluster) mode when non-empty:
 	// the list is passed verbatim to `silo server <ep1> <ep2> ...` instead of the
-	// single-node `/data`. Same identical-list-and-credentials requirement as
-	// minio. Empty => single-node mode.
+	// single-node `/data`. With Drives set too, the list is the host×drive
+	// matrix (MNMD) whose export paths name /data1../dataN on each node; with
+	// Drives empty it is one /data endpoint per node (MNSD). Same
+	// identical-list-and-credentials requirement as minio. Empty => single-node.
 	Endpoints []string `yaml:"endpoints,omitempty"`
 
-	// Drives switches this addon to single-node multi-drive mode (SNMD) when
-	// non-empty and Endpoints is empty: host dirs, each on its own device,
-	// bind-mounted at /data1../dataN and passed as `silo server /data1 ...`.
-	// Mutually exclusive with Endpoints and with data_dir. Empty => unchanged.
+	// Drives makes this node contribute several export drives: host dirs, each
+	// on its own device, bind-mounted at /data1../dataN. With Endpoints empty
+	// that is single-node multi-drive (SNMD: `silo server /data1 ...`); with
+	// Endpoints non-empty it is one node of a multi-node multi-drive cluster
+	// (MNMD — argv is the shared endpoint matrix, one endpoint per drive per
+	// node at /data1../dataN). Mutually exclusive with data_dir. Empty =>
+	// unchanged.
 	Drives []string `yaml:"drives,omitempty"`
 
 	// Autostart brings this container up on host boot via the boot service

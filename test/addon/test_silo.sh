@@ -386,10 +386,30 @@ main() {
 
     # ---- SNMD: single-node multi-drive over four loop-mounted "disks" ------
     section "SNMD (--drive x4, --tls)"
-    run_fails "--drive rejects --endpoint in the same install" "cannot be combined" \
-        pg addon install silo --name snmdx --drive /a --endpoint http://10.0.0.1:9000/data
-    run_fails "--drive rejects --data-dir in the same install" "cannot be combined" \
+    run_fails "--drive still rejects --data-dir in the same install" "cannot be combined" \
         pg addon install silo --name snmdx --drive /a --data-dir /b
+
+    # ---- MNMD: --drive + --endpoint is now a legal combination ----
+    # The mutual-exclusion error is gone; what remains is matrix validation,
+    # which fires before any podman work, so these are pure CLI checks (no real
+    # second host is exercised locally — that is the VM test's job).
+    section "MNMD matrix validation (--drive + --endpoint)"
+    run_fails "MNMD rejects a bare /data export path" "each endpoint must address one of those slots" \
+        pg addon install silo --name mnmdx --drive /a --drive /b \
+        --endpoint http://10.0.0.1:9000/data --endpoint http://10.0.0.1:9000/data \
+        --endpoint http://10.0.0.2:9000/data --endpoint http://10.0.0.2:9000/data
+    run_fails "MNMD rejects an endpoint count not divisible by drives/node" "not a multiple of" \
+        pg addon install silo --name mnmdx --drive /a --drive /b \
+        --endpoint http://10.0.0.1:9000/data1 --endpoint http://10.0.0.1:9000/data2 \
+        --endpoint http://10.0.0.2:9000/data1
+    run_fails "MNMD rejects a single-host fold" "at least one more node" \
+        pg addon install silo --name mnmdx --drive /a --drive /b \
+        --endpoint http://10.0.0.1:9000/data1 --endpoint http://10.0.0.1:9000/data2
+    run_fails "MNMD rejects http:// endpoints on a --tls node" "plaintext http:// but this node serves TLS" \
+        pg addon install silo --name mnmdx --tls --drive /a --drive /b \
+        --endpoint http://10.0.0.1:9000/data1 --endpoint http://10.0.0.1:9000/data2 \
+        --endpoint http://10.0.0.2:9000/data1 --endpoint http://10.0.0.2:9000/data2
+
 
     TESTS=$((TESTS + 1))
     DRIVES_FILE="$TEST_DIR/snmd-drives.txt"

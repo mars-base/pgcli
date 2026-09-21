@@ -128,6 +128,38 @@ func TestSiloDrivesRoundTrip(t *testing.T) {
 	}
 }
 
+// The silo twin of the minio MNMD round-trip: drives and endpoints coexist and
+// both persist in order.
+func TestSiloMNMDRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pg.yaml")
+	cfg := Default()
+	cfg.Addons.Silo = map[string]SiloConfig{
+		"s1": {
+			ContainerName: "pgcli-silo-s1",
+			Name:          "s1",
+			Drives:        []string{"/mnt/d1", "/mnt/d2"},
+			Endpoints: []string{
+				"http://10.0.0.1:9000/data1", "http://10.0.0.1:9000/data2",
+				"http://10.0.0.2:9000/data1", "http://10.0.0.2:9000/data2",
+			},
+		},
+	}
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	sc := got.Addons.Silo["s1"]
+	if len(sc.Drives) != 2 || sc.Drives[0] != "/mnt/d1" {
+		t.Errorf("silo MNMD drives round-trip = %v", sc.Drives)
+	}
+	if len(sc.Endpoints) != 4 || sc.Endpoints[3] != "http://10.0.0.2:9000/data2" {
+		t.Errorf("silo MNMD endpoints round-trip = %v", sc.Endpoints)
+	}
+}
+
 // The shared-pool contract: minio and silo instances on one host auto-assign
 // from the same cursor, so their port pairs never overlap. Names sort within
 // each table; the minio table is assigned before silo. The base is a high

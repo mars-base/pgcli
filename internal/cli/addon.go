@@ -295,8 +295,8 @@ func init() {
 	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO or silo server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network)")
 	addonInstallCmd.Flags().String("root-user", "", "MinIO/silo root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config)")
 	addonInstallCmd.Flags().String("root-password", "", "MinIO/silo root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand)")
-	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO/silo distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (path is the in-container export dir; keep it under /data where --data-dir is mounted; repeat for each node; the list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
-	addonInstallCmd.Flags().StringSlice("drive", nil, "MinIO/silo single-node multi-drive (SNMD) host dir(s), each on its own disk — e.g. --drive /mnt/minio/disk1 --drive /mnt/minio/disk2 ... (repeat for each drive; the server erasure-codes across them: 4 drives tolerate 2 failures. Mutually exclusive with --endpoint and --data-dir; MinIO/silo reject a drive sharing the root device)")
+	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO/silo distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (path is the in-container export dir — /data with a plain --data-dir node, or /data1../dataN on a --drive node (MNMD); repeat for every node's every drive; the list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
+	addonInstallCmd.Flags().StringSlice("drive", nil, "MinIO/silo multi-drive host dir(s), each on its own disk — e.g. --drive /mnt/minio/disk1 --drive /mnt/minio/disk2 ... (repeat for each drive; alone this is single-node multi-drive (SNMD); combined with --endpoint it is one node of a multi-node multi-drive cluster (MNMD), and each endpoint must address this node's /data1../dataN slots. Mutually exclusive with --data-dir; MinIO/silo reject a drive sharing the root device)")
 	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo>/<name>/; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Changing this needs --force to recreate")
 	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
 	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo: private key for --tls-cert (PEM; mounted read-only as private.key). Must pair with the cert; both are required to enable BYO TLS")
@@ -1469,12 +1469,13 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	if (existing.CertFile == "") != (existing.KeyFile == "") {
 		return fmt.Errorf("--tls-cert and --tls-key must be given together (a bring-your-own TLS pair needs both the cert and its key)")
 	}
-	// The three data-location axes name one mode each — endpoints (MNSD),
-	// drives (SNMD), data-dir (SNSD) — and mixing them has no sensible merge
-	// semantics, so refuse rather than silently prefer one. Checked post-merge
-	// so a stale drives/endpoints key in pg.yaml conflicts just like flags.
-	if len(existing.Drives) > 0 && len(existing.Endpoints) > 0 {
-		return fmt.Errorf("--drive (single-node multi-drive) and --endpoint (distributed cluster) cannot be combined — pick one deployment mode")
+	// Three data-location axes — endpoints (cluster), drives (this node's
+	// multi-drive set), data-dir (single export). drives+endpoints is MNMD, a
+	// legal combination, but the matrix must name this node's /dataN slots and
+	// divide evenly by drives-per-node; drives+data-dir has no merge semantics.
+	// All checked post-merge so a stale key in pg.yaml conflicts like a flag.
+	if err := podman.ValidateMNMDMatrix(existing.Endpoints, len(existing.Drives), existing.TLS); err != nil {
+		return err
 	}
 	if len(existing.Drives) > 0 && existing.DataDir != "" {
 		return fmt.Errorf("--drive and --data-dir cannot be combined — multi-drive mode takes its data locations from --drive only")
@@ -1596,7 +1597,7 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	}
 	fmt.Printf("  Container:    %s\n", mc.ContainerName)
 	fmt.Printf("  Image:        %s\n", mc.ImageTag)
-	if len(mc.Drives) > 0 && len(mc.Endpoints) == 0 {
+	if len(mc.Drives) > 0 {
 		for i, d := range mm.Drives(&mc) {
 			fmt.Printf("  Drive %d:       %s -> /data%d\n", i+1, d, i+1)
 		}
@@ -1621,11 +1622,18 @@ func runAddonInstallMinio(cmd *cobra.Command) error {
 	}
 	if len(mc.Endpoints) > 0 {
 		fmt.Println()
-		fmt.Printf("  Distributed mode: %d endpoints\n", len(mc.Endpoints))
+		if len(mc.Drives) > 0 {
+			fmt.Printf("  Distributed multi-drive mode (MNMD): %d endpoints = %d nodes × %d drives/node\n", len(mc.Endpoints), len(mc.Endpoints)/len(mc.Drives), len(mc.Drives))
+		} else {
+			fmt.Printf("  Distributed mode: %d endpoints\n", len(mc.Endpoints))
+		}
 		for _, ep := range mc.Endpoints {
 			fmt.Printf("    - %s\n", ep)
 		}
 		fmt.Println("  NOTE: every node's pg.yaml must carry the identical endpoint list AND identical root credentials, or the cluster will not form.")
+		if len(mc.Drives) > 0 {
+			fmt.Println("        MNMD: each endpoint addresses one drive slot (/data1../dataN) on one node; every node contributes the same drive count, and this node mounts its own drives at those slots.")
+		}
 	}
 	if len(mc.Drives) > 0 && len(mc.Endpoints) == 0 {
 		fmt.Println()
@@ -1720,12 +1728,13 @@ func runAddonInstallSilo(cmd *cobra.Command) error {
 	if (existing.CertFile == "") != (existing.KeyFile == "") {
 		return fmt.Errorf("--tls-cert and --tls-key must be given together (a bring-your-own TLS pair needs both the cert and its key)")
 	}
-	// The three data-location axes name one mode each — endpoints (MNSD),
-	// drives (SNMD), data-dir (SNSD) — and mixing them has no sensible merge
-	// semantics, so refuse rather than silently prefer one. Checked post-merge
-	// so a stale drives/endpoints key in pg.yaml conflicts just like flags.
-	if len(existing.Drives) > 0 && len(existing.Endpoints) > 0 {
-		return fmt.Errorf("--drive (single-node multi-drive) and --endpoint (distributed cluster) cannot be combined — pick one deployment mode")
+	// Three data-location axes — endpoints (cluster), drives (this node's
+	// multi-drive set), data-dir (single export). drives+endpoints is MNMD, a
+	// legal combination, but the matrix must name this node's /dataN slots and
+	// divide evenly by drives-per-node; drives+data-dir has no merge semantics.
+	// All checked post-merge so a stale key in pg.yaml conflicts like a flag.
+	if err := podman.ValidateMNMDMatrix(existing.Endpoints, len(existing.Drives), existing.TLS); err != nil {
+		return err
 	}
 	if len(existing.Drives) > 0 && existing.DataDir != "" {
 		return fmt.Errorf("--drive and --data-dir cannot be combined — multi-drive mode takes its data locations from --drive only")
@@ -1847,7 +1856,7 @@ func runAddonInstallSilo(cmd *cobra.Command) error {
 	}
 	fmt.Printf("  Container:    %s\n", sc.ContainerName)
 	fmt.Printf("  Image:        %s\n", sc.ImageTag)
-	if len(sc.Drives) > 0 && len(sc.Endpoints) == 0 {
+	if len(sc.Drives) > 0 {
 		for i, d := range sm.Drives(&sc) {
 			fmt.Printf("  Drive %d:       %s -> /data%d\n", i+1, d, i+1)
 		}
@@ -1872,11 +1881,18 @@ func runAddonInstallSilo(cmd *cobra.Command) error {
 	}
 	if len(sc.Endpoints) > 0 {
 		fmt.Println()
-		fmt.Printf("  Distributed mode: %d endpoints\n", len(sc.Endpoints))
+		if len(sc.Drives) > 0 {
+			fmt.Printf("  Distributed multi-drive mode (MNMD): %d endpoints = %d nodes × %d drives/node\n", len(sc.Endpoints), len(sc.Endpoints)/len(sc.Drives), len(sc.Drives))
+		} else {
+			fmt.Printf("  Distributed mode: %d endpoints\n", len(sc.Endpoints))
+		}
 		for _, ep := range sc.Endpoints {
 			fmt.Printf("    - %s\n", ep)
 		}
 		fmt.Println("  NOTE: every node's pg.yaml must carry the identical endpoint list AND identical root credentials, or the cluster will not form.")
+		if len(sc.Drives) > 0 {
+			fmt.Println("        MNMD: each endpoint addresses one drive slot (/data1../dataN) on one node; every node contributes the same drive count, and this node mounts its own drives at those slots.")
+		}
 	}
 	if len(sc.Drives) > 0 && len(sc.Endpoints) == 0 {
 		fmt.Println()
@@ -2096,7 +2112,11 @@ func runAddonList() error {
 				fmt.Printf("                   from another host:     pg backup fetch-ca <this-host>:%d\n", mc.APIPort)
 			}
 			if len(mc.Drives) > 0 {
-				fmt.Printf("    Drives:      %d (SNMD)\n", len(mc.Drives))
+				driveMode := "SNMD"
+				if len(mc.Endpoints) > 0 {
+					driveMode = "MNMD, this node"
+				}
+				fmt.Printf("    Drives:      %d (%s)\n", len(mc.Drives), driveMode)
 				for i, d := range mc.Drives {
 					fmt.Printf("      - /data%d <- %s\n", i+1, d)
 				}
@@ -2104,7 +2124,11 @@ func runAddonList() error {
 				fmt.Printf("    Data:        %s\n", mm.DataDir(&mc))
 			}
 			if len(mc.Endpoints) > 0 {
-				fmt.Printf("    Endpoints:   %d (distributed)\n", len(mc.Endpoints))
+				endpointMode := "distributed"
+				if len(mc.Drives) > 0 {
+					endpointMode = fmt.Sprintf("MNMD, %d nodes × %d drives/node", len(mc.Endpoints)/len(mc.Drives), len(mc.Drives))
+				}
+				fmt.Printf("    Endpoints:   %d (%s)\n", len(mc.Endpoints), endpointMode)
 				for _, ep := range mc.Endpoints {
 					fmt.Printf("      - %s\n", ep)
 				}
@@ -2162,7 +2186,11 @@ func runAddonList() error {
 				fmt.Printf("                   from another host:     pg backup fetch-ca <this-host>:%d\n", sc.APIPort)
 			}
 			if len(sc.Drives) > 0 {
-				fmt.Printf("    Drives:      %d (SNMD)\n", len(sc.Drives))
+				driveMode := "SNMD"
+				if len(sc.Endpoints) > 0 {
+					driveMode = "MNMD, this node"
+				}
+				fmt.Printf("    Drives:      %d (%s)\n", len(sc.Drives), driveMode)
 				for i, d := range sc.Drives {
 					fmt.Printf("      - /data%d <- %s\n", i+1, d)
 				}
@@ -2170,7 +2198,11 @@ func runAddonList() error {
 				fmt.Printf("    Data:        %s\n", sm.DataDir(&sc))
 			}
 			if len(sc.Endpoints) > 0 {
-				fmt.Printf("    Endpoints:   %d (distributed)\n", len(sc.Endpoints))
+				endpointMode := "distributed"
+				if len(sc.Drives) > 0 {
+					endpointMode = fmt.Sprintf("MNMD, %d nodes × %d drives/node", len(sc.Endpoints)/len(sc.Drives), len(sc.Drives))
+				}
+				fmt.Printf("    Endpoints:   %d (%s)\n", len(sc.Endpoints), endpointMode)
 				for _, ep := range sc.Endpoints {
 					fmt.Printf("      - %s\n", ep)
 				}
