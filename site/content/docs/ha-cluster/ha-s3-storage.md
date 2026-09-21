@@ -1,6 +1,6 @@
 ---
 title: "S3 Storage High Availability"
-description: "Making the MinIO/silo object store behind pgBackRest highly available: the two deployment modes pgcli exposes and why only those two, plus the ZFS layer that adds disk-level redundancy — a single-host raidz pool, per-node pools in a distributed cluster, and heterogeneous nodes"
+description: "Making the MinIO/silo object store behind pgBackRest highly available: the three deployment modes pgcli exposes (SNSD/SNMD/MNSD), how native SNMD compares to a ZFS layer for disk redundancy, and the per-node ZFS recipes for a distributed cluster"
 weight: 55
 ---
 
@@ -13,58 +13,74 @@ are **orthogonal**:
 
 | Fault | Who absorbs it |
 |-------|----------------|
-| A **disk** dies inside a node | the storage layer under MinIO's data directory (ZFS) |
+| A **disk** dies inside a node | the drive-level EC under SNMD, or the storage layer under MinIO's data directory (ZFS) |
 | A **node** dies entirely | MinIO's own erasure coding (EC) across hosts |
 
-This page records the shapes pgcli supports for combining the two, and why the
-exposed mode list stops at two.
+This page records the shapes pgcli supports for combining the two, and how to
+pick among them.
 
-## The two deployment modes
+## The deployment modes
 
 MinIO classifies its layouts by node count and drive count per node
-([SNSD / SNMD / MNSD](../addon/minio/#deployment-modes)). pgcli exposes two:
+([SNSD / SNMD / MNSD](../addon/minio/#deployment-modes)). pgcli exposes three:
 
 | Mode | Shape | Use it for |
 |------|-------|------------|
 | **SNSD** (single-node, single-drive) | one node, one data directory — the default | dev, test, demos — and, paired with ZFS below, any single-host deployment that needs disk redundancy |
+| **SNMD** (single-node, *multi*-drive) | one node, several drives — one `--drive` per drive | a single host with N ≥ 4 data disks that must survive a disk loss without a filesystem layer |
 | **MNSD** (multi-node, single-drive) | ≥ 4 nodes, one data directory per node | compact high-availability deployments |
 
-### Why only two
+SNMD is native now: `pg addon install minio --drive /mnt/disk1 --drive ...`
+(one flag per drive) starts one MinIO process that erasure-codes across the
+drives. What it buys, measured on a live 4-drive set: 2 parity shards by
+default, so it tolerates 2 drive failures; with 1 drive down reads *and*
+writes continue, with 2 down reads still succeed but writes are refused (the
+quorum boundary); usable capacity is about half the raw total; a drive that
+returns is healed by MinIO itself. The same `--drive` works on
+[silo](../addon/silo/).
 
-MinIO and silo support more shapes than these — **SNMD** (single-node,
-*multi*-drive) and multi-node with several drives per node are both real,
-using MinIO's path-style endpoint syntax (a single node with
-`/data{1...4}`, or a host×drive matrix). pgcli simply does not wire those
-into the addon: `--endpoint` takes one routable host per node and `--data-dir`
-is one directory, so the two modes above are what the CLI can express today.
+Multi-node with several drives per node (MNMD) is still not wired in:
+`--endpoint` takes one routable host per node, so a distributed cluster keeps
+the one-drive-per-node shape.
 
-That is a deliberate scope call, not a gap we consider worth closing. Disk
-redundancy is a *filesystem* job, and ZFS does it better and more flexibly
-than MinIO's own multi-drive mode could:
+### SNMD vs ZFS: two ways to survive a disk
 
-- **One mechanism serves both modes.** `raidz1` under SNSD protects a single
-  host's store; the same recipe under each node of an MNSD cluster protects a
-  distributed one. A MinIO SNMD/MNMD layout, by contrast, only ever applies to
-  whichever node it was declared on.
-- **The layout stays changeable underneath.** Swap two disks for a mirror,
-  grow the pool, migrate to `raidz2` — `--data-dir` never changes and MinIO
-  notices nothing. MinIO's drive set is fixed at install time.
-- **Nodes may be heterogeneous.** A 2-disk node and a 6-disk node look
-  identical to MinIO (one endpoint each). With MinIO-level multi-drive, every
-  member has to describe its drives to the cluster.
-- **Quorum math stays simple.** Writes need ⌈N/2⌉+1 *nodes*. When drives
-  inside a node also count as failure members, the arithmetic of "what can
-  this cluster survive" stops being legible.
+Both protect a single host's data against disk loss; they differ in where the
+redundancy lives and what that costs.
 
-So the division of labor is: **MinIO does node-level EC, ZFS does disk-level
-redundancy** — and each layer stays simple.
+| | native **SNMD** (`--drive`) | **ZFS** pool under `--data-dir` |
+|---|---|---|
+| quorum unit | the *drive* — MinIO counts drives as failure members | invisible to MinIO — one big drive, the pool absorbs disk loss |
+| layout changeable later | fixed at install (the drive set is the EC set) | freely — swap disks, grow, migrate `raidz1`→`raidz2`; `--data-dir` never changes |
+| usable capacity, 4 disks | ~half (2 data + 2 parity) | depends on vdev: `raidz2` = 2×disk, `raidz1` = 3×disk (more usable) |
+| rebuild | MinIO heals a returned drive | ZFS resilvers locally |
+| serves which modes | SNMD only | SNSD *and* MNSD (same recipe under each node) |
+| heterogeneous nodes | every member must be a drive set | a 2-disk node and a 6-disk node look identical (one endpoint each) |
+
+The honest tradeoff: **SNMD is simpler** — one command, no filesystem to
+provision, and it gets you disk redundancy on a single host with zero ZFS
+setup. **ZFS is more flexible** — the layout stays changeable underneath, it
+saves more capacity on the same disks (`raidz1` keeps 3 of 4 usable where
+SNMD's EC:2 keeps 2 of 4), and it's the *only* option that also serves MNSD,
+where a disk failure must not escalate into a node loss. So:
+
+- single host, want disk redundancy without touching ZFS → **SNMD**
+- single host, want the most usable capacity / a layout you can change later →
+  **SNSD + ZFS**
+- distributed cluster, disk *and* node failure → **MNSD + per-node ZFS** (SNMD
+  cannot span hosts; that's the MNMD shape pgcli doesn't expose yet)
+
+Neither is wrong on a single box — SNMD's 50% capacity is the price of not
+managing a pool, and ZFS's flexibility is the price of provisioning one. The
+rest of this page documents the ZFS path, which remains the recommendation for
+MNSD and for capacity-sensitive single hosts.
 
 ## ZFS: the flexible disk layer
 
-The recipe is identical for both modes: build a zpool from the host's data
-disks, create one dataset for the store, and point `--data-dir` at its mount
-point. MinIO sees "one big reliable drive"; it never learns how many physical
-disks are under it.
+The recipe is identical under SNSD and MNSD: build a zpool from the host's
+data disks, create one dataset for the store, and point `--data-dir` at its
+mount point. MinIO sees "one big reliable drive"; it never learns how many
+physical disks are under it.
 
 ```bash
 # one pool from the host's spare disks (mount point defaults to /minio-pool)
@@ -191,9 +207,9 @@ layer down.)
 | Situation | Shape |
 |-----------|-------|
 | laptop / demo / CI | SNSD, default data dir — nothing to decide |
-| one host with N ≥ 4 data disks, backups must survive a disk | SNSD + `raidz2` on spinning disks, `raidz1` on fast SSDs |
+| one host with N ≥ 4 data disks, backups must survive a disk | SNMD (`--drive` × N) — zero filesystem setup; or SNSD + ZFS (`raidz2` on spinning disks, `raidz1` on fast SSDs) for more usable capacity and a changeable layout |
 | a few hosts, one data disk each, must survive a host | MNSD plain |
-| hosts with several data disks each, must survive a disk *and* a host | MNSD + per-node ZFS (layouts may differ per node; keep capacities aligned) |
+| hosts with several data disks each, must survive a disk *and* a host | MNSD + per-node ZFS (layouts may differ per node; keep capacities aligned) — SNMD can't span hosts |
 
 The store's TLS story is independent of the topology: whichever shape you
 pick, `--tls` (or `pg cert`-minted BYO certificates) works the same — see
