@@ -194,3 +194,43 @@ func TestMinioDrivesRoundTrip(t *testing.T) {
 		t.Errorf("plain instance drives = %v, want empty", d)
 	}
 }
+
+// MNMD is the fourth shape: Drives and Endpoints coexist in one config — drives
+// name this node's mounts, endpoints carry the whole cluster's matrix. Both keys
+// must round-trip together, each preserving order.
+func TestMinioMNMDRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pg.yaml")
+	cfg := Default()
+	cfg.Addons.Minio = map[string]MinioConfig{
+		"mnmd": {
+			ContainerName: "pgcli-minio-mnmd",
+			Name:          "mnmd",
+			Drives:        []string{"/mnt/d1", "/mnt/d2"},
+			Endpoints: []string{
+				"http://10.0.0.1:9000/data1", "http://10.0.0.1:9000/data2",
+				"http://10.0.0.2:9000/data1", "http://10.0.0.2:9000/data2",
+			},
+		},
+	}
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(raw), "drives:") || !strings.Contains(string(raw), "endpoints:") {
+		t.Fatalf("MNMD config must persist both drives and endpoints:\n%s", raw)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	mc := got.Addons.Minio["mnmd"]
+	if !reflect.DeepEqual(mc.Drives, []string{"/mnt/d1", "/mnt/d2"}) {
+		t.Errorf("MNMD drives round-trip = %v", mc.Drives)
+	}
+	if !reflect.DeepEqual(mc.Endpoints, cfg.Addons.Minio["mnmd"].Endpoints) {
+		t.Errorf("MNMD endpoints round-trip mismatch:\n got %v\nwant %v", mc.Endpoints, cfg.Addons.Minio["mnmd"].Endpoints)
+	}
+}

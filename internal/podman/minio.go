@@ -63,13 +63,13 @@ func (m *MinioManager) resolveDataDir(mc *config.MinioConfig) string {
 }
 
 // resolveDriveDirs returns the host directories backing this instance's MinIO
-// drives. In single-node multi-drive mode (mc.Drives non-empty, which the
-// container layer only honors when Endpoints is empty — MNSD owns that axis) it
-// returns the configured drives verbatim, in order; drive N is mounted at
-// /dataN and MinIO erasure-codes across them. Otherwise it collapses to the
-// single resolveDataDir, so every consumer treats SNSD/MNSD as a one-drive case.
+// drives. Whenever mc.Drives is non-empty it returns the configured drives
+// verbatim, in order: drive N is mounted at /dataN and MinIO erasure-codes
+// across them — single-node (SNMD) or as one node of a distributed set (MNMD,
+// where the endpoints carry the full host×drive matrix). Otherwise it collapses
+// to the single resolveDataDir, so SNSD/MNSD stay the one-drive case.
 func (m *MinioManager) resolveDriveDirs(mc *config.MinioConfig) []string {
-	if len(mc.Drives) > 0 && len(mc.Endpoints) == 0 {
+	if len(mc.Drives) > 0 {
 		return mc.Drives
 	}
 	return []string{m.resolveDataDir(mc)}
@@ -276,9 +276,12 @@ func (m *MinioManager) StartContainer(mc *config.MinioConfig) error {
 	return nil
 }
 
-// createContainer runs MinIO: single-node serving /data (the bind-mounted
-// data dir) when mc.Endpoints is empty, or a distributed cluster with mc.Endpoints
-// as the shared endpoint list when non-empty (see config.MinioConfig.Endpoints).
+// createContainer runs MinIO: a single-node server over the bind-mounted data
+// dir when neither mc.Endpoints nor mc.Drives is set, SNMD (`server /data1
+// ..dataN`) when Drives is set, and a distributed cluster when mc.Endpoints is
+// non-empty — with Drives also set that is MNMD: this node's drives mount at
+// their own /dataN slots while the argv carries the shared host×drive endpoint
+// matrix (see config.MinioConfig.Endpoints).
 // Linux: host networking, bound to mc.Listen:APIPort (S3 API) and
 // mc.Listen:ConsolePort (web console). macOS: the same ports on the pgcli-net
 // bridge, published -p N:N so the Mac reaches them on 127.0.0.1 — which needs
@@ -345,8 +348,8 @@ func (m *MinioManager) createContainer(mc *config.MinioConfig) error {
 		"--name", mc.ContainerName,
 	}
 	args = append(args, netFlags(m.bridge, m.cfg.Podman.Network, mc.APIPort, mc.ConsolePort)...)
-	// Data layout + server argv follow the one mode rule (endpoints=MNSD,
-	// drives=SNMD, else SNSD), shared verbatim with silo via
+	// Data layout + server argv follow the one mode rule (endpoints+drives=MNMD,
+	// endpoints=MNSD, drives=SNMD, else SNSD), shared verbatim with silo via
 	// storeMountsAndServerArgv.
 	driveMounts, serverArgs := storeMountsAndServerArgv(driveDirs, mc.Endpoints, len(mc.Drives) > 0)
 	args = append(args,
