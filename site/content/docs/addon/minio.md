@@ -476,9 +476,29 @@ drives) and must name at least one remote node; a matrix that folds onto a
 single host is rejected before the container starts, as is a `--tls` node whose
 endpoints are plaintext `http://`.
 
+**Serving the grid over TLS — one certificate, not a CA per node.** Let each
+node's bare `--tls` run and every host mints its *own* self-signed CA, so the
+first cross-node handshake dies with `x509: certificate signed by unknown
+authority` and you are left seeding one CA into every node's cert store by
+hand. The clean path is a single certificate shared by the whole grid:
+`pg cert` writes one self-signed leaf whose SANs cover every node address, you
+copy that one `.crt`/`.key` pair to all nodes byte-identically, and serve it
+with `--tls-cert` / `--tls-key` (there is no per-node CA to reconcile). This is
+the recommended TLS setup — pgBackRest forces HTTPS for an S3 repo anyway, so a
+backup store is a TLS grid. The endpoint matrix must then be all `https://`, and
+every address a node dials must be in the leaf's SANs. (The same shared leaf
+serves an MNSD grid just as well — the handshake is between the same servers.)
+
 ```bash
+# once, anywhere — one leaf for the whole grid (list every node address; add any
+# VIP or hostname clients will dial):
+pg cert --host 10.0.0.11,10.0.0.12,10.0.0.20,10.0.0.21 \
+        --cert-file grid.crt --key-file grid.key
+# then copy grid.crt + grid.key to every node — identical files everywhere
+
 # on node 1 (10.0.0.11), four data disks mounted and passed with --drive:
-pg addon install minio --name store --tls \
+pg addon install minio --name store \
+  --tls-cert grid.crt --tls-key grid.key \
   --listen 0.0.0.0 \
   --drive /mnt/minio/disk1 --drive /mnt/minio/disk2 \
   --drive /mnt/minio/disk3 --drive /mnt/minio/disk4 \
@@ -492,16 +512,17 @@ pg addon install minio --name store --tls \
   --endpoint https://10.0.0.21:9000/data1 --endpoint https://10.0.0.21:9000/data2 \
   --endpoint https://10.0.0.21:9000/data3 --endpoint https://10.0.0.21:9000/data4
 
-# nodes 2-4: same command, own --drive paths, and the SAME 16-endpoint matrix
-# AND the SAME --root-password value.
+# nodes 2-4: same command, the SAME grid.crt/grid.key pair, own --drive paths,
+# and the SAME 16-endpoint matrix AND the SAME --root-password value.
 ```
 
 The `--listen 0.0.0.0` is deliberate: each node must answer on the address the
 other 15 endpoints name. `--root-password` must be identical everywhere, exactly
 as under MNSD.
 
-On a live 4-node × 4-drive set (16 × 2 GiB) the measured shape, via
-`mc admin info`:
+On a live 4-node × 4-drive set (16 × 2 GiB) — formed over exactly this
+shared-`pg cert` TLS setup, the ring coming up with `Network: 4/4 OK` and no
+per-node CA to reconcile — the measured shape, via `mc admin info`:
 
 - **16 drives online, EC:4** in a single erasure set of stripe size 16 — the
   set reports 4 parity shards, so losing 4 drives of 16 stays healthy.

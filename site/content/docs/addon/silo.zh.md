@@ -274,6 +274,11 @@ MNMD 与 MinIO 下的做法完全一致：用 `--drive` 传本节点的盘，用
 节点**（8/16 在线）时写被拒（`Resource requested is unwritable`）、读也失败，
 节点重启后集合自愈回 16/16。16 盘 EC:4 保留原始字节的 12/16。
 
+TLS 集群的推荐与 MinIO 下一条完全一致——一张 `pg cert` 叶子、SAN 覆盖所有节
+点地址、每个节点 `--tls-cert`/`--tls-key` 同一对文件——并在 silo 上按与 minio
+相同的方式验证过：grid 直接成环，没有逐节点 CA 需要对齐。配法见
+[MinIO → 多机多盘（MNMD）](../minio/#多机多盘mnmd)。
+
 ## 使用 mcli 客户端
 
 `pg mcli` 从 pgsty/silo 镜像（经 `--entrypoint mcli` 选择——镜像默认

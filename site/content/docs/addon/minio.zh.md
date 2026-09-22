@@ -406,9 +406,27 @@ URL——它把整个矩阵原样交给 `minio server`，与 MinIO 官方文档�
 求每个节点贡献相同数量的盘），且必须至少包含一台远端节点；会折叠到单台主机的
 矩阵会在容器启动前就被拒绝，`--tls` 节点搭配明文 `http://` 端点同样会被拒。
 
+**用 TLS 服务整个 grid——一份证书，而不是每节点一张 CA。** 让每个节点各自跑
+裸 `--tls`，每台主机就会签出自己的*私有* CA，于是第一次跨节点握手死在 `x509:
+certificate signed by unknown authority`，剩下的活儿只能靠手工把某一张 CA 种进
+每个节点的证书目录。干净的做法是整个 grid 共用一份证书：`pg cert` 写出一张
+SAN 覆盖所有节点地址的自签叶子，把这一份 `.crt`/`.key` 逐字节相同地复制到所有
+节点，用 `--tls-cert` / `--tls-key` 服务它（根本没有逐节点 CA 需要对齐）。这
+就是推荐的 TLS 配法——反正 pgBackRest 对 S3 仓库强制 HTTPS，一个备份 store 本
+就是一个 TLS grid。端点矩阵届时必须全部是 `https://`，且节点拨出的每个地址都
+要在叶子的 SAN 里。（同一份共享叶子服务 MNSD 集群同样合适——握手的还是那几台
+服务器。）
+
 ```bash
+# 任意一台上执行一次——整个 grid 共用一张叶子（列出所有节点地址；客户端还会拨的
+# VIP 或主机名也一并加上）：
+pg cert --host 10.0.0.11,10.0.0.12,10.0.0.20,10.0.0.21 \
+        --cert-file grid.crt --key-file grid.key
+# 然后把 grid.crt + grid.key 复制到每个节点——各处都是逐字节相同的文件
+
 # 节点 1（10.0.0.11），四块数据盘已挂载并用 --drive 传入：
-pg addon install minio --name store --tls \
+pg addon install minio --name store \
+  --tls-cert grid.crt --tls-key grid.key \
   --listen 0.0.0.0 \
   --drive /mnt/minio/disk1 --drive /mnt/minio/disk2 \
   --drive /mnt/minio/disk3 --drive /mnt/minio/disk4 \
@@ -422,14 +440,16 @@ pg addon install minio --name store --tls \
   --endpoint https://10.0.0.21:9000/data1 --endpoint https://10.0.0.21:9000/data2 \
   --endpoint https://10.0.0.21:9000/data3 --endpoint https://10.0.0.21:9000/data4
 
-# 节点 2-4：同样的命令、各自的 --drive 路径，以及完全相同的 16 条端点矩阵
-# 和完全相同的 --root-password 值。
+# 节点 2-4：同样的命令、同一份 grid.crt/grid.key、各自的 --drive 路径，以及
+# 完全相同的 16 条端点矩阵和完全相同的 --root-password 值。
 ```
 
 `--listen 0.0.0.0` 是有意为之：每个节点都要在其他 15 条端点所指名的地址上应答。
 `--root-password` 必须处处一致，与 MNSD 的要求相同。
 
-在活体的 4 节点 × 4 盘集群（16 × 2 GiB）上，用 `mc admin info` 实测到的形状：
+在活体的 4 节点 × 4 盘集群（16 × 2 GiB）上——正是用上面这套共享 `pg cert` 的
+TLS 配法成环，`Network: 4/4 OK`，没有逐节点 CA 需要对齐——用 `mc admin info`
+实测到的形状：
 
 - **16 块盘在线，EC:4**，位于单个 stripe 大小为 16 的纠删码集合里——该集合报
   4 片校验，因此 16 块盘里坏 4 块仍然健康。

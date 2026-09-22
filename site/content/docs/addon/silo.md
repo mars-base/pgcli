@@ -314,6 +314,12 @@ refuses writes (`Resource requested is unwritable`) and fails reads too, and
 the set self-heals back to 16/16 once the nodes restart. EC:4 over 16 drives
 keeps 12/16 of raw bytes.
 
+For a TLS grid the same recommendation applies as under MinIO — one
+`pg cert` leaf whose SANs cover every node address, the identical
+`--tls-cert`/`--tls-key` pair on every node — and it was verified on silo
+exactly as on minio: the ring forms with no per-node CA to reconcile. See
+[MinIO → MNMD](../minio/#multi-node-multi-drive-mnmd) for the setup.
+
 ## Using the mcli Client
 
 `pg mcli` runs silo's own `mcli` client from the pgsty/silo image in a

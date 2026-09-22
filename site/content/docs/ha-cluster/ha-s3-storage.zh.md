@@ -137,12 +137,20 @@ MinIO 每节点只见一块盘，坏盘由本地池吸收。两条路的失败�
 ### 原生 MNMD
 
 一条矩阵、没有文件系统层：每个节点用 `--drive` 传自己的盘，每个节点携带完全
-相同的 host×drive 端点列表。
+相同的 host×drive 端点列表。TLS 方面，签一张共享叶子、每个节点装同一对文件
+（见下文实测之后的 TLS 说明）。
 
 ```bash
-# 节点 1（10.0.0.11），四块数据盘已挂载；节点 2-4：同样的命令、各自的
-# --drive 路径、完全相同的 16 条端点矩阵、完全相同的 --root-password：
-pg addon install minio --name store --tls \
+# 任意一台上执行一次——一张 SAN 覆盖所有节点地址的自签叶子：
+pg cert --host 10.0.0.11,10.0.0.12,10.0.0.20,10.0.0.21 \
+        --cert-file grid.crt --key-file grid.key
+# 把 grid.crt + grid.key 复制到每个节点——各处都是逐字节相同的文件
+
+# 节点 1（10.0.0.11），四块数据盘已挂载；节点 2-4：同样的命令、同一份
+# grid.crt/grid.key、各自的 --drive 路径、完全相同的 16 条端点矩阵、完全相同
+# 的 --root-password：
+pg addon install minio --name store \
+  --tls-cert grid.crt --tls-key grid.key \
   --listen 0.0.0.0 \
   --drive /mnt/minio/disk1 --drive /mnt/minio/disk2 \
   --drive /mnt/minio/disk3 --drive /mnt/minio/disk4 \
@@ -169,11 +177,15 @@ stripe 大小 16 的纠删码集、EC:4**——16 块盘里坏 4 块仍然健康
 
 可用容量随校验比例而定：16 盘 EC:4 保留原始字节的 **12/16**。代价是：布局在
 install 时定死（矩阵就是 EC 集合）、每个节点必须贡献相同盘数，而 pgcli 查不
-出*另一台*节点上写歪的矩阵——保持 N 份 `pg.yaml` 一致是运维的职责。用
-`--tls` 时，整个 grid 需要一个共享 CA：先把同一份 CA 材料（或自带
-`cert_file`/`key_file`）种进每个节点的 certs 目录再启动其余节点——各节点各自
-自签的 CA 会让跨节点握手失败于 `x509: certificate signed by unknown
-authority`。
+出*另一台*节点上写歪的矩阵——保持 N 份 `pg.yaml` 一致是运维的职责。跨 grid 的
+TLS，**服务一份共享证书**：用 `pg cert --host <所有节点地址，逗号分隔>` 签一
+张自签叶子，再用 `--tls-cert`/`--tls-key` 装到每个节点（同一对文件各处逐字节
+相同，端点矩阵全部 `https://`）。grid 随即成环，没有任何逐节点 CA 需要对齐
+——在活体的 4 节点集上验证过：环以 `Network: 4/4 OK` 起来、`CAs/` 目录为空，
+因为那张共享叶子自身就是信任锚，而每个节点本来就持有它。退路才是生成模式：
+若让每个节点各跑裸 `--tls`，每台主机会签出自己的*私有* CA，第一次跨节点握手
+死在 `x509: certificate signed by unknown authority`，直到你手工把某一份共享
+CA 种进每个节点的证书目录——而共享 `pg cert` 这条路把这个活儿整个消掉了。
 
 ### MNSD + 每节点 ZFS
 
@@ -239,7 +251,7 @@ ZFS——而不是一个把同样单点风险藏低一层的条带池。）
 | 可用容量 | 该集合上是原始的 12/16（EC:4）——校验片数是 MinIO 为这个 stripe 选的 | 本地 `raidz1` 每池留 3/4，再经跨节点 EC 减半 |
 | 日后可否改布局 | install 时定死——矩阵就是 EC 集合 | 可改——换盘、vdev、布局都不碰 MinIO |
 | 异构节点 | 不可能：每个节点必须贡献相同盘数 | 天然支持——每节点只是一个 endpoint，本地布局随意 |
-| TLS | grid 需要一个跨节点共享的 CA（种同一份 CA 材料，或自带证书） | 与任何 MNSD 集群的要求相同 |
+| TLS | 一张共享证书服务整个 grid：`pg cert` 签一张覆盖所有节点地址的叶子，`--tls-cert`/`--tls-key` 各处一致地装上（没有 CA 要对齐） | 同理——节点之间仍是 TLS grid，同一套共享叶子配法照用 |
 
 节点彼此一致、盘的规划已经定死、只靠 MinIO 就要同时拿到盘与节点的冗余、底下
 什么都不想置备——选 **MNMD**。各节点的盘数/盘大小不一、布局日后可能变、或者习

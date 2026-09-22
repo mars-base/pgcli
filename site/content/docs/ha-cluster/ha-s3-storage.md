@@ -157,12 +157,21 @@ They fail differently, so the choice is real either way.
 ### Native MNMD
 
 One matrix, no filesystem layer: each node passes its own drives with
-`--drive` and every node carries the identical host×drive endpoint list.
+`--drive` and every node carries the identical host×drive endpoint list. For
+TLS, generate one shared leaf and install the same pair on every node (see the
+TLS note after the measurements below).
 
 ```bash
-# node 1 (10.0.0.11) — four data disks mounted; nodes 2–4: same command,
-# own --drive paths, SAME 16-endpoint matrix, SAME --root-password:
-pg addon install minio --name store --tls \
+# once, anywhere — one self-signed leaf whose SANs cover every node address:
+pg cert --host 10.0.0.11,10.0.0.12,10.0.0.20,10.0.0.21 \
+        --cert-file grid.crt --key-file grid.key
+# copy grid.crt + grid.key to every node — byte-identical files everywhere
+
+# node 1 (10.0.0.11) — four data disks mounted; nodes 2–4: same command, the
+# SAME grid.crt/grid.key, own --drive paths, SAME 16-endpoint matrix, SAME
+# --root-password:
+pg addon install minio --name store \
+  --tls-cert grid.crt --tls-key grid.key \
   --listen 0.0.0.0 \
   --drive /mnt/minio/disk1 --drive /mnt/minio/disk2 \
   --drive /mnt/minio/disk3 --drive /mnt/minio/disk4 \
@@ -192,11 +201,19 @@ Usable capacity follows the parity ratio: EC:4 over 16 drives keeps **12/16**
 of raw bytes. The costs: the layout is fixed at install (the matrix is the EC
 set), every node must contribute the same number of drives, and pgcli cannot
 detect a matrix typo on *another* node — keeping the N `pg.yaml` files
-identical is the operator's job. With `--tls`, the grid needs one shared
-certificate authority: seed the same CA material (or BYO `cert_file`/
-`key_file`) into every node's certs dir before starting the rest — per-node
-self-signed CAs make cross-node handshakes fail with `x509: certificate
-signed by unknown authority`.
+identical is the operator's job.
+
+For TLS across the grid, **serve one shared certificate**: mint a single self-
+signed leaf with `pg cert --host <every node address, comma-separated>` and
+install it on every node with `--tls-cert`/`--tls-key` (the same two files
+byte-identical everywhere, the endpoint matrix all `https://`). The grid then
+forms with no per-node CA to reconcile — verified on a live 4-node set: the ring
+came up `Network: 4/4 OK` with an empty `CAs/` dir, because that shared leaf is
+its own trust anchor and every node already holds it. The fallback is the
+generated mode: if you let each node run a bare `--tls`, every host mints its
+*own* CA and the first cross-node handshake dies with `x509: certificate signed
+by unknown authority` until you seed one shared CA into every node's cert dir by
+hand — which the shared-`pg cert` path avoids entirely.
 
 ### MNSD + per-node ZFS
 
@@ -272,7 +289,7 @@ layer down.)
 | usable capacity | 12/16 of raw on that set (EC:4) — the parity is MinIO's choice for the stripe | local `raidz1` keeps 3/4 per pool, then EC halves across nodes |
 | layout later | fixed at install — the matrix *is* the EC set | changeable — disks, vdevs, layouts move without touching MinIO |
 | heterogeneous nodes | not possible: every node must contribute the same drive count | natural — each node is just one endpoint, any local layout |
-| TLS | the grid needs one shared CA across nodes (seed the same CA material, or BYO certs) | same requirement as any MNSD cluster |
+| TLS | one shared cert serves the whole grid: `pg cert` a single leaf covering every node address, `--tls-cert`/`--tls-key` it identically everywhere (no CA to reconcile) | the same — it's still a TLS grid between nodes, so the same shared-leaf setup applies |
 
 Pick **MNMD** when the nodes are identical, the disk plan is settled, and you
 want disk *and* node redundancy from MinIO alone with nothing to provision
