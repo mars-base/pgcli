@@ -69,11 +69,14 @@ pg addon install postgrest \
 
 # Tune the connection pool PostgREST keeps toward its backend
 pg addon install postgrest -i mypg --db-pool 20
+
+# Enable JWT auth (unauthenticated requests still fall back to --anon-role)
+pg addon install postgrest -i mypg --schema api --anon-role web_anon --jwt-secret "$(openssl rand -hex 32)"
 ```
 
 Re-running install is idempotent: an existing container is reused (a stopped
 one is started). Pass `--force` to recreate it after changing ports, listen
-address, DSN, db-pool, schema, or anon-role.
+address, DSN, db-pool, schema, anon-role, or jwt-secret.
 
 **Parameters:**
 
@@ -85,6 +88,7 @@ address, DSN, db-pool, schema, or anon-role.
 | `--schema` | Exposed schema(s), comma-separated; → `PGRST_DB_SCHEMAS` | PostgREST default (`public`) |
 | `--db-pool` | Connections in PostgREST's pool toward the backend; → `PGRST_DB_POOL` | PostgREST default (`10`) |
 | `--anon-role` | Role unauthenticated requests run as; → `PGRST_DB_ANON_ROLE` | — (anonymous access off) |
+| `--jwt-secret` | Secret used to verify `Authorization: Bearer` JWTs; → `PGRST_JWT_SECRET` | — (JWT auth off) |
 | `--port` | HTTP host port | auto, from `postgrest_start_port` (base 3500) |
 | `--listen` | Bind address | `127.0.0.1` |
 | `--image` | Container image | `docker.io/postgrest/postgrest:v16.3` |
@@ -102,7 +106,7 @@ pg addon list
 ```
 
 PostgREST appears under **Local add-ons** / **Remote add-ons** with Status,
-REST URL, Backend, Schema, DB pool, Anon role, and Container.
+REST URL, Backend, Schema, DB pool, Anon role, JWT auth, and Container.
 
 ### Start / stop / remove / logs
 
@@ -148,6 +152,7 @@ addons:
       db_pool: 4
       schemas: api
       anon_role: web_anon
+      jwt_secret: <HS256-shared-secret>   # only present when --jwt-secret was given
       autostart: false
 ```
 
@@ -204,8 +209,9 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA api GRANT SELECT ON TABLES TO web_anon;
 
 PostgREST connects as the DSN user and `SET ROLE`s to `web_anon` per request, so
 that role needs the read grants; the connecting login role itself can stay
-narrow. Then install with `--anon-role web_anon`. Without an anonymous role,
-requests must carry a JWT; the install prints the same hint.
+narrow. Then install with `--anon-role web_anon`. The two ways to authenticate a
+request — anonymous (`--anon-role`) and JWT (`--jwt-secret`) — are covered next;
+without either, every request is refused with 401.
 
 PostgREST caches the schema it introspected. After a schema change, reload the
 cache:
@@ -260,12 +266,62 @@ A few things to expect on a fresh install:
   the schema cache is stale or `--anon-role` is unset — see the
   [Troubleshooting](#troubleshooting) table below for the fix.
 
+## JWT authentication
+
+`--anon-role` is the simplest model: every unauthenticated request runs as one
+fixed role. `--jwt-secret` turns on per-request identity. Pass it at install
+time (a HS256 shared secret, or a JSON Web Key for RS256); pgcli passes it to
+the container as `PGRST_JWT_SECRET`.
+
+```bash
+pg addon install postgrest -i mypg --schema api --anon-role web_anon \
+  --jwt-secret "$(openssl rand -hex 32)"
+```
+
+> The secret is **not** written to your shell history if you inline a command
+> substitution as shown. It does land in `pg.yaml` (so pgcli can recreate the
+> container) — treat that file as secret-bearing, and re-run install with
+> `--force` after changing it.
+
+> **Length:** for HS256 the secret must be **at least 32 characters** (256-bit
+> key material; 48 for HS384, 64 for HS512). PostgREST refuses to start with a
+> shorter one — `openssl rand -hex 32` (64 chars) is a safe default. A JWK (for
+> RS256/ECDSA) has no such minimum; the key strength comes from the JWK itself.
+
+With a secret set, PostgREST verifies any request that carries
+`Authorization: Bearer <token>` and runs it as the role named in the token's
+**`role`** claim:
+
+- The token must be signed with the same secret; a tampered one is rejected 401.
+- The `role` claim must name a database role with grants on the exposed schema
+  (create it like `web_anon` above, `NOINHERIT`).
+- Change the claim key from `role` via `PGRST_JWT_ROLE_CLAIM_KEY` if your issuer
+  uses another field — pgcli does not surface that flag; set it on the container
+  directly if needed.
+
+`--anon-role` and `--jwt-secret` compose: requests **with** a valid JWT run as
+their `role` claim, requests **without** one fall back to `--anon-role`. With
+neither flag, every request is refused (401). A typical progression is anon for
+public reads plus JWT roles for authenticated writes.
+
+In production your application's auth service signs the tokens. To hand-craft a
+test token with the same HS256 secret:
+
+```bash
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+SECRET='<the --jwt-secret value>'
+HEADER=$(printf '{"alg":"HS256","typ":"JWT"}' | b64url)
+PAYLOAD=$(printf '{"role":"web_user","exp":%d}' $(( $(date +%s) + 3600 )) | b64url)
+SIG=$(printf '%s.%s' "$HEADER" "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" -binary | b64url)
+curl -s -H "Authorization: Bearer $HEADER.$PAYLOAD.$SIG" http://127.0.0.1:3500/widgets
+```
+
 ## Troubleshooting
 
 | Symptom | Likely cause / fix |
 |---------|--------------------|
 | Install fails with `cannot connect to source database` | The DSN host:port is unreachable from the container (on macOS, remote `127.0.0.1` points at the Mac, not the VM). Verify with `pg exec --dsn <dsn> "SELECT 1"`. |
-| Every request returns HTTP 401 `Anonymous access is disabled` | No `--anon-role` was given and you're sending unauthenticated requests — add `--anon-role`, or send a JWT. |
+| Every request returns HTTP 401 `Anonymous access is disabled` | No `--anon-role` was given and the request carried no valid JWT — add `--anon-role`, or install with `--jwt-secret` and send a signed token. A JWT 401 with `--jwt-secret` set means the signature/`role` claim is wrong. |
 | A brand-new table/relationship still returns 404/`PGRST205` after `NOTIFY pgrst` | Reload is not reaching PostgREST (see **transaction pooling** above). Restart the container, or use a session/direct connection. |
 | Writes fail right after a Patroni failover | The DSN pointed at a member's direct port, not the HAProxy rw listener — install warned about this. Re-point the DSN at the LB. |
 | `--db-pool` change didn't take effect | Existing containers are reused; re-run install with `--force` to recreate. |

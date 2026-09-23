@@ -61,10 +61,13 @@ pg addon install postgrest \
 
 # 调整 PostgREST 面向后端的连接池大小
 pg addon install postgrest -i mypg --db-pool 20
+
+# 启用 JWT 认证（未认证请求仍回落到 --anon-role）
+pg addon install postgrest -i mypg --schema api --anon-role web_anon --jwt-secret "$(openssl rand -hex 32)"
 ```
 
 重复安装是幂等的：已存在的容器会被复用（停着的会被启动）。改过端口、监听地址、
-DSN、db-pool、schema 或 anon-role 后，加 `--force` 重建容器以生效。
+DSN、db-pool、schema、anon-role 或 jwt-secret 后，加 `--force` 重建容器以生效。
 
 **参数：**
 
@@ -76,6 +79,7 @@ DSN、db-pool、schema 或 anon-role 后，加 `--force` 重建容器以生效�
 | `--schema` | 暴露的 schema（可逗号分隔多个）；→ `PGRST_DB_SCHEMAS` | PostgREST 默认（`public`） |
 | `--db-pool` | PostgREST 面向后端的连接池大小；→ `PGRST_DB_POOL` | PostgREST 默认（`10`） |
 | `--anon-role` | 未认证请求所切换到的角色；→ `PGRST_DB_ANON_ROLE` | —（匿名访问关闭） |
+| `--jwt-secret` | 验证 `Authorization: Bearer` JWT 所用的密钥；→ `PGRST_JWT_SECRET` | —（JWT 认证关闭） |
 | `--port` | HTTP 主机端口 | 自动，取自 `postgrest_start_port`（基 3500） |
 | `--listen` | 绑定地址 | `127.0.0.1` |
 | `--image` | 容器镜像 | `docker.io/postgrest/postgrest:v16.3` |
@@ -92,7 +96,7 @@ pg addon list
 ```
 
 PostgREST 出现在**本地插件**/**远程插件**段下，含 Status、REST URL、Backend、
-Schema、DB pool、Anon role、Container。
+Schema、DB pool、Anon role、JWT auth、Container。
 
 ### 启动 / 停止 / 移除 / 日志
 
@@ -137,6 +141,7 @@ addons:
       db_pool: 4
       schemas: api
       anon_role: web_anon
+      jwt_secret: <HS256共享密钥>   # 仅在给了 --jwt-secret 时才会出现
       autostart: false
 ```
 
@@ -188,7 +193,8 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA api GRANT SELECT ON TABLES TO web_anon;
 
 PostgREST 以 DSN 用户连接、每个请求再 `SET ROLE` 到 `web_anon`，因此读权限要落在
 这个角色上；连接用的登录角色本身权限可保持很窄。然后用 `--anon-role web_anon`
-安装。没有匿名角色时，请求必须带 JWT；安装输出里也会打印同样的提示。
+安装。认证请求的两种方式——匿名（`--anon-role`）与 JWT（`--jwt-secret`）——见
+下文；两者都不设时，每个请求都会被拒绝（401）。
 
 PostgREST 会缓存它内省到的 schema。schema 变更后需要重载缓存：
 
@@ -236,12 +242,56 @@ curl -s "http://127.0.0.1:3500/widgets?id=eq.1"   # 带过滤条件
 - 刚建的表返回 `404`、未认证请求返回 `401`，说明 schema 缓存过期或未设
   `--anon-role`——修法见下方**排障**表。
 
+## JWT 认证
+
+`--anon-role` 是最简单的模型：每个未认证请求都固定以某个角色运行。
+`--jwt-secret` 则打开按请求划分的身份。安装时传入它（HS256 共享密钥，或用于
+RS256 的 JSON Web Key）；pgcli 会作为 `PGRST_JWT_SECRET` 传进容器。
+
+```bash
+pg addon install postgrest -i mypg --schema api --anon-role web_anon \
+  --jwt-secret "$(openssl rand -hex 32)"
+```
+
+> 若像上面那样内联命令替换，密钥**不会**进你的 shell 历史。但它会落到
+> `pg.yaml` 里（pgcli 要靠它重建容器）——请把这个文件当作含密文件对待，改过
+> 密钥后要加 `--force` 重新安装。
+
+> **长度：** HS256 的密钥**至少 32 个字符**（256-bit 密钥材料；HS384 需 48、
+> HS512 需 64）。更短的密钥会让 PostgREST **拒绝启动**——`openssl rand -hex 32`
+> （64 字符）是稳妥的默认值。JWK（用于 RS256/ECDSA）没有这个下限，强度由 JWK
+> 自身决定。
+
+设了密钥后，任何带 `Authorization: Bearer <token>` 的请求，PostgREST 都会先验签，
+再以 token 里 **`role`** claim 所指名的角色运行：
+
+- token 必须用同一密钥签名；被篡改的一律 401。
+- `role` claim 必须指到一个在暴露 schema 上有授权的角色（像上面的 `web_anon`
+  那样建，`NOINHERIT`）。
+- 若你的签发方用别的字段名，可用 `PGRST_JWT_ROLE_CLAIM_KEY` 改 claim 键——pgcli
+  没有暴露该 flag，需要时直接在容器上设置。
+
+`--anon-role` 与 `--jwt-secret` 可并存：**带**合法 JWT 的请求按其 `role` claim
+运行，**不带**的请求回落到 `--anon-role`。两者都不设时，每个请求都被拒绝（401）。
+常见组合是：公开读用匿名，认证写用 JWT 角色。
+
+生产环境由你应用的认证服务签发 token。手搓一个用同一 HS256 密钥的测试 token：
+
+```bash
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+SECRET='<--jwt-secret 的值>'
+HEADER=$(printf '{"alg":"HS256","typ":"JWT"}' | b64url)
+PAYLOAD=$(printf '{"role":"web_user","exp":%d}' $(( $(date +%s) + 3600 )) | b64url)
+SIG=$(printf '%s.%s' "$HEADER" "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" -binary | b64url)
+curl -s -H "Authorization: Bearer $HEADER.$PAYLOAD.$SIG" http://127.0.0.1:3500/widgets
+```
+
 ## 排障
 
 | 现象 | 可能原因 / 处理 |
 |------|-----------------|
 | 安装报 `cannot connect to source database` | 容器访问不到 DSN 的 host:port（macOS 上远程 `127.0.0.1` 指向 Mac 而非 VM）。用 `pg exec --dsn <dsn> "SELECT 1"` 验证。 |
-| 所有请求返回 HTTP 401 `Anonymous access is disabled` | 未给 `--anon-role` 且发的是未认证请求——补 `--anon-role`，或带 JWT。 |
+| 所有请求返回 HTTP 401 `Anonymous access is disabled` | 未给 `--anon-role` 且请求没带合法 JWT——补 `--anon-role`，或用 `--jwt-secret` 安装并发一个签名 token。若已设 `--jwt-secret` 仍 401，说明签名或 `role` claim 不对。 |
 | 新建的表/关系在 `NOTIFY pgrst` 后仍 404 / `PGRST205` | reload 没送达 PostgREST（见上文**事务池化**）。重启容器，或改用会话/直连。 |
 | Patroni failover 后写请求立刻失败 | DSN 指到了成员直连口而非 HAProxy 读写口——安装时已警告。把 DSN 改指 LB。 |
 | `--db-pool` 改动没生效 | 已存在的容器会被复用；加 `--force` 重装以重建。 |
