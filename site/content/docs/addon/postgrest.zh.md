@@ -281,7 +281,7 @@ pg addon install postgrest -i mypg --schema api --anon-role web_anon \
 b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 SECRET='<--jwt-secret 的值>'
 HEADER=$(printf '{"alg":"HS256","typ":"JWT"}' | b64url)
-PAYLOAD=$(printf '{"role":"web_user","exp":%d}' $(( $(date +%s) + 3600 )) | b64url)
+PAYLOAD=$(printf '{"role":"web_anon","exp":%d}' $(( $(date +%s) + 3600 )) | b64url)
 SIG=$(printf '%s.%s' "$HEADER" "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" -binary | b64url)
 curl -s -H "Authorization: Bearer $HEADER.$PAYLOAD.$SIG" http://127.0.0.1:3500/widgets
 ```
