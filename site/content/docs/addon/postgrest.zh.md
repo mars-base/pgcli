@@ -148,21 +148,30 @@ addons:
 省略 `--port` 时端口从 `postgrest_start_port` 端口池（基 3500）自动分配；该池独立
 于 PgBouncer / etcd / pgdog / minio 的池。
 
-## 连接 Patroni 集群
+## 推荐：用 HAProxy 接 Patroni 集群
 
-把 `--dsn` 指向集群的 **HAProxy 监听口**，而不是某个成员直连的 PG 端口。
+对 Patroni 集群，推荐形态是 **PostgREST → HAProxy 读写口 → 集群 leader**，
+而不是让 PostgREST 直连某个成员。把监听口作为 `--dsn` 传入（远程模式）：
 
 ```bash
-# 正确：写请求经 LB 的读写口跟随 leader
+# 推荐：写请求始终经 LB 的读写口跟随 leader
 pg addon install postgrest --dsn "postgres://api:pass@<lb-host>:5000/appdb" \
   --pg-name app-api --schema api --anon-role web_anon
 ```
 
-成员直连口在 failover 后会失去写入（旧 leader 不再接受写，但 DSN 仍指着它）。
-pgcli 在安装时会检测并给出警告，建议改指 HAProxy 监听口。
+为什么用监听口、而不是成员的直连 PG 端口：成员直连口在 failover 后会失去写入
+（旧 leader 不再接受写，但 DSN 仍指着它）。pgcli 在安装时会检测并给出警告，
+建议改指 HAProxy 监听口。
 
-- **failover 自愈。** 后端 leader 变更后，PostgREST 的重连 + 重载 schema 缓存
-  循环会经 LB 重新提供服务，无需 pgcli 干预。
+- **failover 自愈，无需重启。** leader 变更后，PostgREST 只需经 LB 重连、
+  自动选中新 leader——不用重启容器、也不用重跑 install。**实测**：一次
+  `pg ha switchover` 后，正好打在被关闭旧连接上的那一个在途写请求返回
+  `503`（`SQLSTATE 57P01`，连接被终止），紧随其后的重试就在 **新 leader**
+  上成功返回 `201`。把 leader 切换期间那一次瞬时的 `503`/`57P01` 当作预期
+  行为并重试即可。
+- **HAProxy 按健康检查路由，与"谁是 leader"解耦。** 读写口只放行通过
+  `/primary` 检查的成员，只读口只放行通过 `/replica` 检查的副本——所以
+  failover 不需要重新配置 haproxy，流量自己会漂移。
 - **横向扩容。** 在一个负载均衡器后面跑多个 PostgREST 副本；每个副本各自贡献
   `--db-pool` 份后端连接。
 

@@ -160,24 +160,34 @@ Ports are auto-assigned from the `postgrest_start_port` pool (base 3500) when
 `--port` is omitted; the pool is independent of the PgBouncer / etcd / pgdog /
 minio pools.
 
-## Connecting to a Patroni cluster
+## Recommended: front a Patroni cluster with HAProxy
 
-Point `--dsn` at the cluster's **HAProxy listener**, not at an individual
-member's direct PG port.
+For a Patroni cluster the recommended shape is **PostgREST → HAProxy rw
+listener → cluster leader**, not PostgREST pointed straight at a member. Pass
+the listener as `--dsn` (remote mode):
 
 ```bash
-# Good: writes follow the leader through the LB's rw listener
+# Recommended: writes always follow the leader through the LB's rw listener
 pg addon install postgrest --dsn "postgres://api:pass@<lb-host>:5000/appdb" \
   --pg-name app-api --schema api --anon-role web_anon
 ```
 
-A member's direct port loses writes after a failover (the old leader stops
-accepting them, but the DSN keeps pointing there). pgcli detects this at
-install time and warns, suggesting the HAProxy listener instead.
+Why the listener, not a member's direct port: a pinned member loses writes
+after a failover (the old leader stops accepting them, but the DSN keeps
+pointing there). pgcli detects a member's direct port at install time and warns,
+suggesting the HAProxy listener instead.
 
-- **Failover self-heal.** When the backend leader changes, PostgREST's
-  reconnect-and-reload cycle (it retries the connection and reloads the schema
-  cache) re-establishes service through the LB without any pgcli action.
+- **Failover self-heal, no restart.** When the leader changes, PostgREST just
+  reconnects through the LB and re-selects the new leader — service resumes
+  without restarting the container or re-running install. Verified: after a
+  `pg ha switchover`, the one in-flight write that hit the demoted connection
+  failed `503` (`SQLSTATE 57P01`, connection terminated), and the very next
+  retried request succeeded `201` against the new leader. Treat that single
+  transient `503`/`57P01` during a leader change as expected and retry it.
+- **HAProxy routes by health check, decoupled from who is leader.** The rw
+  listener only admits the member passing the `/primary` check and the ro
+  listener only the replicas passing `/replica`, so a failover needs no haproxy
+  reconfiguration — the traffic moves on its own.
 - **Scale-out.** Run several PostgREST replicas behind a load balancer; each
   adds its own `--db-pool` worth of backend connections.
 
