@@ -168,6 +168,9 @@ pgcli 只负责安装并运行 PostgREST 容器，**不碰你的数据库**。AP
 ——通常归你的 migration 管，不归 pgcli。以下这段可重复执行：
 
 ```sql
+-- 暴露的 schema（即 --schema 的值；若用 public 可省略，它本就存在）：
+CREATE SCHEMA IF NOT EXISTS api;
+
 -- 未认证请求所切换到的 NOINHERIT 角色（即 --anon-role 的值）。
 DO $$ BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'web_anon') THEN
@@ -203,8 +206,15 @@ NOTIFY pgrst, 'reload schema';
 
 ## 验证 API
 
-安装输出会打印 REST URL（`http://127.0.0.1:<port>`）。访问它确认服务已就绪，
-并查看它暴露了哪些关系：
+安装输出会打印 REST URL（`http://127.0.0.1:<port>`）。先在暴露的 schema 里建一张
+表，再访问 API 确认服务已就绪并能返回它的行：
+
+```sql
+CREATE TABLE api.widgets (id integer PRIMARY KEY, name text);
+INSERT INTO api.widgets VALUES (1, 'bolt'), (2, 'nut');
+GRANT SELECT ON api.widgets TO web_anon;
+NOTIFY pgrst, 'reload schema';   -- 否则新表仍会 404
+```
 
 ```bash
 # OpenAPI 根——PostgREST 连上后端后即应答。
@@ -223,9 +233,8 @@ curl -s "http://127.0.0.1:3500/widgets?id=eq.1"   # 带过滤条件
 
 - 根路径可能需要一点时间才应答——schema 内省在启动后才跑，最初的请求可能返回
   `503`，直到 PostgREST 连上后端。
-- 刚建的表返回 `404`/`PGRST205` 说明缓存早于它：发一句
-  `NOTIFY pgrst, 'reload schema'`（直连/会话连接），或重启容器。
-- `HTTP 401 Anonymous access is disabled` 表示未设 `--anon-role` 且请求没带 JWT。
+- 刚建的表返回 `404`、未认证请求返回 `401`，说明 schema 缓存过期或未设
+  `--anon-role`——修法见下方**排障**表。
 
 ## 排障
 

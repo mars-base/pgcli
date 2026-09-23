@@ -184,6 +184,9 @@ role PostgREST `SET ROLE`s to, plus grants on the exposed schema — usually own
 by your migrations, not pgcli. This block is re-runnable:
 
 ```sql
+-- The exposed schema (--schema value; skip for public, which already exists):
+CREATE SCHEMA IF NOT EXISTS api;
+
 -- The NOINHERIT role unauthenticated requests run as (the --anon-role value).
 DO $$ BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'web_anon') THEN
@@ -225,8 +228,16 @@ NOTIFY pgrst, 'reload schema';
 
 ## Verifying the API
 
-The install prints the REST URL (`http://127.0.0.1:<port>`). Hit it to confirm
-the server is live and see which relations it exposes:
+The install prints the REST URL (`http://127.0.0.1:<port>`). Create a table in
+the exposed schema, then hit the API to confirm the server is live and serves
+its rows:
+
+```sql
+CREATE TABLE api.widgets (id integer PRIMARY KEY, name text);
+INSERT INTO api.widgets VALUES (1, 'bolt'), (2, 'nut');
+GRANT SELECT ON api.widgets TO web_anon;
+NOTIFY pgrst, 'reload schema';   -- otherwise the new table stays 404
+```
 
 ```bash
 # The OpenAPI root — answers as soon as PostgREST has connected to the backend.
@@ -235,8 +246,8 @@ curl -s http://127.0.0.1:3500/ | head -c 120
 # Which tables/relations are exposed (from the OpenAPI paths):
 curl -s http://127.0.0.1:3500/ | grep -o '"/[a-z_]*"'
 
-# Read rows from a table in the exposed schema. The schema is implicit in the
-# path — it is /widgets, NOT /api.widgets:
+# Read rows from the table. The schema is implicit in the path — it is
+# /widgets, NOT /api.widgets:
 curl -s "http://127.0.0.1:3500/widgets"
 curl -s "http://127.0.0.1:3500/widgets?id=eq.1"   # a filter
 ```
@@ -245,11 +256,9 @@ A few things to expect on a fresh install:
 
 - The root can take a moment to answer — schema introspection runs after boot,
   so the first requests may `503` until PostgREST has connected.
-- If a table you just created returns `404`/`PGRST205`, the cache predates it:
-  send `NOTIFY pgrst, 'reload schema'` (direct/session connection) or restart
-  the container.
-- `HTTP 401 Anonymous access is disabled` means no `--anon-role` was set and the
-  request carried no JWT.
+- A `404` on a just-created table or a `401` on unauthenticated requests means
+  the schema cache is stale or `--anon-role` is unset — see the
+  [Troubleshooting](#troubleshooting) table below for the fix.
 
 ## Troubleshooting
 
