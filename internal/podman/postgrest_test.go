@@ -72,6 +72,10 @@ func TestPostgrestArgsAndEnv(t *testing.T) {
 		if hasEnvKey(args, "PGRST_DB_ANON_ROLE") {
 			t.Errorf("PGRST_DB_ANON_ROLE should be absent when AnonRole=\"\": %v", args)
 		}
+		// Unset jwt-secret means "JWT auth off" — env absent.
+		if hasEnvKey(args, "PGRST_JWT_SECRET") {
+			t.Errorf("PGRST_JWT_SECRET should be absent when JwtSecret=\"\": %v", args)
+		}
 		// Image is the final positional argument.
 		if args[len(args)-1] != config.DefaultPostgrestImageTag {
 			t.Errorf("image = %q, want last arg %q", args[len(args)-1], config.DefaultPostgrestImageTag)
@@ -112,6 +116,7 @@ func TestPostgrestArgsAndEnv(t *testing.T) {
 		pc.DbPool = 3
 		pc.Schemas = "api,public"
 		pc.AnonRole = "web_anon"
+		pc.JwtSecret = "super-secret-jwt-value"
 		args := postgrestArgsAndEnv(pc, false, "pgcli-net")
 		if !hasEnv(args, "PGRST_DB_POOL=3") {
 			t.Errorf("PGRST_DB_POOL=3 missing: %v", args)
@@ -121,6 +126,9 @@ func TestPostgrestArgsAndEnv(t *testing.T) {
 		}
 		if !hasEnv(args, "PGRST_DB_ANON_ROLE=web_anon") {
 			t.Errorf("PGRST_DB_ANON_ROLE=web_anon missing: %v", args)
+		}
+		if !hasEnv(args, "PGRST_JWT_SECRET=super-secret-jwt-value") {
+			t.Errorf("PGRST_JWT_SECRET missing: %v", args)
 		}
 	})
 

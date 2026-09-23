@@ -122,18 +122,19 @@ Infra addon (minio — single-node S3-compatible object storage, Linux and macOS
 
 PostgREST (stateless REST API in front of a schema; dual mode like pgbouncer,
 Linux and macOS):
-  Local:  pg addon install postgrest -i <instance> [--schema api] [--db-pool N] [--anon-role r]
-  Remote: pg addon install postgrest --dsn <dsn> --pg-name <name> [--schema api] [--anon-role r]
+  Local:  pg addon install postgrest -i <instance> [--schema api] [--db-pool N] [--anon-role r] [--jwt-secret s]
+  Remote: pg addon install postgrest --dsn <dsn> --pg-name <name> [--schema api] [--anon-role r] [--jwt-secret s]
           The --dsn works against any PG endpoint — a direct instance, a
           PgBouncer pool, or a Patroni cluster behind its HAProxy listener
           (prefer the LB: a member's direct port loses writes on failover).
   PostgREST is env-configured (PGRST_*) and holds no data dir. It does NOT
-  touch the database: the login role, the --anon-role, and their GRANTs are
-  yours (or your migrations'). Without --anon-role, unauthenticated requests
-  are refused and only JWT-authenticated ones are served. After a schema
-  change run NOTIFY pgrst, 'reload schema'.
+  touch the database: the login role, the --anon-role/--jwt-secret roles, and
+  their GRANTs are yours (or your migrations'). --anon-role serves
+  unauthenticated requests; --jwt-secret enables Authorization: Bearer JWTs
+  whose 'role' claim runs the request. Without either, every request is 401.
+  After a schema change run NOTIFY pgrst, 'reload schema'.
   Re-running install reuses a live container; --force recreates it to apply a
-  changed --dsn/--port/--listen/--db-pool/--schema/--anon-role.
+  changed --dsn/--port/--listen/--db-pool/--schema/--anon-role/--jwt-secret.
 
 Re-running install is idempotent — it re-syncs all users and passwords from
 pg_shadow, regenerates config files and restarts the container.
@@ -354,6 +355,7 @@ func init() {
 	addonInstallCmd.Flags().Int("db-pool", 0, "PostgREST: connections in its internal pool toward the backend (PGRST_DB_POOL; 0=PostgREST's own default 10) — total backend connections = instances × db-pool")
 	addonInstallCmd.Flags().String("schema", "", "PostgREST: exposed schema(s), comma-separated (PGRST_DB_SCHEMAS; default \"public\") — which schema to serve as REST")
 	addonInstallCmd.Flags().String("anon-role", "", "PostgREST: role unauthenticated requests run as (PGRST_DB_ANON_ROLE) — a NOINHERIT login role with GRANTs on the exposed schema; empty disables anonymous access (JWT only)")
+	addonInstallCmd.Flags().String("jwt-secret", "", "PostgREST: JWT secret (PGRST_JWT_SECRET) — enables Authorization: Bearer requests whose 'role' claim SET ROLEs a NOINHERIT role with grants on the exposed schema; empty disables JWT auth")
 }
 
 // ---------------------------------------------------------------------------
@@ -1962,6 +1964,7 @@ func runAddonInstallPostgrest(cmd *cobra.Command) error {
 	dbPool, _ := cmd.Flags().GetInt("db-pool")
 	schemas, _ := cmd.Flags().GetString("schema")
 	anonRole, _ := cmd.Flags().GetString("anon-role")
+	jwtSecret, _ := cmd.Flags().GetString("jwt-secret")
 	imageTag, _ := cmd.Flags().GetString("image")
 	force, _ := cmd.Flags().GetBool("force")
 
@@ -2032,6 +2035,9 @@ func runAddonInstallPostgrest(cmd *cobra.Command) error {
 		if anonRole != "" {
 			pc.AnonRole = anonRole
 		}
+		if jwtSecret != "" {
+			pc.JwtSecret = jwtSecret
+		}
 		if imageTag != "" {
 			pc.ImageTag = imageTag
 		}
@@ -2057,6 +2063,9 @@ func runAddonInstallPostgrest(cmd *cobra.Command) error {
 		}
 		if anonRole != "" {
 			pc.AnonRole = anonRole
+		}
+		if jwtSecret != "" {
+			pc.JwtSecret = jwtSecret
 		}
 		if imageTag != "" {
 			pc.ImageTag = imageTag
@@ -2181,13 +2190,16 @@ func runAddonInstallPostgrest(cmd *cobra.Command) error {
 	fmt.Printf("  Schema:       %s\n", postgrestSchemasDisplay(pc.Schemas))
 	fmt.Printf("  DB pool:      %s\n", postgrestPoolDisplay(pc.DbPool))
 	fmt.Printf("  Anon role:    %s\n", postgrestAnonRoleDisplay(pc.AnonRole))
+	fmt.Printf("  JWT auth:     %s\n", postgrestJwtDisplay(pc.JwtSecret))
 	fmt.Println()
 	fmt.Printf("  Database side is NOT touched by pgcli. PostgREST needs:\n")
 	fmt.Printf("    - a login role it connects with (the DSN user);\n")
 	fmt.Printf("    - for unauthenticated requests: a NOINHERIT role passed via\n")
 	fmt.Printf("      --anon-role that has GRANT USAGE on the exposed schema and\n")
-	fmt.Printf("      GRANTs on its tables (without it, anonymous access is off\n")
-	fmt.Printf("      and only JWT-authenticated requests are served);\n")
+	fmt.Printf("      GRANTs on its tables (without it, anonymous access is off);\n")
+	fmt.Printf("    - for JWT requests: a secret via --jwt-secret, and a NOINHERIT\n")
+	fmt.Printf("      role named in each token's 'role' claim (without --jwt-secret,\n")
+	fmt.Printf("      no token is accepted; without either flag, every request is 401);\n")
 	fmt.Printf("    - after schema changes: NOTIFY pgrst, 'reload schema'\n")
 	fmt.Printf("      (or restart this container) to refresh its schema cache.\n")
 	return nil
@@ -2219,6 +2231,15 @@ func postgrestAnonRoleDisplay(role string) string {
 		return "none (anonymous access disabled — JWT only)"
 	}
 	return role
+}
+
+// postgrestJwtDisplay surfaces whether JWT auth is on for the summary and
+// `addon list`. The secret is never printed — only its presence.
+func postgrestJwtDisplay(secret string) string {
+	if secret == "" {
+		return "off (no --jwt-secret)"
+	}
+	return "enabled (secret set)"
 }
 
 // postgrestPatroniMemberWarning checks the DSN's backend against every Patroni
@@ -2311,6 +2332,7 @@ func runAddonList() error {
 			fmt.Printf("    Schema:      %s\n", postgrestSchemasDisplay(pr.Schemas))
 			fmt.Printf("    DB pool:     %s\n", postgrestPoolDisplay(pr.DbPool))
 			fmt.Printf("    Anon role:   %s\n", postgrestAnonRoleDisplay(pr.AnonRole))
+			fmt.Printf("    JWT auth:    %s\n", postgrestJwtDisplay(pr.JwtSecret))
 			fmt.Printf("    Container:   %s\n", pr.ContainerName)
 		}
 	}
@@ -2355,6 +2377,7 @@ func runAddonList() error {
 		fmt.Printf("    Schema:      %s\n", postgrestSchemasDisplay(pr.Schemas))
 		fmt.Printf("    DB pool:     %s\n", postgrestPoolDisplay(pr.DbPool))
 		fmt.Printf("    Anon role:   %s\n", postgrestAnonRoleDisplay(pr.AnonRole))
+		fmt.Printf("    JWT auth:    %s\n", postgrestJwtDisplay(pr.JwtSecret))
 		fmt.Printf("    Container:   %s\n", pr.ContainerName)
 	}
 	if !hasRemote {

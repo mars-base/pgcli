@@ -112,3 +112,17 @@ func TestPostgrestSchemasAndPoolDisplay(t *testing.T) {
 		t.Errorf("pool display = %q, want 3", got)
 	}
 }
+
+func TestPostgrestJwtDisplay(t *testing.T) {
+	if got := postgrestJwtDisplay(""); got != "off (no --jwt-secret)" {
+		t.Errorf("empty jwt display = %q", got)
+	}
+	// A set secret must never be echoed back — only its presence is shown.
+	got := postgrestJwtDisplay("a-very-secret-value")
+	if !strings.Contains(got, "enabled") {
+		t.Errorf("jwt display = %q, want to mention enabled", got)
+	}
+	if strings.Contains(got, "a-very-secret-value") {
+		t.Errorf("jwt display leaked the secret: %q", got)
+	}
+}

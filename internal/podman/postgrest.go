@@ -63,6 +63,9 @@ func postgrestArgsAndEnv(pc *config.PostgrestConfig, bridge bool, network string
 	if pc.AnonRole != "" {
 		args = append(args, "-e", "PGRST_DB_ANON_ROLE="+pc.AnonRole)
 	}
+	if pc.JwtSecret != "" {
+		args = append(args, "-e", "PGRST_JWT_SECRET="+pc.JwtSecret)
+	}
 	args = append(args, pc.ImageTag)
 	return args
 }

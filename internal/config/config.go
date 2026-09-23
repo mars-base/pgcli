@@ -148,6 +148,7 @@ type PostgrestConfig struct {
 	DbPool        int    `yaml:"db_pool,omitempty"`      // PGRST_DB_POOL; 0 = PostgREST's own default (10)
 	Schemas       string `yaml:"schemas,omitempty"`      // PGRST_DB_SCHEMAS; exposed schema, e.g. "api" (empty = PostgREST default "public")
 	AnonRole      string `yaml:"anon_role,omitempty"`    // PGRST_DB_ANON_ROLE; the NOINHERIT role unauthenticated requests SET ROLE to (empty = anonymous access disabled)
+	JwtSecret     string `yaml:"jwt_secret,omitempty"`   // PGRST_JWT_SECRET; enables JWT-authenticated requests (empty = JWT off). A secret — set only via --jwt-secret, never defaulted.
 	Autostart     bool   `yaml:"autostart,omitempty"`    // start on host boot via `pg autostart enable --postgrest`
 }
 

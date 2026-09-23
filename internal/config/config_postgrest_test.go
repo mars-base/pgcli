@@ -50,6 +50,10 @@ func TestPostgrestDefaultsAndPortAssignment(t *testing.T) {
 	if pr.Schemas != "" {
 		t.Errorf("schemas = %q, want empty (defer to PostgREST default)", pr.Schemas)
 	}
+	// The JWT secret is never defaulted — it only exists if --jwt-secret set it.
+	if pr.JwtSecret != "" {
+		t.Errorf("jwt secret = %q, want empty (never defaulted)", pr.JwtSecret)
+	}
 
 	local := cfg.Instances["inst1"].Addons.Postgrest
 	if local == nil {
@@ -110,6 +114,7 @@ func TestPostgrestSaveLoadRoundTrip(t *testing.T) {
 			DbPool:        3,
 			Schemas:       "api",
 			AnonRole:      "web_anon",
+			JwtSecret:     "s3cr3t-jwt",
 			Autostart:     true,
 		},
 	}
@@ -136,6 +141,9 @@ func TestPostgrestSaveLoadRoundTrip(t *testing.T) {
 	}
 	if pr.AnonRole != "web_anon" {
 		t.Errorf("anon role not persisted: %q", pr.AnonRole)
+	}
+	if pr.JwtSecret != "s3cr3t-jwt" {
+		t.Errorf("jwt secret not persisted: %q", pr.JwtSecret)
 	}
 	if !pr.Autostart {
 		t.Error("autostart not persisted")

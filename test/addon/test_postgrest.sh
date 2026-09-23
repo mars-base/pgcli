@@ -34,6 +34,7 @@ LOCAL_PRST="local"          # postgrest installed in local (-i) mode
 REMOTE_PRST="remote"        # postgrest installed in remote (--dsn) mode
 API_SCHEMA="rest"           # exposed schema (PGRST_DB_SCHEMAS)
 ANON_ROLE="anonymous"       # PostgREST's default db-anon-role, SET ROLE'd per request
+JWT_SECRET="e2e-jwt-secret-0123456789abcdef0123456789" # throwaway fixture (HS256 needs >=32 chars)
 TABLE="widgets"             # table the REST test reads
 
 SKIP_DESTROY=false
@@ -113,6 +114,7 @@ wait_http() {
     done
     return 1
 }
+export -f wait_http   # run_test helpers call it through `bash -c`
 
 # wait_pg <instance> — poll pg_isready inside the PG container.
 wait_pg() {
@@ -122,6 +124,21 @@ wait_pg() {
         sleep 1
     done
     return 1
+}
+
+# b64url — base64url-encode stdin (JWT wants no padding, URL alphabet).
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+# make_jwt <secret> <role> — an HS256 JWT asserting `role`, valid ~1h. Mimics
+# what an application's auth service signs; exercises PostgREST's JWT path.
+make_jwt() {
+    local secret="$1" role="$2"
+    local header payload sig
+    header=$(printf '{"alg":"HS256","typ":"JWT"}' | b64url)
+    payload=$(printf '{"role":"%s","exp":%d}' "$role" $(( $(date +%s) + 3600 )) | b64url)
+    sig=$(printf '%s.%s' "$header" "$payload" \
+        | openssl dgst -sha256 -hmac "$secret" -binary | b64url)
+    printf '%s.%s.%s' "$header" "$payload" "$sig"
 }
 
 # poll_table <port> <fragment> [tries] — curl the widgets endpoint until the
@@ -206,8 +223,8 @@ main() {
 
     # ---- Local-mode install ----
     section "Install postgrest (local -i mode, --schema $API_SCHEMA)"
-    run_test "install postgrest -i $INSTANCE --db-pool 3 --schema $API_SCHEMA --anon-role $ANON_ROLE" \
-        pg addon install postgrest -i "$INSTANCE" --db-pool 3 --schema "$API_SCHEMA" --anon-role "$ANON_ROLE"
+    run_test "install postgrest -i $INSTANCE --db-pool 3 --schema $API_SCHEMA --anon-role $ANON_ROLE --jwt-secret" \
+        pg addon install postgrest -i "$INSTANCE" --db-pool 3 --schema "$API_SCHEMA" --anon-role "$ANON_ROLE" --jwt-secret "$JWT_SECRET"
     LOCAL_PORT="$(prst_port local)"
     if [ -n "$LOCAL_PORT" ]; then pass "postgrest host port assigned: $LOCAL_PORT"
     else fail "could not read postgrest host_port from config"; fi
@@ -215,7 +232,7 @@ main() {
         bash -c "podman ps --filter name=pgcli-postgrest-$NAMESPACE-$INSTANCE --filter status=running --format '{{.Names}}' | grep -q ."
     run_test "REST root answers (OpenAPI)" wait_http "$LOCAL_PORT"
     run_test "root returns OpenAPI JSON" \
-        bash -c "curl -sf 'http://127.0.0.1:$LOCAL_PORT/' | grep -q '\"openapi\"'"
+        bash -c "curl -sf 'http://127.0.0.1:$LOCAL_PORT/' | grep -q '\"openapi\"\|\"swagger\"'"
 
     # Tell PostgREST to reload so the freshly-created table is visible, then read.
     psql_on "$INSTANCE" "NOTIFY pgrst, 'reload schema'" || true
@@ -234,6 +251,17 @@ main() {
         bash -c "podman inspect pgcli-postgrest-$NAMESPACE-$INSTANCE --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -q '^PGRST_DB_SCHEMAS=$API_SCHEMA$'"
     run_test "PGRST_DB_ANON_ROLE=$ANON_ROLE (from --anon-role)" \
         bash -c "podman inspect pgcli-postgrest-$NAMESPACE-$INSTANCE --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -q '^PGRST_DB_ANON_ROLE=$ANON_ROLE$'"
+    run_test "PGRST_JWT_SECRET set (from --jwt-secret)" \
+        bash -c "podman inspect pgcli-postgrest-$NAMESPACE-$INSTANCE --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -q '^PGRST_JWT_SECRET='"
+
+    # ---- JWT path: a token whose 'role' claim is the anon role authenticates;
+    # a forged signature is rejected. Direct backend => JWT verification works. ----
+    JWT="$(make_jwt "$JWT_SECRET" "$ANON_ROLE")"
+    run_test "GET /$TABLE with a valid JWT returns rows" \
+        bash -c "curl -sf -H 'Authorization: Bearer $JWT' 'http://127.0.0.1:$LOCAL_PORT/$TABLE' | grep -q 'bolt'"
+    BADJWT="$(printf '%s' "$JWT" | sed 's/.$//')x"
+    run_test "a tampered JWT is rejected (HTTP 401)" \
+        bash -c "[ \$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer $BADJWT' 'http://127.0.0.1:$LOCAL_PORT/$TABLE') = 401 ]"
 
     # ---- list ----
     section "List"
