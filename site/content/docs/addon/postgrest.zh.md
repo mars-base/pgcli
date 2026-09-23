@@ -164,36 +164,28 @@ pgcli 在安装时会检测并给出警告，建议改指 HAProxy 监听口。
 ## 库侧准备（pgcli 不代管）
 
 pgcli 只负责安装并运行 PostgREST 容器，**不碰你的数据库**。API 要能读到东西，
-数据库侧需要先备好角色与授权——通常归你的 migration 管，不归 pgcli：
+数据库侧需要先备好未认证请求所 `SET ROLE` 到的角色，以及对暴露 schema 的授权
+——通常归你的 migration 管，不归 pgcli。以下这段可重复执行：
 
 ```sql
--- PostgREST 用来连接的角色（即 DSN 用户），权限尽量收窄。
--- 未认证请求所 SET ROLE 到的 NOINHERIT 角色：
-CREATE ROLE web_anon NOINHERIT;
-GRANT USAGE ON SCHEMA api TO web_anon;
-GRANT SELECT ON ALL TABLES IN SCHEMA api TO web_anon;
-```
-
-要让这段准备可重复执行，用 `DO` 块守卫 `CREATE ROLE`，并用 default privileges
-覆盖以后新建的表：
-
-```sql
+-- 未认证请求所切换到的 NOINHERIT 角色（即 --anon-role 的值）。
 DO $$ BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'web_anon') THEN
     CREATE ROLE web_anon NOINHERIT NOLOGIN;
   END IF;
 END $$;
-GRANT USAGE ON SCHEMA public TO web_anon;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO web_anon;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO web_anon;
+GRANT USAGE ON SCHEMA api TO web_anon;
+GRANT SELECT ON ALL TABLES IN SCHEMA api TO web_anon;
+ALTER DEFAULT PRIVILEGES IN SCHEMA api GRANT SELECT ON TABLES TO web_anon;
 ```
 
 > 角色视图的列名是 `rolname`，不是 `rolename`——写错会让整批语句回滚。
-> `ALTER DEFAULT PRIVILEGES` 只对其**之后**新建的表生效；已存在的表要用上面那条
-> `GRANT ... ON ALL TABLES` 单独授权。
+> `ALTER DEFAULT PRIVILEGES` 只对其**之后**新建的表生效；已存在的表由上面那条
+> `GRANT ... ON ALL TABLES` 覆盖。
 
-然后用 `--anon-role web_anon` 安装。没有匿名角色时，请求必须带 JWT；安装输出里
-也会打印同样的提示。
+PostgREST 以 DSN 用户连接、每个请求再 `SET ROLE` 到 `web_anon`，因此读权限要落在
+这个角色上；连接用的登录角色本身权限可保持很窄。然后用 `--anon-role web_anon`
+安装。没有匿名角色时，请求必须带 JWT；安装输出里也会打印同样的提示。
 
 PostgREST 会缓存它内省到的 schema。schema 变更后需要重载缓存：
 

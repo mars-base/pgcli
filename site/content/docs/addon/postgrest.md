@@ -179,37 +179,30 @@ install time and warns, suggesting the HAProxy listener instead.
 ## Database-side setup (not managed by pgcli)
 
 pgcli installs and runs the PostgREST container; it **does not** touch your
-database. Before the API serves anything, the database needs a role and grants
-— usually owned by your migrations, not pgcli:
+database. Before the API serves anything, the database needs the unauthenticated
+role PostgREST `SET ROLE`s to, plus grants on the exposed schema — usually owned
+by your migrations, not pgcli. This block is re-runnable:
 
 ```sql
--- A role PostgREST connects with (the DSN user); keep its privileges narrow.
--- A NOINHERIT role unauthenticated requests SET ROLE to:
-CREATE ROLE web_anon NOINHERIT;
-GRANT USAGE ON SCHEMA api TO web_anon;
-GRANT SELECT ON ALL TABLES IN SCHEMA api TO web_anon;
-```
-
-To make the setup re-runnable, guard the `CREATE ROLE` with a `DO` block and pin
-future tables with default privileges:
-
-```sql
+-- The NOINHERIT role unauthenticated requests run as (the --anon-role value).
 DO $$ BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'web_anon') THEN
     CREATE ROLE web_anon NOINHERIT NOLOGIN;
   END IF;
 END $$;
-GRANT USAGE ON SCHEMA public TO web_anon;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO web_anon;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO web_anon;
+GRANT USAGE ON SCHEMA api TO web_anon;
+GRANT SELECT ON ALL TABLES IN SCHEMA api TO web_anon;
+ALTER DEFAULT PRIVILEGES IN SCHEMA api GRANT SELECT ON TABLES TO web_anon;
 ```
 
-> The role column is `rolname`, not `rolename` — a typo here fails the whole
-> batch. `ALTER DEFAULT PRIVILEGES` only affects tables created **after** it
-> runs; grant existing tables separately with the `GRANT ... ON ALL TABLES` line.
+> The role view's column is `rolname`, not `rolename` — a typo fails the whole
+> batch. `ALTER DEFAULT PRIVILEGES` covers only tables created **after** it
+> runs; existing ones are handled by the `GRANT ... ON ALL TABLES` line.
 
-Then install with `--anon-role web_anon`. Without an anonymous role, requests
-must carry a JWT; the install prints the same hint.
+PostgREST connects as the DSN user and `SET ROLE`s to `web_anon` per request, so
+that role needs the read grants; the connecting login role itself can stay
+narrow. Then install with `--anon-role web_anon`. Without an anonymous role,
+requests must carry a JWT; the install prints the same hint.
 
 PostgREST caches the schema it introspected. After a schema change, reload the
 cache:
