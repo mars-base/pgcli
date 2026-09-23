@@ -185,16 +185,21 @@ END $$;
 GRANT USAGE ON SCHEMA api TO web_anon;
 GRANT SELECT ON ALL TABLES IN SCHEMA api TO web_anon;
 ALTER DEFAULT PRIVILEGES IN SCHEMA api GRANT SELECT ON TABLES TO web_anon;
+
+-- SET ROLE 要求登录用户是目标角色的成员（DSN 用户是 superuser 时可省略）：
+GRANT web_anon TO <dsn-user>;
 ```
 
 > 角色视图的列名是 `rolname`，不是 `rolename`——写错会让整批语句回滚。
 > `ALTER DEFAULT PRIVILEGES` 只对其**之后**新建的表生效；已存在的表由上面那条
 > `GRANT ... ON ALL TABLES` 覆盖。
 
-PostgREST 以 DSN 用户连接、每个请求再 `SET ROLE` 到 `web_anon`，因此读权限要落在
-这个角色上；连接用的登录角色本身权限可保持很窄。然后用 `--anon-role web_anon`
-安装。认证请求的两种方式——匿名（`--anon-role`）与 JWT（`--jwt-secret`）——见
-下文；两者都不设时，每个请求都会被拒绝（401）。
+PostgREST 以 DSN 用户连接、每个请求再 `SET ROLE` 到 `web_anon`，因此 **API 携带的
+就是这个角色的权限**：`web_anon` 只有 SELECT 就只能读，想开写权限就对该表
+`GRANT INSERT/UPDATE/DELETE`。连接用的登录角色本身只需是请求所扮演角色的成员，
+不需要别的权限。然后用 `--anon-role web_anon` 安装。认证请求的两种方式——匿名
+（`--anon-role`）与 JWT（`--jwt-secret`）——见下文；两者都不设时，每个请求都会被
+拒绝（401）。
 
 PostgREST 会缓存它内省到的 schema。schema 变更后需要重载缓存：
 

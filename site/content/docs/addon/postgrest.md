@@ -201,6 +201,10 @@ END $$;
 GRANT USAGE ON SCHEMA api TO web_anon;
 GRANT SELECT ON ALL TABLES IN SCHEMA api TO web_anon;
 ALTER DEFAULT PRIVILEGES IN SCHEMA api GRANT SELECT ON TABLES TO web_anon;
+
+-- SET ROLE requires the login user to be a member of the target role
+-- (skip if the DSN user is a superuser):
+GRANT web_anon TO <dsn-user>;
 ```
 
 > The role view's column is `rolname`, not `rolename` — a typo fails the whole
@@ -208,10 +212,12 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA api GRANT SELECT ON TABLES TO web_anon;
 > runs; existing ones are handled by the `GRANT ... ON ALL TABLES` line.
 
 PostgREST connects as the DSN user and `SET ROLE`s to `web_anon` per request, so
-that role needs the read grants; the connecting login role itself can stay
-narrow. Then install with `--anon-role web_anon`. The two ways to authenticate a
-request — anonymous (`--anon-role`) and JWT (`--jwt-secret`) — are covered next;
-without either, every request is refused with 401.
+**the API carries exactly that role's privileges**: `web_anon` sees SELECT-only
+until you `GRANT INSERT/UPDATE/DELETE` on the tables you want writable. The
+connecting login role itself needs nothing beyond membership of the roles
+requests will assume. Then install with `--anon-role web_anon`. The two ways to
+authenticate a request — anonymous (`--anon-role`) and JWT (`--jwt-secret`) —
+are covered next; without either, every request is refused with 401.
 
 PostgREST caches the schema it introspected. After a schema change, reload the
 cache:
