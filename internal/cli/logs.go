@@ -35,6 +35,7 @@ Examples:
   pg logs addon pgbouncer --pg-name my-pool -f
   pg logs addon etcd --name m1         # etcd member logs
   pg logs addon pgdog --name proxy     # PgDog proxy logs
+  pg logs addon postgrest --pg-name my-api  # Remote PostgREST logs
   pg logs addon haproxy --name lb      # HAProxy instance logs
   pg logs addon minio --name store     # MinIO instance logs
   pg logs addon silo --name store      # silo instance logs`,
@@ -59,7 +60,7 @@ var logsAddonCmd = &cobra.Command{
 	Short: "Show addon console output logs",
 	Long: `Show addon console output logs.
 
-Requires the addon type (pgbouncer, etcd, pgdog, haproxy, minio, silo, patroni).
+Requires the addon type (pgbouncer, postgrest, etcd, pgdog, haproxy, minio, silo, patroni).
 Use -i for local instance addons, --pg-name for remote addons,
 --name for an etcd member, pgdog proxy, haproxy instance, minio or silo
 instance, or Patroni member (default
@@ -72,6 +73,9 @@ Examples:
   pg logs addon pgbouncer --pg-name my-pool
   pg logs addon pgbouncer --pg-name my-pool -f
   pg logs addon pgbouncer --pg-name my-pool -n 200
+  pg logs addon postgrest -i myinst
+  pg logs addon postgrest --pg-name my-api
+  pg logs addon postgrest --pg-name my-api -f
   pg logs addon etcd --name m1
   pg logs addon etcd --name m1 -f
   pg logs addon etcd --name m2 -n 200
@@ -113,7 +117,7 @@ Examples:
 		switch addonType {
 		case "patroni":
 			if pgName != "" {
-				return fmt.Errorf("--pg-name selects a remote PgBouncer; use --scope/--name for a Patroni member")
+				return fmt.Errorf("--pg-name selects a remote PgBouncer or PostgREST; use --scope/--name for a Patroni member")
 			}
 			if scope == "" {
 				return fmt.Errorf("--scope is required for Patroni members, e.g. pg logs addon patroni --scope app --name node1")
@@ -129,7 +133,7 @@ Examples:
 		case "etcd", "pgdog", "haproxy", "minio", "silo":
 			// (patroni is handled above; it shares --name but requires --scope.)
 			if pgName != "" {
-				return fmt.Errorf("--pg-name selects a remote PgBouncer; use --name for an %s", addonType)
+				return fmt.Errorf("--pg-name selects a remote PgBouncer or PostgREST; use --name for an %s", addonType)
 			}
 			deflt := addonType
 			name := etcdName
@@ -209,8 +213,33 @@ Examples:
 				}
 				containerName = inst.Addons.PgBouncer.ContainerName
 			}
+		case "postgrest":
+			if etcdName != "" {
+				return fmt.Errorf("--name selects an etcd member, pgdog proxy, haproxy instance, minio or silo instance, or Patroni member; use -i or --pg-name for PostgREST")
+			}
+			if pgName != "" {
+				// Remote mode
+				if cfg.Addons.Postgrest == nil {
+					return fmt.Errorf("no remote PostgREST addons configured")
+				}
+				pr, ok := cfg.Addons.Postgrest[pgName]
+				if !ok {
+					return fmt.Errorf("remote PostgREST %q not found (use 'pg addon list' to see available)", pgName)
+				}
+				containerName = pr.ContainerName
+			} else {
+				// Local mode: -i
+				inst, ok := cfg.Instances[cfgInstance]
+				if !ok {
+					return fmt.Errorf("instance %q not found", cfgInstance)
+				}
+				if inst.Addons.Postgrest == nil {
+					return fmt.Errorf("no PostgREST addon configured for instance %q", cfgInstance)
+				}
+				containerName = inst.Addons.Postgrest.ContainerName
+			}
 		default:
-			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, patroni)", addonType)
+			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, postgrest, patroni)", addonType)
 		}
 
 		return runPodmanLogs(containerName, tail, follow)
@@ -285,7 +314,7 @@ func init() {
 	// Flags on addon subcommand
 	logsAddonCmd.Flags().BoolP("follow", "f", false, "Stream logs continuously")
 	logsAddonCmd.Flags().IntP("tail", "n", 50, "Number of lines to show (0 = all)")
-	logsAddonCmd.Flags().String("pg-name", "", "Remote addon pooler name (for remote PgBouncer)")
+	logsAddonCmd.Flags().String("pg-name", "", "Remote addon name (for remote PgBouncer or PostgREST)")
 	logsAddonCmd.Flags().String("name", "", "etcd member name, pgdog proxy name, haproxy instance name, minio instance name, or Patroni member name")
 	logsAddonCmd.Flags().String("scope", "", "Patroni cluster scope (required only with addon type patroni)")
 

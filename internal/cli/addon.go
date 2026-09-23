@@ -28,13 +28,13 @@ var addonCmd = &cobra.Command{
 Add-ons are sidecar containers that provide additional capabilities
 for PostgreSQL instances without modifying the database itself.
 
-Two modes:
+Two modes (pgbouncer, postgrest):
   Local:  pg addon install pgbouncer -i <instance>
           Stored under instances.<name>.addons in config.
 
   Remote: pg addon install pgbouncer --dsn <dsn> --pg-name <name>
           Stored under top-level addons in config.
-          --pg-name is required to identify this remote pooler.
+          --pg-name is required to identify this remote addon.
 
 Infra addons (shared, not tied to one instance):
   pg addon install etcd
@@ -50,6 +50,13 @@ Infra addons (shared, not tied to one instance):
           Pigsty's MinIO fork — the same S3 store, from the public
           docker.io/pgsty/silo image (its own mcli client comes with it; see
           "pg mcli").
+  pg addon install postgrest
+          Exposes a PostgreSQL schema as a REST API (single stateless
+          container, dual mode like pgbouncer): local -i fronting an
+          instance, or remote --dsn fronting any PG endpoint (direct
+          instance, PgBouncer, or a Patroni cluster behind its HAProxy
+          listener). Stored under instances.<name>.addons.postgrest (local)
+          or addons.postgrest.<name> (remote).
 
 Commands:
   pg addon install <addon>   install an add-on
@@ -75,8 +82,9 @@ Currently supported add-ons:
   haproxy     TCP load balancer in front of a Patroni cluster (unified or read/write split)
   minio       single-node S3-compatible object storage (web console included; Linux host network, macOS bridge)
   silo        MinIO's Pigsty fork — same S3 object storage, from the public docker.io/pgsty/silo image (console + mcli client bundled; Linux host network, macOS bridge)
+  postgrest   stateless REST API in front of a PostgreSQL schema (single container; Linux host network, macOS bridge)
 
-Two modes (pgbouncer):
+Two modes (pgbouncer, postgrest):
   Local:  pg addon install pgbouncer -i <instance>
   Remote: pg addon install pgbouncer --dsn <dsn> --pg-name <name>
 
@@ -112,6 +120,21 @@ Infra addon (minio — single-node S3-compatible object storage, Linux and macOS
   started); pass --force to recreate it after changing ports, listen, or
   credentials.
 
+PostgREST (stateless REST API in front of a schema; dual mode like pgbouncer,
+Linux and macOS):
+  Local:  pg addon install postgrest -i <instance> [--schema api] [--db-pool N] [--anon-role r]
+  Remote: pg addon install postgrest --dsn <dsn> --pg-name <name> [--schema api] [--anon-role r]
+          The --dsn works against any PG endpoint — a direct instance, a
+          PgBouncer pool, or a Patroni cluster behind its HAProxy listener
+          (prefer the LB: a member's direct port loses writes on failover).
+  PostgREST is env-configured (PGRST_*) and holds no data dir. It does NOT
+  touch the database: the login role, the --anon-role, and their GRANTs are
+  yours (or your migrations'). Without --anon-role, unauthenticated requests
+  are refused and only JWT-authenticated ones are served. After a schema
+  change run NOTIFY pgrst, 'reload schema'.
+  Re-running install reuses a live container; --force recreates it to apply a
+  changed --dsn/--port/--listen/--db-pool/--schema/--anon-role.
+
 Re-running install is idempotent — it re-syncs all users and passwords from
 pg_shadow, regenerates config files and restarts the container.
 
@@ -126,7 +149,9 @@ Examples:
   pg addon install haproxy --name lb --mode split --ha app --max-lag 1MB
   pg addon install haproxy --node node1=10.0.0.11:35532:8008 --node node2=10.0.0.11:35533:8009
   pg addon install minio --name store --data-dir /srv/minio
-  pg addon install silo --name store --tls`,
+  pg addon install silo --name store --tls
+  pg addon install postgrest -i proj01 --schema api --anon-role web_anon
+  pg addon install postgrest --dsn "postgres://api:pass@127.0.0.1:5000/appdb" --pg-name app-api --schema api`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonInstall(args[0], cmd)
@@ -160,7 +185,9 @@ For remote add-ons, use --pg-name to specify the pooler name.
 
 Examples:
   pg addon remove pgbouncer -i proj01
-  pg addon remove pgbouncer --pg-name remote-proj01`,
+  pg addon remove pgbouncer --pg-name remote-proj01
+  pg addon remove postgrest -i proj01
+  pg addon remove postgrest --pg-name app-api`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonRemove(args[0], cmd)
@@ -186,6 +213,8 @@ Supported add-ons:
   silo       pg addon start silo [--name store]
   pgbouncer  pg addon start pgbouncer -i <instance>
              pg addon start pgbouncer --pg-name <remote-name>
+  postgrest  pg addon start postgrest -i <instance>
+             pg addon start postgrest --pg-name <remote-name>
 
 Examples:
   pg addon start etcd --name m1
@@ -193,7 +222,8 @@ Examples:
   pg addon start haproxy --name lb
   pg addon start minio --name store
   pg addon start silo --name store
-  pg addon start pgbouncer -i proj01`,
+  pg addon start pgbouncer -i proj01
+  pg addon start postgrest --pg-name app-api`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonStart(args[0], cmd)
@@ -214,6 +244,8 @@ Supported add-ons:
   silo       pg addon stop silo [--name store]
   pgbouncer  pg addon stop pgbouncer -i <instance>
              pg addon stop pgbouncer --pg-name <remote-name>
+  postgrest  pg addon stop postgrest -i <instance>
+             pg addon stop postgrest --pg-name <remote-name>
 
 Examples:
   pg addon stop etcd --name m1
@@ -221,7 +253,8 @@ Examples:
   pg addon stop haproxy --name lb
   pg addon stop minio --name store
   pg addon stop silo --name store
-  pg addon stop pgbouncer -i proj01`,
+  pg addon stop pgbouncer -i proj01
+  pg addon stop postgrest --pg-name app-api`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonStop(args[0], cmd)
@@ -238,7 +271,7 @@ func init() {
 
 	// Basic flags
 	addonInstallCmd.Flags().String("dsn", "", "PG instance connection string for remote mode (postgres://user:pass@host:port/db)")
-	addonInstallCmd.Flags().String("pg-name", "", "name to identify a remote PgBouncer (required with --dsn)")
+	addonInstallCmd.Flags().String("pg-name", "", "name to identify a remote PgBouncer or PostgREST (required with --dsn)")
 	addonInstallCmd.Flags().Int("max-client-conn", 0, "maximum number of client connections allowed (default 100)")
 	addonInstallCmd.Flags().Int("default-pool-size", 0, "number of server connections per user/database pair (default 20)")
 
@@ -266,7 +299,7 @@ func init() {
 	addonInstallCmd.Flags().Int("log-connections", 0, "log client connections (default 1=enabled)")
 	addonInstallCmd.Flags().Int("log-disconnections", 0, "log client disconnections (default 1=enabled)")
 
-	addonRemoveCmd.Flags().String("pg-name", "", "name of a remote PgBouncer to remove")
+	addonRemoveCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to remove")
 
 	// etcd flags (top-level shared-infrastructure addon)
 	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio or silo instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\")")
@@ -292,7 +325,7 @@ func init() {
 	// minio flags (top-level single-node S3-compatible object storage)
 	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo S3 API host port (0=auto-assign from the shared minio_start_port pool)")
 	addonInstallCmd.Flags().Int("console-port", 0, "MinIO/silo web console host port (0=auto-assign, next free port)")
-	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO or silo server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network)")
+	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO or silo server / PostgREST HTTP server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network)")
 	addonInstallCmd.Flags().String("root-user", "", "MinIO/silo root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config)")
 	addonInstallCmd.Flags().String("root-password", "", "MinIO/silo root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand)")
 	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO/silo distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (path is the in-container export dir — /data with a plain --data-dir node, or /data1../dataN on a --drive node (MNMD); repeat for every node's every drive; the list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
@@ -300,22 +333,27 @@ func init() {
 	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo>/<name>/; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Changing this needs --force to recreate")
 	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
 	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo: private key for --tls-cert (PEM; mounted read-only as private.key). Must pair with the cert; both are required to enable BYO TLS")
-	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo container even if one already exists (to apply changed ports/listen/credentials)")
+	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/PostgREST container even if one already exists (to apply changed ports/listen/credentials, or a changed PostgREST --dsn/--db-pool/--schema)")
 
 	// start / stop flags
 	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio or silo instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\")")
-	addonStartCmd.Flags().String("pg-name", "", "name of a remote PgBouncer to start")
+	addonStartCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to start")
 	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio or silo instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\")")
-	addonStopCmd.Flags().String("pg-name", "", "name of a remote PgBouncer to stop")
+	addonStopCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to stop")
 
 	// pgdog flags (top-level shared Postgres proxy addon)
-	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port)")
+	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port) / PostgREST HTTP host port (0=auto-assign from postgrest_start_port)")
 	addonInstallCmd.Flags().String("host", "", "PgDog listen address (default 127.0.0.1)")
 	addonInstallCmd.Flags().String("pool-mode", "", "PgDog pooler mode: transaction (default) or session")
 	addonInstallCmd.Flags().Int("workers", 0, "PgDog worker threads (default 2)")
 	addonInstallCmd.Flags().StringArray("backend", nil, "backend database NAME=HOST:PORT:DBNAME[:SHARD[:ROLE]] (repeatable)")
 	addonInstallCmd.Flags().StringArray("user", nil, "proxy user NAME:PASSWORD[:DBNAME] (repeatable; DBNAME defaults to the first backend's name)")
 	addonInstallCmd.Flags().StringArray("sharded-table", nil, "sharded table DBNAME:TABLE:COLUMN:DATA_TYPE (repeatable)")
+
+	// postgrest flags (proxy-type addon: stateless REST API in front of any PG endpoint)
+	addonInstallCmd.Flags().Int("db-pool", 0, "PostgREST: connections in its internal pool toward the backend (PGRST_DB_POOL; 0=PostgREST's own default 10) — total backend connections = instances × db-pool")
+	addonInstallCmd.Flags().String("schema", "", "PostgREST: exposed schema(s), comma-separated (PGRST_DB_SCHEMAS; default \"public\") — which schema to serve as REST")
+	addonInstallCmd.Flags().String("anon-role", "", "PostgREST: role unauthenticated requests run as (PGRST_DB_ANON_ROLE) — a NOINHERIT login role with GRANTs on the exposed schema; empty disables anonymous access (JWT only)")
 }
 
 // ---------------------------------------------------------------------------
@@ -334,10 +372,12 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallMinio(cmd)
 	case "silo":
 		return runAddonInstallSilo(cmd)
+	case "postgrest":
+		return runAddonInstallPostgrest(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, postgrest)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -1905,6 +1945,312 @@ func runAddonInstallSilo(cmd *cobra.Command) error {
 	return nil
 }
 
+// runAddonInstallPostgrest installs a PostgREST container: a single stateless
+// process that exposes a PostgreSQL schema as a RESTful API. Like pgbouncer it
+// works in two modes — local (-i, fronting an instance pgcli manages) or
+// remote (--dsn + --pg-name, fronting any PG endpoint: a direct instance, a
+// PgBouncer pool, or a Patroni cluster behind its HAProxy listener). Unlike
+// pgbouncer it touches nothing inside the database: no auth user, no config
+// files, no data dir. The DSN is passed to the container verbatim as
+// PGRST_DB_URI; authenticator role / GRANTs / schema exposure stay the
+// operator's (or the app's migrations) — install prints the hints.
+func runAddonInstallPostgrest(cmd *cobra.Command) error {
+	dsn, _ := cmd.Flags().GetString("dsn")
+	pgName, _ := cmd.Flags().GetString("pg-name")
+	port, _ := cmd.Flags().GetInt("port")
+	listenAddr, _ := cmd.Flags().GetString("listen")
+	dbPool, _ := cmd.Flags().GetInt("db-pool")
+	schemas, _ := cmd.Flags().GetString("schema")
+	anonRole, _ := cmd.Flags().GetString("anon-role")
+	imageTag, _ := cmd.Flags().GetString("image")
+	force, _ := cmd.Flags().GetBool("force")
+
+	// Validate mutual exclusivity: --dsn/--pg-name vs -i
+	if dsn != "" || pgName != "" {
+		if dsn == "" {
+			return fmt.Errorf("--pg-name requires --dsn")
+		}
+		if pgName == "" {
+			return fmt.Errorf("--dsn requires --pg-name to identify this remote PostgREST API")
+		}
+		if err := checkDSNInstanceConflict(cmd); err != nil {
+			return err
+		}
+	}
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// Determine mode: remote (--dsn + --pg-name, stored under
+	// addons.postgrest.<pgName>) or local (-i, stored as an instance sidecar
+	// keyed by the instance name). addonName is the map key (remote) or the
+	// instance name (local) — same scheme as pgbouncer.
+	remote := dsn != "" && pgName != ""
+	var addonName string
+	if remote {
+		addonName = pgName
+	} else {
+		if _, ok := cfg.Instances[cfgInstance]; !ok {
+			return fmt.Errorf("instance %q not found in config", cfgInstance)
+		}
+		cfg.SetInstance(cfgInstance)
+		dsn = cfg.GetPostgresURL()
+		addonName = cfgInstance
+	}
+
+	// Merge flags into the stored config (map value for remote, pointer for
+	// local), then write back before ApplyDefaults so port assignment and
+	// container naming see the final values.
+	if remote {
+		if cfg.Addons.Postgrest == nil {
+			cfg.Addons.Postgrest = make(map[string]config.PostgrestConfig)
+		}
+		pc, _ := cfg.Addons.Postgrest[addonName]
+		pc.Name = addonName
+		pc.DSN = dsn
+		if cmd.Flags().Changed("port") {
+			pc.HostPort = port
+		}
+		if listenAddr != "" {
+			pc.Listen = listenAddr
+		}
+		if cmd.Flags().Changed("db-pool") {
+			pc.DbPool = dbPool
+		}
+		if schemas != "" {
+			pc.Schemas = schemas
+		}
+		if anonRole != "" {
+			pc.AnonRole = anonRole
+		}
+		if imageTag != "" {
+			pc.ImageTag = imageTag
+		}
+		cfg.Addons.Postgrest[addonName] = pc
+	} else {
+		inst := cfg.Instances[addonName]
+		if inst.Addons.Postgrest == nil {
+			inst.Addons.Postgrest = &config.PostgrestConfig{}
+		}
+		pc := inst.Addons.Postgrest
+		pc.DSN = dsn
+		if cmd.Flags().Changed("port") {
+			pc.HostPort = port
+		}
+		if listenAddr != "" {
+			pc.Listen = listenAddr
+		}
+		if cmd.Flags().Changed("db-pool") {
+			pc.DbPool = dbPool
+		}
+		if schemas != "" {
+			pc.Schemas = schemas
+		}
+		if anonRole != "" {
+			pc.AnonRole = anonRole
+		}
+		if imageTag != "" {
+			pc.ImageTag = imageTag
+		}
+		cfg.Instances[addonName] = inst
+	}
+
+	// Set BackendHost best-effort from the DSN. ParseDSN can reject an unusual
+	// URI (or one without a password) — that only costs the display field, the
+	// raw DSN still reaches the container untouched.
+	if host, bport, _, _, _, perr := podman.ParseDSN(dsn); perr == nil {
+		if remote {
+			pc := cfg.Addons.Postgrest[addonName]
+			pc.BackendHost = fmt.Sprintf("%s:%d", host, bport)
+			cfg.Addons.Postgrest[addonName] = pc
+		} else {
+			inst := cfg.Instances[addonName]
+			inst.Addons.Postgrest.BackendHost = fmt.Sprintf("%s:%d", host, bport)
+			cfg.Instances[addonName] = inst
+		}
+	}
+
+	// Soft Patroni check: a member's direct PG port fronted by PostgREST breaks
+	// writes on failover (the old leader stops accepting them and the DSN keeps
+	// pointing there). If this host knows an HAProxy fronting a scope whose
+	// members include this backend, steer toward the LB's rw listener.
+	if w := postgrestPatroniMemberWarning(cfg, dsn); w != "" {
+		fmt.Printf("-> WARNING: %s\n", w)
+	}
+
+	cfg.ApplyDefaults()
+
+	// Re-fetch after ApplyDefaults (map values are copied; port may be assigned)
+	if remote {
+		if cfg.Addons.Postgrest == nil {
+			return fmt.Errorf("postgrest addon %q not found in config after apply", addonName)
+		}
+	}
+
+	pm, err := podman.New(cfg)
+	if err != nil {
+		return fmt.Errorf("podman: %w", err)
+	}
+	// macOS: bring up the podman machine and the pgcli-net bridge the container
+	// joins (no-ops on Linux, where PostgREST uses host networking).
+	if err := pm.EnsureMachine(); err != nil {
+		return err
+	}
+	if err := pm.EnsureNetwork(); err != nil {
+		return err
+	}
+
+	fmt.Println("-> Checking PG connectivity...")
+	if err := pm.CheckDSNReachable(dsn); err != nil {
+		return err
+	}
+
+	pgm, err := podman.NewPostgrestManager(cfg)
+	if err != nil {
+		return fmt.Errorf("postgrest manager: %w", err)
+	}
+
+	// Load the (now fully-defaulted) config for the manager call.
+	var pc *config.PostgrestConfig
+	if remote {
+		v := cfg.Addons.Postgrest[addonName]
+		pc = &v
+	} else {
+		pc = cfg.Instances[addonName].Addons.Postgrest
+	}
+
+	// Idempotency like MinIO/silo: an existing container is reused (a stopped
+	// one is started); --force recreates it so changed dsn/port/db-pool/schema
+	// take effect.
+	exists, err := pgm.ContainerExists(pc.ContainerName)
+	if err != nil {
+		return err
+	}
+	skipped := false
+	if exists && !force {
+		skipped = true
+		if running, _ := pgm.ContainerRunning(pc.ContainerName); running {
+			fmt.Printf("-> PostgREST container %q already running; skipping creation\n", pc.ContainerName)
+		} else {
+			fmt.Printf("-> PostgREST container %q exists but is stopped; starting it\n", pc.ContainerName)
+			if err := pgm.StartContainer(pc); err != nil {
+				return err
+			}
+		}
+	} else {
+		fmt.Printf("-> Preparing PostgREST image %s...\n", pc.ImageTag)
+		if err := pgm.EnsureImage(pc.ImageTag); err != nil {
+			return err
+		}
+		fmt.Println("-> Starting PostgREST container...")
+		if err := pgm.EnsureContainer(pc); err != nil {
+			return err
+		}
+	}
+
+	if remote {
+		cfg.Addons.Postgrest[addonName] = *pc
+	} else {
+		inst := cfg.Instances[addonName]
+		inst.Addons.Postgrest = pc
+		cfg.Instances[addonName] = inst
+	}
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	fmt.Println()
+	if skipped {
+		fmt.Printf("✓ postgrest already present: %q\n", addonName)
+	} else {
+		fmt.Printf("✓ postgrest installed: %q\n", addonName)
+	}
+	fmt.Printf("  Container:    %s\n", pc.ContainerName)
+	fmt.Printf("  Image:        %s\n", pc.ImageTag)
+	fmt.Printf("  Backend:      %s\n", pc.BackendHost)
+	fmt.Printf("  REST API:     http://%s:%d\n", pc.Listen, pc.HostPort)
+	fmt.Printf("  Schema:       %s\n", postgrestSchemasDisplay(pc.Schemas))
+	fmt.Printf("  DB pool:      %s\n", postgrestPoolDisplay(pc.DbPool))
+	fmt.Printf("  Anon role:    %s\n", postgrestAnonRoleDisplay(pc.AnonRole))
+	fmt.Println()
+	fmt.Printf("  Database side is NOT touched by pgcli. PostgREST needs:\n")
+	fmt.Printf("    - a login role it connects with (the DSN user);\n")
+	fmt.Printf("    - for unauthenticated requests: a NOINHERIT role passed via\n")
+	fmt.Printf("      --anon-role that has GRANT USAGE on the exposed schema and\n")
+	fmt.Printf("      GRANTs on its tables (without it, anonymous access is off\n")
+	fmt.Printf("      and only JWT-authenticated requests are served);\n")
+	fmt.Printf("    - after schema changes: NOTIFY pgrst, 'reload schema'\n")
+	fmt.Printf("      (or restart this container) to refresh its schema cache.\n")
+	return nil
+}
+
+// postgrestSchemasDisplay renders the exposed-schema setting for the summary,
+// naming PostgREST's own default when the field is unset.
+func postgrestSchemasDisplay(schemas string) string {
+	if schemas == "" {
+		return "public (PostgREST default)"
+	}
+	return schemas
+}
+
+// postgrestPoolDisplay renders the DB pool size for the summary, naming
+// PostgREST's own default (10) when unset.
+func postgrestPoolDisplay(dbPool int) string {
+	if dbPool == 0 {
+		return "10 (PostgREST default)"
+	}
+	return strconv.Itoa(dbPool)
+}
+
+// postgrestAnonRoleDisplay renders the anonymous role for the summary and
+// `addon list` — unset means unauthenticated requests are refused, which is
+// worth surfacing explicitly.
+func postgrestAnonRoleDisplay(role string) string {
+	if role == "" {
+		return "none (anonymous access disabled — JWT only)"
+	}
+	return role
+}
+
+// postgrestPatroniMemberWarning checks the DSN's backend against every Patroni
+// member this host's config knows about. If the backend is a member's DIRECT
+// PG address while an HAProxy fronts that same scope, warn — a direct member
+// DSN loses writes after a failover, the LB listener follows the leader.
+// Returns "" when there is nothing to warn about (not a Patroni backend at
+// all, no HAProxy for that scope, or the DSN already points at the LB).
+func postgrestPatroniMemberWarning(cfg *config.Config, dsn string) string {
+	host, port, _, _, _, err := podman.ParseDSN(dsn)
+	if err != nil {
+		return "" // unparseable DSN: no opinion
+	}
+	for scope, cluster := range cfg.Addons.Patroni {
+		for mbName, mb := range cluster.Members {
+			mHost := pgConnectHost(mb)
+			if (mHost == host || mHost == "127.0.0.1" && host == "localhost") && mb.HostPort == port {
+				// backend is this member's direct PG port — is there an LB?
+				for _, lb := range cfg.Addons.HAProxy {
+					if lb.HAScope == scope && lb.WritePort != 0 {
+						return fmt.Sprintf("DSN points at Patroni member %q's direct PG port (%s:%d) in scope %q; after a failover that node stops accepting writes. Point the DSN at the HAProxy listener instead: postgres://...@%s:%d/<db>",
+							mbName, mHost, port, scope, lb.Listen, lb.WritePort)
+					}
+				}
+				return fmt.Sprintf("DSN points at Patroni member %q's direct PG port (%s:%d) in scope %q; after a failover that node stops accepting writes. Install an HAProxy listener for the scope (pg addon install haproxy --ha %s) and point the DSN at it.",
+					mbName, mHost, port, scope, scope)
+			}
+		}
+	}
+	return ""
+}
+
 // ---------------------------------------------------------------------------
 // list logic
 // ---------------------------------------------------------------------------
@@ -1923,6 +2269,7 @@ func runAddonList() error {
 	}
 
 	pbMgr, _ := podman.NewPgBouncerManager(cfg)
+	pgm, _ := podman.NewPostgrestManager(cfg)
 	em, _ := podman.NewEtcdManager(cfg)
 	dm, _ := podman.NewPgDogManager(cfg)
 
@@ -1930,24 +2277,42 @@ func runAddonList() error {
 	fmt.Println("Local add-ons:")
 	hasLocal := false
 	for name, inst := range cfg.Instances {
-		if inst.Addons.PgBouncer == nil {
+		if inst.Addons.PgBouncer == nil && inst.Addons.Postgrest == nil {
 			continue
 		}
-		hasLocal = true
-		pb := inst.Addons.PgBouncer
-		status := "stopped"
-		if pbMgr != nil {
-			if running, err := pbMgr.ContainerRunning(pb.ContainerName); err == nil && running {
-				status = "running"
+		if pb := inst.Addons.PgBouncer; pb != nil {
+			hasLocal = true
+			status := "stopped"
+			if pbMgr != nil {
+				if running, err := pbMgr.ContainerRunning(pb.ContainerName); err == nil && running {
+					status = "running"
+				}
 			}
+			fmt.Printf("  %s (instance: %s)\n", "pgbouncer", name)
+			fmt.Printf("    Status:      %s\n", status)
+			fmt.Printf("    Host:        %s:%d\n", inst.Postgres.Host, pb.HostPort)
+			fmt.Printf("    Backend:     %s\n", pb.BackendHost)
+			fmt.Printf("    Port:        %d\n", pb.HostPort)
+			fmt.Printf("    Pool mode:   %s\n", pb.PoolMode)
+			fmt.Printf("    Container:   %s\n", pb.ContainerName)
 		}
-		fmt.Printf("  %s (instance: %s)\n", "pgbouncer", name)
-		fmt.Printf("    Status:      %s\n", status)
-		fmt.Printf("    Host:        %s:%d\n", inst.Postgres.Host, pb.HostPort)
-		fmt.Printf("    Backend:     %s\n", pb.BackendHost)
-		fmt.Printf("    Port:        %d\n", pb.HostPort)
-		fmt.Printf("    Pool mode:   %s\n", pb.PoolMode)
-		fmt.Printf("    Container:   %s\n", pb.ContainerName)
+		if pr := inst.Addons.Postgrest; pr != nil {
+			hasLocal = true
+			status := "stopped"
+			if pgm != nil {
+				if running, err := pgm.ContainerRunning(pr.ContainerName); err == nil && running {
+					status = "running"
+				}
+			}
+			fmt.Printf("  %s (instance: %s)\n", "postgrest", name)
+			fmt.Printf("    Status:      %s\n", status)
+			fmt.Printf("    REST URL:    http://%s:%d\n", pr.Listen, pr.HostPort)
+			fmt.Printf("    Backend:     %s\n", pr.BackendHost)
+			fmt.Printf("    Schema:      %s\n", postgrestSchemasDisplay(pr.Schemas))
+			fmt.Printf("    DB pool:     %s\n", postgrestPoolDisplay(pr.DbPool))
+			fmt.Printf("    Anon role:   %s\n", postgrestAnonRoleDisplay(pr.AnonRole))
+			fmt.Printf("    Container:   %s\n", pr.ContainerName)
+		}
 	}
 	if !hasLocal {
 		fmt.Println("  (none)")
@@ -1974,6 +2339,23 @@ func runAddonList() error {
 			fmt.Printf("    Pool mode:   %s\n", pb.PoolMode)
 			fmt.Printf("    Container:   %s\n", pb.ContainerName)
 		}
+	}
+	for name, pr := range cfg.Addons.Postgrest {
+		hasRemote = true
+		status := "stopped"
+		if pgm != nil {
+			if running, err := pgm.ContainerRunning(pr.ContainerName); err == nil && running {
+				status = "running"
+			}
+		}
+		fmt.Printf("  %s (pg-name: %s)\n", "postgrest", name)
+		fmt.Printf("    Status:      %s\n", status)
+		fmt.Printf("    REST URL:    http://%s:%d\n", pr.Listen, pr.HostPort)
+		fmt.Printf("    Backend:     %s\n", pr.BackendHost)
+		fmt.Printf("    Schema:      %s\n", postgrestSchemasDisplay(pr.Schemas))
+		fmt.Printf("    DB pool:     %s\n", postgrestPoolDisplay(pr.DbPool))
+		fmt.Printf("    Anon role:   %s\n", postgrestAnonRoleDisplay(pr.AnonRole))
+		fmt.Printf("    Container:   %s\n", pr.ContainerName)
 	}
 	if !hasRemote {
 		fmt.Println("  (none)")
@@ -2246,10 +2628,12 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemoveMinio(cmd)
 	case "silo":
 		return runAddonRemoveSilo(cmd)
+	case "postgrest":
+		return runAddonRemovePostgrest(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, postgrest)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -2328,6 +2712,76 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 	}
 
 	fmt.Printf("✓ PgBouncer removed from instance %q\n", cfgInstance)
+	return nil
+}
+
+// runAddonRemovePostgrest removes a PostgREST container and its config entry,
+// in either mode: --pg-name removes the top-level addons.postgrest.<name>
+// entry, otherwise the local instance sidecar (instances.<name>.addons.postgrest).
+// PostgREST is stateless, so there is nothing on the host to clean beyond the
+// container itself.
+func runAddonRemovePostgrest(cmd *cobra.Command) error {
+	pgName, _ := cmd.Flags().GetString("pg-name")
+	isRemote := pgName != ""
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	pgm, err := podman.NewPostgrestManager(cfg)
+	if err != nil {
+		return fmt.Errorf("postgrest manager: %w", err)
+	}
+
+	if isRemote {
+		if cfg.Addons.Postgrest == nil {
+			return fmt.Errorf("no remote PostgREST add-ons configured")
+		}
+		pc, ok := cfg.Addons.Postgrest[pgName]
+		if !ok {
+			return fmt.Errorf("remote PostgREST %q not found", pgName)
+		}
+		fmt.Printf("-> Removing remote PostgREST %q...\n", pgName)
+		if err := pgm.Remove(&pc); err != nil {
+			return err
+		}
+		delete(cfg.Addons.Postgrest, pgName)
+		if len(cfg.Addons.Postgrest) == 0 {
+			cfg.Addons.Postgrest = nil
+		}
+		if err := cfg.Save(path); err != nil {
+			return fmt.Errorf("failed to save config: %w", err)
+		}
+		fmt.Printf("✓ Remote PostgREST %q removed\n", pgName)
+		return nil
+	}
+
+	if _, ok := cfg.Instances[cfgInstance]; !ok {
+		return fmt.Errorf("instance %q not found in config", cfgInstance)
+	}
+	inst := cfg.Instances[cfgInstance]
+	if inst.Addons.Postgrest == nil {
+		fmt.Printf("PostgREST is not installed for instance %q\n", cfgInstance)
+		return nil
+	}
+	fmt.Printf("-> Removing PostgREST from instance %q...\n", cfgInstance)
+	if err := pgm.Remove(inst.Addons.Postgrest); err != nil {
+		return err
+	}
+	inst.Addons.Postgrest = nil
+	cfg.Instances[cfgInstance] = inst
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	fmt.Printf("✓ PostgREST removed from instance %q\n", cfgInstance)
 	return nil
 }
 
@@ -2468,8 +2922,10 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartSilo(cmd)
 	case "pgbouncer":
 		return runAddonStartPgBouncer(cmd)
+	case "postgrest":
+		return runAddonStartPostgrest(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, postgrest)", addonName)
 	}
 }
 
@@ -2487,8 +2943,10 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopSilo(cmd)
 	case "pgbouncer":
 		return runAddonStopPgBouncer(cmd)
+	case "postgrest":
+		return runAddonStopPostgrest(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, postgrest)", addonName)
 	}
 }
 
@@ -3010,6 +3468,74 @@ func runAddonStopPgBouncer(cmd *cobra.Command) error {
 		return err
 	}
 	fmt.Printf("✓ PgBouncer for %q stopped\n", instName)
+	return nil
+}
+
+// resolvePostgrestTarget maps (pg-name / cfgInstance) to
+// (pcConf, name). pg-name non-empty → remote (top-level
+// addons.postgrest[pg-name]); otherwise local (instances.<-i>.addons.postgrest).
+func resolvePostgrestTarget(cfg *config.Config, cmd *cobra.Command) (*config.PostgrestConfig, string, error) {
+	pgName, _ := cmd.Flags().GetString("pg-name")
+	if pgName != "" {
+		pc, ok := cfg.Addons.Postgrest[pgName]
+		if !ok {
+			return nil, "", fmt.Errorf("remote PostgREST %q not found (run 'pg addon install postgrest --pg-name %s --dsn <dsn>')", pgName, pgName)
+		}
+		return &pc, pgName, nil
+	}
+	inst, ok := cfg.Instances[cfgInstance]
+	if !ok {
+		return nil, "", fmt.Errorf("instance %q not found in config", cfgInstance)
+	}
+	if inst.Addons.Postgrest == nil {
+		return nil, "", fmt.Errorf("PostgREST is not installed for instance %q (run 'pg addon install postgrest -i %s')", cfgInstance, cfgInstance)
+	}
+	return inst.Addons.Postgrest, cfgInstance, nil
+}
+
+func runAddonStartPostgrest(cmd *cobra.Command) error {
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	pc, name, err := resolvePostgrestTarget(cfg, cmd)
+	if err != nil {
+		return err
+	}
+	if err := ensureProxyBridge(cfg); err != nil {
+		return err
+	}
+	pgm, err := podman.NewPostgrestManager(cfg)
+	if err != nil {
+		return fmt.Errorf("postgrest manager: %w", err)
+	}
+	fmt.Printf("-> Starting PostgREST for %q...\n", name)
+	return pgm.StartContainer(pc)
+}
+
+func runAddonStopPostgrest(cmd *cobra.Command) error {
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	pc, name, err := resolvePostgrestTarget(cfg, cmd)
+	if err != nil {
+		return err
+	}
+	pgm, err := podman.NewPostgrestManager(cfg)
+	if err != nil {
+		return fmt.Errorf("postgrest manager: %w", err)
+	}
+	running, _ := pgm.ContainerRunning(pc.ContainerName)
+	if !running {
+		fmt.Printf("PostgREST for %q is not running\n", name)
+		return nil
+	}
+	fmt.Printf("-> Stopping PostgREST for %q...\n", name)
+	if _, err := pgm.Stop(pc.ContainerName); err != nil {
+		return err
+	}
+	fmt.Printf("✓ PostgREST for %q stopped\n", name)
 	return nil
 }
 

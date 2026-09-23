@@ -22,7 +22,8 @@ func init() {
 	for _, c := range []*cobra.Command{autostartEnableCmd, autostartDisableCmd} {
 		c.Flags().Bool("backup", false, "select the shared backup container")
 		c.Flags().Bool("pgbouncer", false, "select the PgBouncer addon (use with -i for a local pooler, --pg-name for a remote one)")
-		c.Flags().String("pg-name", "", "name of a remote PgBouncer (top-level addons)")
+		c.Flags().Bool("postgrest", false, "select the PostgREST addon (use with -i for a local one, --pg-name for a remote one)")
+		c.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST (top-level addons)")
 		c.Flags().Bool("etcd", false, "select an etcd member (top-level addons)")
 		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy instance, minio or silo instance, or Patroni member")
 		c.Flags().Bool("pgdog", false, "select a PgDog proxy (top-level addons)")
@@ -47,13 +48,15 @@ Use 'pg autostart disable' to opt out.`,
 
 var autostartEnableCmd = &cobra.Command{
 	Use:   "enable",
-	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo instance, or a Patroni member",
+	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo instance, or a Patroni member",
 	Long: `Enable auto-start on boot for exactly one target:
 
   pg autostart enable -i myinst          # instance
   pg autostart enable --backup           # shared backup container
   pg autostart enable --pgbouncer -i myinst      # local PgBouncer for an instance
   pg autostart enable --pgbouncer --pg-name x    # remote PgBouncer
+  pg autostart enable --postgrest -i myinst      # local PostgREST for an instance
+  pg autostart enable --postgrest --pg-name x    # remote PostgREST
   pg autostart enable --etcd --name m1           # etcd member (default name "etcd")
   pg autostart enable --pgdog --name proxy       # PgDog proxy (default name "pgdog")
   pg autostart enable --haproxy --name lb        # HAProxy instance (default name "haproxy")
@@ -71,6 +74,9 @@ haproxy).
 MinIO autostart only starts the existing container, recreating it from the
 config if the container was removed — install the instance first (pg addon
 install minio). silo autostart behaves identically (pg addon install silo).
+PostgREST autostart likewise only starts the existing container, recreating it
+from the config if it was removed — install it first (pg addon install
+postgrest).
 Patroni member autostart only brings that member's existing container up,
 reading the patroni.yml already on disk — create the member first (pg ha
 create). Start order relative to the DCS doesn't matter: Patroni retries until
@@ -133,6 +139,7 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 
 	backupSel, _ := cmd.Flags().GetBool("backup")
 	pgbSel, _ := cmd.Flags().GetBool("pgbouncer")
+	prSel, _ := cmd.Flags().GetBool("postgrest")
 	etcdSel, _ := cmd.Flags().GetBool("etcd")
 	pgdogSel, _ := cmd.Flags().GetBool("pgdog")
 	haSel, _ := cmd.Flags().GetBool("ha")
@@ -146,13 +153,16 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 
 	// Exactly one selector required.
 	sel := 0
-	if instChanged && !pgbSel {
+	if instChanged && !pgbSel && !prSel {
 		sel++
 	}
 	if backupSel {
 		sel++
 	}
 	if pgbSel {
+		sel++
+	}
+	if prSel {
 		sel++
 	}
 	if etcdSel {
@@ -174,10 +184,10 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		sel++
 	}
 	if sel != 1 {
-		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --etcd, --pgdog, --ha, --haproxy, --minio, or --silo")
+		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, or --silo")
 	}
-	if pgName != "" && !pgbSel {
-		return fmt.Errorf("--pg-name requires --pgbouncer")
+	if pgName != "" && !pgbSel && !prSel {
+		return fmt.Errorf("--pg-name requires --pgbouncer or --postgrest")
 	}
 	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel {
 		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, or --silo")
@@ -288,6 +298,25 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		inst.Addons.PgBouncer.Autostart = enable
 		cfg.Instances[cfgInstance] = inst
 		targetDesc = fmt.Sprintf("PgBouncer of instance %q", cfgInstance)
+	case prSel && pgName != "":
+		pr, ok := cfg.Addons.Postgrest[pgName]
+		if !ok {
+			return fmt.Errorf("remote PostgREST %q not found in config", pgName)
+		}
+		pr.Autostart = enable
+		cfg.Addons.Postgrest[pgName] = pr
+		targetDesc = fmt.Sprintf("remote PostgREST %q", pgName)
+	case prSel:
+		inst, ok := cfg.Instances[cfgInstance]
+		if !ok {
+			return fmt.Errorf("instance %q not found in config", cfgInstance)
+		}
+		if inst.Addons.Postgrest == nil {
+			return fmt.Errorf("instance %q has no PostgREST installed (run 'pg addon install postgrest -i %s')", cfgInstance, cfgInstance)
+		}
+		inst.Addons.Postgrest.Autostart = enable
+		cfg.Instances[cfgInstance] = inst
+		targetDesc = fmt.Sprintf("PostgREST of instance %q", cfgInstance)
 	default:
 		inst, ok := cfg.Instances[cfgInstance]
 		if !ok {
@@ -348,9 +377,17 @@ func countAutostartTargets(c *config.Config) int {
 		if inst.Addons.PgBouncer != nil && inst.Addons.PgBouncer.Autostart {
 			n++
 		}
+		if inst.Addons.Postgrest != nil && inst.Addons.Postgrest.Autostart {
+			n++
+		}
 	}
 	for _, pb := range c.Addons.PgBouncer {
 		if pb.Autostart {
+			n++
+		}
+	}
+	for _, pr := range c.Addons.Postgrest {
+		if pr.Autostart {
 			n++
 		}
 	}
@@ -403,10 +440,16 @@ func runAutostartStatus(cmd *cobra.Command, args []string) error {
 		if inst.Addons.PgBouncer != nil {
 			fmt.Printf("    pgbouncer %-11s %s\n", name, onOff(inst.Addons.PgBouncer.Autostart))
 		}
+		if inst.Addons.Postgrest != nil {
+			fmt.Printf("    postgrest %-10s %s\n", name, onOff(inst.Addons.Postgrest.Autostart))
+		}
 	}
 	fmt.Printf("  backup %-15s %s\n", "", onOff(cfg.Backup.Autostart))
 	for name, pb := range cfg.Addons.PgBouncer {
 		fmt.Printf("  pgbouncer %-13s %s (remote)\n", name, onOff(pb.Autostart))
+	}
+	for name, pr := range cfg.Addons.Postgrest {
+		fmt.Printf("  postgrest %-12s %s (remote)\n", name, onOff(pr.Autostart))
 	}
 	for name, ec := range cfg.Addons.Etcd {
 		fmt.Printf("  etcd %-17s %s\n", name, onOff(ec.Autostart))

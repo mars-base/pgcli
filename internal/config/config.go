@@ -28,6 +28,7 @@ type Config struct {
 	PatroniSSHStartPort     int                       `yaml:"patroni_ssh_start_port,omitempty"`     // starting Patroni SSH host port, default 42301 (separate from PG instance SSH pool at 42201)
 	HaProxyStartPort        int                       `yaml:"haproxy_start_port,omitempty"`         // starting HAProxy listener host port, default 5000 (read port and stats take the next free ports)
 	MinioStartPort          int                       `yaml:"minio_start_port,omitempty"`           // starting MinIO API host port, default 9000 (console takes the next free port)
+	PostgrestStartPort      int                       `yaml:"postgrest_start_port,omitempty"`       // starting PostgREST HTTP host port, default 3500
 	Postgres                PostgresConfig            `yaml:"postgres"`
 	Podman                  PodmanConfig              `yaml:"podman"`
 	PITR                    PITRConfig                `yaml:"pitr"`
@@ -70,6 +71,7 @@ type InstanceConfig struct {
 // AddonsConfig tracks optional sidecar components attached to an instance.
 type AddonsConfig struct {
 	PgBouncer *PgBouncerConfig `yaml:"pgbouncer,omitempty"`
+	Postgrest *PostgrestConfig `yaml:"postgrest,omitempty"`
 }
 
 // TopAddonsConfig holds top-level (cross-instance) addon configurations.
@@ -78,6 +80,7 @@ type AddonsConfig struct {
 // infrastructure addons like etcd.
 type TopAddonsConfig struct {
 	PgBouncer map[string]PgBouncerConfig      `yaml:"pgbouncer,omitempty"`
+	Postgrest map[string]PostgrestConfig      `yaml:"postgrest,omitempty"`
 	Etcd      map[string]EtcdConfig           `yaml:"etcd,omitempty"`
 	PgDog     map[string]PgDogConfig          `yaml:"pgdog,omitempty"`
 	Patroni   map[string]PatroniClusterConfig `yaml:"patroni,omitempty"`
@@ -123,6 +126,29 @@ type PgBouncerConfig struct {
 	// Autostart starts this PgBouncer container automatically on host boot
 	// via the boot service (`pg autostart enable --pgbouncer`).
 	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// PostgrestConfig holds a PostgREST addon: a single stateless container that
+// turns a PostgreSQL schema into a RESTful API. It connects to a PG endpoint
+// given by DSN, so the backend may be a direct instance, a PgBouncer, or a
+// Patroni+HAProxy writer address — the addon does not care which. Like
+// PgBouncer it is dual-mode: a local sidecar attached to an instance
+// (instances.<name>.addons.postgrest) or a top-level remote entry fronting a
+// database via --dsn (addons.postgrest.<name>). PostgREST is env-configured
+// (every setting is a PGRST_* variable) and holds no host data, so there is no
+// data dir and no config file to render.
+type PostgrestConfig struct {
+	ContainerName string `yaml:"container_name"`         // pgcli-postgrest<ns>-<name>
+	Name          string `yaml:"name,omitempty"`         // addon key, defaults to the map key
+	ImageTag      string `yaml:"image_tag,omitempty"`    // docker.io/postgrest/postgrest:v16.3 (default)
+	HostPort      int    `yaml:"host_port,omitempty"`    // HTTP host port, 3500+ auto-assigned
+	Listen        string `yaml:"listen,omitempty"`       // bind address, default 127.0.0.1
+	DSN           string `yaml:"dsn"`                    // backend PG URI, verbatim -> PGRST_DB_URI
+	BackendHost   string `yaml:"backend_host,omitempty"` // backend host:port (display only, parsed from DSN best-effort)
+	DbPool        int    `yaml:"db_pool,omitempty"`      // PGRST_DB_POOL; 0 = PostgREST's own default (10)
+	Schemas       string `yaml:"schemas,omitempty"`      // PGRST_DB_SCHEMAS; exposed schema, e.g. "api" (empty = PostgREST default "public")
+	AnonRole      string `yaml:"anon_role,omitempty"`    // PGRST_DB_ANON_ROLE; the NOINHERIT role unauthenticated requests SET ROLE to (empty = anonymous access disabled)
+	Autostart     bool   `yaml:"autostart,omitempty"`    // start on host boot via `pg autostart enable --postgrest`
 }
 
 // EtcdConfig holds a standalone etcd addon (a single-member key-value store,
@@ -368,6 +394,12 @@ const DefaultMCImageTag = "ghcr.io/mars-base/pgcli/pgcli-mc:20250813083541"
 // this and the Makefile (if one ever builds it) in sync.
 const DefaultPgBouncerImageTag = "docker.io/edoburu/pgbouncer:v1.25.2-p0"
 
+// DefaultPostgrestImageTag pins the PostgREST image to a specific upstream
+// release rather than :latest, so installs are reproducible. postgrest/postgrest
+// is the official multi-arch image on docker.io (pull-only — pgcli never builds
+// it). v16.3 is the current stable line; keep this in sync when bumping.
+const DefaultPostgrestImageTag = "docker.io/postgrest/postgrest:v16.3"
+
 // MinioConfig holds a standalone MinIO addon (single-node S3-compatible object
 // storage). Like etcd/pgdog/haproxy it is shared infrastructure, so it lives at
 // the top level (addons.minio.<name>). The typical use is a pgBackRest repository
@@ -594,6 +626,7 @@ func Default() *Config {
 		PatroniSSHStartPort:     42301,
 		HaProxyStartPort:        5000,
 		MinioStartPort:          9000,
+		PostgrestStartPort:      3500,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -791,6 +824,7 @@ type displayConfig struct {
 	PatroniRestapiStartPort int                       `yaml:"patroni_restapi_start_port,omitempty"`
 	HaProxyStartPort        int                       `yaml:"haproxy_start_port,omitempty"`
 	MinioStartPort          int                       `yaml:"minio_start_port,omitempty"`
+	PostgrestStartPort      int                       `yaml:"postgrest_start_port,omitempty"`
 	Logging                 LoggingConfig             `yaml:"logging"`
 	Backup                  BackupConfig              `yaml:"backup"`
 	Pigsty                  PigstyConfig              `yaml:"pigsty"`
@@ -813,6 +847,7 @@ func (c *Config) Display() displayConfig {
 		PatroniRestapiStartPort: c.PatroniRestapiStartPort,
 		HaProxyStartPort:        c.HaProxyStartPort,
 		MinioStartPort:          c.MinioStartPort,
+		PostgrestStartPort:      c.PostgrestStartPort,
 		Logging:                 c.Logging,
 		Backup:                  c.Backup,
 		Pigsty:                  c.Pigsty,
@@ -898,6 +933,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.MinioStartPort == 0 {
 		c.MinioStartPort = d.MinioStartPort
+	}
+	if c.PostgrestStartPort == 0 {
+		c.PostgrestStartPort = d.PostgrestStartPort
 	}
 
 	// Postgres
@@ -1046,6 +1084,22 @@ func (c *Config) ApplyDefaults() {
 			// so we don't need to fill them — pgbouncer.ini will omit them.
 			inst.Addons.PgBouncer = pb
 		}
+		// PostgREST addon defaults (only when a postgrest sidecar is present).
+		// DbPool/Schemas are left empty on purpose: 0/"" means "use PostgREST's
+		// own default" (10 / public), so the env is simply not set.
+		if inst.Addons.Postgrest != nil {
+			pr := inst.Addons.Postgrest
+			if pr.ContainerName == "" {
+				pr.ContainerName = "pgcli-postgrest" + nsSuffix(c.Namespace) + "-" + name
+			}
+			if pr.ImageTag == "" {
+				pr.ImageTag = DefaultPostgrestImageTag
+			}
+			if pr.Listen == "" {
+				pr.Listen = "127.0.0.1"
+			}
+			inst.Addons.Postgrest = pr
+		}
 		c.Instances[name] = inst
 	}
 
@@ -1067,6 +1121,24 @@ func (c *Config) ApplyDefaults() {
 			addon.DefaultPoolSize = 20
 		}
 		c.Addons.PgBouncer[name] = addon
+	}
+
+	// Top-level addons defaults (remote PostgREST APIs). Same dual shape as the
+	// PgBouncer map; DbPool/Schemas stay empty to defer to PostgREST's defaults.
+	for name, addon := range c.Addons.Postgrest {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-postgrest" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultPostgrestImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "127.0.0.1"
+		}
+		c.Addons.Postgrest[name] = addon
 	}
 
 	// Top-level addons defaults (etcd)
@@ -1256,6 +1328,7 @@ func (c *Config) autoAssignPorts() {
 	pbBase := c.PgBouncerStartPort
 	etcdBase := c.EtcdStartPort
 	pgdogBase := c.PgDogStartPort
+	prBase := c.PostgrestStartPort
 
 	// Probe already-used ports so multiple config files (or other services)
 	// on the same host don't collide.
@@ -1302,12 +1375,24 @@ func (c *Config) autoAssignPorts() {
 			assignedPgDog[addon.OpenmetricsPort] = true
 		}
 	}
+	assignedPR := map[int]bool{}
+	for _, inst := range c.Instances {
+		if inst.Addons.Postgrest != nil && inst.Addons.Postgrest.HostPort != 0 {
+			assignedPR[inst.Addons.Postgrest.HostPort] = true
+		}
+	}
+	for _, addon := range c.Addons.Postgrest {
+		if addon.HostPort != 0 {
+			assignedPR[addon.HostPort] = true
+		}
+	}
 
 	nextPG := pgBase
 	nextSSH := sshBase
 	nextPB := pbBase
 	nextEtcd := etcdBase
 	nextPgDog := pgdogBase
+	nextPR := prBase
 	for _, name := range sorted {
 		inst := c.Instances[name]
 		changed := false
@@ -1345,6 +1430,17 @@ func (c *Config) autoAssignPorts() {
 			nextPB = inst.Addons.PgBouncer.HostPort + 1
 		}
 
+		if inst.Addons.Postgrest != nil && inst.Addons.Postgrest.HostPort == 0 && prBase > 0 {
+			for (usedPorts != nil && usedPorts[nextPR]) || assignedPR[nextPR] {
+				nextPR++
+			}
+			inst.Addons.Postgrest.HostPort = nextPR
+			nextPR++
+			changed = true
+		} else if inst.Addons.Postgrest != nil && inst.Addons.Postgrest.HostPort >= nextPR && prBase > 0 {
+			nextPR = inst.Addons.Postgrest.HostPort + 1
+		}
+
 		if changed {
 			c.Instances[name] = inst
 		}
@@ -1361,6 +1457,21 @@ func (c *Config) autoAssignPorts() {
 			c.Addons.PgBouncer[name] = addon
 		} else if addon.HostPort >= nextPB && pbBase > 0 {
 			nextPB = addon.HostPort + 1
+		}
+	}
+
+	// Allocate ports for top-level addons (remote PostgREST APIs). Single port
+	// per entry, same shape as the PgBouncer map above.
+	for name, addon := range c.Addons.Postgrest {
+		if addon.HostPort == 0 && prBase > 0 {
+			for (usedPorts != nil && usedPorts[nextPR]) || assignedPR[nextPR] {
+				nextPR++
+			}
+			addon.HostPort = nextPR
+			nextPR++
+			c.Addons.Postgrest[name] = addon
+		} else if addon.HostPort >= nextPR && prBase > 0 {
+			nextPR = addon.HostPort + 1
 		}
 	}
 

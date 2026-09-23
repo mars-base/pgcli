@@ -75,8 +75,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --etcd / --pgdog / --ha / --haproxy / --minio / --silo)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo)")
 		return nil
 	}
 
@@ -118,6 +118,13 @@ func startAutostart() error {
 
 	// PgBouncer containers (local per-instance + remote).
 	if err := startAutostartPgbouncers(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// PostgREST containers (local per-instance + remote). Right after
+	// pgbouncer: both front the PG instances started above, and PostgREST
+	// only needs its backend reachable — no ordering constraint with the LBs.
+	if err := startAutostartPostgrests(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -193,6 +200,49 @@ func startAutostartPgbouncers(c *config.Config) error {
 		if pb.Autostart {
 			if err := pbMgr.StartContainer(&pb, name); err != nil {
 				fmt.Printf("  [X] pgbouncer autostart (%s): %v\n", name, err)
+				if firstErr == nil {
+					firstErr = err
+				}
+			}
+		}
+	}
+	return firstErr
+}
+
+func hasAutostartPostgrest(c *config.Config) bool {
+	for _, inst := range c.Instances {
+		if inst.Addons.Postgrest != nil && inst.Addons.Postgrest.Autostart {
+			return true
+		}
+	}
+	for _, pr := range c.Addons.Postgrest {
+		if pr.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+func startAutostartPostgrests(c *config.Config) error {
+	prMgr, err := podman.NewPostgrestManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for name, inst := range c.Instances {
+		if inst.Addons.Postgrest != nil && inst.Addons.Postgrest.Autostart {
+			if err := prMgr.StartContainer(inst.Addons.Postgrest); err != nil {
+				fmt.Printf("  [X] postgrest autostart (%s): %v\n", name, err)
+				if firstErr == nil {
+					firstErr = err
+				}
+			}
+		}
+	}
+	for name, pr := range c.Addons.Postgrest {
+		if pr.Autostart {
+			if err := prMgr.StartContainer(&pr); err != nil {
+				fmt.Printf("  [X] postgrest autostart (%s): %v\n", name, err)
 				if firstErr == nil {
 					firstErr = err
 				}
