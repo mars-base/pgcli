@@ -273,6 +273,10 @@ pg addon install postgrest -i mypg --schema api --anon-role web_anon \
 - token 必须用同一密钥签名；被篡改的一律 401。
 - `role` claim 必须指到一个在暴露 schema 上有授权的角色（像上面的 `web_anon`
   那样建，`NOINHERIT`）。
+- **DSN 里的登录角色必须是该角色的成员**，因为服务请求的本质就是 `SET ROLE`
+  到它。所以对 `web_user` 这类 JWT 角色，还需要 `GRANT web_user TO <dsn-user>;`
+  ——与上面匿名角色的要求相同，DSN 用户是 superuser 时同样可省略。缺这个成员
+  关系，请求会失败并报 `permission denied to set role`。
 - 若你的签发方用别的字段名，可用 `PGRST_JWT_ROLE_CLAIM_KEY` 改 claim 键——pgcli
   没有暴露该 flag，需要时直接在容器上设置。
 
@@ -297,6 +301,7 @@ curl -s -H "Authorization: Bearer $HEADER.$PAYLOAD.$SIG" http://127.0.0.1:3500/w
 |------|-----------------|
 | 安装报 `cannot connect to source database` | 容器访问不到 DSN 的 host:port（macOS 上远程 `127.0.0.1` 指向 Mac 而非 VM）。用 `pg exec --dsn <dsn> "SELECT 1"` 验证。 |
 | 所有请求返回 HTTP 401 `Anonymous access is disabled` | 未给 `--anon-role` 且请求没带合法 JWT——补 `--anon-role`，或用 `--jwt-secret` 安装并发一个签名 token。若已设 `--jwt-secret` 仍 401，说明签名或 `role` claim 不对。 |
+| 写请求返回 HTTP 401，但 JSON 响应体里是 `42501` / `permission denied for table` | 请求所扮演角色（匿名角色或 JWT 的 `role` claim）缺该权限——PostgREST 在 HTTP 层把权限不足报成 401，真正的 SQLSTATE 只在响应体里。给请求实际使用的角色补授权。 |
 | 新建的表/关系在 `NOTIFY pgrst` 后仍 404 / `PGRST205` | reload 没送达 PostgREST（见上文**事务池化**）。重启容器，或改用会话/直连。 |
 | Patroni failover 后写请求立刻失败 | DSN 指到了成员直连口而非 HAProxy 读写口——安装时已警告。把 DSN 改指 LB。 |
 | `--db-pool` 改动没生效 | 已存在的容器会被复用；加 `--force` 重装以重建。 |

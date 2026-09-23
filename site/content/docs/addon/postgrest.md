@@ -301,6 +301,11 @@ With a secret set, PostgREST verifies any request that carries
 - The token must be signed with the same secret; a tampered one is rejected 401.
 - The `role` claim must name a database role with grants on the exposed schema
   (create it like `web_anon` above, `NOINHERIT`).
+- **The login role in the DSN must be a member of that role**, because serving the
+  request means `SET ROLE` to it. So for a JWT role like `web_user` you also need
+  `GRANT web_user TO <dsn-user>;` — same requirement as the anon role above, and
+  likewise skippable when the DSN user is a superuser. Without the membership,
+  requests fail with `permission denied to set role`.
 - Change the claim key from `role` via `PGRST_JWT_ROLE_CLAIM_KEY` if your issuer
   uses another field — pgcli does not surface that flag; set it on the container
   directly if needed.
@@ -328,6 +333,7 @@ curl -s -H "Authorization: Bearer $HEADER.$PAYLOAD.$SIG" http://127.0.0.1:3500/w
 |---------|--------------------|
 | Install fails with `cannot connect to source database` | The DSN host:port is unreachable from the container (on macOS, remote `127.0.0.1` points at the Mac, not the VM). Verify with `pg exec --dsn <dsn> "SELECT 1"`. |
 | Every request returns HTTP 401 `Anonymous access is disabled` | No `--anon-role` was given and the request carried no valid JWT — add `--anon-role`, or install with `--jwt-secret` and send a signed token. A JWT 401 with `--jwt-secret` set means the signature/`role` claim is wrong. |
+| A write returns HTTP 401 whose JSON body says `42501` / `permission denied for table` | The role the request ran as (anon or the JWT `role` claim) lacks that privilege — PostgREST surfaces insufficient privilege as 401 at the HTTP layer, with the real SQLSTATE only in the body. Grant the privilege to the role the request assumes. |
 | A brand-new table/relationship still returns 404/`PGRST205` after `NOTIFY pgrst` | Reload is not reaching PostgREST (see **transaction pooling** above). Restart the container, or use a session/direct connection. |
 | Writes fail right after a Patroni failover | The DSN pointed at a member's direct port, not the HAProxy rw listener — install warned about this. Re-point the DSN at the LB. |
 | `--db-pool` change didn't take effect | Existing containers are reused; re-run install with `--force` to recreate. |
