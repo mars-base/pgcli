@@ -190,6 +190,24 @@ GRANT USAGE ON SCHEMA api TO web_anon;
 GRANT SELECT ON ALL TABLES IN SCHEMA api TO web_anon;
 ```
 
+To make the setup re-runnable, guard the `CREATE ROLE` with a `DO` block and pin
+future tables with default privileges:
+
+```sql
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'web_anon') THEN
+    CREATE ROLE web_anon NOINHERIT NOLOGIN;
+  END IF;
+END $$;
+GRANT USAGE ON SCHEMA public TO web_anon;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO web_anon;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO web_anon;
+```
+
+> The role column is `rolname`, not `rolename` — a typo here fails the whole
+> batch. `ALTER DEFAULT PRIVILEGES` only affects tables created **after** it
+> runs; grant existing tables separately with the `GRANT ... ON ALL TABLES` line.
+
 Then install with `--anon-role web_anon`. Without an anonymous role, requests
 must carry a JWT; the install prints the same hint.
 
@@ -211,6 +229,34 @@ NOTIFY pgrst, 'reload schema';
 > stable connection. Either point PostgREST at a **session**-pooled or direct
 > connection, or **restart the PostgREST container** (it re-introspects on
 > boot) to pick up schema changes.
+
+## Verifying the API
+
+The install prints the REST URL (`http://127.0.0.1:<port>`). Hit it to confirm
+the server is live and see which relations it exposes:
+
+```bash
+# The OpenAPI root — answers as soon as PostgREST has connected to the backend.
+curl -s http://127.0.0.1:3500/ | head -c 120
+
+# Which tables/relations are exposed (from the OpenAPI paths):
+curl -s http://127.0.0.1:3500/ | grep -o '"/[a-z_]*"'
+
+# Read rows from a table in the exposed schema. The schema is implicit in the
+# path — it is /widgets, NOT /api.widgets:
+curl -s "http://127.0.0.1:3500/widgets"
+curl -s "http://127.0.0.1:3500/widgets?id=eq.1"   # a filter
+```
+
+A few things to expect on a fresh install:
+
+- The root can take a moment to answer — schema introspection runs after boot,
+  so the first requests may `503` until PostgREST has connected.
+- If a table you just created returns `404`/`PGRST205`, the cache predates it:
+  send `NOTIFY pgrst, 'reload schema'` (direct/session connection) or restart
+  the container.
+- `HTTP 401 Anonymous access is disabled` means no `--anon-role` was set and the
+  request carried no JWT.
 
 ## Troubleshooting
 

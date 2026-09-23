@@ -174,6 +174,24 @@ GRANT USAGE ON SCHEMA api TO web_anon;
 GRANT SELECT ON ALL TABLES IN SCHEMA api TO web_anon;
 ```
 
+要让这段准备可重复执行，用 `DO` 块守卫 `CREATE ROLE`，并用 default privileges
+覆盖以后新建的表：
+
+```sql
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'web_anon') THEN
+    CREATE ROLE web_anon NOINHERIT NOLOGIN;
+  END IF;
+END $$;
+GRANT USAGE ON SCHEMA public TO web_anon;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO web_anon;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO web_anon;
+```
+
+> 角色视图的列名是 `rolname`，不是 `rolename`——写错会让整批语句回滚。
+> `ALTER DEFAULT PRIVILEGES` 只对其**之后**新建的表生效；已存在的表要用上面那条
+> `GRANT ... ON ALL TABLES` 单独授权。
+
 然后用 `--anon-role web_anon` 安装。没有匿名角色时，请求必须带 JWT；安装输出里
 也会打印同样的提示。
 
@@ -190,6 +208,32 @@ NOTIFY pgrst, 'reload schema';
 > 而且即便把 `NOTIFY` 直发到后端也会丢，因为 PostgREST 自己的 LISTEN 会话没有稳定
 > 连接。要么让 PostgREST 连到**会话**池化或直连端点，要么**重启 PostgREST 容器**
 > （启动时会重新内省）以拾取 schema 变更。
+
+## 验证 API
+
+安装输出会打印 REST URL（`http://127.0.0.1:<port>`）。访问它确认服务已就绪，
+并查看它暴露了哪些关系：
+
+```bash
+# OpenAPI 根——PostgREST 连上后端后即应答。
+curl -s http://127.0.0.1:3500/ | head -c 120
+
+# 暴露了哪些表/关系（取自 OpenAPI paths）：
+curl -s http://127.0.0.1:3500/ | grep -o '"/[a-z_]*"'
+
+# 读取暴露 schema 下某张表的行。路径里 schema 是隐含的——是 /widgets，
+# 不是 /api.widgets：
+curl -s "http://127.0.0.1:3500/widgets"
+curl -s "http://127.0.0.1:3500/widgets?id=eq.1"   # 带过滤条件
+```
+
+全新安装时几点预期：
+
+- 根路径可能需要一点时间才应答——schema 内省在启动后才跑，最初的请求可能返回
+  `503`，直到 PostgREST 连上后端。
+- 刚建的表返回 `404`/`PGRST205` 说明缓存早于它：发一句
+  `NOTIFY pgrst, 'reload schema'`（直连/会话连接），或重启容器。
+- `HTTP 401 Anonymous access is disabled` 表示未设 `--anon-role` 且请求没带 JWT。
 
 ## 排障
 
