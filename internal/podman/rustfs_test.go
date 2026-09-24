@@ -77,7 +77,9 @@ func TestRustfsVolumesEnv(t *testing.T) {
 		{"SNMD four drives", nil, true, 4, "/data/rustfs{0...3}"},
 		{"MNMD two nodes × two drives",
 			[]string{"http://10.0.0.1:9000", "http://10.0.0.2:9000"}, true, 2,
-			"http://10.0.0.1:9000/data/rustfs{0...1},http://10.0.0.2:9000/data/rustfs{0...1}"},
+			// Space-joined, NOT comma: rustfs's binary mis-splits a comma-joined
+			// URL list (collapsing http:// to http:/ and aborting VolumeNotFound).
+			"http://10.0.0.1:9000/data/rustfs{0...1} http://10.0.0.2:9000/data/rustfs{0...1}"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

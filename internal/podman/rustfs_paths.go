@@ -41,9 +41,18 @@ func rustfsVolumeRange(drives int) string {
 //
 //   - SNSD (no endpoints, no drives): "/data" (the single data-dir mount).
 //   - SNMD (no endpoints, drives):    "/data/rustfs{0...D-1}" (or /data/rustfs0).
-//   - MNMD (endpoints, drives):       "<epN>/data/rustfs{0...D-1},<...>" — every
+//   - MNMD (endpoints, drives):       "<epN>/data/rustfs{0...D-1} <...>" — every
 //     endpoint (each node's scheme://host:port) gets the shared per-drive suffix,
-//     comma-joined; the entrypoint's tr expands commas and braces on each token.
+//     SPACE-joined. The separator MUST be a space, not a comma: the image's
+//     /entrypoint.sh turns commas into spaces with `tr` before expanding the
+//     brace ranges for its OWN argv, but the rustfs binary re-reads the raw
+//     RUSTFS_VOLUMES value and mis-tokenizes a comma-joined URL list — the
+//     "http://" prefix collapses to "http:/", so the node resolves the whole
+//     comma-run as a single bogus local path and aborts with VolumeNotFound (or,
+//     on the peers, degrades to "waiting for storage_quorum" with no writable
+//     cluster). Space-separated literals parse identically to the documented
+//     compact brace form (http://node{1...4}:9000/data/rustfs{0...3}) but let
+//     pgcli emit the operator's literal, per-node IPs with no /etc/hosts setup.
 func rustfsVolumesEnv(endpoints []string, drivesProvided bool, driveCount int) string {
 	switch {
 	case len(endpoints) > 0:
@@ -52,7 +61,7 @@ func rustfsVolumesEnv(endpoints []string, drivesProvided bool, driveCount int) s
 		for _, ep := range endpoints {
 			parts = append(parts, ep+suffix)
 		}
-		return strings.Join(parts, ",")
+		return strings.Join(parts, " ")
 	case drivesProvided:
 		return rustfsVolumeRange(driveCount)
 	default:
