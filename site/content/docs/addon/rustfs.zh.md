@@ -179,6 +179,11 @@ pg addon install rustfs --name store \
   --tls-key  /etc/ssl/wildcard.example.com.key
 ```
 
+还没有证书？`pg cert` 能按你给定的 SAN 铸一张自签 leaf，rustfs 原样 serve
+它（真机验证过：rustfs 实际呈现的证书与 `pg cert` 输出在实时握手上吻合，
+`pg mc` 对它完成完整的 put/get 往返）。签发的参数、客户端信任锚、续期，见
+[自签证书](../../self-cert/)。
+
 BYO 模式的其余一切——为什么续期需要 `--force`（单文件挂载会钉住宿主源
 inode）、客户端如何挑选信任锚、`pg cert` 作为测试证书铸造——与 MinIO 插件完
 全一致，见 [MinIO → 自带证书](../minio/)。**关掉 BYO：** 从 `pg.yaml` 里删

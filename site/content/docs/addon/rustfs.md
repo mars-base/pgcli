@@ -196,6 +196,12 @@ pg addon install rustfs --name store \
   --tls-key  /etc/ssl/wildcard.example.com.key
 ```
 
+No certificate yet? `pg cert` mints a self-signed leaf with whatever SANs you
+name, and rustfs serves it as-is (verified on a real install: the leaf rustfs
+presents matches the `pg cert` output off the live handshake, and `pg mc` does a
+full put/get round-trip against it over TLS). See [Self-Cert](../../self-cert/)
+for the mint flags, client trust-anchor, and renewal.
+
 Everything else about BYO mode — why renewal needs `--force` (a single-file
 mount pins the source inode), how clients pick their trust anchor, and `pg cert`
 as a test-cert mint — is identical to the MinIO addon; see [MinIO → Bring your
