@@ -50,6 +50,15 @@ Infra addons (shared, not tied to one instance):
           Pigsty's MinIO fork — the same S3 store, from the public
           docker.io/pgsty/silo image (its own mcli client comes with it; see
           "pg mcli").
+  pg addon install rustfs
+          Stored under top-level addons.rustfs in config (Linux only).
+          A Rust S3-compatible object store, run from pgcli's own wrapper image
+          (ghcr.io/mars-base/pgcli/pgcli-rustfs). Upstream rustfs runs as a fixed
+          uid 10001; the wrapper handles that inside the container (it chowns its
+          own bind dirs and drops privileges), so pgcli never touches host file
+          ownership. Three topologies — SNSD / SNMD / MNMD — but
+          no multi-node single-drive mode, and every drive must sit on its own
+          physical device.
   pg addon install postgrest
           Exposes a PostgreSQL schema as a REST API (single stateless
           container, dual mode like pgbouncer): local -i fronting an
@@ -82,6 +91,7 @@ Currently supported add-ons:
   haproxy     TCP load balancer in front of a Patroni cluster (unified or read/write split)
   minio       single-node S3-compatible object storage (web console included; Linux host network, macOS bridge)
   silo        MinIO's Pigsty fork — same S3 object storage, from the public docker.io/pgsty/silo image (console + mcli client bundled; Linux host network, macOS bridge)
+  rustfs      Rust S3-compatible object storage from pgcli's wrapper image, ghcr.io/mars-base/pgcli/pgcli-rustfs (console included; Linux only; the fixed upstream uid 10001 is handled inside the container, three topologies SNSD/SNMD/MNMD, each drive on its own physical device)
   postgrest   stateless REST API in front of a PostgreSQL schema (single container; Linux host network, macOS bridge)
 
 Two modes (pgbouncer, postgrest):
@@ -106,19 +116,27 @@ Infra addon (haproxy — TCP load balancer in front of a Patroni cluster, Linux 
   re-run install to re-sync the backend list.
 
 Infra addon (minio — single-node S3-compatible object storage, Linux and macOS;
-            silo — its Pigsty fork, identical flags, same shared port pool):
+            silo — its Pigsty fork, identical flags, same shared port pool;
+            rustfs — a Rust S3 store, Linux only, same shared port pool):
   pg addon install minio [--name store] [--api-port N] [--console-port N]
                          [--listen 127.0.0.1] [--root-user admin] [--data-dir ...] [--force]
   pg addon install silo  [--name store] [--api-port N] [--console-port N]
                          [--listen 127.0.0.1] [--root-user admin] [--data-dir ...] [--force]
+  pg addon install rustfs [--name store] [--api-port N] [--console-port N]
+                         [--listen 127.0.0.1] [--root-user admin] [--data-dir ...] [--force]
   Root credentials are generated on first install, printed once for the record,
   and stored in the config (root_user / root_password under
-  addons.minio.<name> / addons.silo.<name>);
+  addons.minio.<name> / addons.silo.<name> / addons.rustfs.<name>);
   the web console is at http://<listen>:<console-port>/ (on macOS the store
   serves on the bridge with the ports published, so the Mac reaches both on
   127.0.0.1). An already-present container is reused (a stopped one is
   started); pass --force to recreate it after changing ports, listen, or
-  credentials.
+  credentials. rustfs has three topologies — single-node single-drive (default
+  --data-dir), single-node multi-drive (--drive, each on its own physical
+  device), and multi-node multi-drive (--drive + one --endpoint per node); it
+  has NO multi-node single-drive mode. It runs as uid 10001, so pgcli chowns
+  its data and TLS dirs for that user (directly as root, or via "podman
+  unshare chown" under a rootless setup).
 
 PostgREST (stateless REST API in front of a schema; dual mode like pgbouncer,
 Linux and macOS):
@@ -151,6 +169,8 @@ Examples:
   pg addon install haproxy --node node1=10.0.0.11:35532:8008 --node node2=10.0.0.11:35533:8009
   pg addon install minio --name store --data-dir /srv/minio
   pg addon install silo --name store --tls
+  pg addon install rustfs --name store --tls
+  pg addon install rustfs --name store --drive /mnt/rustfs/d0 --drive /mnt/rustfs/d1 --drive /mnt/rustfs/d2 --drive /mnt/rustfs/d3 --tls
   pg addon install postgrest -i proj01 --schema api --anon-role web_anon
   pg addon install postgrest --dsn "postgres://api:pass@127.0.0.1:5000/appdb" --pg-name app-api --schema api`,
 	Args: cobra.ExactArgs(1),
@@ -212,6 +232,7 @@ Supported add-ons:
   haproxy    pg addon start haproxy [--name lb]
   minio      pg addon start minio [--name store]
   silo       pg addon start silo [--name store]
+  rustfs     pg addon start rustfs [--name store]
   pgbouncer  pg addon start pgbouncer -i <instance>
              pg addon start pgbouncer --pg-name <remote-name>
   postgrest  pg addon start postgrest -i <instance>
@@ -223,6 +244,7 @@ Examples:
   pg addon start haproxy --name lb
   pg addon start minio --name store
   pg addon start silo --name store
+  pg addon start rustfs --name store
   pg addon start pgbouncer -i proj01
   pg addon start postgrest --pg-name app-api`,
 	Args: cobra.ExactArgs(1),
@@ -243,6 +265,7 @@ Supported add-ons:
   haproxy    pg addon stop haproxy [--name lb]
   minio      pg addon stop minio [--name store]
   silo       pg addon stop silo [--name store]
+  rustfs     pg addon stop rustfs [--name store]
   pgbouncer  pg addon stop pgbouncer -i <instance>
              pg addon stop pgbouncer --pg-name <remote-name>
   postgrest  pg addon stop postgrest -i <instance>
@@ -254,6 +277,7 @@ Examples:
   pg addon stop haproxy --name lb
   pg addon stop minio --name store
   pg addon stop silo --name store
+  pg addon stop rustfs --name store
   pg addon stop pgbouncer -i proj01
   pg addon stop postgrest --pg-name app-api`,
 	Args: cobra.ExactArgs(1),
@@ -303,16 +327,16 @@ func init() {
 	addonRemoveCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to remove")
 
 	// etcd flags (top-level shared-infrastructure addon)
-	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio or silo instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\")")
+	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo or rustfs instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\")")
 	addonInstallCmd.Flags().Int("client-port", 0, "etcd client host port (0=auto-assign from etcd_start_port)")
 	addonInstallCmd.Flags().Int("peer-port", 0, "etcd peer host port (0=auto-assign, next free port after client)")
 	addonInstallCmd.Flags().String("image", "", "etcd image tag (default quay.io/coreos/etcd:v3.5.30)")
 	addonInstallCmd.Flags().String("cluster", "", "etcd cluster name (--initial-cluster-token, default \"pgcli-etcd\")")
-	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO or a silo instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data)")
+	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo or rustfs instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data)")
 	addonInstallCmd.Flags().String("advertise-host", "", "host advertised in this member's peer/client URLs (empty=127.0.0.1 for single-host; set a LAN IP or FQDN for cross-host clusters)")
 	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.0.0.12:2379 (implies --initial-cluster-state existing; requires --advertise-host)")
-	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio or silo instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\")")
-	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo data directory (object storage / backup repository)")
+	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo or rustfs instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\")")
+	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs data directory (object storage / backup repository)")
 
 	// haproxy flags (top-level load balancer in front of a Patroni cluster)
 	addonInstallCmd.Flags().String("mode", "", "HAProxy routing mode: unified (default, all traffic to the leader) or split (separate read listener for replicas)")
@@ -324,22 +348,22 @@ func init() {
 	addonInstallCmd.Flags().String("max-lag", "", "replica lag threshold for the read listener, e.g. 1MB (split mode; empty=no filter)")
 
 	// minio flags (top-level single-node S3-compatible object storage)
-	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo S3 API host port (0=auto-assign from the shared minio_start_port pool)")
-	addonInstallCmd.Flags().Int("console-port", 0, "MinIO/silo web console host port (0=auto-assign, next free port)")
-	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO or silo server / PostgREST HTTP server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network)")
-	addonInstallCmd.Flags().String("root-user", "", "MinIO/silo root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config)")
-	addonInstallCmd.Flags().String("root-password", "", "MinIO/silo root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand)")
-	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO/silo distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (path is the in-container export dir — /data with a plain --data-dir node, or /data1../dataN on a --drive node (MNMD); repeat for every node's every drive; the list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
-	addonInstallCmd.Flags().StringSlice("drive", nil, "MinIO/silo multi-drive host dir(s), each on its own disk — e.g. --drive /mnt/minio/disk1 --drive /mnt/minio/disk2 ... (repeat for each drive; alone this is single-node multi-drive (SNMD); combined with --endpoint it is one node of a multi-node multi-drive cluster (MNMD), and each endpoint must address this node's /data1../dataN slots. Mutually exclusive with --data-dir; MinIO/silo reject a drive sharing the root device)")
-	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo>/<name>/; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Changing this needs --force to recreate")
-	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
-	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo: private key for --tls-cert (PEM; mounted read-only as private.key). Must pair with the cert; both are required to enable BYO TLS")
-	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/PostgREST container even if one already exists (to apply changed ports/listen/credentials, or a changed PostgREST --dsn/--db-pool/--schema)")
+	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo/rustfs S3 API host port (0=auto-assign from the shared minio_start_port pool)")
+	addonInstallCmd.Flags().Int("console-port", 0, "MinIO/silo/rustfs web console host port (0=auto-assign, next free port)")
+	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo or rustfs server / PostgREST HTTP server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network)")
+	addonInstallCmd.Flags().String("root-user", "", "MinIO/silo/rustfs root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config)")
+	addonInstallCmd.Flags().String("root-password", "", "MinIO/silo/rustfs root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand)")
+	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO/silo/rustfs distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (MinIO/silo: path is the in-container export dir — /data with a plain --data-dir node, or /data1../dataN on a --drive node (MNMD); repeat for every node's every drive. rustfs: one endpoint per node — scheme://host:port, no path; it has no multi-node single-drive mode so --drive is required, and it derives the /data/rustfs0../rustfsN suffix itself. The list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
+	addonInstallCmd.Flags().StringSlice("drive", nil, "MinIO/silo/rustfs multi-drive host dir(s), each on its own disk — e.g. --drive /mnt/minio/disk1 --drive /mnt/minio/disk2 ... (repeat for each drive; alone this is single-node multi-drive (SNMD); combined with --endpoint it is one node of a multi-node multi-drive cluster (MNMD), and each endpoint addresses this node's drive slots (/data1../dataN for MinIO/silo, /data/rustfs0../rustfsN for rustfs). Mutually exclusive with --data-dir. MinIO/silo reject a drive sharing the root device; rustfs hard-requires every drive on its own physical device)")
+	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo/rustfs: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo|rustfs>/<name>/; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Changing this needs --force to recreate")
+	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo/rustfs: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt for MinIO/silo, rustfs_cert.pem for rustfs). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
+	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo/rustfs: private key for --tls-cert (PEM; mounted read-only as private.key for MinIO/silo, rustfs_key.pem for rustfs). Must pair with the cert; both are required to enable BYO TLS")
+	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/PostgREST container even if one already exists (to apply changed ports/listen/credentials, or a changed PostgREST --dsn/--db-pool/--schema)")
 
 	// start / stop flags
-	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio or silo instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\")")
+	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo or rustfs instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\")")
 	addonStartCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to start")
-	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio or silo instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\")")
+	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo or rustfs instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\")")
 	addonStopCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to stop")
 
 	// pgdog flags (top-level shared Postgres proxy addon)
@@ -374,12 +398,14 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallMinio(cmd)
 	case "silo":
 		return runAddonInstallSilo(cmd)
+	case "rustfs":
+		return runAddonInstallRustfs(cmd)
 	case "postgrest":
 		return runAddonInstallPostgrest(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, postgrest)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, postgrest)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -1947,6 +1973,264 @@ func runAddonInstallSilo(cmd *cobra.Command) error {
 	return nil
 }
 
+// runAddonInstallRustfs installs a rustfs container. Field-for-field twin of
+// runAddonInstallSilo except where the runtime genuinely differs: rustfs has no
+// multi-node single-drive topology (so ValidateRustfsVolumes replaces
+// ValidateMNMDMatrix here), and its drive slots are 0-indexed /data/rustfsN
+// rather than MinIO/silo's 1-indexed /dataN — the display and the notes below
+// reflect rustfs's own layout and its hard distinct-physical-device rule.
+func runAddonInstallRustfs(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "rustfs"
+	}
+	imageTag, _ := cmd.Flags().GetString("image")
+	dataDir, _ := cmd.Flags().GetString("data-dir")
+	apiPort, _ := cmd.Flags().GetInt("api-port")
+	consolePort, _ := cmd.Flags().GetInt("console-port")
+	listenAddr, _ := cmd.Flags().GetString("listen")
+	rootUser, _ := cmd.Flags().GetString("root-user")
+	rootPassword, _ := cmd.Flags().GetString("root-password")
+	endpoints, _ := cmd.Flags().GetStringSlice("endpoint")
+	drives, _ := cmd.Flags().GetStringSlice("drive")
+	force, _ := cmd.Flags().GetBool("force")
+	tls, _ := cmd.Flags().GetBool("tls")
+	tlsCert, _ := cmd.Flags().GetString("tls-cert")
+	tlsKey, _ := cmd.Flags().GetString("tls-key")
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.Rustfs == nil {
+		cfg.Addons.Rustfs = make(map[string]config.RustfsConfig)
+	}
+	existing, ok := cfg.Addons.Rustfs[name]
+	if !ok {
+		existing = config.RustfsConfig{
+			ContainerName: "pgcli-rustfs" + nsSuffixCLI(cfg.Namespace) + "-" + name,
+			Name:          name,
+		}
+	}
+	if imageTag != "" {
+		existing.ImageTag = imageTag
+	}
+	if dataDir != "" {
+		existing.DataDir = dataDir
+	}
+	if apiPort != 0 {
+		existing.APIPort = apiPort
+	}
+	if consolePort != 0 {
+		existing.ConsolePort = consolePort
+	}
+	if rootUser != "" {
+		existing.RootUser = rootUser
+	}
+	if rootPassword != "" {
+		existing.RootPassword = rootPassword
+	}
+	if listenAddr != "" {
+		existing.Listen = listenAddr
+	}
+	if len(endpoints) > 0 {
+		existing.Endpoints = endpoints
+	}
+	if len(drives) > 0 {
+		existing.Drives = drives
+	}
+	if tls {
+		existing.TLS = true
+	}
+	if tlsCert != "" {
+		existing.TLS = true
+		existing.CertFile = podman.HostMountPath(tlsCert)
+	}
+	if tlsKey != "" {
+		existing.TLS = true
+		existing.KeyFile = podman.HostMountPath(tlsKey)
+	}
+	if (existing.CertFile == "") != (existing.KeyFile == "") {
+		return fmt.Errorf("--tls-cert and --tls-key must be given together (a bring-your-own TLS pair needs both the cert and its key)")
+	}
+	// rustfs has SNSD/SNMD/MNMD but NO multi-node single-drive mode, so
+	// endpoints require at least one drive. Checked post-merge so a stale key in
+	// pg.yaml conflicts like a flag. The minimum drive/node count and the
+	// distinct-physical-device rule are enforced by rustfs itself at startup
+	// (it FATALs otherwise), not here.
+	if err := podman.ValidateRustfsVolumes(existing.Endpoints, len(existing.Drives)); err != nil {
+		return err
+	}
+	if len(existing.Drives) > 0 && existing.DataDir != "" {
+		return fmt.Errorf("--drive and --data-dir cannot be combined — multi-drive mode takes its data locations from --drive only")
+	}
+	if existing.Name == "" {
+		existing.Name = name
+	}
+	cfg.Addons.Rustfs[name] = existing
+
+	// ApplyDefaults fills ContainerName/ImageTag/Listen/RootUser and assigns
+	// the two ports from the shared minio_start_port pool (minio, silo and
+	// rustfs draw one cursor, so all three can coexist). Credentials are NOT
+	// managed there — they are a secret the install path owns.
+	cfg.ApplyDefaults()
+	rc := cfg.Addons.Rustfs[name]
+
+	// BYO TLS: fail fast at install on a bad pair (mismatch, expired, CA-only,
+	// unparseable) rather than letting the container crash-loop on handshake.
+	// The SAN check is advisory: a domain cert is often meant to be dialed by a
+	// name behind DNS/LB that is not this host's Listen, so only warn — and
+	// never for a wildcard bind.
+	if podman.BYOTLS(rc.TLS, rc.CertFile, rc.KeyFile) {
+		ci, err := podman.ValidateBYOCert(rc.CertFile, rc.KeyFile)
+		if err != nil {
+			return fmt.Errorf("rustfs --tls-cert/--tls-key: %w", err)
+		}
+		fmt.Printf("-> rustfs BYO cert: CN=%q issuer=%q valid %s → %s\n",
+			ci.Subject, ci.Issuer, ci.NotBefore.Format("2006-01-02"), ci.NotAfter.Format("2006-01-02"))
+		if h := strings.TrimSuffix(rc.Listen, ":0"); h != "" && h != "0.0.0.0" && h != "::" && !podman.CertCoversHost(ci, h) {
+			fmt.Printf("  [!] listen address %q is not a SAN of the cert (SANs: %s) — clients must reach rustfs by a name the cert does cover\n",
+				rc.Listen, strings.Join(append(append([]string{}, ci.DNSNames...), ci.IPs...), ", "))
+		}
+	}
+
+	// macOS: the store serves on the pgcli-net bridge with published ports, so
+	// bring up the machine and the bridge first (no-ops on Linux, where rustfs
+	// uses host networking).
+	if err := ensureProxyBridge(cfg); err != nil {
+		return err
+	}
+
+	rm, err := podman.NewRustfsManager(cfg)
+	if err != nil {
+		return fmt.Errorf("rustfs manager: %w", err)
+	}
+
+	// If a same-named container is already present, don't recreate it — reuse
+	// it (starting it if it's stopped). Reinstall is then a no-op against a
+	// live instance; --force recreates it so changed ports/listen/credentials
+	// take effect.
+	exists, err := rm.ContainerExists(rc.ContainerName)
+	if err != nil {
+		return err
+	}
+	skipped := false
+	if exists && !force {
+		skipped = true
+		if running, _ := rm.ContainerRunning(rc.ContainerName); running {
+			fmt.Printf("-> rustfs container %q already running; skipping creation\n", rc.ContainerName)
+			// Still refresh cert material: rustfs hot-reloads its cert files, so
+			// this is how a running store adopts the leaf+CA chain (the
+			// `pg backup fetch-ca` anchor) without a --force recreate.
+			if rc.TLS {
+				if caPath, err := rm.EnsureTLS(&rc); err != nil {
+					fmt.Printf("  [!] TLS cert refresh failed: %v\n", err)
+				} else if podman.BYOTLS(rc.TLS, rc.CertFile, rc.KeyFile) {
+					fmt.Printf("  [OK] TLS cert pair validated (BYO: %s)\n", rc.CertFile)
+				} else {
+					fmt.Printf("  [OK] TLS certs current (CA: %s)\n", caPath)
+				}
+			}
+		} else {
+			fmt.Printf("-> rustfs container %q exists but is stopped; starting it\n", rc.ContainerName)
+			if err := rm.StartContainer(&rc); err != nil {
+				return err
+			}
+		}
+	} else {
+		// Fresh install (or the config survived a `remove` that kept it):
+		// generate the root password once so the data dir stays readable.
+		if rc.RootPassword == "" {
+			pw, err := generatePassword(20)
+			if err != nil {
+				return fmt.Errorf("generating rustfs root password: %w", err)
+			}
+			rc.RootPassword = pw
+		}
+		fmt.Printf("-> Preparing rustfs image %s...\n", rc.ImageTag)
+		if err := rm.EnsureImage(rc.ImageTag); err != nil {
+			return err
+		}
+		// rustfs erasure-codes across drives and, unlike MinIO/silo's advisory
+		// check, FATALs at startup if two drives share a physical device. Warn
+		// per-drive before we try to start so the operator sees the cause
+		// rather than a crash-loop. SNSD has no such requirement, so silent.
+		if len(rc.Endpoints) > 0 || len(rc.Drives) > 0 {
+			for _, d := range rm.DrivesSharingRootDevice(&rc) {
+				fmt.Printf("-> WARNING: drive %q is on the same device as the host root filesystem; rustfs requires every drive on its own physical device and will refuse this one. Point --drive/--data-dir at separately-mounted disks.\n", d)
+			}
+		}
+		fmt.Println("-> Starting rustfs container...")
+		if err := rm.EnsureContainer(&rc); err != nil {
+			return err
+		}
+	}
+
+	cfg.Addons.Rustfs[name] = rc
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	if skipped {
+		fmt.Println()
+		fmt.Printf("✓ rustfs already present: %q\n", name)
+	} else {
+		fmt.Println()
+		fmt.Printf("✓ rustfs installed: %q\n", name)
+	}
+	fmt.Printf("  Container:    %s\n", rc.ContainerName)
+	fmt.Printf("  Image:        %s\n", rc.ImageTag)
+	if len(rc.Drives) > 0 {
+		for i, d := range rm.Drives(&rc) {
+			fmt.Printf("  Drive %d:       %s -> /data/rustfs%d\n", i+1, d, i)
+		}
+	} else {
+		fmt.Printf("  Data:         %s\n", rm.DataDir(&rc))
+	}
+	scheme := "http"
+	if rc.TLS {
+		scheme = "https"
+	}
+	fmt.Printf("  S3 API:       %s://%s:%d\n", scheme, rc.Listen, rc.APIPort)
+	fmt.Printf("  Console:      %s://%s:%d\n", scheme, rc.Listen, rc.ConsolePort)
+	fmt.Println()
+	fmt.Printf("  Root user:     %s\n", rc.RootUser)
+	fmt.Printf("  Root password: %s\n", rc.RootPassword)
+	if rc.TLS {
+		if podman.BYOTLS(rc.TLS, rc.CertFile, rc.KeyFile) {
+			fmt.Printf("  TLS cert:      %s (BYO, key: %s)\n", rc.CertFile, rc.KeyFile)
+		} else {
+			fmt.Printf("  TLS CA cert:   %s\n", filepath.Join(rm.TLSDir(&rc), "ca.crt"))
+		}
+	}
+	if len(rc.Endpoints) > 0 {
+		fmt.Println()
+		fmt.Printf("  Distributed multi-drive mode (MNMD): %d endpoints = %d nodes × %d drives/node\n", len(rc.Endpoints), len(rc.Endpoints)/len(rc.Drives), len(rc.Drives))
+		for _, ep := range rc.Endpoints {
+			fmt.Printf("    - %s\n", ep)
+		}
+		fmt.Println("  NOTE: every node's pg.yaml must carry the identical endpoint list AND identical root credentials, or the cluster will not form.")
+		fmt.Println("        MNMD: each endpoint addresses one node's /data/rustfs0../data/rustfs(D-1) slots; every node contributes the same drive count, and this node mounts its own drives there.")
+	}
+	if len(rc.Drives) > 0 && len(rc.Endpoints) == 0 {
+		fmt.Println()
+		fmt.Printf("  Multi-drive mode (SNMD): %d drives\n", len(rc.Drives))
+		for _, d := range rc.Drives {
+			fmt.Printf("    - %s\n", d)
+		}
+		fmt.Printf("  NOTE: rustfs erasure-codes across these drives; usable capacity is a fraction of the raw total. rustfs hard-requires each drive on its own physical device (it aborts at startup otherwise, unlike MinIO's advisory check); a drive that goes down is healed when it returns.\n")
+	}
+	return nil
+}
+
 // runAddonInstallPostgrest installs a PostgREST container: a single stateless
 // process that exposes a PostgreSQL schema as a RESTful API. Like pgbouncer it
 // works in two modes — local (-i, fronting an instance pgcli manages) or
@@ -2632,6 +2916,76 @@ func runAddonList() error {
 		fmt.Println("  (none)")
 	}
 
+	// rustfs (S3-compatible object storage — third store addon; Linux-only manager)
+	fmt.Println()
+	fmt.Println("Infra add-ons (rustfs):")
+	hasRustfs := false
+	if rm, err := podman.NewRustfsManager(cfg); err == nil {
+		for name, rc := range cfg.Addons.Rustfs {
+			hasRustfs = true
+			status := "stopped"
+			if running, err := rm.ContainerRunning(rc.ContainerName); err == nil && running {
+				status = "running"
+			}
+			fmt.Printf("  %s (name: %s)\n", "rustfs", name)
+			fmt.Printf("    Status:      %s\n", status)
+			fmt.Printf("    Listen:      %s\n", rc.Listen)
+			fmt.Printf("    API port:    %d\n", rc.APIPort)
+			fmt.Printf("    Console port: %d\n", rc.ConsolePort)
+			scheme := "http"
+			if rc.TLS {
+				scheme = "https"
+			}
+			fmt.Printf("    Console URL: %s://%s:%d/\n", scheme, rc.Listen, rc.ConsolePort)
+			fmt.Printf("    Health:      %s://%s:%d/health\n", scheme, rc.Listen, rc.APIPort)
+			if podman.BYOTLS(rc.TLS, rc.CertFile, rc.KeyFile) {
+				fmt.Printf("    TLS:         on (BYO cert: %s, key: %s)\n", rc.CertFile, rc.KeyFile)
+				fmt.Printf("                   replace files + pg addon install rustfs --name %s --tls-cert ... --tls-key ... --force to renew\n", name)
+			} else if rc.TLS {
+				caPath := filepath.Join(rm.TLSDir(&rc), tlsca.CACertFile)
+				fmt.Printf("    TLS:         on (CA: %s)\n", caPath)
+				fmt.Printf("                   as pgBackRest repo CA: pg backup setup --s3-endpoint <host>:%d --s3-ca-file %s\n", rc.APIPort, caPath)
+				fmt.Printf("                   from another host:     pg backup fetch-ca <this-host>:%d\n", rc.APIPort)
+			}
+			if len(rc.Drives) > 0 {
+				driveMode := "SNMD"
+				if len(rc.Endpoints) > 0 {
+					driveMode = "MNMD, this node"
+				}
+				fmt.Printf("    Drives:      %d (%s)\n", len(rc.Drives), driveMode)
+				for i, d := range rc.Drives {
+					fmt.Printf("      - /data/rustfs%d <- %s\n", i, d)
+				}
+			} else {
+				fmt.Printf("    Data:        %s\n", rm.DataDir(&rc))
+			}
+			if len(rc.Endpoints) > 0 {
+				endpointMode := fmt.Sprintf("MNMD, %d nodes × %d drives/node", len(rc.Endpoints)/len(rc.Drives), len(rc.Drives))
+				fmt.Printf("    Endpoints:   %d (%s)\n", len(rc.Endpoints), endpointMode)
+				for _, ep := range rc.Endpoints {
+					fmt.Printf("      - %s\n", ep)
+				}
+			}
+			fmt.Printf("    Root user:   %s\n", rc.RootUser)
+			fmt.Printf("    Image:       %s\n", rc.ImageTag)
+			fmt.Printf("    Container:   %s\n", rc.ContainerName)
+		}
+	} else if len(cfg.Addons.Rustfs) > 0 {
+		// Configured but the manager is unavailable (macOS/arm): still show them.
+		for name, rc := range cfg.Addons.Rustfs {
+			hasRustfs = true
+			fmt.Printf("  %s (name: %s)\n", "rustfs", name)
+			fmt.Printf("    Status:      n/a (%v)\n", err)
+			fmt.Printf("    Listen:      %s\n", rc.Listen)
+			fmt.Printf("    API port:    %d\n", rc.APIPort)
+			fmt.Printf("    Console port: %d\n", rc.ConsolePort)
+			fmt.Printf("    Container:   %s\n", rc.ContainerName)
+		}
+	}
+	if !hasRustfs {
+		fmt.Println("  (none)")
+	}
+
 	return nil
 }
 
@@ -2651,12 +3005,14 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemoveMinio(cmd)
 	case "silo":
 		return runAddonRemoveSilo(cmd)
+	case "rustfs":
+		return runAddonRemoveRustfs(cmd)
 	case "postgrest":
 		return runAddonRemovePostgrest(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, postgrest)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, postgrest)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -2943,12 +3299,14 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartMinio(cmd)
 	case "silo":
 		return runAddonStartSilo(cmd)
+	case "rustfs":
+		return runAddonStartRustfs(cmd)
 	case "pgbouncer":
 		return runAddonStartPgBouncer(cmd)
 	case "postgrest":
 		return runAddonStartPostgrest(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, postgrest)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, postgrest)", addonName)
 	}
 }
 
@@ -2964,12 +3322,14 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopMinio(cmd)
 	case "silo":
 		return runAddonStopSilo(cmd)
+	case "rustfs":
+		return runAddonStopRustfs(cmd)
 	case "pgbouncer":
 		return runAddonStopPgBouncer(cmd)
 	case "postgrest":
 		return runAddonStopPostgrest(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, postgrest)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, postgrest)", addonName)
 	}
 }
 
@@ -3423,6 +3783,108 @@ func runAddonStopSilo(cmd *cobra.Command) error {
 		return err
 	}
 	fmt.Printf("✓ silo %q stopped\n", name)
+	return nil
+}
+
+func runAddonRemoveRustfs(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "rustfs"
+	}
+	cleanData, _ := cmd.Flags().GetBool("clean-data")
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.Rustfs == nil {
+		return fmt.Errorf("no rustfs add-ons configured")
+	}
+	rc, ok := cfg.Addons.Rustfs[name]
+	if !ok {
+		return fmt.Errorf("rustfs %q not found", name)
+	}
+
+	rm, err := podman.NewRustfsManager(cfg)
+	if err != nil {
+		return fmt.Errorf("rustfs manager: %w", err)
+	}
+
+	fmt.Printf("-> Removing rustfs %q...\n", name)
+	if err := rm.Remove(&rc, cleanData); err != nil {
+		return err
+	}
+
+	delete(cfg.Addons.Rustfs, name)
+	if len(cfg.Addons.Rustfs) == 0 {
+		cfg.Addons.Rustfs = nil
+	}
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	fmt.Printf("✓ rustfs %q removed\n", name)
+	return nil
+}
+
+func runAddonStartRustfs(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "rustfs"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	if cfg.Addons.Rustfs == nil {
+		return fmt.Errorf("no rustfs add-ons configured (run 'pg addon install rustfs')")
+	}
+	rc, ok := cfg.Addons.Rustfs[name]
+	if !ok {
+		return fmt.Errorf("rustfs %q not found (run 'pg addon install rustfs --name %s')", name, name)
+	}
+	rm, err := podman.NewRustfsManager(cfg)
+	if err != nil {
+		return fmt.Errorf("rustfs manager: %w", err)
+	}
+	fmt.Printf("-> Starting rustfs %q...\n", name)
+	return rm.StartContainer(&rc)
+}
+
+func runAddonStopRustfs(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "rustfs"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	rc, ok := cfg.Addons.Rustfs[name]
+	if !ok {
+		return fmt.Errorf("rustfs %q not found", name)
+	}
+	rm, err := podman.NewRustfsManager(cfg)
+	if err != nil {
+		return fmt.Errorf("rustfs manager: %w", err)
+	}
+	running, _ := rm.ContainerRunning(rc.ContainerName)
+	if !running {
+		fmt.Printf("rustfs %q is not running\n", name)
+		return nil
+	}
+	fmt.Printf("-> Stopping rustfs %q...\n", name)
+	if _, err := rm.Stop(rc.ContainerName); err != nil {
+		return err
+	}
+	fmt.Printf("✓ rustfs %q stopped\n", name)
 	return nil
 }
 

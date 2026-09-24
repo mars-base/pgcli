@@ -60,11 +60,11 @@ var logsAddonCmd = &cobra.Command{
 	Short: "Show addon console output logs",
 	Long: `Show addon console output logs.
 
-Requires the addon type (pgbouncer, postgrest, etcd, pgdog, haproxy, minio, silo, patroni).
+Requires the addon type (pgbouncer, postgrest, etcd, pgdog, haproxy, minio, silo, rustfs, patroni).
 Use -i for local instance addons, --pg-name for remote addons,
---name for an etcd member, pgdog proxy, haproxy instance, minio or silo
+--name for an etcd member, pgdog proxy, haproxy instance, minio, silo or rustfs
 instance, or Patroni member (default
-"etcd"/"pgdog"/"haproxy"/"minio"/"silo"; Patroni members have
+"etcd"/"pgdog"/"haproxy"/"minio"/"silo"/"rustfs"; Patroni members have
 no default and also require --scope).
 
 Examples:
@@ -87,6 +87,8 @@ Examples:
   pg logs addon minio --name store -f
   pg logs addon silo --name store
   pg logs addon silo --name store -f
+  pg logs addon rustfs --name store
+  pg logs addon rustfs --name store -f
   pg logs addon patroni --scope app --name node1
   pg logs addon patroni --scope app --name node1 -f`,
 	Args: cobra.ExactArgs(1),
@@ -130,7 +132,7 @@ Examples:
 			if err != nil {
 				return err
 			}
-		case "etcd", "pgdog", "haproxy", "minio", "silo":
+		case "etcd", "pgdog", "haproxy", "minio", "silo", "rustfs":
 			// (patroni is handled above; it shares --name but requires --scope.)
 			if pgName != "" {
 				return fmt.Errorf("--pg-name selects a remote PgBouncer or PostgREST; use --name for an %s", addonType)
@@ -186,10 +188,19 @@ Examples:
 					return fmt.Errorf("silo instance %q not found (use 'pg addon list' to see available)", name)
 				}
 				containerName = sc.ContainerName
+			case "rustfs":
+				if cfg.Addons.Rustfs == nil {
+					return fmt.Errorf("no rustfs addons configured")
+				}
+				rc, ok := cfg.Addons.Rustfs[name]
+				if !ok {
+					return fmt.Errorf("rustfs instance %q not found (use 'pg addon list' to see available)", name)
+				}
+				containerName = rc.ContainerName
 			}
 		case "pgbouncer":
 			if etcdName != "" {
-				return fmt.Errorf("--name selects an etcd member, pgdog proxy, haproxy instance, minio or silo instance, or Patroni member; use -i or --pg-name for PgBouncer")
+				return fmt.Errorf("--name selects an etcd member, pgdog proxy, haproxy instance, minio, silo or rustfs instance, or Patroni member; use -i or --pg-name for PgBouncer")
 			}
 			if pgName != "" {
 				// Remote mode
@@ -215,7 +226,7 @@ Examples:
 			}
 		case "postgrest":
 			if etcdName != "" {
-				return fmt.Errorf("--name selects an etcd member, pgdog proxy, haproxy instance, minio or silo instance, or Patroni member; use -i or --pg-name for PostgREST")
+				return fmt.Errorf("--name selects an etcd member, pgdog proxy, haproxy instance, minio, silo or rustfs instance, or Patroni member; use -i or --pg-name for PostgREST")
 			}
 			if pgName != "" {
 				// Remote mode
@@ -239,7 +250,7 @@ Examples:
 				containerName = inst.Addons.Postgrest.ContainerName
 			}
 		default:
-			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, postgrest, patroni)", addonType)
+			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, postgrest, patroni)", addonType)
 		}
 
 		return runPodmanLogs(containerName, tail, follow)

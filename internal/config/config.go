@@ -87,6 +87,7 @@ type TopAddonsConfig struct {
 	HAProxy   map[string]HAProxyConfig        `yaml:"haproxy,omitempty"`
 	Minio     map[string]MinioConfig          `yaml:"minio,omitempty"`
 	Silo      map[string]SiloConfig           `yaml:"silo,omitempty"`
+	Rustfs    map[string]RustfsConfig         `yaml:"rustfs,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -382,6 +383,23 @@ const DefaultMinioImageTag = "ghcr.io/mars-base/pgcli/pgcli-minio:20250422221226
 // ApplyDefaults and the podman managers agree.
 const DefaultSiloImageTag = "docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z"
 
+// DefaultRustfsImageTag pins the public rustfs image (https://rustfs.com) — a
+// Rust object store that is S3-compatible on the wire but shares none of
+// MinIO's runtime contract: it runs as a fixed non-root container user (uid/gid
+// 10001), configures itself entirely through RUSTFS_* env (no `server <path>`
+// argv from pgcli — the image's /entrypoint.sh derives that from RUSTFS_VOLUMES),
+// names its TLS files rustfs_cert.pem/rustfs_key.pem, and offers only three
+// topologies (SNSD/SNMD/MNMD — no multi-node single-drive). That fixed uid is why
+// pgcli runs its OWN wrapper image rather than upstream's: the wrapper starts as
+// container-root, chowns the bind-mounted dirs to 10001, then su-drops to rustfs
+// (see internal/podman/rustfs.go §1), so pgcli never does host-side ownership.
+// The wrapper is published to pgcli's ghcr by `make container-push-rustfs` and
+// pulled at install (pull-only, like the other pgcli add-on images — pgcli never
+// builds during install). Its tag tracks the upstream rustfs version it wraps
+// (1.0.0, the first GA release; later 1.0.1-* are previews). The tag is the
+// single source of truth that ApplyDefaults and the podman manager agree on.
+const DefaultRustfsImageTag = "ghcr.io/mars-base/pgcli/pgcli-rustfs:1.0.0"
+
 // DefaultMCImageTag is the public pre-built MinIO client (mc) image: the
 // static upstream binary on scratch with a CA bundle. `pg mc` runs it in a
 // throwaway container. Not a yaml field — mc is a client, not an addon — so
@@ -531,6 +549,72 @@ type SiloConfig struct {
 
 	// Autostart brings this container up on host boot via the boot service
 	// (pg autostart enable --silo). Start-only: it starts the existing
+	// container, so install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// RustfsConfig holds a standalone rustfs addon. Its field set is a
+// field-for-field twin of MinioConfig/SiloConfig so the CLI surface and config
+// shape stay uniform across the three object stores, but rustfs shares NONE of
+// MinIO's runtime contract (see DefaultRustfsImageTag and internal/podman
+// RustfsManager): it runs as a fixed non-root user (uid/gid 10001, so every
+// bind dir must be owned by that uid), configures itself via RUSTFS_* env
+// rather than `server <path>` argv, names its TLS pair rustfs_cert.pem/
+// rustfs_key.pem, and supports only three topologies. Consequently these two
+// fields mean something narrower than they do for minio/silo:
+//   - Endpoints is a multi-node (MNMD) node list, one scheme://host:port per
+//     node; there is NO multi-node single-drive mode, so Endpoints with an
+//     empty Drives is rejected at install rather than forming an MNSD cluster.
+//   - Drives are the per-node export dirs; rustfs hard-refuses drives sharing a
+//     physical device at startup (no pgcli-side cheap check — it surfaces as a
+//     fatal in the container log).
+//
+// RootUser/RootPassword become RUSTFS_ACCESS_KEY/RUSTFS_SECRET_KEY (rustfs
+// accepts no minimum length; the reserved default "rustfsadmin" only warns).
+// Ports draw from the same shared pool as minio and silo (minio_start_port).
+type RustfsConfig struct {
+	ContainerName string `yaml:"container_name"`      // pgcli-rustfs<ns>-<name>
+	Name          string `yaml:"name,omitempty"`      // addon key, defaults to the map key
+	ImageTag      string `yaml:"image_tag,omitempty"` // ghcr.io/mars-base/pgcli/pgcli-rustfs:... (default)
+	DataDir       string `yaml:"data_dir,omitempty"`  // host dir bound to /data; default <base-dir>/addon/rustfs/<name>/data
+	Listen        string `yaml:"listen,omitempty"`    // bind address, default 127.0.0.1
+	APIPort       int    `yaml:"api_port,omitempty"`  // S3 API host port, 9000+ auto-assigned
+	ConsolePort   int    `yaml:"console_port,omitempty"`
+	RootUser      string `yaml:"root_user,omitempty"`     // → RUSTFS_ACCESS_KEY, default admin
+	RootPassword  string `yaml:"root_password,omitempty"` // → RUSTFS_SECRET_KEY, generated on first install
+
+	// TLS turns on rustfs's native HTTPS: pgcli generates a self-signed CA plus
+	// a leaf under <base-dir>/tls/rustfs/<name>/ and mounts the dir via
+	// RUSTFS_TLS_PATH, naming the files rustfs_cert.pem/rustfs_key.pem (the only
+	// names rustfs reads). The dir must be owned by the container uid (10001) or
+	// rustfs cannot read the cert. Required for pgBackRest S3 repositories.
+	TLS bool `yaml:"tls,omitempty"`
+
+	// CertFile / KeyFile bring your own certificate instead of the generated
+	// pair: host paths to a PEM leaf and its private key, mounted read-only at
+	// the two names rustfs wants (rustfs_cert.pem / rustfs_key.pem). Implies
+	// TLS. Setting either without the other falls back to generated certs. The
+	// operator's files are never chowned by pgcli, so they must already be
+	// readable by uid 10001 or rustfs fails to start on TLS.
+	CertFile string `yaml:"cert_file,omitempty"`
+	KeyFile  string `yaml:"key_file,omitempty"`
+
+	// Endpoints switches this addon to multi-node (MNMD) mode: one
+	// scheme://host:port per node. rustfs has no multi-node single-drive mode, so
+	// Endpoints requires Drives — the pair forms the shared node×drive matrix.
+	// Empty => single-node.
+	Endpoints []string `yaml:"endpoints,omitempty"`
+
+	// Drives makes this node contribute several export drives: host dirs, each on
+	// its own device, bind-mounted at /data/rustfs0../rustfsN-1 (0-indexed, the
+	// rustfs layout). With Endpoints empty that is single-node multi-drive (SNMD);
+	// with Endpoints non-empty it is one node of an MNMD cluster. rustfs refuses
+	// drives sharing a physical device at startup. Mutually exclusive with
+	// data_dir. Empty => single-node single-drive (SNSD).
+	Drives []string `yaml:"drives,omitempty"`
+
+	// Autostart brings this container up on host boot via the boot service
+	// (pg autostart enable --rustfs). Start-only: it starts the existing
 	// container, so install first.
 	Autostart bool `yaml:"autostart,omitempty"`
 }
@@ -1294,6 +1378,30 @@ func (c *Config) ApplyDefaults() {
 		c.Addons.Silo[name] = addon
 	}
 
+	// Top-level addons defaults (rustfs). Same shape as the minio/silo blocks;
+	// DataDir is left empty for the manager to resolve under the base dir at
+	// container-creation time. RootUser defaults to "admin" (rustfs imposes no
+	// minimum access-key length — verified 3/4/5/18-char keys all start — and
+	// this avoids the reserved "rustfsadmin" that only warns).
+	for name, addon := range c.Addons.Rustfs {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-rustfs" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultRustfsImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "127.0.0.1"
+		}
+		if addon.RootUser == "" {
+			addon.RootUser = "admin"
+		}
+		c.Addons.Rustfs[name] = addon
+	}
+
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
 	c.autoAssignPorts()
 }
@@ -1668,12 +1776,13 @@ func (c *Config) autoAssignPorts() {
 		}
 	}
 
-	// Allocate ports for top-level object-storage addons (MinIO and silo). Each
-	// instance takes two consecutive ports from ONE shared pool (minio_start_port
-	// base, default 9000): the S3 API and the web console. minio and silo draw
-	// from the same cursor so both can coexist on a host without colliding —
-	// reserved explicit ports from both tables feed one `assigned` set, and
-	// assignment runs the minio table first, then silo, in sorted order.
+	// Allocate ports for top-level object-storage addons (MinIO, silo, rustfs).
+	// Each instance takes two consecutive ports from ONE shared pool
+	// (minio_start_port base, default 9000): the S3 API and the web console. The
+	// three stores draw from the same cursor so they can coexist on a host
+	// without colliding — reserved explicit ports from all three tables feed one
+	// `assigned` set, and assignment runs the minio table first, then silo, then
+	// rustfs, each in sorted order.
 	minioBase := c.MinioStartPort
 	assignedMinio := map[int]bool{}
 	for _, addon := range c.Addons.Minio {
@@ -1684,6 +1793,13 @@ func (c *Config) autoAssignPorts() {
 		}
 	}
 	for _, addon := range c.Addons.Silo {
+		for _, p := range []int{addon.APIPort, addon.ConsolePort} {
+			if p != 0 {
+				assignedMinio[p] = true
+			}
+		}
+	}
+	for _, addon := range c.Addons.Rustfs {
 		for _, p := range []int{addon.APIPort, addon.ConsolePort} {
 			if p != 0 {
 				assignedMinio[p] = true
@@ -1738,6 +1854,18 @@ func (c *Config) autoAssignPorts() {
 			addon := c.Addons.Silo[name]
 			assign(&addon.APIPort, &addon.ConsolePort)
 			c.Addons.Silo[name] = addon
+		}
+	}
+	{
+		names := make([]string, 0, len(c.Addons.Rustfs))
+		for name := range c.Addons.Rustfs {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.Rustfs[name]
+			assign(&addon.APIPort, &addon.ConsolePort)
+			c.Addons.Rustfs[name] = addon
 		}
 	}
 }

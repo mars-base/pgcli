@@ -38,7 +38,7 @@ func init() {
 	backupCmd.AddCommand(backupListStanzaCmd)
 
 	backupSetupCmd.Flags().StringVar(&backupBaseDir, "base-dir", "", "base directory for backup data and logs (overrides config base_dir)")
-	backupSetupCmd.Flags().StringVar(&s3Endpoint, "s3-endpoint", "", "S3 repository host:port (pgBackRest forces HTTPS - use a TLS-terminated endpoint, e.g. a MinIO/silo installed with 'pg addon install minio|silo --tls')")
+	backupSetupCmd.Flags().StringVar(&s3Endpoint, "s3-endpoint", "", "S3 repository host:port (pgBackRest forces HTTPS - use a TLS-terminated endpoint, e.g. a MinIO/silo/rustfs installed with 'pg addon install minio|silo|rustfs --tls')")
 	backupSetupCmd.Flags().StringVar(&s3Bucket, "s3-bucket", "", "S3 bucket (must already exist)")
 	backupSetupCmd.Flags().StringVar(&s3AccessKey, "s3-access-key", "", "S3 access key")
 	backupSetupCmd.Flags().StringVar(&s3SecretKey, "s3-secret-key", "", "S3 secret key (prefer editing backup.repo.s3.secret_key in pg.yaml so it stays out of shell history)")
@@ -98,7 +98,7 @@ var backupSetupCmd = &cobra.Command{
 
 The backup container is shared across all database instances. With
 --s3-endpoint/--s3-bucket/... the Patroni stanzas back up to an S3 repository
-(pgBackRest requires HTTPS — pair with ` + "`pg addon install minio|silo --tls`" + ` or
+(pgBackRest requires HTTPS — pair with ` + "`pg addon install minio|silo|rustfs --tls`" + ` or
 any TLS S3 endpoint; regular-instance backups stay on the local repo).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		path := cfgPath
@@ -827,14 +827,14 @@ var backupFetchCACmd = &cobra.Command{
 	Long: `fetch-ca dials the S3 repository endpoint over TLS and saves the certificate
 its clients should trust, so a Patroni host on a different machine than the
 storage host can trust it without anyone scp'ing a file across. Two shapes
-resolve: a self-signed leaf (what `+"`pg cert`"+` mints for a MinIO/silo BYO mode) is
+resolve: a self-signed leaf (what `+"`pg cert`"+` mints for a MinIO/silo/rustfs BYO mode) is
 saved as-is — it is its own trust anchor — and otherwise the self-signed CA that
 signed the served leaf, taken from the endpoint's TLS chain.
 
 The endpoint argument defaults to backup.repo.s3.endpoint from pg.yaml. The
 command prints the saved path and a sha256 fingerprint — cross-check the
 fingerprint against the storage host (sha256sum of its tls/minio/<name>/ca.crt (or
-tls/silo/<name>/ca.crt), or of the .crt given to --tls-cert) the way you would an SSH host key, since
+tls/silo/<name>/ca.crt, or tls/rustfs/<name>/ca.crt), or of the .crt given to --tls-cert) the way you would an SSH host key, since
 fetching a trust anchor before you trust anything is inherently
 trust-on-first-use.
 
@@ -843,7 +843,7 @@ so the remaining hosts need nothing at all:
 
   pg backup setup --s3-ca-file <path>
 
-Works against a pgcli-served MinIO/silo (its own CA or a `+"`pg cert`"+` BYO leaf sits in
+Works against a pgcli-served MinIO/silo/rustfs (its own CA or a `+"`pg cert`"+` BYO leaf sits in
 the TLS chain). An endpoint served with a public CA's certificate needs no
 ca_file and this command is pointless there. This is a deliberate one-shot
 rather than something setup runs on its own: a silent TOFU dial on every setup

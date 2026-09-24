@@ -1389,7 +1389,15 @@ func removeHostDirIfEmpty(podmanPath, image, dir string) (bool, error) {
 // podmanUnshareRm removes a path from inside the rootless podman user
 // namespace, where subordinate-UID files are accessible to the host process.
 func podmanUnshareRm(podmanPath, path string) error {
-	return podmanCommand(podmanPath, "unshare", "rm", "-rf", path).Run()
+	return podmanUnshareRun(podmanPath, "rm", "-rf", path)
+}
+
+// podmanUnshareRun runs an arbitrary command inside the rootless podman user
+// namespace, where subordinate-UID files (those a fixed non-root container user
+// like rustfs's uid 10001 leaves on bind mounts) are accessible to the host
+// process without sudo. podmanUnshareRm is the current caller.
+func podmanUnshareRun(podmanPath string, args ...string) error {
+	return podmanCommand(podmanPath, append([]string{"unshare"}, args...)...).Run()
 }
 
 // PGIsReady checks if PostgreSQL is accepting connections by running pg_isready

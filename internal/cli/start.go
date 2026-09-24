@@ -75,7 +75,7 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) {
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) {
 		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo)")
 		return nil
 	}
@@ -160,6 +160,12 @@ func startAutostart() error {
 	// silo instances (top-level infra addon, Pigsty's MinIO fork). Same
 	// position as minio: independent of the PostgreSQL stack, a backup repo.
 	if err := startAutostartSilos(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// rustfs instances (top-level infra addon, a Rust S3 store). Same position
+	// as minio/silo: independent of the PostgreSQL stack, a backup repo.
+	if err := startAutostartRustfs(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -514,6 +520,51 @@ func startAutostartSilos(c *config.Config) error {
 		sc := c.Addons.Silo[name]
 		if err := sm.StartContainer(&sc); err != nil {
 			fmt.Printf("  [X] silo autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartRustfs reports whether any rustfs instance is autostart-enabled.
+func hasAutostartRustfs(c *config.Config) bool {
+	for _, rc := range c.Addons.Rustfs {
+		if rc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartRustfs starts each autostart-enabled rustfs instance. Start-only
+// semantics like the other infra autostarts: the container comes up with the
+// ports/credentials already in the config, recreating it if the container was
+// removed. Order is sorted by instance name for deterministic, readable boot
+// logs. StartContainer re-applies the uid-10001 ownership before creating, so
+// the boot-time start needs the same root-or-rootless-podman access as install.
+func startAutostartRustfs(c *config.Config) error {
+	var names []string
+	for name, rc := range c.Addons.Rustfs {
+		if rc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	rm, err := podman.NewRustfsManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		rc := c.Addons.Rustfs[name]
+		if err := rm.StartContainer(&rc); err != nil {
+			fmt.Printf("  [X] rustfs autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}

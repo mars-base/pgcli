@@ -9,7 +9,7 @@ LDFLAGS = -s -w \
 
 PLATFORMS = linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
-.PHONY: build clean test lint install build-all gencert container-build container-push container-build-minio container-push-minio container-build-mc container-push-mc container-build-patroni container-push-patroni
+.PHONY: build clean test lint install build-all gencert container-build container-push container-build-minio container-push-minio container-build-mc container-push-mc container-build-patroni container-push-patroni container-build-rustfs container-push-rustfs
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) .
@@ -119,3 +119,35 @@ container-build-mc:
 
 container-push-mc:
 	podman manifest push $(MC_IMAGE) $(MC_IMAGE) --all
+
+# rustfs wrapper image — the ONLY way pgcli runs rustfs (config.DefaultRustfsImageTag
+# points here). Upstream rustfs bakes a fixed non-root user (uid/gid 10001), which
+# under rootless podman forces a host-side ownership dance to pre-own bind mounts.
+# This image removes that: its entrypoint starts as container-root, chowns the
+# bind-mounted data/cert dirs to 10001, then `su`-drops to rustfs and execs the
+# UNMODIFIED upstream /entrypoint.sh (see embed/rustfs-entrypoint.sh). pgcli then
+# runs it with no --user flag and no host ownership code.
+#
+# The rustfs base is multi-arch, so — unlike the minio/mc targets that stage
+# per-arch static binaries — there is nothing to download: just build the same
+# thin wrapper once per arch (each build resolves the base for its own platform)
+# and merge into a manifest. The tag mirrors the pinned upstream rustfs version.
+RUSTFS_VERSION ?= 1.0.0
+RUSTFS_BASE    = docker.io/rustfs/rustfs:$(RUSTFS_VERSION)
+RUSTFS_IMAGE   = ghcr.io/mars-base/pgcli/pgcli-rustfs:$(RUSTFS_VERSION)
+
+# `--manifest` APPENDS a per-arch entry to an existing manifest list (it does not
+# replace), so without clearing first, re-running this target on the same host
+# accumulates stale entries — a later `podman run` picks whichever entry the
+# resolver visits first, potentially an older build. Drop the list (and the two
+# per-arch tags) before rebuilding.
+container-build-rustfs:
+	podman manifest rm $(RUSTFS_IMAGE) 2>/dev/null || true
+	podman rmi -f $(RUSTFS_IMAGE)-amd64 $(RUSTFS_IMAGE)-arm64 2>/dev/null || true
+	@for a in amd64 arm64; do \
+	  podman build --platform linux/$$a --manifest $(RUSTFS_IMAGE) -t $(RUSTFS_IMAGE)-$$a \
+	    --build-arg RUSTFS_BASE=$(RUSTFS_BASE) -f embed/rustfs.Containerfile embed/ || exit 1; \
+	done
+
+container-push-rustfs:
+	podman manifest push $(RUSTFS_IMAGE) $(RUSTFS_IMAGE) --all

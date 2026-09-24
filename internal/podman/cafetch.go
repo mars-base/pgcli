@@ -40,7 +40,7 @@ func FetchRepoCA(endpoint string) (string, error) {
 		&tls.Config{InsecureSkipVerify: true}, //nolint:gosec // TOFU: fetching the anchor to verify against
 	)
 	if err != nil {
-		return "", fmt.Errorf("connecting to %s over TLS: %w (an S3 endpoint must serve HTTPS — pgBackRest refuses plaintext S3; for pgcli's MinIO/silo store that is `pg addon install minio|silo --tls`)", hostport, err)
+		return "", fmt.Errorf("connecting to %s over TLS: %w (an S3 endpoint must serve HTTPS — pgBackRest refuses plaintext S3; for pgcli's MinIO/silo/rustfs store that is `pg addon install minio|silo|rustfs --tls`)", hostport, err)
 	}
 	defer conn.Close()
 
@@ -51,7 +51,7 @@ func FetchRepoCA(endpoint string) (string, error) {
 	leaf := chain[0]
 	// A self-signed leaf *is* its own anchor — there is no separate CA to
 	// find, and none of the chain-scanning below applies (see `pg cert`,
-	// which mints exactly this shape for a MinIO/silo BYO mode).
+	// which mints exactly this shape for a MinIO/silo/rustfs BYO mode).
 	if bytes.Equal(leaf.RawSubject, leaf.RawIssuer) {
 		return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw})), nil
 	}
@@ -64,7 +64,7 @@ func FetchRepoCA(endpoint string) (string, error) {
 		}
 		return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})), nil
 	}
-	return "", fmt.Errorf("%s did not present its CA in the TLS chain (only %d certificate(s)) — the storage host runs a pgcli from before CA distribution; re-run `pg addon install minio|silo --tls` there (which hot-reloads the chain) or copy its tls/minio/<name>/ca.crt (or tls/silo/<name>/ca.crt) over manually", hostport, len(chain))
+	return "", fmt.Errorf("%s did not present its CA in the TLS chain (only %d certificate(s)) — the storage host runs a pgcli from before CA distribution; re-run `pg addon install minio|silo|rustfs --tls` there (which hot-reloads the chain) or copy its tls/minio/<name>/ca.crt (or tls/silo/<name>/ca.crt, or tls/rustfs/<name>/ca.crt) over manually", hostport, len(chain))
 }
 
 // s3EndpointDialTimeout bounds the reachability probe: an unreachable storage
