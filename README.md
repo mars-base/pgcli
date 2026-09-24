@@ -30,6 +30,7 @@ Full documentation site: **[https://pgcli.pages.dev](https://pgcli.pages.dev)** 
 | [Replica](docs/replica.md) | Read-only physical standby of an instance: create/list, live WAL streaming, lag, slot lifecycle |
 | [Failover](docs/failover.md) | 3-step manual failover: promote replica to primary, re-point other replicas, demote old primary |
 | [Extensions](docs/extensions.md) | Install PostgreSQL extensions from Pigsty DEB repo, baked into container image, shared_preload_libraries management |
+| [Addons](https://pgcli.pages.dev/docs/addon/) | Standalone companion containers via `pg addon`: PgBouncer (pooling), etcd (DCS for HA), PgDog (pooling/load-balancing/sharding), PostgREST (schema-as-REST-API), HAProxy (TCP load balancer for Patroni), MinIO / silo (S3 object storage, standalone or distributed) |
 | [Administration](docs/administration.md) | Shell completion (bash/zsh/fish/PowerShell), PostgreSQL parameter tuning, instance destroy/rebuild |
 | [Test Report](docs/full-test-step.md) | Core functionality test report: DSN piping, PITR verification, known issues, install script test |
 
@@ -88,6 +89,7 @@ The installer automatically detects available privileges and adapts accordingly.
 - **Data Import/Export** — Export/import in custom or SQL format with gzip compression, stream piping between instances, and cross-host support via SSH or `--dsn`
 - **Instance Cloning** — Copy an instance into a new one via logical dump pipe with live progress and pre-flight connectivity checks
 - **Interactive Shell** — Open psql or bash sessions directly in containers, or connect to remote databases via `--dsn`
+- **Addons** — Standalone companion containers managed via `pg addon install/start/stop/remove`: PgBouncer (connection pooling), etcd (DCS for HA), PgDog (pooling/load-balancing/sharding), PostgREST (schema-as-REST-API), HAProxy (TCP load balancer for Patroni clusters), MinIO / silo (S3-compatible object storage, standalone or distributed erasure-coded)
 - **Linux + macOS** — Native Podman on Linux, podman machine on macOS with automatic setup
 
 ## Install
