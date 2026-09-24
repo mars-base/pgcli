@@ -265,20 +265,37 @@ its own drives:
 ```bash
 # on node 1 (10.0.0.11), four dedicated data disks:
 pg addon install rustfs --name store \
-  --listen 10.0.0.11 \
+  --listen 0.0.0.0 \
   --root-password '<shared-secret>' \
   --drive /mnt/rustfs/d1 --drive /mnt/rustfs/d2 --drive /mnt/rustfs/d3 --drive /mnt/rustfs/d4 \
   --endpoint http://10.0.0.11:9000 --endpoint http://10.0.0.12:9000 \
   --endpoint http://10.0.0.20:9000 --endpoint http://10.0.0.21:9000
 
-# nodes 2-4: same command, own --listen/--drive, and the SAME --endpoint list
+# nodes 2-4: same command, own --drive, and the SAME --endpoint list
 # AND the SAME --root-password value.
 ```
 
-Cross-host MNMD is code-complete and validated at install time, but this page's
-e2e coverage ran SNSD and SNMD on a real single host; the four-node ring above is
-documented from the wiring and the CLI validation, not a measured cluster.
-Treat it as such until you have run it.
+Two things matter beyond the identical config: `--listen` must be `0.0.0.0` (or
+the node's own reachable address), not the loopback default — under podman host
+networking the endpoints advertise each node's real IP, and a node listening
+only on `127.0.0.1` can never be joined. And every node must carry the *same*
+endpoint list and root credentials: rustfs derives one shared erasure set from
+them, so a mismatch splits the ring into independent standalones.
+
+`--endpoint` values are `scheme://host:port` with no path; pgcli appends the
+per-node `/data/rustfs{0...N-1}` drive range and joins the four URLs with **spaces**
+into a single `RUSTFS_VOLUMES`. (A comma-joined list is *not* equivalent: the
+rustfs binary mis-splits it, collapsing `http://` to `http:/` so a node can't
+resolve its own disks — the first-listed node aborts with `VolumeNotFound` and
+the peers hang at `waiting for storage_quorum`, never forming a writable
+cluster. Space-separated literals parse exactly like the documented compact
+`http://node{1...4}:9000/data/rustfs{0...3}` brace form, but let you use plain
+per-node IPs with no `/etc/hosts` or DNS.)
+
+Cross-host MNMD is verified on a real 4-node × 4-drive cluster (Linux, rootful
+podman): all four serve `/health` 200, and an object written once reads back
+byte-identical from every node — the erasure shards spread across all 16
+drives.
 
 ## Using the mc Client
 

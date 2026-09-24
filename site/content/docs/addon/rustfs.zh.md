@@ -240,19 +240,33 @@ bind 挂到容器路径 `/data/rustfsN`，`RUSTFS_VOLUMES` 被设为花括号范
 ```bash
 # node 1（10.0.0.11），四块独立数据盘：
 pg addon install rustfs --name store \
-  --listen 10.0.0.11 \
+  --listen 0.0.0.0 \
   --root-password '<shared-secret>' \
   --drive /mnt/rustfs/d1 --drive /mnt/rustfs/d2 --drive /mnt/rustfs/d3 --drive /mnt/rustfs/d4 \
   --endpoint http://10.0.0.11:9000 --endpoint http://10.0.0.12:9000 \
   --endpoint http://10.0.0.20:9000 --endpoint http://10.0.0.21:9000
 
-# node 2-4：同样的命令、自己的 --listen/--drive，外加相同的 --endpoint 列表
+# node 2-4：同样的命令、自己的 --drive，外加相同的 --endpoint 列表
 # 与相同的 --root-password 值。
 ```
 
-跨主机 MNMD 代码完整、并在 install 期做校验；不过本页的 e2e 覆盖只在真实单
-主机上跑了 SNSD 与 SNMD。上面的四节点环是按接线与 CLI 校验写出的，不是实测
-集群——在你亲自跑过之前，请如此看待。
+除了一份份逐字节相同的配置，还有两点关键：`--listen` 必须是 `0.0.0.0`（或本节点
+自己的可达地址）而不是默认的 loopback——podman host 网络下端点广播的是各节点真实
+IP，只监听 `127.0.0.1` 的节点永远进不了集群。而且所有节点的 endpoint 列表与 root
+凭据必须完全一致：rustfs 据此派生出同一个纠删码集合，一旦对不上就退化成彼此独立
+的单实例。
+
+`--endpoint` 传的是不带 path 的 `scheme://host:port`；pgcli 会给每条拼上本节点的
+`/data/rustfs{0...N-1}` 盘范围，再用**空格**把四条 URL 连成单个 `RUSTFS_VOLUMES`。
+（逗号连接并**不等效**：rustfs 二进制会把逗号串错误切分，把 `http://` 塌缩成
+`http:/`，节点因此解析不出自己的盘——列表中第一个节点以 `VolumeNotFound` 退出，
+其余节点卡在 `waiting for storage_quorum`，始终凑不出可写集群。空格分隔的字面 URL
+与官方文档的紧凑花括号形式 `http://node{1...4}:9000/data/rustfs{0...3}` 解析结果
+完全一致，却能直接用各节点的普通 IP，不需要 `/etc/hosts` 或 DNS。）
+
+跨主机 MNMD 已在真机 4 节点 × 4 盘集群上验证（Linux，rootful podman）：四台全部
+`/health` 返回 200，且写入一次的对象从**每一台**读回都逐字节一致——纠删码分片确实
+散布在全部 16 块盘上。
 
 ## 使用 mc 客户端
 
