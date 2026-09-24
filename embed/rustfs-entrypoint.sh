@@ -43,7 +43,7 @@ done
 #    in it), for BYO mode the two operator files are mounted at those same names.
 #    Either way the copy is uniform and no host file is ever mutated.
 TLS_SRC=/opt/rustfs/certs-src
-TLS_DST="$RUSTFS_TLS_PATH"
+TLS_DST="${RUSTFS_TLS_PATH:-}"
 if [ -n "${TLS_DST:-}" ] && [ "$TLS_DST" != "$TLS_SRC" ] && [ -d "$TLS_SRC" ]; then
     mkdir -p "$TLS_DST"
     cp -f "$TLS_SRC/rustfs_cert.pem" "$TLS_DST/rustfs_cert.pem" 2>/dev/null || true
