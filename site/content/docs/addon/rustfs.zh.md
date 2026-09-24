@@ -1,5 +1,5 @@
 ---
-title: "rustfs"
+title: "RustFS"
 description: "以 pgcli 插件方式运行 rustfs（Rust 实现的 S3 兼容对象存储）——单机或纠删码多盘/多节点，固定的容器 uid 由定制镜像在内部消化"
 weight: 47
 ---

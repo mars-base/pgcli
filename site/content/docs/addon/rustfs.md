@@ -1,5 +1,5 @@
 ---
-title: "rustfs"
+title: "RustFS"
 description: "Run rustfs (the Rust S3-compatible object store) as a pgcli addon — single-node or erasure-coded, with the fixed container uid handled inside a purpose-built image"
 weight: 47
 ---

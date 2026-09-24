@@ -1,5 +1,5 @@
 ---
-title: "etcd"
+title: "Etcd"
 description: "以 pgcli addon 形式运行独立的 etcd 集群，用于 HA / DCS 场景"
 weight: 30
 ---

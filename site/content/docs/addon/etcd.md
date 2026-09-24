@@ -1,5 +1,5 @@
 ---
-title: "etcd"
+title: "Etcd"
 description: "Run a standalone etcd cluster as a pgcli addon for HA / DCS use"
 weight: 30
 ---
