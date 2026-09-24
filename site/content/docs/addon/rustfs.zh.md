@@ -256,13 +256,15 @@ IP，只监听 `127.0.0.1` 的节点永远进不了集群。而且所有节点�
 凭据必须完全一致：rustfs 据此派生出同一个纠删码集合，一旦对不上就退化成彼此独立
 的单实例。
 
-`--endpoint` 传的是不带 path 的 `scheme://host:port`；pgcli 会给每条拼上本节点的
+`--endpoint` 传的是不带 path 的 `scheme://host:port`，每节点重复一条（写成逗号串
+`--endpoint a,b,c` 也等效——它是 string-slice flag）；pgcli 会给每条拼上本节点的
 `/data/rustfs{0...N-1}` 盘范围，再用**空格**把四条 URL 连成单个 `RUSTFS_VOLUMES`。
-（逗号连接并**不等效**：rustfs 二进制会把逗号串错误切分，把 `http://` 塌缩成
-`http:/`，节点因此解析不出自己的盘——列表中第一个节点以 `VolumeNotFound` 退出，
-其余节点卡在 `waiting for storage_quorum`，始终凑不出可写集群。空格分隔的字面 URL
-与官方文档的紧凑花括号形式 `http://node{1...4}:9000/data/rustfs{0...3}` 解析结果
-完全一致，却能直接用各节点的普通 IP，不需要 `/etc/hosts` 或 DNS。）
+（`RUSTFS_VOLUMES` 本身必须是空格连接、不能是逗号连接：rustfs 二进制会把逗号串错误
+切分，把 `http://` 塌缩成 `http:/`，节点因此解析不出自己的盘——列表中第一个节点以
+`VolumeNotFound` 退出，其余节点卡在 `waiting for storage_quorum`，始终凑不出可写集
+群。空格分隔的字面 URL 与官方文档的紧凑花括号形式
+`http://node{1...4}:9000/data/rustfs{0...3}` 解析结果完全一致，却能直接用各节点的
+普通 IP，不需要 `/etc/hosts` 或 DNS。）
 
 跨主机 MNMD 已在真机 4 节点 × 4 盘集群上验证（Linux，rootful podman）：四台全部
 `/health` 返回 200，且写入一次的对象从**每一台**读回都逐字节一致——纠删码分片确实

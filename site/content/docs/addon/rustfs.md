@@ -282,10 +282,12 @@ only on `127.0.0.1` can never be joined. And every node must carry the *same*
 endpoint list and root credentials: rustfs derives one shared erasure set from
 them, so a mismatch splits the ring into independent standalones.
 
-`--endpoint` values are `scheme://host:port` with no path; pgcli appends the
-per-node `/data/rustfs{0...N-1}` drive range and joins the four URLs with **spaces**
-into a single `RUSTFS_VOLUMES`. (A comma-joined list is *not* equivalent: the
-rustfs binary mis-splits it, collapsing `http://` to `http:/` so a node can't
+`--endpoint` values are `scheme://host:port` with no path, repeated once per
+node (a comma-joined `--endpoint a,b,c` is equivalent — it is a string-slice
+flag). pgcli appends the per-node `/data/rustfs{0...N-1}` drive range and joins
+the four URLs with **spaces** into a single `RUSTFS_VOLUMES`. (The
+`RUSTFS_VOLUMES` value itself must be space-joined, not comma-joined: the rustfs
+binary mis-splits it, collapsing `http://` to `http:/` so a node can't
 resolve its own disks — the first-listed node aborts with `VolumeNotFound` and
 the peers hang at `waiting for storage_quorum`, never forming a writable
 cluster. Space-separated literals parse exactly like the documented compact
