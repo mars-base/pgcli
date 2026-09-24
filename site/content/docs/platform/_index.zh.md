@@ -47,10 +47,12 @@ pgcli 在 Linux 和 macOS 上都是驱动 [Podman](https://podman.io) 容器运�
 | 插件 —— **etcd** | ✅ 含跨主机集群 | ❌ 仅 Linux |
 | 插件 —— **HAProxy** | ✅ | ❌ 仅 Linux |
 | 插件 —— **MinIO** | ✅ host 网络 | ✅ bridge，发布端口 |
+| 插件 —— **silo** | ✅ host 网络 | ✅ bridge，发布端口 |
+| 插件 —— **rustfs** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
 | 客户端 —— **`pg mc`**（MinIO 客户端） | ✅ host 网络 | ✅ bridge（见下） |
 | 高可用 —— **Patroni**（`pg ha`） | ✅ 含跨主机 | ❌ 仅 Linux |
 
-图例：✅ 支持 · ✅ *备注* 支持但有所述限制 · ❌ 不支持。
+图例：✅ 支持 · ✅ *备注* 支持但有所述限制 · ⚠️ 该平台上已实现但未实测 · ❌ 不支持。
 
 ## 实例类功能
 
@@ -94,6 +96,15 @@ macOS 上这些都是**单主机**：跨主机副本、跨多机的连接池属�
   主机分布式纠删码集群皆可。Linux 上经主机网络提供服务；macOS 上加入 `pgcli-net` 并发布 API 与控制台端
   口，Mac 通过 `127.0.0.1:<port>` 即可访问（与代理插件同一条路径）。公开镜像
   为双架构（amd64 + arm64）。
+- **[silo](/docs/addon/silo/)** —— **两个平台都支持**。Pigsty 的 MinIO 分支，
+  网络模型与 MinIO 完全一致：Linux 走 host 网络，macOS 加入 `pgcli-net` 并发布
+  端口。公开镜像为双架构（amd64 + arm64）。
+- **[rustfs](/docs/addon/rustfs/)** —— **实际上仅 Linux**。pgcli 运行一个定制
+  wrapper 镜像（`ghcr.io/mars-base/pgcli/pgcli-rustfs`），其 entrypoint 在容器
+  内部先把 bind 挂载的数据/证书目录 chown 成 rustfs 固定的 uid 10001，再降权到
+  非特权用户。wrapper 镜像为双架构构建，Go manager 也有与 MinIO/silo 相同的
+  macOS bridge 路径（发布端口），故 macOS 预期可用 —— 但本插件的 e2e 覆盖只在
+  Linux 上跑过，在 Mac 上实测之前请按仅 Linux 对待。
 - **[`pg mc`](/docs/addon/minio/#使用-mc-客户端)**（MinIO 客户端）——
   **两个平台都支持**。它在一次性容器里运行 `mc`：宿主的 `~/.mc/config.json`
   按其原生默认路径挂载，`cp`/`mirror`/`diff` 的本地文件参数也会按真实路径动态

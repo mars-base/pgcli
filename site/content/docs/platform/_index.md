@@ -51,10 +51,12 @@ across machines, or that depend on Linux-only container internals, stay
 | Addon — **etcd** | ✅ incl. cross-host clusters | ❌ Linux only |
 | Addon — **HAProxy** | ✅ | ❌ Linux only |
 | Addon — **MinIO** | ✅ host network | ✅ bridge, published ports |
+| Addon — **silo** | ✅ host network | ✅ bridge, published ports |
+| Addon — **rustfs** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
 | Client — **`pg mc`** (MinIO client) | ✅ host network | ✅ bridge (see below) |
 | HA — **Patroni** (`pg ha`) | ✅ incl. cross-host | ❌ Linux only |
 
-Legend: ✅ supported · ✅ *note* supported with the stated caveat · ❌ not supported.
+Legend: ✅ supported · ✅ *note* supported with the stated caveat · ⚠️ present but unverified on that platform · ❌ not supported.
 
 ## Instance features
 
@@ -104,6 +106,18 @@ Addon networking differs per component:
   `pgcli-net` with its API and console ports published, so the Mac reaches both
   on `127.0.0.1:<port>` (the same path the proxy addons use). The public image
   is dual-arch (amd64 + arm64).
+- **[silo](/docs/addon/silo/)** — **both platforms.** Pigsty's MinIO fork, so
+  it shares MinIO's networking story exactly: host networking on Linux, the
+  `pgcli-net` bridge with published ports on macOS. The public image is
+  dual-arch (amd64 + arm64).
+- **[rustfs](/docs/addon/rustfs/)** — **Linux only, in practice.** pgcli runs a
+  custom wrapper image (`ghcr.io/mars-base/pgcli/pgcli-rustfs`) whose entrypoint
+  chowns the bind-mounted data/cert directories to rustfs's fixed uid 10001
+  from inside the container, before dropping to the unprivileged user. The
+  wrapper image is built dual-arch, and the Go manager has the same macOS bridge
+  path (published ports) as MinIO/silo, so macOS is expected to work — but this
+  addon's e2e coverage has only run on Linux, so treat it as Linux only until
+  it is exercised on a Mac.
 - **[`pg mc`](/docs/addon/minio/#using-the-mc-client)** (MinIO client) — **both
   platforms.** It runs the `mc` binary from a throwaway container, with your
   `~/.mc/config.json` mounted as its own default config path and local file
