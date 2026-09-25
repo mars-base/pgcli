@@ -51,4 +51,11 @@ embed/minio.linux-*
 # after. (Exact paths — embed/mc.Containerfile stays tracked.)
 embed/mc
 embed/ca-certificates.crt
+
+# predixy proxy: the amd64 binary staged as embed/predixy and the extracted
+# embed/predixy-conf/ (with the current license), put in embed/ by
+# `make container-build-predixy` right before the build and deleted after.
+# (Exact paths — embed/predixy.Containerfile stays tracked.)
+embed/predixy
+embed/predixy-conf
 pg

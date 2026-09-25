@@ -9,7 +9,7 @@ LDFLAGS = -s -w \
 
 PLATFORMS = linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
-.PHONY: build clean test lint install build-all gencert container-build container-push container-build-minio container-push-minio container-build-mc container-push-mc container-build-patroni container-push-patroni container-build-rustfs container-push-rustfs
+.PHONY: build clean test lint install build-all gencert container-build container-push container-build-minio container-push-minio container-build-mc container-push-mc container-build-patroni container-push-patroni container-build-rustfs container-push-rustfs container-build-predixy container-push-predixy
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) .
@@ -151,3 +151,34 @@ container-build-rustfs:
 
 container-push-rustfs:
 	podman manifest push $(RUSTFS_IMAGE) $(RUSTFS_IMAGE) --all
+
+# Predixy proxy image — built from the upstream FREE-EDITION binary on Alpine.
+# Upstream ships ONLY an amd64 glibc binary, so (unlike the dual-arch
+# minio/mc/rustfs targets) this is a single-arch image with no manifest list;
+# the tag carries a -alpine suffix to say so. The tarball's own license.conf is
+# already expired (the free binary refuses to start with it), so we always
+# overwrite it with the current license2026.conf from the release. The binary
+# and extracted conf are downloaded and sha256-verified by the target, staged
+# into embed/, and deleted after — never committed. The apk step and the alpine
+# base pull need outbound network: prefix HTTP_PROXY/HTTPS_PROXY, or add
+# `--network host` to the build line on a host whose default container network
+# can't reach the alpine CDN (same caveat as the minio/mc targets above).
+PREDIXY_VERSION ?= 7.0.1
+PREDIXY_IMAGE   = ghcr.io/mars-base/pgcli/predixy:$(PREDIXY_VERSION)-alpine
+PREDIXY_BASE    = https://github.com/joyieldInc/predixy/releases/download/$(PREDIXY_VERSION)
+PREDIXY_LICENSE_SHA256 ?= 04390ed707c305a64827b61e5ce71f1d2c53e850ccb30c769e6c74957c2be400
+
+container-build-predixy:
+	@curl -sfL --retry 3 -o /tmp/predixy.tar.gz $(PREDIXY_BASE)/predixyFreeEdition-$(PREDIXY_VERSION)-amd64-linux.tar.gz || exit 1
+	@rm -rf /tmp/predixy-ex && mkdir -p /tmp/predixy-ex && tar xzf /tmp/predixy.tar.gz -C /tmp/predixy-ex
+	@cp /tmp/predixy-ex/predixyFreeEdition-$(PREDIXY_VERSION)/bin/predixy embed/predixy
+	@rm -rf embed/predixy-conf && cp -r /tmp/predixy-ex/predixyFreeEdition-$(PREDIXY_VERSION)/conf embed/predixy-conf
+	@curl -sfL --retry 3 -o embed/predixy-conf/license.conf $(PREDIXY_BASE)/license2026.conf || exit 1
+	@echo "$(PREDIXY_LICENSE_SHA256)  embed/predixy-conf/license.conf" | sha256sum -c - || exit 1
+	@podman build --platform linux/amd64 -t $(PREDIXY_IMAGE) -f embed/predixy.Containerfile embed/
+	@rm -f embed/predixy
+	@rm -rf embed/predixy-conf
+	@rm -rf /tmp/predixy.tar.gz /tmp/predixy-ex
+
+container-push-predixy:
+	podman push $(PREDIXY_IMAGE) $(PREDIXY_IMAGE)
