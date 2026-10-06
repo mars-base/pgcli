@@ -31,38 +31,51 @@ and several instances (even across majors) can run on one host.
 > **Out of scope:** standalone only. Sentinel (HA) and Redis Cluster are not
 > managed by pgcli — see [Known limitations](#known-limitations).
 
-## How It Works
+## Parameters
 
-One container per instance, from the plain upstream image — pgcli builds **no
-wrapper for Redis** (it starts as container root and needs no uid gymnastics,
-unlike [rustfs](../rustfs/)). pgcli drives `redis-server` directly with argv
-overrides through the image's own entrypoint:
+pgcli keeps Redis's parameter surface deliberately small: one flag per knob,
+each mapping to a native `redis-server` option — argv overrides through the
+image's own entrypoint, no `redis.conf` file is generated, and one container
+per instance runs the plain upstream image (no pgcli wrapper, unlike
+[rustfs](../rustfs/)). The table lists every knob with its default and the
+equivalent from Pigsty's [REDIS module
+parameters](https://pigsty.cc/docs/redis/param/) for reference:
 
-```
-redis-server --port <port> --requirepass <password> --bind <listen> --dir /data
-```
+| Flag / `pg.yaml` key | Default | Redis option | Pigsty equivalent |
+|----------------------|---------|--------------|-------------------|
+| `--version` / `version` | `8` | — (picks the image tag) | `redis_type` (engine choice, closest analogue) |
+| `--image` / `image_tag` | resolved from the version table | — | package/version selection |
+| `--port` / `port` | auto from `redis_start_port` (base **6379**) | `--port` | the instance key in `redis_instances` |
+| `--listen` / `listen` | `0.0.0.0` | `--bind` | `redis_bind_address` |
+| `--password` / `password` | generated, 20 chars | `--requirepass` | `redis_password` — Pigsty defaults to empty (no auth); pgcli always requires one |
+| `--maxmemory` / `maxmemory` | unset (no cap) | `--maxmemory` + `--maxmemory-policy allkeys-lru` | `redis_max_memory` + `redis_mem_policy` (pgcli pins the policy to `allkeys-lru`) |
+| `--data-dir` / `data_dir` | `<base-dir>/addon/redis/<name>/data` | `--dir /data` (host dir bind-mounted at `/data`) | `redis_fs_main` |
+| — | `autostart: false` | — | — (pgcli-level: `pg autostart enable --redis`) |
 
-plus `--maxmemory <cap> --maxmemory-policy allkeys-lru` when `--maxmemory` is
-set. The host data directory (default
-`<base-dir>/addon/redis/<name>/data`) is bind-mounted at `/data`, so the RDB
-snapshot lands on the host. `--stop-timeout 30` gives Redis time to write its
-final snapshot on `pg stop`.
+Policy that is fixed, not exposed as flags:
 
-Credentials and version are handled like the other infra addons:
+- **`requirepass` is always on** — an unauthenticated Redis is not a reachable
+  state, even if `--password` is passed empty by hand into `pg.yaml`.
+- **Persistence is RDB snapshots only** — Redis's own default `save` schedule
+  applies, plus a final snapshot on shutdown (`--stop-timeout 30` gives Redis
+  the time to write it) and a replay from `dump.rdb` at start. This matches
+  the intent of Pigsty's `redis_rdb_save: ['1200 1']`; AOF
+  (`redis_aof_enabled: false`) is deliberately off for both.
+- **`--maxmemory-policy` is pinned to `allkeys-lru`** whenever `--maxmemory` is
+  set: the cap means "cache, evict to stay under", never "hard store". For a
+  no-eviction store, omit `--maxmemory` and size the host instead.
 
-- `password` (→ `requirepass`) is **generated on first install** (20 chars, or
-  pin it with `--password`), stored in `pg.yaml`
-  (`addons.redis.<name>.password`) and **printed once** in the install summary;
-- `version` + `image_tag` are resolved together at install time (see
-  [Version selection](#version-selection));
-- `port` is auto-assigned from Redis's own pool (`redis_start_port`, default
-  **6379**) — separate from the object stores' shared pool.
-
-Persistence is **RDB snapshots only** (Redis's own default): `save` runs on
-shutdown and on demand, and the file replays at start. AOF is deliberately not
-turned on — for cache/session data the RDB granularity is the right trade; if
-you need write-ahead durability, Redis replication or AOF is a topology
-decision beyond this addon.
+Pigsty parameters pgcli does not manage: everything behind multi-node
+topology (`redis_mode: sentinel|cluster`, `redis_cluster_replicas`,
+`redis_sentinel_monitor`, per-instance `replica_of`), the config-file
+template (`redis_conf`), dangerous-command renaming
+(`redis_rename_commands`), and monitoring (`redis_exporter_*` — run a
+`redis_exporter` container yourself if wanted). The `REDIS_REMOVE` knobs map
+partially: `--clean-data` is pgcli's `redis_rm_data`; `redis_safeguard` and
+`redis_rm_pkg` have no meaning when nothing is installed on the host. The one
+knob you *can* bend through `--image`: `redis_type: valkey` is just another
+tag — `pg addon install redis --image docker.io/valkey/valkey:8` works, and
+the major reverse-parses as `8`.
 
 ## Version selection
 

@@ -26,34 +26,46 @@ weight: 50
 > **范围之外：** 仅单机。Sentinel（高可用）与 Redis Cluster 不由 pgcli 管理
 > ——见[已知限制](#已知限制)。
 
-## 工作原理
+## 参数设置
 
-一个实例一个容器，直接用纯上游镜像——pgcli **不为 Redis 构建 wrapper**（它
-以容器 root 启动，不需要 rustfs 那套 uid 处理）。pgcli 经镜像自带
-entrypoint 用 argv 覆盖的方式驱动 `redis-server`：
+pgcli 刻意把 Redis 的参数面做得很小：一个可调项对应一个 flag，最终都落到
+`redis-server` 的原生选项上——经镜像自带 entrypoint 用 argv 覆盖，不生成
+`redis.conf`；一个实例一个容器，直接用纯上游镜像（pgcli 不为 Redis 构建
+wrapper，这点与 [rustfs](../rustfs/) 不同）。下表列出每个可调项、默认值，以及
+Pigsty [REDIS 模块参数](https://pigsty.cc/docs/redis/param/) 里的对应项供参照：
 
-```
-redis-server --port <port> --requirepass <password> --bind <listen> --dir /data
-```
+| Flag / `pg.yaml` 键 | 默认值 | Redis 选项 | Pigsty 对应参数 |
+|---|---|---|---|
+| `--version` / `version` | `8` | —（决定镜像 tag） | `redis_type`（引擎选择，最接近的对应） |
+| `--image` / `image_tag` | 由版本映射表解析 | — | 版本/包选择 |
+| `--port` / `port` | 从 `redis_start_port` 自动分配（基 **6379**） | `--port` | `redis_instances` 的实例键 |
+| `--listen` / `listen` | `0.0.0.0` | `--bind` | `redis_bind_address` |
+| `--password` / `password` | 自动生成 20 字符 | `--requirepass` | `redis_password`——Pigsty 默认留空即禁用密码，pgcli 始终要求一个 |
+| `--maxmemory` / `maxmemory` | 不设（无上限） | `--maxmemory` + `--maxmemory-policy allkeys-lru` | `redis_max_memory` + `redis_mem_policy`（pgcli 把策略钉死为 `allkeys-lru`） |
+| `--data-dir` / `data_dir` | `<base-dir>/addon/redis/<name>/data` | `--dir /data`（主机目录 bind 挂载到 `/data`） | `redis_fs_main` |
+| — | `autostart: false` | — | —（pgcli 层：`pg autostart enable --redis`） |
 
-设置了 `--maxmemory` 时再追加 `--maxmemory <cap> --maxmemory-policy
-allkeys-lru`。主机数据目录（默认
-`<base-dir>/addon/redis/<name>/data`）bind 挂载到 `/data`，RDB 快照因此落在
-主机上。`--stop-timeout 30` 给 Redis 在 `pg stop` 时留出写最后一份快照的时
-间。
+固定、不对外暴露为 flag 的策略：
 
-凭据与版本的处理方式与其他基础设施插件一致：
+- **`requirepass` 始终开启**——即使手工往 `pg.yaml` 里塞空 `password`，也不存在
+  "未认证的 Redis" 这种可达状态。
+- **持久化仅 RDB 快照**——沿用 Redis 自身的默认 `save` 计划，外加停机时补一份
+  最终快照（`--stop-timeout 30` 给足时间）与启动时从 `dump.rdb` 回放。这与
+  Pigsty `redis_rdb_save: ['1200 1']` 的意图一致；AOF（`redis_aof_enabled:
+  false`）两边都刻意关着。
+- **设了 `--maxmemory` 就把 `--maxmemory-policy` 钉为 `allkeys-lru`**：上限的
+  语义是"缓存，超了就驱逐"，不是"硬存储"。要严格不驱逐就别设 `--maxmemory`，
+  改为按主机容量规划。
 
-- `password`（→ `requirepass`）**首次安装时生成**（20 字符；用 `--password`
-  可固定），存入 `pg.yaml`（`addons.redis.<name>.password`）并在安装摘要里
-  **打印一次**；
-- `version` 与 `image_tag` 在安装时一并解析（见[版本选择](#版本选择)）；
-- `port` 从 Redis 自己的端口池自动分配（`redis_start_port`，默认 **6379**）
-  ——与对象存储共用的池相互独立。
-
-持久化为**仅 RDB 快照**（Redis 自身默认）：停机与手动 `save` 时落盘，启动
-时回放。刻意不开 AOF——对缓存/会话数据，RDB 粒度是合适的取舍；需要写前耐久
-性时，Redis 复制或 AOF 属于超出本插件范围的拓扑决策。
+Pigsty 参数中 pgcli 不管理的那些：多节点拓扑相关的一切（`redis_mode:
+sentinel|cluster`、`redis_cluster_replicas`、`redis_sentinel_monitor`、实例级
+`replica_of`）、配置文件模板（`redis_conf`）、危险命令重命名
+（`redis_rename_commands`）、监控（`redis_exporter_*`——需要的话自行跑一个
+`redis_exporter` 容器）。`REDIS_REMOVE` 只部分对应：`--clean-data` 即
+pgcli 的 `redis_rm_data`；`redis_safeguard` 与 `redis_rm_pkg` 在"主机上没装任何
+东西"的容器模型下没有意义。唯一能靠 `--image` 变通的是 `redis_type: valkey`——
+它不过是另一个 tag：`pg addon install redis --image
+docker.io/valkey/valkey:8` 可用，大版本反解析为 `8`。
 
 ## 版本选择
 
