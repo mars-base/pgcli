@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # pgcli install script — installs the pg binary and container dependencies.
 # Supports Linux and macOS (amd64/arm64).
+#
+# Usage: install.sh [VERSION] [--skip-pull]
+#   --skip-pull  do not pull container images during install
 set -euo pipefail
 
 REPO="mars-base/pgcli"
 BINARY="pg"
 INSTALL_DIR="${INSTALL_DIR:-}"
+SKIP_PULL=false
+VERSION_ARG=""
 
 # Container images (pulled during install for faster first startup)
 PG_IMAGE="ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0"
@@ -347,14 +352,23 @@ install_podman_launcher() {
     arch="$(detect_arch)"
     local launcher_url="https://github.com/89luca89/podman-launcher/releases/latest/download/podman-launcher-${arch}"
 
+    # Download as the invoking user: sudo strips proxy env vars, so fetching
+    # from inside `sudo curl` breaks behind a proxy.
+    local tmp
+    tmp="$(mktemp -d)"
+    if ! curl -fsSL --connect-timeout 15 --max-time 300 -o "$tmp/podman" "$launcher_url"; then
+        die "Download failed: $launcher_url"
+    fi
+    chmod +x "$tmp/podman"
+
     if [ -w "$podman_dir" ]; then
         mkdir -p "$podman_dir"
-        curl -fsSL --connect-timeout 15 --max-time 300 -o "$podman_dir/podman" "$launcher_url"
-        chmod +x "$podman_dir/podman"
+        mv "$tmp/podman" "$podman_dir/podman"
     else
         as_root mkdir -p "$podman_dir"
-        as_root bash -c "curl -fsSL --connect-timeout 15 --max-time 300 -o '$podman_dir/podman' '$launcher_url' && chmod +x '$podman_dir/podman'"
+        as_root mv "$tmp/podman" "$podman_dir/podman"
     fi
+    rm -rf "$tmp"
     green "  [OK] podman-launcher installed to $podman_dir/podman"
 
     # Trigger podman-launcher to download the actual podman binary.
@@ -370,6 +384,10 @@ install_podman_launcher() {
 # ─── Image pull ──────────────────────────────────────────────────────
 
 pull_images() {
+    if $SKIP_PULL; then
+        yellow "-> Skipping image pull (--skip-pull)"
+        return
+    fi
     if ! command -v podman &>/dev/null; then
         yellow "  [!] podman not available, skipping image pull"
         return
@@ -447,6 +465,19 @@ check_path() {
 }
 
 main() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --skip-pull) SKIP_PULL=true ;;
+            -h|--help)
+                echo "Usage: install.sh [VERSION] [--skip-pull]"
+                echo "  --skip-pull  do not pull container images during install"
+                exit 0
+                ;;
+            *) VERSION_ARG="$1" ;;
+        esac
+        shift
+    done
+
     echo "=== pgcli installer ==="
     echo ""
 
@@ -455,8 +486,8 @@ main() {
     arch="$(detect_arch)"
 
     # Version from argument or latest release
-    if [ $# -ge 1 ]; then
-        version="$1"
+    if [ -n "$VERSION_ARG" ]; then
+        version="$VERSION_ARG"
     else
         version="$(latest_version)"
         if [ -z "$version" ]; then
