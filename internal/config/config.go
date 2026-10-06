@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -29,6 +30,7 @@ type Config struct {
 	HaProxyStartPort        int                       `yaml:"haproxy_start_port,omitempty"`         // starting HAProxy listener host port, default 5000 (read port and stats take the next free ports)
 	MinioStartPort          int                       `yaml:"minio_start_port,omitempty"`           // starting MinIO API host port, default 9000 (console takes the next free port)
 	PostgrestStartPort      int                       `yaml:"postgrest_start_port,omitempty"`       // starting PostgREST HTTP host port, default 3500
+	RedisStartPort          int                       `yaml:"redis_start_port,omitempty"`           // starting Redis host port, default 6379
 	Postgres                PostgresConfig            `yaml:"postgres"`
 	Podman                  PodmanConfig              `yaml:"podman"`
 	PITR                    PITRConfig                `yaml:"pitr"`
@@ -88,6 +90,7 @@ type TopAddonsConfig struct {
 	Minio     map[string]MinioConfig          `yaml:"minio,omitempty"`
 	Silo      map[string]SiloConfig           `yaml:"silo,omitempty"`
 	Rustfs    map[string]RustfsConfig         `yaml:"rustfs,omitempty"`
+	Redis     map[string]RedisConfig          `yaml:"redis,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -419,6 +422,69 @@ const DefaultPgBouncerImageTag = "docker.io/edoburu/pgbouncer:v1.25.2-p0"
 // it). v16.3 is the current stable line; keep this in sync when bumping.
 const DefaultPostgrestImageTag = "docker.io/postgrest/postgrest:v16.3"
 
+// DefaultRedisMajor is the Redis major version installed when --version is not
+// given: "8", the current stable line upstream (docker.io/library/redis).
+const DefaultRedisMajor = "8"
+
+// redisMajorImages maps a Redis major to the default upstream image tag. This
+// is pgcli's first version-selection mechanism — every other add-on pins a
+// single image — so the shape is deliberately local: a table plus the two
+// resolvers below, not an abstraction other add-ons must conform to. Should a
+// second versioned add-on appear (PG majors, etcd), lift this pattern rather
+// than invent a new one.
+//
+// Tags track the latest patch release of each major; bump them with the
+// matching docs/images.md row. Both are plain upstream images — pgcli builds no
+// wrapper for Redis (it runs as container root and drops privileges itself).
+var redisMajorImages = map[string]string{
+	"7": "docker.io/library/redis:7.4.11",
+	"8": "docker.io/library/redis:8.10.2",
+}
+
+// RedisMajors returns the selectable Redis majors, sorted ascending ("7", "8").
+func RedisMajors() []string {
+	majors := make([]string, 0, len(redisMajorImages))
+	for major := range redisMajorImages {
+		majors = append(majors, major)
+	}
+	sort.Strings(majors)
+	return majors
+}
+
+// RedisImageTagForMajor resolves a major to its default image tag; ok is false
+// for anything outside the table, which callers turn into an error listing
+// RedisMajors.
+func RedisImageTagForMajor(major string) (string, bool) {
+	tag, ok := redisMajorImages[major]
+	return tag, ok
+}
+
+// RedisMajorForImageTag reverse-parses an image tag to its major version —
+// the leading digit run after the colon ("docker.io/library/redis:7.4.11" →
+// "7"). Used only for display when --image bypassed the table; returns "" for
+// unparseable or unknown majors, in which case the tag is shown verbatim.
+func RedisMajorForImageTag(imageTag string) string {
+	idx := strings.LastIndex(imageTag, ":")
+	if idx < 0 || idx == len(imageTag)-1 {
+		return ""
+	}
+	digits := make([]byte, 0, 2)
+	for _, ch := range imageTag[idx+1:] {
+		if ch < '0' || ch > '9' {
+			break
+		}
+		digits = append(digits, byte(ch))
+	}
+	if len(digits) == 0 {
+		return ""
+	}
+	major := string(digits)
+	if _, ok := redisMajorImages[major]; !ok {
+		return ""
+	}
+	return major
+}
+
 // MinioConfig holds a standalone MinIO addon (single-node S3-compatible object
 // storage). Like etcd/pgdog/haproxy it is shared infrastructure, so it lives at
 // the top level (addons.minio.<name>). The typical use is a pgBackRest repository
@@ -619,6 +685,36 @@ type RustfsConfig struct {
 	Autostart bool `yaml:"autostart,omitempty"`
 }
 
+// RedisConfig holds a standalone Redis addon: a KV store for cache, session,
+// ranking and atomic-counter data, run as its own container off the upstream
+// docker.io/library/redis image (no wrapper build — Redis runs fine as root
+// inside the container, so there is no rustfs-style uid-drop contract).
+//
+// Version/ImageTag implement the first version-selection mechanism in pgcli:
+// Version is the major ("7" | "8"), ImageTag the resolved full reference
+// (redisMajorImages below). --image overrides ImageTag directly and Version is
+// then reverse-parsed for display only. Redis defaults to Listen 0.0.0.0 —
+// the Pigsty redis_bind_address convention — with Password always generated
+// (requirepass), since a port published on every interface is meaningless
+// without auth. Persistence is the native RDB snapshot into /data (DataDir);
+// AOF is not exposed as an option.
+type RedisConfig struct {
+	ContainerName string `yaml:"container_name"`      // pgcli-redis<ns>-<name>
+	Name          string `yaml:"name,omitempty"`      // addon key, defaults to the map key
+	Version       string `yaml:"version,omitempty"`   // Redis major: "7" | "8"
+	ImageTag      string `yaml:"image_tag,omitempty"` // docker.io/library/redis:<x.y.z>, resolved from Version
+	DataDir       string `yaml:"data_dir,omitempty"`  // host dir bound to /data; default <base-dir>/addon/redis/<name>/data
+	Listen        string `yaml:"listen,omitempty"`    // bind address, default 0.0.0.0 (Pigsty convention)
+	Port          int    `yaml:"port,omitempty"`      // host port, 6379+ auto-assigned
+	Password      string `yaml:"password,omitempty"`  // → requirepass, generated on first install
+	MaxMemory     string `yaml:"maxmemory,omitempty"` // optional cap, e.g. "256mb"; empty = unlimited
+
+	// Autostart brings this container up on host boot via the boot service
+	// (pg autostart enable --redis). Start-only: it starts the existing
+	// container, so install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
 // PostgresConfig holds PostgreSQL connection settings.
 type PostgresConfig struct {
 	URL      string `yaml:"url"`      // connection string (postgres://user:pass@host:port/db)
@@ -712,6 +808,7 @@ func Default() *Config {
 		HaProxyStartPort:        5000,
 		MinioStartPort:          9000,
 		PostgrestStartPort:      3500,
+		RedisStartPort:          6379,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -910,6 +1007,7 @@ type displayConfig struct {
 	HaProxyStartPort        int                       `yaml:"haproxy_start_port,omitempty"`
 	MinioStartPort          int                       `yaml:"minio_start_port,omitempty"`
 	PostgrestStartPort      int                       `yaml:"postgrest_start_port,omitempty"`
+	RedisStartPort          int                       `yaml:"redis_start_port,omitempty"`
 	Logging                 LoggingConfig             `yaml:"logging"`
 	Backup                  BackupConfig              `yaml:"backup"`
 	Pigsty                  PigstyConfig              `yaml:"pigsty"`
@@ -933,6 +1031,7 @@ func (c *Config) Display() displayConfig {
 		HaProxyStartPort:        c.HaProxyStartPort,
 		MinioStartPort:          c.MinioStartPort,
 		PostgrestStartPort:      c.PostgrestStartPort,
+		RedisStartPort:          c.RedisStartPort,
 		Logging:                 c.Logging,
 		Backup:                  c.Backup,
 		Pigsty:                  c.Pigsty,
@@ -1021,6 +1120,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.PostgrestStartPort == 0 {
 		c.PostgrestStartPort = d.PostgrestStartPort
+	}
+	if c.RedisStartPort == 0 {
+		c.RedisStartPort = d.RedisStartPort
 	}
 
 	// Postgres
@@ -1400,6 +1502,36 @@ func (c *Config) ApplyDefaults() {
 			addon.RootUser = "admin"
 		}
 		c.Addons.Rustfs[name] = addon
+	}
+
+	// Top-level addons defaults (Redis). Version is the source of truth for the
+	// image when ImageTag is empty: an empty Version means DefaultRedisMajor, an
+	// unknown one is left alone here (the CLI rejects it at install; hand-edited
+	// configs surface as an image-not-found pull error, not a silent rewrite).
+	// Password is deliberately NOT generated here — ApplyDefaults must stay
+	// deterministic (it runs on every load), so the CLI install handler fills it
+	// once, same as rustfs's RootPassword. Listen defaults to 0.0.0.0 (the
+	// Pigsty redis_bind_address convention): requirepass is always set, so an
+	// unauthenticated Redis is not a reachable state.
+	for name, addon := range c.Addons.Redis {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-redis" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.Version == "" && addon.ImageTag == "" {
+			addon.Version = DefaultRedisMajor
+		}
+		if addon.ImageTag == "" {
+			if tag, ok := RedisImageTagForMajor(addon.Version); ok {
+				addon.ImageTag = tag
+			}
+		}
+		if addon.Listen == "" {
+			addon.Listen = "0.0.0.0"
+		}
+		c.Addons.Redis[name] = addon
 	}
 
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
@@ -1866,6 +1998,44 @@ func (c *Config) autoAssignPorts() {
 			addon := c.Addons.Rustfs[name]
 			assign(&addon.APIPort, &addon.ConsolePort)
 			c.Addons.Rustfs[name] = addon
+		}
+	}
+
+	// Allocate ports for Redis addons from their own pool (redis_start_port,
+	// default 6379) — one port per instance, unlike the object stores which
+	// take an API+console pair from the shared minio pool. Redis is not
+	// co-located with them by design (different role, different defaults), and
+	// it has no second port unless TLS is added later.
+	{
+		redisBase := c.RedisStartPort
+		assignedRedis := map[int]bool{}
+		for _, addon := range c.Addons.Redis {
+			if addon.Port != 0 {
+				assignedRedis[addon.Port] = true
+			}
+		}
+		next := redisBase
+		nextFreeRedis := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedRedis[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.Redis))
+		for name := range c.Addons.Redis {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.Redis[name]
+			if addon.Port == 0 && redisBase > 0 {
+				addon.Port = nextFreeRedis()
+			} else if addon.Port >= next {
+				next = addon.Port + 1
+			}
+			c.Addons.Redis[name] = addon
 		}
 	}
 }

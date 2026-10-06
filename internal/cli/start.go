@@ -75,8 +75,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartRedis(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --redis)")
 		return nil
 	}
 
@@ -166,6 +166,12 @@ func startAutostart() error {
 	// rustfs instances (top-level infra addon, a Rust S3 store). Same position
 	// as minio/silo: independent of the PostgreSQL stack, a backup repo.
 	if err := startAutostartRustfs(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// redis instances (top-level infra addon, a KV store). Independent of the
+	// PostgreSQL stack like the object stores, so it goes last.
+	if err := startAutostartRedis(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -565,6 +571,51 @@ func startAutostartRustfs(c *config.Config) error {
 		rc := c.Addons.Rustfs[name]
 		if err := rm.StartContainer(&rc); err != nil {
 			fmt.Printf("  [X] rustfs autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartRedis reports whether any redis instance is autostart-enabled.
+func hasAutostartRedis(c *config.Config) bool {
+	for _, rc := range c.Addons.Redis {
+		if rc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartRedis starts each autostart-enabled redis instance. Start-only
+// semantics like the other infra autostarts: the container comes up with the
+// port/password already in the config, recreating it if the container was
+// removed; Redis replays the RDB snapshot from its data dir, so the dataset
+// survives the reboot. Order is sorted by instance name for deterministic,
+// readable boot logs.
+func startAutostartRedis(c *config.Config) error {
+	var names []string
+	for name, rc := range c.Addons.Redis {
+		if rc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	rm, err := podman.NewRedisManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		rc := c.Addons.Redis[name]
+		if err := rm.StartContainer(&rc); err != nil {
+			fmt.Printf("  [X] redis autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}

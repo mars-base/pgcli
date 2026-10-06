@@ -25,13 +25,14 @@ func init() {
 		c.Flags().Bool("postgrest", false, "select the PostgREST addon (use with -i for a local one, --pg-name for a remote one)")
 		c.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST (top-level addons)")
 		c.Flags().Bool("etcd", false, "select an etcd member (top-level addons)")
-		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy instance, minio, silo or rustfs instance, or Patroni member")
+		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs or redis instance, or Patroni member")
 		c.Flags().Bool("pgdog", false, "select a PgDog proxy (top-level addons)")
 		c.Flags().Bool("ha", false, "select Patroni HA members (top-level addons; requires --scope)")
 		c.Flags().Bool("haproxy", false, "select an HAProxy instance (top-level addons)")
 		c.Flags().Bool("minio", false, "select a MinIO instance (top-level addons)")
 		c.Flags().Bool("silo", false, "select a silo instance (top-level addons)")
 		c.Flags().Bool("rustfs", false, "select a rustfs instance (top-level addons)")
+		c.Flags().Bool("redis", false, "select a redis instance (top-level addons)")
 		c.Flags().String("scope", "", "Patroni cluster scope (required only with --ha)")
 	}
 }
@@ -49,7 +50,7 @@ Use 'pg autostart disable' to opt out.`,
 
 var autostartEnableCmd = &cobra.Command{
 	Use:   "enable",
-	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs instance, or a Patroni member",
+	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/redis instance, or a Patroni member",
 	Long: `Enable auto-start on boot for exactly one target:
 
   pg autostart enable -i myinst          # instance
@@ -64,6 +65,7 @@ var autostartEnableCmd = &cobra.Command{
   pg autostart enable --minio --name store       # MinIO instance (default name "minio")
   pg autostart enable --silo --name store         # silo instance (default name "silo")
   pg autostart enable --rustfs --name store       # rustfs instance (default name "rustfs")
+  pg autostart enable --redis --name cache       # redis instance (default name "redis")
   pg autostart enable --ha --scope app --name node1  # Patroni member (one at a time)
 
 Etcd autostart only starts the member's existing container at boot; it never
@@ -79,6 +81,9 @@ install minio). silo autostart behaves identically (pg addon install silo).
 rustfs autostart behaves identically (pg addon install rustfs). rustfs's fixed
 container uid is handled inside pgcli's wrapper image, so a boot-time start needs
 no special host privileges beyond running podman itself.
+Redis autostart likewise only starts the existing container (pg addon install
+redis); it replays the RDB snapshot from its data dir, so the dataset survives
+the reboot.
 PostgREST autostart likewise only starts the existing container, recreating it
 from the config if it was removed — install it first (pg addon install
 postgrest).
@@ -152,6 +157,7 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	minioSel, _ := cmd.Flags().GetBool("minio")
 	siloSel, _ := cmd.Flags().GetBool("silo")
 	rustfsSel, _ := cmd.Flags().GetBool("rustfs")
+	redisSel, _ := cmd.Flags().GetBool("redis")
 	pgName, _ := cmd.Flags().GetString("pg-name")
 	addonName, _ := cmd.Flags().GetString("name")
 	scope, _ := cmd.Flags().GetString("scope")
@@ -192,14 +198,17 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	if rustfsSel {
 		sel++
 	}
+	if redisSel {
+		sel++
+	}
 	if sel != 1 {
-		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, or --rustfs")
+		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, or --redis")
 	}
 	if pgName != "" && !pgbSel && !prSel {
 		return fmt.Errorf("--pg-name requires --pgbouncer or --postgrest")
 	}
-	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel {
-		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, or --rustfs")
+	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !redisSel {
+		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, or --redis")
 	}
 	if scope != "" && !haSel {
 		return fmt.Errorf("--scope requires --ha")
@@ -261,6 +270,18 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		rc.Autostart = enable
 		cfg.Addons.Rustfs[proxyName] = rc
 		targetDesc = fmt.Sprintf("rustfs instance %q", proxyName)
+	case redisSel:
+		proxyName := addonName
+		if proxyName == "" {
+			proxyName = "redis"
+		}
+		rc, ok := cfg.Addons.Redis[proxyName]
+		if !ok {
+			return fmt.Errorf("redis instance %q not found in config", proxyName)
+		}
+		rc.Autostart = enable
+		cfg.Addons.Redis[proxyName] = rc
+		targetDesc = fmt.Sprintf("redis instance %q", proxyName)
 	case haSel:
 		cluster, ok := cfg.Addons.Patroni[scope]
 		if !ok {
@@ -449,6 +470,11 @@ func countAutostartTargets(c *config.Config) int {
 			n++
 		}
 	}
+	for _, rc := range c.Addons.Redis {
+		if rc.Autostart {
+			n++
+		}
+	}
 	return n
 }
 
@@ -499,6 +525,9 @@ func runAutostartStatus(cmd *cobra.Command, args []string) error {
 	}
 	for name, rc := range cfg.Addons.Rustfs {
 		fmt.Printf("  rustfs %-14s %s\n", name, onOff(rc.Autostart))
+	}
+	for name, rc := range cfg.Addons.Redis {
+		fmt.Printf("  redis %-15s %s\n", name, onOff(rc.Autostart))
 	}
 
 	fmt.Println("\n=== Boot service ===")

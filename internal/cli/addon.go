@@ -59,6 +59,16 @@ Infra addons (shared, not tied to one instance):
           ownership. Three topologies — SNSD / SNMD / MNMD — but
           no multi-node single-drive mode, and every drive must sit on its own
           physical device.
+  pg addon install redis
+          Stored under top-level addons.redis in config (Linux and macOS).
+          A standalone Redis (KV store for cache, session, ranking and
+          atomic-counter data) run from the plain upstream docker.io/library/redis
+          image — no wrapper, no pgcli build. --version 7|8 picks the major
+          (each maps to a pinned patch tag); a requirepass password is generated
+          on first install and persisted, so the default 0.0.0.0 bind is always
+          authenticated. Data is an RDB snapshot under the addon's data dir, kept
+          across remove/reinstall. Single-node only: sentinel/cluster are out of
+          scope.
   pg addon install postgrest
           Exposes a PostgreSQL schema as a REST API (single stateless
           container, dual mode like pgbouncer): local -i fronting an
@@ -92,6 +102,7 @@ Currently supported add-ons:
   minio       single-node S3-compatible object storage (web console included; Linux host network, macOS bridge)
   silo        MinIO's Pigsty fork — same S3 object storage, from the public docker.io/pgsty/silo image (console + mcli client bundled; Linux host network, macOS bridge)
   rustfs      Rust S3-compatible object storage from pgcli's wrapper image, ghcr.io/mars-base/pgcli/pgcli-rustfs (console included; Linux only; the fixed upstream uid 10001 is handled inside the container, three topologies SNSD/SNMD/MNMD, each drive on its own physical device)
+  redis       standalone KV store (cache/session/ranking/counters) from the plain upstream docker.io/library/redis image; --version 7|8 selects the major, requirepass auto-generated, RDB persistence, single-node only
   postgrest   stateless REST API in front of a PostgreSQL schema (single container; Linux host network, macOS bridge)
 
 Two modes (pgbouncer, postgrest):
@@ -138,6 +149,25 @@ Infra addon (minio — single-node S3-compatible object storage, Linux and macOS
   its data and TLS dirs for that user (directly as root, or via "podman
   unshare chown" under a rootless setup).
 
+Infra addon (redis — standalone KV store for cache/session/ranking/counters,
+Linux and macOS; the first version-selectable addon):
+  pg addon install redis [--name cache] [--version 7|8] [--port N]
+                         [--listen 0.0.0.0] [--password ...] [--maxmemory 256mb]
+                         [--data-dir ...] [--image ...] [--force]
+  --version chooses the major; each maps to a pinned upstream tag (see
+  docs/images.md) and defaults to "8" when omitted. --image overrides the tag
+  verbatim (and --version is then just a display label, reverse-parsed from the
+  tag). The port is drawn from its own pool (redis_start_port, default 6379).
+  A requirepass password is generated on first install, printed once, and stored
+  under addons.redis.<name>; pass --password to pin it yourself. --maxmemory
+  caps the dataset and turns on allkeys-lru eviction (a real cache); empty means
+  no cap. Persistence is the native RDB snapshot into --data-dir (default
+  <base_dir>/addon/redis/<name>/data), so remove/reinstall revives the data.
+  Listen defaults to 0.0.0.0 (the Pigsty redis_bind_address convention) —
+  requirepass is always on, so pass --listen 127.0.0.1 to keep it loopback-only.
+  Talk to it with "pg redis-cli" (a short-lived redis-cli container wired to the
+  first redis addon; see that command's help).
+
 PostgREST (stateless REST API in front of a schema; dual mode like pgbouncer,
 Linux and macOS):
   Local:  pg addon install postgrest -i <instance> [--schema api] [--db-pool N] [--anon-role r] [--jwt-secret s]
@@ -171,6 +201,9 @@ Examples:
   pg addon install silo --name store --tls
   pg addon install rustfs --name store --tls
   pg addon install rustfs --name store --drive /mnt/rustfs/d0 --drive /mnt/rustfs/d1 --drive /mnt/rustfs/d2 --drive /mnt/rustfs/d3 --tls
+  pg addon install redis
+  pg addon install redis --name cache --version 7 --maxmemory 256mb
+  pg addon install redis --name session --listen 127.0.0.1
   pg addon install postgrest -i proj01 --schema api --anon-role web_anon
   pg addon install postgrest --dsn "postgres://api:pass@127.0.0.1:5000/appdb" --pg-name app-api --schema api`,
 	Args: cobra.ExactArgs(1),
@@ -204,11 +237,17 @@ var addonRemoveCmd = &cobra.Command{
 For local add-ons, use -i to specify the instance.
 For remote add-ons, use --pg-name to specify the pooler name.
 
+Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/redis) use --name.
+Remove keeps the data directory; pass --clean-data for object-storage/KV data
+to go too.
+
 Examples:
   pg addon remove pgbouncer -i proj01
   pg addon remove pgbouncer --pg-name remote-proj01
   pg addon remove postgrest -i proj01
-  pg addon remove postgrest --pg-name app-api`,
+  pg addon remove postgrest --pg-name app-api
+  pg addon remove redis --name cache
+  pg addon remove redis --name cache --clean-data`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonRemove(args[0], cmd)
@@ -233,6 +272,7 @@ Supported add-ons:
   minio      pg addon start minio [--name store]
   silo       pg addon start silo [--name store]
   rustfs     pg addon start rustfs [--name store]
+  redis      pg addon start redis [--name cache]
   pgbouncer  pg addon start pgbouncer -i <instance>
              pg addon start pgbouncer --pg-name <remote-name>
   postgrest  pg addon start postgrest -i <instance>
@@ -245,6 +285,7 @@ Examples:
   pg addon start minio --name store
   pg addon start silo --name store
   pg addon start rustfs --name store
+  pg addon start redis --name cache
   pg addon start pgbouncer -i proj01
   pg addon start postgrest --pg-name app-api`,
 	Args: cobra.ExactArgs(1),
@@ -266,6 +307,7 @@ Supported add-ons:
   minio      pg addon stop minio [--name store]
   silo       pg addon stop silo [--name store]
   rustfs     pg addon stop rustfs [--name store]
+  redis      pg addon stop redis [--name cache]
   pgbouncer  pg addon stop pgbouncer -i <instance>
              pg addon stop pgbouncer --pg-name <remote-name>
   postgrest  pg addon stop postgrest -i <instance>
@@ -327,16 +369,16 @@ func init() {
 	addonRemoveCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to remove")
 
 	// etcd flags (top-level shared-infrastructure addon)
-	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo or rustfs instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\")")
+	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo, rustfs or redis instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\"/\"redis\")")
 	addonInstallCmd.Flags().Int("client-port", 0, "etcd client host port (0=auto-assign from etcd_start_port)")
 	addonInstallCmd.Flags().Int("peer-port", 0, "etcd peer host port (0=auto-assign, next free port after client)")
-	addonInstallCmd.Flags().String("image", "", "etcd image tag (default quay.io/coreos/etcd:v3.5.30)")
+	addonInstallCmd.Flags().String("image", "", "override the addon image tag verbatim (etcd default quay.io/coreos/etcd:v3.5.30; redis default resolved from --version, e.g. docker.io/library/redis:8.10.2)")
 	addonInstallCmd.Flags().String("cluster", "", "etcd cluster name (--initial-cluster-token, default \"pgcli-etcd\")")
-	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo or rustfs instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data)")
+	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs or redis instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data)")
 	addonInstallCmd.Flags().String("advertise-host", "", "host advertised in this member's peer/client URLs (empty=127.0.0.1 for single-host; set a LAN IP or FQDN for cross-host clusters)")
 	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.0.0.12:2379 (implies --initial-cluster-state existing; requires --advertise-host)")
 	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo or rustfs instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\")")
-	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs data directory (object storage / backup repository)")
+	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/redis data directory (object storage / backup repository / key-value data)")
 
 	// haproxy flags (top-level load balancer in front of a Patroni cluster)
 	addonInstallCmd.Flags().String("mode", "", "HAProxy routing mode: unified (default, all traffic to the leader) or split (separate read listener for replicas)")
@@ -350,7 +392,7 @@ func init() {
 	// minio flags (top-level single-node S3-compatible object storage)
 	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo/rustfs S3 API host port (0=auto-assign from the shared minio_start_port pool)")
 	addonInstallCmd.Flags().Int("console-port", 0, "MinIO/silo/rustfs web console host port (0=auto-assign, next free port)")
-	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo or rustfs server / PostgREST HTTP server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network)")
+	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo or rustfs server / PostgREST HTTP server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network) — Redis defaults to \"0.0.0.0\" instead, since its requirepass is always set; pass 127.0.0.1 to keep Redis loopback-only")
 	addonInstallCmd.Flags().String("root-user", "", "MinIO/silo/rustfs root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config)")
 	addonInstallCmd.Flags().String("root-password", "", "MinIO/silo/rustfs root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand)")
 	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO/silo/rustfs distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (MinIO/silo: path is the in-container export dir — /data with a plain --data-dir node, or /data1../dataN on a --drive node (MNMD); repeat for every node's every drive. rustfs: one endpoint per node — scheme://host:port, no path; it has no multi-node single-drive mode so --drive is required, and it derives the /data/rustfs0../rustfsN suffix itself. The list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
@@ -358,16 +400,21 @@ func init() {
 	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo/rustfs: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo|rustfs>/<name>/; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Changing this needs --force to recreate")
 	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo/rustfs: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt for MinIO/silo, rustfs_cert.pem for rustfs). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
 	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo/rustfs: private key for --tls-cert (PEM; mounted read-only as private.key for MinIO/silo, rustfs_key.pem for rustfs). Must pair with the cert; both are required to enable BYO TLS")
-	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/PostgREST container even if one already exists (to apply changed ports/listen/credentials, or a changed PostgREST --dsn/--db-pool/--schema)")
+	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/redis/PostgREST container even if one already exists (to apply changed ports/listen/credentials, or a changed PostgREST --dsn/--db-pool/--schema)")
+
+	// redis flags (top-level standalone KV store — the first version-selectable addon)
+	addonInstallCmd.Flags().String("version", "", "Redis major version to install: 7 or 8 (default \"8\"); each maps to a pinned upstream docker.io/library/redis tag. Ignored for every other addon")
+	addonInstallCmd.Flags().String("password", "", "Redis requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls)")
+	addonInstallCmd.Flags().String("maxmemory", "", "Redis memory cap, e.g. 256mb or 2gb — turns the instance into a real cache (allkeys-lru evicts keys at the cap); empty means no cap")
 
 	// start / stop flags
-	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo or rustfs instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\")")
+	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs or redis instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"redis\")")
 	addonStartCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to start")
-	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo or rustfs instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\")")
+	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs or redis instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"redis\")")
 	addonStopCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to stop")
 
 	// pgdog flags (top-level shared Postgres proxy addon)
-	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port) / PostgREST HTTP host port (0=auto-assign from postgrest_start_port)")
+	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port) / PostgREST HTTP host port (0=auto-assign from postgrest_start_port) / Redis host port (0=auto-assign from redis_start_port, default 6379)")
 	addonInstallCmd.Flags().String("host", "", "PgDog listen address (default 127.0.0.1)")
 	addonInstallCmd.Flags().String("pool-mode", "", "PgDog pooler mode: transaction (default) or session")
 	addonInstallCmd.Flags().Int("workers", 0, "PgDog worker threads (default 2)")
@@ -400,12 +447,14 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallSilo(cmd)
 	case "rustfs":
 		return runAddonInstallRustfs(cmd)
+	case "redis":
+		return runAddonInstallRedis(cmd)
 	case "postgrest":
 		return runAddonInstallPostgrest(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, postgrest)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, postgrest)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -2231,6 +2280,204 @@ func runAddonInstallRustfs(cmd *cobra.Command) error {
 	return nil
 }
 
+// resolveRedisVersion applies the version-selection rules for the redis addon
+// and writes the outcome into rc (Version / ImageTag). Precedence: an explicit
+// --image wins outright and --version is demoted to a display label
+// (reverse-parsed from the tag when it was not given); a bare --version looks
+// the tag up in the config table; neither falls back to DefaultRedisMajor.
+// An unknown --version is an error listing the selectable majors. Called after
+// flags merge into the existing config entry, so a stored Version/ImageTag pair
+// survives a no-flag reinstall and a --version change re-resolves the tag.
+func resolveRedisVersion(rc *config.RedisConfig, version, imageTag string) error {
+	if version != "" {
+		if _, ok := config.RedisImageTagForMajor(version); !ok {
+			return fmt.Errorf("unknown redis --version %q (available: %s)", version, strings.Join(config.RedisMajors(), ", "))
+		}
+		rc.Version = version
+	}
+	if imageTag != "" {
+		rc.ImageTag = imageTag
+		if version == "" {
+			// --image bypasses the table: recover the major for display, or
+			// leave it empty and show the tag verbatim.
+			rc.Version = config.RedisMajorForImageTag(imageTag)
+		}
+		return nil
+	}
+	if rc.Version == "" {
+		rc.Version = config.DefaultRedisMajor
+	}
+	tag, ok := config.RedisImageTagForMajor(rc.Version)
+	if !ok {
+		// Reachable only with a hand-edited version and no --image; ApplyDefaults
+		// deliberately leaves such an ImageTag empty rather than rewriting the
+		// operator's value, so surface it here instead of a confusing pull error.
+		return fmt.Errorf("unknown redis version %q for addon %q (available: %s, or pass --image)", rc.Version, rc.Name, strings.Join(config.RedisMajors(), ", "))
+	}
+	// A --version given now (or a previously-resolved major) always re-derives
+	// the tag; a stale stored tag from an older pgcli must not outrank it.
+	rc.ImageTag = tag
+	return nil
+}
+
+// runAddonInstallRedis installs a Redis container — a standalone KV store for
+// cache, session, ranking and atomic-counter data. It is the simplest addon
+// shape (one container, one port, no cluster modes) so the manager mirrors
+// silo/rustfs, but it is the first version-selectable one: --version 7|8
+// resolves through the config table (see resolveRedisVersion). Password follows
+// rustfs's RootPassword: generated here, once, never in ApplyDefaults.
+func runAddonInstallRedis(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "redis"
+	}
+	imageTag, _ := cmd.Flags().GetString("image")
+	version, _ := cmd.Flags().GetString("version")
+	dataDir, _ := cmd.Flags().GetString("data-dir")
+	port, _ := cmd.Flags().GetInt("port")
+	listenAddr, _ := cmd.Flags().GetString("listen")
+	password, _ := cmd.Flags().GetString("password")
+	maxMemory, _ := cmd.Flags().GetString("maxmemory")
+	force, _ := cmd.Flags().GetBool("force")
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.Redis == nil {
+		cfg.Addons.Redis = make(map[string]config.RedisConfig)
+	}
+	existing, ok := cfg.Addons.Redis[name]
+	if !ok {
+		existing = config.RedisConfig{
+			ContainerName: "pgcli-redis" + nsSuffixCLI(cfg.Namespace) + "-" + name,
+			Name:          name,
+		}
+	}
+	if dataDir != "" {
+		existing.DataDir = dataDir
+	}
+	if port != 0 {
+		existing.Port = port
+	}
+	if listenAddr != "" {
+		existing.Listen = listenAddr
+	}
+	if password != "" {
+		existing.Password = password
+	}
+	if maxMemory != "" {
+		existing.MaxMemory = maxMemory
+	}
+	if existing.Name == "" {
+		existing.Name = name
+	}
+	if err := resolveRedisVersion(&existing, version, imageTag); err != nil {
+		return err
+	}
+	cfg.Addons.Redis[name] = existing
+
+	// ApplyDefaults fills ContainerName/Listen and assigns the port from the
+	// redis_start_port pool. Password is NOT managed there — it is a secret the
+	// install path owns (ApplyDefaults runs on every load and must stay
+	// deterministic).
+	cfg.ApplyDefaults()
+	rc := cfg.Addons.Redis[name]
+
+	// macOS: redis serves on the pgcli-net bridge with the port published, so
+	// bring up the machine and the bridge first (no-op on Linux, where host
+	// networking is used).
+	if err := ensureProxyBridge(cfg); err != nil {
+		return err
+	}
+
+	rm, err := podman.NewRedisManager(cfg)
+	if err != nil {
+		return fmt.Errorf("redis manager: %w", err)
+	}
+
+	// Reuse semantics identical to the object stores: a live container is left
+	// alone (reinstall is a no-op), a stopped one is started, and only --force
+	// recreates it so changed port/listen/password take effect.
+	exists, err := rm.ContainerExists(rc.ContainerName)
+	if err != nil {
+		return err
+	}
+	skipped := false
+	if exists && !force {
+		skipped = true
+		if running, _ := rm.ContainerRunning(rc.ContainerName); running {
+			fmt.Printf("-> redis container %q already running; skipping creation\n", rc.ContainerName)
+		} else {
+			fmt.Printf("-> redis container %q exists but is stopped; starting it\n", rc.ContainerName)
+			if err := rm.StartContainer(&rc); err != nil {
+				return err
+			}
+		}
+	} else {
+		// Fresh install (or the config survived a `remove` that kept it):
+		// generate the password once so a reinstall of the same name can still
+		// read the RDB it left behind.
+		if rc.Password == "" {
+			pw, err := generatePassword(20)
+			if err != nil {
+				return fmt.Errorf("generating redis password: %w", err)
+			}
+			rc.Password = pw
+		}
+		fmt.Printf("-> Preparing redis image %s...\n", rc.ImageTag)
+		if err := rm.EnsureImage(rc.ImageTag); err != nil {
+			return err
+		}
+		if rc.MaxMemory != "" {
+			fmt.Println("-> NOTE: --maxmemory is set, so eviction policy is allkeys-lru — Redis will evict keys to stay under the cap (a cache, not a hard store).")
+		}
+		fmt.Println("-> Starting redis container...")
+		if err := rm.EnsureContainer(&rc); err != nil {
+			return err
+		}
+	}
+
+	cfg.Addons.Redis[name] = rc
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	if skipped {
+		fmt.Println()
+		fmt.Printf("✓ redis already present: %q\n", name)
+	} else {
+		fmt.Println()
+		fmt.Printf("✓ redis installed: %q\n", name)
+	}
+	fmt.Printf("  Container:  %s\n", rc.ContainerName)
+	fmt.Printf("  Version:    %s\n", rc.Version)
+	fmt.Printf("  Image:      %s\n", rc.ImageTag)
+	fmt.Printf("  Data:       %s\n", rm.DataDir(&rc))
+	fmt.Printf("  Address:    %s:%d\n", rc.Listen, rc.Port)
+	if rc.MaxMemory != "" {
+		fmt.Printf("  Maxmemory:  %s (allkeys-lru)\n", rc.MaxMemory)
+	}
+	fmt.Println()
+	fmt.Printf("  Password:    %s\n", rc.Password)
+	fmt.Println()
+	fmt.Printf("  Client:      pg redis-cli ping\n")
+	fmt.Printf("  Raw DSN:     redis://:%s@%s:%d/0\n", rc.Password, rc.Listen, rc.Port)
+	if rc.Listen == "0.0.0.0" {
+		fmt.Println("  NOTE: listening on every interface (the Pigsty default); the password above is the only gate.")
+		fmt.Printf("        loopback-only: pg addon install redis --name %s --listen 127.0.0.1 --force\n", name)
+	}
+	return nil
+}
+
 // runAddonInstallPostgrest installs a PostgREST container: a single stateless
 // process that exposes a PostgreSQL schema as a RESTful API. Like pgbouncer it
 // works in two modes — local (-i, fronting an instance pgcli manages) or
@@ -2986,7 +3233,68 @@ func runAddonList() error {
 		fmt.Println("  (none)")
 	}
 
+	// redis (standalone KV store — cache/session/ranking/counters)
+	fmt.Println()
+	fmt.Println("Infra add-ons (redis):")
+	hasRedis := false
+	if rm, err := podman.NewRedisManager(cfg); err == nil {
+		for _, name := range sortedAddonNames(cfg.Addons.Redis) {
+			rc := cfg.Addons.Redis[name]
+			hasRedis = true
+			status := "stopped"
+			if running, err := rm.ContainerRunning(rc.ContainerName); err == nil && running {
+				status = "running"
+			}
+			fmt.Printf("  %s (name: %s)\n", "redis", name)
+			fmt.Printf("    Status:      %s\n", status)
+			version := rc.Version
+			if version == "" {
+				version = config.RedisMajorForImageTag(rc.ImageTag)
+			}
+			if version != "" {
+				fmt.Printf("    Version:     %s\n", version)
+			}
+			fmt.Printf("    Address:     %s:%d\n", rc.Listen, rc.Port)
+			auth := "off"
+			if rc.Password != "" {
+				auth = "on (requirepass)"
+			}
+			fmt.Printf("    Auth:        %s\n", auth)
+			if rc.MaxMemory != "" {
+				fmt.Printf("    Maxmemory:   %s (allkeys-lru)\n", rc.MaxMemory)
+			}
+			fmt.Printf("    Data:        %s\n", rm.DataDir(&rc))
+			fmt.Printf("    Image:       %s\n", rc.ImageTag)
+			fmt.Printf("    Container:   %s\n", rc.ContainerName)
+			fmt.Printf("    Client:      pg redis-cli --name %s ping\n", name)
+		}
+	} else if len(cfg.Addons.Redis) > 0 {
+		// Configured but the manager is unavailable (podman missing): still show them.
+		for _, name := range sortedAddonNames(cfg.Addons.Redis) {
+			rc := cfg.Addons.Redis[name]
+			hasRedis = true
+			fmt.Printf("  %s (name: %s)\n", "redis", name)
+			fmt.Printf("    Status:      n/a (%v)\n", err)
+			fmt.Printf("    Address:     %s:%d\n", rc.Listen, rc.Port)
+			fmt.Printf("    Container:   %s\n", rc.ContainerName)
+		}
+	}
+	if !hasRedis {
+		fmt.Println("  (none)")
+	}
+
 	return nil
+}
+
+// sortedAddonNames returns an addon map's keys in order, so `pg addon list` is
+// stable across runs (Go map iteration is not).
+func sortedAddonNames[T any](m map[string]T) []string {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // ---------------------------------------------------------------------------
@@ -3007,12 +3315,14 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemoveSilo(cmd)
 	case "rustfs":
 		return runAddonRemoveRustfs(cmd)
+	case "redis":
+		return runAddonRemoveRedis(cmd)
 	case "postgrest":
 		return runAddonRemovePostgrest(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, postgrest)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, postgrest)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -3301,12 +3611,14 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartSilo(cmd)
 	case "rustfs":
 		return runAddonStartRustfs(cmd)
+	case "redis":
+		return runAddonStartRedis(cmd)
 	case "pgbouncer":
 		return runAddonStartPgBouncer(cmd)
 	case "postgrest":
 		return runAddonStartPostgrest(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, postgrest)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, postgrest)", addonName)
 	}
 }
 
@@ -3324,12 +3636,14 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopSilo(cmd)
 	case "rustfs":
 		return runAddonStopRustfs(cmd)
+	case "redis":
+		return runAddonStopRedis(cmd)
 	case "pgbouncer":
 		return runAddonStopPgBouncer(cmd)
 	case "postgrest":
 		return runAddonStopPostgrest(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, postgrest)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, postgrest)", addonName)
 	}
 }
 
@@ -3885,6 +4199,111 @@ func runAddonStopRustfs(cmd *cobra.Command) error {
 		return err
 	}
 	fmt.Printf("✓ rustfs %q stopped\n", name)
+	return nil
+}
+
+func runAddonRemoveRedis(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "redis"
+	}
+	cleanData, _ := cmd.Flags().GetBool("clean-data")
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.Redis == nil {
+		return fmt.Errorf("no redis add-ons configured")
+	}
+	rc, ok := cfg.Addons.Redis[name]
+	if !ok {
+		return fmt.Errorf("redis %q not found", name)
+	}
+
+	rm, err := podman.NewRedisManager(cfg)
+	if err != nil {
+		return fmt.Errorf("redis manager: %w", err)
+	}
+
+	fmt.Printf("-> Removing redis %q...\n", name)
+	if err := rm.Remove(&rc, cleanData); err != nil {
+		return err
+	}
+
+	delete(cfg.Addons.Redis, name)
+	if len(cfg.Addons.Redis) == 0 {
+		cfg.Addons.Redis = nil
+	}
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	fmt.Printf("✓ redis %q removed\n", name)
+	if !cleanData {
+		fmt.Printf("  (data dir kept — reinstall the same name revives the RDB; --clean-data to delete it)\n")
+	}
+	return nil
+}
+
+func runAddonStartRedis(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "redis"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	if cfg.Addons.Redis == nil {
+		return fmt.Errorf("no redis add-ons configured (run 'pg addon install redis')")
+	}
+	rc, ok := cfg.Addons.Redis[name]
+	if !ok {
+		return fmt.Errorf("redis %q not found (run 'pg addon install redis --name %s')", name, name)
+	}
+	rm, err := podman.NewRedisManager(cfg)
+	if err != nil {
+		return fmt.Errorf("redis manager: %w", err)
+	}
+	fmt.Printf("-> Starting redis %q...\n", name)
+	return rm.StartContainer(&rc)
+}
+
+func runAddonStopRedis(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "redis"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	rc, ok := cfg.Addons.Redis[name]
+	if !ok {
+		return fmt.Errorf("redis %q not found", name)
+	}
+	rm, err := podman.NewRedisManager(cfg)
+	if err != nil {
+		return fmt.Errorf("redis manager: %w", err)
+	}
+	running, _ := rm.ContainerRunning(rc.ContainerName)
+	if !running {
+		fmt.Printf("redis %q is not running\n", name)
+		return nil
+	}
+	fmt.Printf("-> Stopping redis %q...\n", name)
+	if _, err := rm.Stop(rc.ContainerName); err != nil {
+		return err
+	}
+	fmt.Printf("✓ redis %q stopped\n", name)
 	return nil
 }
 
