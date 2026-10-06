@@ -53,6 +53,7 @@ across machines, or that depend on Linux-only container internals, stay
 | Addon — **MinIO** | ✅ host network | ✅ bridge, published ports |
 | Addon — **silo** | ✅ host network | ✅ bridge, published ports |
 | Addon — **rustfs** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
+| Addon — **Redis** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
 | Client — **`pg mc`** (MinIO client) | ✅ host network | ✅ bridge (see below) |
 | HA — **Patroni** (`pg ha`) | ✅ incl. cross-host | ❌ Linux only |
 
@@ -118,6 +119,14 @@ Addon networking differs per component:
   path (published ports) as MinIO/silo, so macOS is expected to work — but this
   addon's e2e coverage has only run on Linux, so treat it as Linux only until
   it is exercised on a Mac.
+- **[Redis](/docs/addon/redis/)** — **Linux, tested; macOS expected.** A plain
+  upstream `docker.io/library/redis` image with no wrapper and no fixed container
+  uid, so it needs none of rustfs's ownership machinery. On Linux it serves over
+  host networking (the port lands on every interface or just loopback, per
+  `listen`); on macOS it joins `pgcli-net` with the port published and
+  `pg redis-cli` dials `host.containers.internal` — the same bridge path the
+  object stores use, code-complete but not yet exercised on a Mac, so the e2e
+  coverage is Linux-only for now.
 - **[`pg mc`](/docs/addon/minio/#using-the-mc-client)** (MinIO client) — **both
   platforms.** It runs the `mc` binary from a throwaway container, with your
   `~/.mc/config.json` mounted as its own default config path and local file

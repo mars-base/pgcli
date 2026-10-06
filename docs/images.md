@@ -23,6 +23,8 @@ pgcli 使用的容器镜像及其默认 tag。
 | `docker.io/library/haproxy` | `3.2.23-alpine` | HTTP/TCP 负载均衡 | `DefaultHAProxyImageTag` |
 | `quay.io/coreos/etcd` | `v3.5.30` | 分布式键值存储（Patroni DCS） | `etcdctl.go:69` |
 | `ghcr.io/pgdogdev/pgdog` | `v0.1.57` | PostgreSQL 代理 / 连接池 | `config.go:204` |
+| `docker.io/library/redis` | `7.4.11` | Redis 大版本 7（`--version 7`），纯上游镜像无 wrapper | `redisMajorImages["7"]` |
+| `docker.io/library/redis` | `8.10.2` | Redis 大版本 8（默认，`--version 8`），纯上游镜像无 wrapper | `redisMajorImages["8"]` |
 
 ## 镜像导出
 
@@ -65,6 +67,13 @@ podman save -o "$TARGET/etcd_v3.5.30.tar" \
 
 podman save -o "$TARGET/pgdog_v0.1.57.tar" \
   ghcr.io/pgdogdev/pgdog:v0.1.57
+
+# Redis 上游镜像与 rustfs 一样是双架构 manifest list，
+# 先按目标平台 pull 成单架构再 save（见下面的 rustfs 小节）
+podman pull --platform linux/amd64 docker.io/library/redis:7.4.11
+podman save -o "$TARGET/redis_7.4.11.tar" docker.io/library/redis:7.4.11
+podman pull --platform linux/amd64 docker.io/library/redis:8.10.2
+podman save -o "$TARGET/redis_8.10.2.tar" docker.io/library/redis:8.10.2
 ```
 
 ### rustfs（双架构 manifest 不能直接 save）
@@ -108,8 +117,11 @@ done
 - **pgcli-rustfs**：建立在 `docker.io/rustfs/rustfs:1.0.0`（首个 GA）之上的
   pgcli wrapper（pull-only），tag 跟随被 pin 的上游版本；ghcr 上为双架构
   manifest list
+- **redis**：纯上游 `docker.io/library/redis`，无 wrapper；两个大版本各自
+  pin 一个补丁 tag（`redisMajorImages` 映射表，默认大版本 8），tag 跟随各大
+  版本的最新补丁、与 `internal/config/config.go` 的映射表一起升级
 - **pgbouncer** / **postgrest** / **haproxy** / **etcd** / **pgdog**：上游官方或社区维护的稳定版本
 
 ---
 
-**最后更新**：2026-09-25（v2.1.5）
+**最后更新**：2026-10-06（新增 redis 两个大版本镜像）

@@ -49,6 +49,7 @@ pgcli 在 Linux 和 macOS 上都是驱动 [Podman](https://podman.io) 容器运�
 | 插件 —— **MinIO** | ✅ host 网络 | ✅ bridge，发布端口 |
 | 插件 —— **silo** | ✅ host 网络 | ✅ bridge，发布端口 |
 | 插件 —— **rustfs** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
+| 插件 —— **Redis** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
 | 客户端 —— **`pg mc`**（MinIO 客户端） | ✅ host 网络 | ✅ bridge（见下） |
 | 高可用 —— **Patroni**（`pg ha`） | ✅ 含跨主机 | ❌ 仅 Linux |
 
@@ -105,6 +106,12 @@ macOS 上这些都是**单主机**：跨主机副本、跨多机的连接池属�
   非特权用户。wrapper 镜像为双架构构建，Go manager 也有与 MinIO/silo 相同的
   macOS bridge 路径（发布端口），故 macOS 预期可用 —— 但本插件的 e2e 覆盖只在
   Linux 上跑过，在 Mac 上实测之前请按仅 Linux 对待。
+- **[Redis](/docs/addon/redis/)** —— **Linux 已实测；macOS 预期可用**。纯上游
+  `docker.io/library/redis` 镜像，没有 wrapper、也没有固定容器 uid，因此不需要
+  rustfs 那套属主机制。Linux 上走 host 网络（端口按 `listen` 落在全部网卡或仅
+  回环）；macOS 上加入 `pgcli-net` 并发布端口，`pg redis-cli` 拨
+  `host.containers.internal` —— 与对象存储相同的 bridge 路径，代码完备但尚未在
+  Mac 上跑过，e2e 覆盖目前仅限 Linux。
 - **[`pg mc`](/docs/addon/minio/#使用-mc-客户端)**（MinIO 客户端）——
   **两个平台都支持**。它在一次性容器里运行 `mc`：宿主的 `~/.mc/config.json`
   按其原生默认路径挂载，`cp`/`mirror`/`diff` 的本地文件参数也会按真实路径动态
