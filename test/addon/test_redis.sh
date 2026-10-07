@@ -394,6 +394,41 @@ main() {
     run_grep "logs redis returns the startup banner" "redis" \
         pg logs addon redis --name "$CACHE" -n 50
 
+    # ---- password reveal (opt-in) ----
+    # The bare listing stays paste-safe; only --show-password and the
+    # dedicated `pg addon password` print the stored requirepass.
+    section "Password reveal (--show-password / pg addon password)"
+    run_grep "addon list --show-password prints the password" "$PW" \
+        pg addon list --show-password
+    TESTS=$((TESTS + 1))
+    if [ "$(pg addon password redis --name "$CACHE")" = "$PW" ]; then
+        pass "pg addon password redis prints exactly the stored password"
+    else
+        fail "pg addon password mismatch: got '$(pg addon password redis --name "$CACHE")'"
+    fi
+    PWFILE="$TEST_DIR/reveal.pw"
+    run_test "pg addon password --file writes the password" \
+        pg addon password redis --name "$CACHE" --file "$PWFILE"
+    TESTS=$((TESTS + 1))
+    if [ "$(cat "$PWFILE")" = "$PW" ]; then
+        pass "--file contains the password"
+    else
+        fail "--file content mismatch: got '$(cat "$PWFILE")'"
+    fi
+    TESTS=$((TESTS + 1))
+    if [ "$(stat -c '%a' "$PWFILE")" = "600" ]; then
+        pass "--file is mode 0600"
+    else
+        fail "--file mode is $(stat -c '%a' "$PWFILE"), want 600"
+    fi
+    rm -f "$PWFILE"
+    # Unknown instance errors and lists what is installed; an addon with no
+    # stored credential (etcd) says so instead of printing an empty line.
+    run_fails "password for an unknown instance errors" "nosuch" \
+        pg addon password redis --name nosuch
+    run_fails "pg addon password etcd has no stored password" "etcd" \
+        pg addon password etcd
+
     # ---- Second major: 7 and 8 coexist on two ports, per-major tags ----
     section "Major coexistence (--version 7)"
     TESTS=$((TESTS + 1))

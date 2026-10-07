@@ -623,7 +623,16 @@ Infra add-ons (minio):
     Container:   pgcli-minio-default-store
 ```
 
-`pg addon list` 从不打印密码——请到 `pg.yaml` 里查看。
+`pg addon list` 从不打印密码。要有意揭示它，加 `--show-password`（追加一行
+`Root password:`），或只把密钥原样打到 stdout 供脚本使用：
+
+```bash
+pg addon password minio --name store
+mc alias set local http://127.0.0.1:9000 admin "$(pg addon password minio --name store)"
+```
+
+输出的值即 access-key 密钥，与上面的 `Root user:` 配对使用。`--file <path>`
+以 0600 权限写入文件而非终端，避免落入 shell 历史与回滚缓冲。
 
 ## 启动与停止
 

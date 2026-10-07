@@ -389,7 +389,11 @@ Infra add-ons (rustfs):
     Container:   pgcli-rustfs-default-store
 ```
 
-`pg addon list` never prints the password — read it from `pg.yaml`. Health is on
+`pg addon list` never prints the password. Reveal it deliberately with
+`pg addon list --show-password` (appends a `Root password:` line), or print just
+the secret for scripting: `pg addon password rustfs --name store` (the access-key
+secret, paired with the `Root user:` above; `--file <path>` writes it mode 0600).
+Health is on
 `GET /health` (returns `200`), unlike MinIO's `/minio/health/live`.
 
 ## Start and stop

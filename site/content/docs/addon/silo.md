@@ -434,7 +434,17 @@ Infra add-ons (silo):
     Container:   pgcli-silo-default-store
 ```
 
-`pg addon list` never prints the password — read it from `pg.yaml`.
+`pg addon list` never prints the password. Reveal it deliberately with
+`pg addon list --show-password` (appends a `Root password:` line), or print just
+the secret for scripting:
+
+```bash
+pg addon password silo --name store
+```
+
+The value is the access-key secret; pair it with the `Root user:` above.
+`--file <path>` writes it mode 0600 instead of to the terminal, keeping the
+secret out of shell history and scrollback.
 
 ## Start and stop
 

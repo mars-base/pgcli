@@ -141,7 +141,8 @@ pg addon install redis --name sessions-ro --replica-of sessions
 > **安全模型。** `listen` 默认 **`0.0.0.0`**——Linux（host 网络）下端口发布在
 > 所有网卡上，`requirepass` 是唯一的闸门。这对"应用跑在另一台机器"很方便，但
 > 也意味着密码是分量的：用 `--listen 127.0.0.1` 可把实例收紧为仅回环。
-> `pg addon list` 与日志从不打印密码；需要时从 `pg.yaml` 读。
+> `pg addon list` 与日志从不打印密码；需要时显式揭示——`pg addon password redis
+> --name cache` 或 `pg addon list --show-password`（也可直接读 `pg.yaml`）。
 
 重复执行 `install` 是幂等的：运行中的容器原样不动，停止的容器会被拉起。要让
 改动的端口/监听/密码/镜像生效，加 `--force`（容器按配置重建；数据目录不受影
@@ -312,7 +313,17 @@ Infra add-ons (redis):
     Client:      pg redis-cli --name cache ping
 ```
 
-`pg addon list` 从不打印密码。
+`pg addon list` 从不打印密码。要有意揭示它，加 `--show-password`（会给每个 Redis
+实例追加 `Password:` 与一条可直接粘贴的 `Raw DSN:` 行——对象存储则追加
+`Root password:` 行），或只把某一个实例的值原样打到 stdout 供脚本使用：
+
+```bash
+pg addon password redis --name cache
+export REDISCLI_AUTH="$(pg addon password redis --name cache)"
+```
+
+`pg addon password` 与其它子命令一样接受 `--name`（缺省即插件自身名字），并支持
+`--file`——把值以 0600 权限写入文件而非终端，避免落入 shell 历史与回滚缓冲。
 
 ## 启停
 
@@ -359,8 +370,8 @@ pg logs addon redis --name cache -f     # 跟随
 ## 故障排查
 
 - **裸客户端报 `NOAUTH Authentication required`** ——预期行为：每个实例都有
-  `requirepass`。从 `pg.yaml`（`addons.redis.<name>.password`）读，或直接用
-  会注入密码的 `pg redis-cli`。
+  `requirepass`。用 `pg addon password redis --name cache` 取，或直接用会注入密
+  码的 `pg redis-cli`。
 - **`maxmemory` 驱逐超出预期** —— 设了 `--maxmemory` 上限后默认策略是
   `allkeys-lru`（到上限就驱逐任何 key：是缓存，不是硬存储）。要把上限变成
   硬天花板就传 `--maxmemory-policy noeviction`（超限后写入报错而非驱逐），或

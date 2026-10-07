@@ -357,7 +357,10 @@ Infra add-ons (rustfs):
     Container:   pgcli-rustfs-default-store
 ```
 
-`pg addon list` 从不打印密码——去 `pg.yaml` 读。健康端点是 `GET /health`
+`pg addon list` 从不打印密码。要有意揭示它，加 `--show-password`（追加一行
+`Root password:`），或只把密钥原样打到 stdout 供脚本使用：`pg addon password
+rustfs --name store`（即 access-key 密钥，与上面的 `Root user:` 配对；
+`--file <path>` 以 0600 权限写入文件）。健康端点是 `GET /health`
 （返回 `200`），不同于 MinIO 的 `/minio/health/live`。
 
 ## 启停

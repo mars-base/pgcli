@@ -68,8 +68,8 @@ Infra addons (shared, not tied to one instance):
           (each maps to a pinned patch tag); a requirepass password is generated
           on first install and persisted, so the default 0.0.0.0 bind is always
           authenticated. Data is an RDB snapshot under the addon's data dir, kept
-          across remove/reinstall. Single-node only: sentinel/cluster are out of
-          scope.
+          across remove/reinstall. Read replicas via --replica-of; no
+          automatic failover (sentinel/cluster are out of scope).
   pg addon install postgrest
           Exposes a PostgreSQL schema as a REST API (single stateless
           container, dual mode like pgbouncer): local -i fronting an
@@ -79,11 +79,12 @@ Infra addons (shared, not tied to one instance):
           or addons.postgrest.<name> (remote).
 
 Commands:
-  pg addon install <addon>   install an add-on
-  pg addon list              list all installed add-ons
-  pg addon start <addon>     start an installed but stopped add-on
-  pg addon stop <addon>      stop a running add-on (keeps config)
-  pg addon remove <addon>    remove an add-on`,
+  pg addon install <addon>    install an add-on
+  pg addon list               list all installed add-ons (--show-password to reveal credentials)
+  pg addon password <addon>   print one add-on's stored password
+  pg addon start <addon>      start an installed but stopped add-on
+  pg addon stop <addon>       stop a running add-on (keeps config)
+  pg addon remove <addon>     remove an add-on`,
 }
 
 // ---------------------------------------------------------------------------
@@ -235,9 +236,41 @@ Examples:
 var addonListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all installed add-ons (local and remote)",
-	Args:  cobra.NoArgs,
+	Long: `List all installed add-ons. The default output is safe to paste into
+tickets and screenshots: stored credentials (Redis requirepass, the object
+stores' root passwords) are shown only as presence markers. Add
+--show-password to print them too — or read them straight from pg.yaml.`,
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runAddonList()
+		showPassword, _ := cmd.Flags().GetBool("show-password")
+		return runAddonList(showPassword)
+	},
+}
+
+// addonPasswordCmd prints one addon's stored password on stdout — the
+// on-demand reveal counterpart to the deliberately redacting `pg addon list`.
+// The name mirrors `pg ha passwords`: a dedicated read-only credential command,
+// shaped for $(...) capture in scripts.
+var addonPasswordCmd = &cobra.Command{
+	Use:   "password <addon>",
+	Short: "Print an add-on's stored password (Redis requirepass, MinIO/silo/rustfs root password)",
+	Long: `Print the password pgcli generated and stored for one add-on instance:
+the Redis requirepass, or the MinIO/silo/rustfs root password (the access-key
+secret — pair it with the instance's Root user from "pg addon list").
+
+The single value goes to stdout with no decoration, so it composes into
+scripts and app config:
+
+  export REDISCLI_AUTH="$(pg addon password redis --name cache)"
+  mc alias set local http://127.0.0.1:9000 admin "$(pg addon password minio --name store)"
+
+The default "pg addon list" never prints passwords; this command is the
+explicit, opt-in way to reveal one without opening pg.yaml.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		name, _ := cmd.Flags().GetString("name")
+		file, _ := cmd.Flags().GetString("file")
+		return runAddonPassword(args[0], name, file)
 	},
 }
 
@@ -350,7 +383,7 @@ Examples:
 
 func init() {
 	rootCmd.AddCommand(addonCmd)
-	addonCmd.AddCommand(addonInstallCmd, addonListCmd, addonRemoveCmd, addonStartCmd, addonStopCmd)
+	addonCmd.AddCommand(addonInstallCmd, addonListCmd, addonPasswordCmd, addonRemoveCmd, addonStartCmd, addonStopCmd)
 
 	// Basic flags
 	addonInstallCmd.Flags().String("dsn", "", "PG instance connection string for remote mode (postgres://user:pass@host:port/db)")
@@ -435,6 +468,11 @@ func init() {
 	addonStartCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to start")
 	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs or redis instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"redis\")")
 	addonStopCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to stop")
+
+	// list / password flags
+	addonListCmd.Flags().Bool("show-password", false, "also print stored credentials (Redis requirepass, MinIO/silo/rustfs root password) — off by default so the listing stays paste-safe")
+	addonPasswordCmd.Flags().String("name", "", "instance to reveal (redis/minio/silo/rustfs; default \"redis\"/\"minio\"/\"silo\"/\"rustfs\")")
+	addonPasswordCmd.Flags().String("file", "", "write the password to this file (mode 0600) instead of stdout, keeping it out of shell history and scrollback")
 
 	// pgdog flags (top-level shared Postgres proxy addon)
 	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port) / PostgREST HTTP host port (0=auto-assign from postgrest_start_port) / Redis host port (0=auto-assign from redis_start_port, default 6379)")
@@ -3059,7 +3097,10 @@ func postgrestPatroniMemberWarning(cfg *config.Config, dsn string) string {
 // list logic
 // ---------------------------------------------------------------------------
 
-func runAddonList() error {
+// runAddonList prints every installed add-on. showPassword opts into printing
+// the stored credentials (Redis requirepass, the object stores' root
+// passwords); the default keeps the listing paste-safe.
+func runAddonList(showPassword bool) error {
 	path := cfgPath
 	if path == "" {
 		path = platform.DefaultConfigPath()
@@ -3322,6 +3363,9 @@ func runAddonList() error {
 				}
 			}
 			fmt.Printf("    Root user:   %s\n", mc.RootUser)
+			if showPassword && mc.RootPassword != "" {
+				fmt.Printf("    Root password: %s\n", mc.RootPassword)
+			}
 			fmt.Printf("    Image:       %s\n", mc.ImageTag)
 			fmt.Printf("    Container:   %s\n", mc.ContainerName)
 		}
@@ -3396,6 +3440,9 @@ func runAddonList() error {
 				}
 			}
 			fmt.Printf("    Root user:   %s\n", sc.RootUser)
+			if showPassword && sc.RootPassword != "" {
+				fmt.Printf("    Root password: %s\n", sc.RootPassword)
+			}
 			fmt.Printf("    Image:       %s\n", sc.ImageTag)
 			fmt.Printf("    Container:   %s\n", sc.ContainerName)
 		}
@@ -3466,6 +3513,9 @@ func runAddonList() error {
 				}
 			}
 			fmt.Printf("    Root user:   %s\n", rc.RootUser)
+			if showPassword && rc.RootPassword != "" {
+				fmt.Printf("    Root password: %s\n", rc.RootPassword)
+			}
 			fmt.Printf("    Image:       %s\n", rc.ImageTag)
 			fmt.Printf("    Container:   %s\n", rc.ContainerName)
 		}
@@ -3513,6 +3563,10 @@ func runAddonList() error {
 				auth = "on (requirepass)"
 			}
 			fmt.Printf("    Auth:        %s\n", auth)
+			if showPassword && rc.Password != "" {
+				fmt.Printf("    Password:    %s\n", rc.Password)
+				fmt.Printf("    Raw DSN:     redis://:%s@%s:%d/0\n", rc.Password, rc.Listen, rc.Port)
+			}
 			if rc.MaxMemory != "" {
 				fmt.Printf("    Maxmemory:   %s (%s)\n", rc.MaxMemory, redisEffectivePolicy(rc))
 			}
@@ -3549,6 +3603,80 @@ func sortedAddonNames[T any](m map[string]T) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// ---------------------------------------------------------------------------
+// password logic
+// ---------------------------------------------------------------------------
+
+// addonPasswords indexes every instance that has a pgcli-generated stored
+// password, keyed "<addon>:<name>". Only these four addons qualify: etcd and
+// haproxy have no stored credential at all, and PG instance passwords are not
+// auto-generated by pgcli — neither belongs in a "print the stored password"
+// surface that promises to work. (The root *user* is not part of this: it is
+// never secret, so `pg addon list` always prints it.)
+func addonPasswords(cfg *config.Config) map[string]string {
+	out := map[string]string{}
+	for name, rc := range cfg.Addons.Redis {
+		out["redis:"+name] = rc.Password
+	}
+	for name, mc := range cfg.Addons.Minio {
+		out["minio:"+name] = mc.RootPassword
+	}
+	for name, sc := range cfg.Addons.Silo {
+		out["silo:"+name] = sc.RootPassword
+	}
+	for name, rc := range cfg.Addons.Rustfs {
+		out["rustfs:"+name] = rc.RootPassword
+	}
+	return out
+}
+
+// runAddonPassword resolves "<addon>" (plus --name, defaulting to the addon's
+// own name) to the stored password and prints it bare on stdout, or to --file
+// mode 0600 following the `pg ha passwords` precedent.
+func runAddonPassword(addon, name, file string) error {
+	if name == "" {
+		name = addon
+	}
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	all := addonPasswords(cfg)
+	key := addon + ":" + name
+	entry, ok := all[key]
+	if !ok {
+		var known []string
+		for k := range all {
+			if strings.HasPrefix(k, addon+":") {
+				known = append(known, strings.TrimPrefix(k, addon+":"))
+			}
+		}
+		sort.Strings(known)
+		if len(known) == 0 {
+			return fmt.Errorf("no %q add-on is installed (and it stores no generated password)", addon)
+		}
+		return fmt.Errorf("no %s instance %q installed; installed: %s", addon, name, strings.Join(known, ", "))
+	}
+	if entry == "" {
+		return fmt.Errorf("%s has no stored password (empty in %s)", key, path)
+	}
+
+	if file != "" {
+		if err := os.WriteFile(file, []byte(entry+"\n"), 0600); err != nil {
+			return fmt.Errorf("writing %s: %w", file, err)
+		}
+		fmt.Printf("[OK] password for %s written to %s (mode 0600)\n", key, file)
+		return nil
+	}
+	fmt.Println(entry)
+	return nil
 }
 
 // ---------------------------------------------------------------------------

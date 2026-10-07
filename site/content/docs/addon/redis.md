@@ -163,8 +163,9 @@ The install summary prints everything a client needs:
 > networking) the port is published on every interface, and `requirepass` is
 > the only gate. That is convenient for app-on-another-host setups but means
 > the password is load-bearing: pass `--listen 127.0.0.1` to keep an instance
-> loopback-only. `pg addon list` and the logs never print the password; read it
-> from `pg.yaml`.
+> loopback-only. `pg addon list` and the logs never print the password; reveal it
+> on demand with `pg addon password redis --name cache` or `pg addon list
+> --show-password` (or read `pg.yaml`).
 
 Re-running `install` is idempotent: a running container is left alone, a
 stopped one is started. To apply changed ports/listen/password/image, add
@@ -347,7 +348,20 @@ Infra add-ons (redis):
     Client:      pg redis-cli --name cache ping
 ```
 
-`pg addon list` never prints the password.
+`pg addon list` never prints the password. To reveal it deliberately, add
+`--show-password` (it appends a `Password:` and a ready-to-paste `Raw DSN:`
+line to each Redis instance — and a `Root password:` line to each object store),
+or print just one instance's value bare on stdout for scripting:
+
+```bash
+pg addon password redis --name cache
+export REDISCLI_AUTH="$(pg addon password redis --name cache)"
+```
+
+`pg addon password` takes the same `--name` as the other subcommands (defaulting
+to the addon's own name) and a `--file` that writes the value mode 0600 instead
+of to the terminal — prefer `--file` so the secret stays out of shell history
+and scrollback.
 
 ## Start and stop
 
@@ -397,8 +411,8 @@ pg logs addon redis --name cache -f     # follow
 ## Troubleshooting
 
 - **`NOAUTH Authentication required` from a raw client** — expected: every
-  instance has a `requirepass`. Read it from `pg.yaml`
-  (`addons.redis.<name>.password`) or use `pg redis-cli`, which injects it.
+  instance has a `requirepass`. Get it with `pg addon password redis --name
+  cache`, or use `pg redis-cli`, which injects it.
 - **`maxmemory` evicting more than you wanted** — under a `--maxmemory` cap the
   default policy is `allkeys-lru` (evict any key to stay under: a cache, not a
   hard store). Pass `--maxmemory-policy noeviction` to make the cap a hard
