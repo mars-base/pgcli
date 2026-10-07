@@ -26,7 +26,10 @@ const redisContainerDataDir = "/data"
 // is opt-in, and empty means "leave Redis's own default alone": --maxmemory
 // pairs with allkeys-lru unless MaxMemoryPolicy says otherwise, --appendonly
 // comes with an optional --appendfsync strength, and --save overrides (or, as
-// "no", disables) the RDB snapshot schedule.
+// "no", disables) the RDB snapshot schedule. A non-empty ReplicaHost turns the
+// instance into a read replica: --replicaof <host> <port> plus --masterauth
+// (which equals requirepass, since resolveRedisReplica pins a replica's
+// password to the master's).
 //
 // The flag values are validated by the CLI layer, not here — see
 // validateRedisKnobs in internal/cli/addon.go.
@@ -61,6 +64,15 @@ func redisServerArgs(rc *config.RedisConfig, bindHost string) []string {
 			val = ""
 		}
 		args = append(args, "--save", val)
+	}
+	if rc.ReplicaHost != "" {
+		// Read replica: --replicaof points at the master, and --masterauth is
+		// the password used to authenticate TO it. resolveRedisReplica has
+		// already enforced rc.Password == the master's password, so the same
+		// value serves both --requirepass (above) and --masterauth here — one
+		// stored password, no separate masterauth field.
+		args = append(args, "--masterauth", rc.Password,
+			"--replicaof", rc.ReplicaHost, fmt.Sprintf("%d", rc.ReplicaPort))
 	}
 	return args
 }

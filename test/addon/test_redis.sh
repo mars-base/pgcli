@@ -179,11 +179,41 @@ rd_has() { rd_cmd "$1" | grep -qF -- "$2"; }
 # written after the last snapshot back.
 hard_kill() { podman kill --signal KILL "pgcli-redis-$NAMESPACE-$1" >/dev/null 2>&1; }
 
+# wait_sync <name> — poll until the replica reports an established master link.
+# Redis 8's first full sync goes through an rdbchannel that drops and re-
+# establishes once, so a single read can legitimately catch the link down.
+wait_sync() {
+    for _ in $(seq 1 30); do
+        if pg redis-cli --name "$1" info replication 2>/dev/null \
+            | grep -q 'master_link_status:up'; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+# rd_role <name> — role: line from info replication (slave on 7, replica on 8).
+rd_role() {
+    pg redis-cli --name "$1" info replication 2>/dev/null \
+        | tr -d '\r' | awk -F: '/^role:/{print $2; exit}'
+}
+
+# rd_is_replica <name> — the replica reports role: replica (8) or slave (7).
+rd_is_replica() {
+    case "$(rd_role "$1")" in
+        replica|slave) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 cleanup() {
     if [ "$SKIP_DESTROY" = true ]; then
         yellow "Skipping cleanup (--skip-destroy)"; return
     fi
     section "Cleanup"
+    pg addon remove redis --name "r1"       --clean-data 2>/dev/null || true
+    pg addon remove redis --name "r2"       --clean-data 2>/dev/null || true
     pg addon remove redis --name "$LEGACY"  --clean-data 2>/dev/null || true
     pg addon remove redis --name "$CACHE"   --clean-data 2>/dev/null || true
     pg addon remove redis --name "imgtest"  --clean-data 2>/dev/null || true
@@ -562,6 +592,113 @@ main() {
     run_test "remove aoftest --clean-data" pg addon remove redis --name aoftest --clean-data
     run_test "aoftest gone" rd_gone aoftest
     run_test "aoftest data deleted" test ! -d "$(data_dir_of aoftest)"
+
+    # ---- Read replicas (--replica-of / --replica-of-host) ----
+    # The master under test is $CACHE (major 8); $LEGACY (major 7) is still
+    # installed, which gives the cross-major rejection for free. Linux host
+    # networking means the stored 127.0.0.1 target is literally reachable, so
+    # the remote-loopback instance r2 exercises the same code path a cross-host
+    # master would.
+    section "Read replicas"
+    run_fails "--replica-of and --replica-of-host together" "mutually exclusive" \
+        pg addon install redis --name badrep --replica-of "$CACHE" --replica-of-host 10.0.0.9 --replica-of-port 6379 --password x
+    run_fails "--replica-of an uninstalled master lists what exists" "not an installed redis addon" \
+        pg addon install redis --name badrep --replica-of ghost
+    run_fails "--replica-of itself" "cannot name the instance itself" \
+        pg addon install redis --name "$CACHE" --replica-of "$CACHE"
+    run_fails "cross-major replica rejected" "cannot replicate across majors" \
+        pg addon install redis --name badrep --replica-of "$LEGACY" --version 8
+    run_fails "remote replica without --password" "--password" \
+        pg addon install redis --name badrep --replica-of-host 127.0.0.1 --replica-of-port "$PORT"
+    run_fails "remote replica without --replica-of-port" "--replica-of-port" \
+        pg addon install redis --name badrep --replica-of-host 127.0.0.1 --password "$PW"
+    run_not_grep "rejected replicas never entered the config" "badrep:" cat "$CONFIG_FILE"
+
+    TESTS=$((TESTS + 1))
+    if R1_OUT="$(pg addon install redis --name r1 --replica-of "$CACHE" 2>&1)"; then
+        pass "install redis --name r1 --replica-of $CACHE"
+    else
+        fail "installing the local replica"; echo "$R1_OUT" | sed 's/^/      | /'
+    fi
+    echo "$R1_OUT" | sed 's/^/      /'
+    run_grep "summary prints the replica role" "replica of 127.0.0.1:$PORT" echo "$R1_OUT"
+    run_grep "summary says where writes go" "Send writes to the master" echo "$R1_OUT"
+    run_test "replica container running" rd_up r1
+    run_test "master link up" wait_sync r1
+    run_test "role is replica/slave" rd_is_replica r1
+    run_test "major adopted from the master" test "$(redis_field r1 version)" = "8"
+    run_test "password borrowed from the master" test "$(redis_field r1 password)" = "$PW"
+    run_test "replica_host stored" test "$(redis_field r1 replica_host)" = "127.0.0.1"
+    run_test "replica_port stored = master's port" test "$(redis_field r1 replica_port)" = "$PORT"
+    run_test "--replicaof in the container command" rd_has r1 "--replicaof"
+    run_test "--masterauth in the container command" rd_has r1 "--masterauth"
+    run_test "replica answers ping" redis_ping r1
+    TESTS=$((TESTS + 1))
+    if pg redis-cli --name "$CACHE" info replication 2>/dev/null | grep -q 'connected_slaves:1'; then
+        pass "master reports 1 connected replica"
+    else
+        fail "master does not see the replica: $(pg redis-cli --name "$CACHE" info replication 2>/dev/null | tr -d '\r' | grep -i connected || echo none)"
+    fi
+    # Write on the master, read on the replica: the propagation is what the role
+    # exists for. Synchronous here because the master's write has already been
+    # ACKed by the link above; retry briefly for the event loop.
+    pg redis-cli --name "$CACHE" set repl:key "replicated-value" >/dev/null 2>&1 || true
+    TESTS=$((TESTS + 1))
+    synced=false
+    for _ in $(seq 1 10); do
+        if [ "$(redis_get r1 repl:key)" = "replicated-value" ]; then synced=true; break; fi
+        sleep 1
+    done
+    if [ "$synced" = true ]; then
+        pass "write on the master reached the replica"
+    else
+        fail "replica never got the write: got '$(redis_get r1 repl:key)'"
+    fi
+    TESTS=$((TESTS + 1))
+    wo_out=$(pg redis-cli --name r1 set repl:rejected nope 2>&1 || true)
+    if echo "$wo_out" | grep -qi 'READONLY'; then
+        pass "write to the replica refused with READONLY"
+    else
+        fail "replica accepted a write: $wo_out"
+    fi
+    run_grep "addon list marks it a replica" "Role:        replica of 127.0.0.1:$PORT" pg addon list
+    run_grep "addon list marks the master a master" "Role:        master" pg addon list
+
+    # Remote shape: same host, addressed by IP:port + explicit password.
+    TESTS=$((TESTS + 1))
+    if R2_OUT="$(pg addon install redis --name r2 --replica-of-host 127.0.0.1 \
+                    --replica-of-port "$PORT" --password "$PW" 2>&1)"; then
+        pass "install redis --name r2 --replica-of-host (remote form)"
+    else
+        fail "installing the remote-form replica"; echo "$R2_OUT" | sed 's/^/      | /'
+    fi
+    echo "$R2_OUT" | sed 's/^/      /'
+    run_test "r2 container running" rd_up r2
+    run_test "r2 master link up" wait_sync r2
+    run_test "r2 stored remote target" test "$(redis_field r2 replica_host)" = "127.0.0.1"
+    TESTS=$((TESTS + 1))
+    if [ "$(redis_get r2 repl:key)" = "replicated-value" ]; then
+        pass "r2 (remote form) serves replicated reads"
+    else
+        fail "r2 did not replicate: got '$(redis_get r2 repl:key)'"
+    fi
+
+    # A reinstall that passes no replica flag must keep the role — dropping it
+    # would silently promote the replica to an independent master.
+    run_grep "reinstall keeps the replica role" "replica of 127.0.0.1:$PORT" \
+        pg addon install redis --name r1 --force
+    run_test "role survives reinstall in the config" \
+        test "$(redis_field r1 replica_host)" = "127.0.0.1"
+
+    # Promoting at runtime (no pgcli flag for it) is the documented escape
+    # hatch; do it on r2 and confirm it becomes writable, then drop r2.
+    pg redis-cli --name r2 replicaof no one >/dev/null 2>&1 || true
+    sleep 1
+    run_test "runtime replicaof no one promotes r2" redis_setget r2 promoted:key promoted-value
+    run_test "remove r1" pg addon remove redis --name r1 --clean-data
+    run_test "r1 gone" rd_gone r1
+    run_test "remove r2" pg addon remove redis --name r2 --clean-data
+    run_test "r2 gone" rd_gone r2
 
     # ---- Remove: data kept by default; --clean-data deletes ----
     section "Remove / --clean-data"

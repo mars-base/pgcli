@@ -733,6 +733,21 @@ type RedisConfig struct {
 	// default schedule; "no" disables snapshots (the AOF-only shape).
 	SaveSchedule string `yaml:"save,omitempty"`
 
+	// ReplicaHost non-empty marks this instance a read replica of the master at
+	// that host:port. It is resolved once at install (from a local --replica-of
+	// name → 127.0.0.1 + the master's port + the master's password, or a remote
+	// --replica-of-host/--replica-of-port), then stored so `pg addon start`
+	// rebuilds the same --replicaof argv without the master still being in the
+	// config. A replica's Password is required to equal the master's
+	// (resolveRedisReplica), so that one field feeds both --requirepass and
+	// --masterauth. Empty means this instance is a master.
+	ReplicaHost string `yaml:"replica_host,omitempty"`
+
+	// ReplicaPort is the master's port, paired with ReplicaHost. Kept
+	// redundant with the host so a stored replica re-derives its argv without a
+	// live master lookup.
+	ReplicaPort int `yaml:"replica_port,omitempty"`
+
 	// Autostart brings this container up on host boot via the boot service
 	// (pg autostart enable --redis). Start-only: it starts the existing
 	// container, so install first.

@@ -176,6 +176,17 @@ func (m *RedisManager) createContainer(rc *config.RedisConfig) error {
 
 	bind := proxyBindHost(m.bridge, rc.Listen)
 
+	// A bridge container cannot reach a same-host published port via
+	// 127.0.0.1 — that is the container's own loopback — so the master's
+	// stored loopback address becomes podman's container→host alias here, at
+	// the same layer that widens the bind above. redisServerArgs stays a pure
+	// function of the config it is handed.
+	if m.bridge && (rc.ReplicaHost == "127.0.0.1" || rc.ReplicaHost == "localhost") {
+		rcCopy := *rc
+		rcCopy.ReplicaHost = "host.containers.internal"
+		rc = &rcCopy
+	}
+
 	// --http-proxy=false: podman would otherwise inject the host's HTTP(S)_PROXY
 	// and the process could honor it for outbound connections. Image pulls run
 	// client-side and keep the proxy.

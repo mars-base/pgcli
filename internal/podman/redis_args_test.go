@@ -135,3 +135,48 @@ func TestRedisServerArgsSaveDefaultUntouched(t *testing.T) {
 		t.Errorf("--save emitted without SaveSchedule set: %v", args)
 	}
 }
+
+// A replica emits --replicaof <host> <port> — three argv slots, so the
+// two-slot flagPair helper does not fit — plus --masterauth carrying the same
+// password as --requirepass (resolveRedisReplica pins them equal).
+func TestRedisServerArgsReplica(t *testing.T) {
+	rc := &config.RedisConfig{
+		Port:        6380,
+		Password:    "sharedPw",
+		ReplicaHost: "127.0.0.1",
+		ReplicaPort: 6379,
+	}
+	args := redisServerArgs(rc, "0.0.0.0")
+
+	i := slices.Index(args, "--replicaof")
+	if i < 0 {
+		t.Fatalf("args missing --replicaof: %v", args)
+	}
+	if i+2 >= len(args) || args[i+1] != "127.0.0.1" || args[i+2] != "6379" {
+		t.Errorf("--replicaof = %v, want [127.0.0.1 6379]", args[i+1:])
+	}
+	flagPair(t, args, "--masterauth", "sharedPw")
+	flagPair(t, args, "--requirepass", "sharedPw")
+
+	// The knobs are orthogonal to the role: a replica may cap memory and enable
+	// AOF exactly like a master.
+	rc.MaxMemory = "256mb"
+	rc.AOF = true
+	args = redisServerArgs(rc, "0.0.0.0")
+	flagPair(t, args, "--maxmemory", "256mb")
+	flagPair(t, args, "--appendonly", "yes")
+	flagPair(t, args, "--masterauth", "sharedPw")
+	if slices.Index(args, "--replicaof") < 0 {
+		t.Errorf("--replicaof lost when other knobs are set: %v", args)
+	}
+}
+
+// A master must emit neither replica flag — an orphan --masterauth would be
+// harmless but --replicaof would silently demote it.
+func TestRedisServerArgsMasterHasNoReplicaFlags(t *testing.T) {
+	rc := &config.RedisConfig{Port: 6379, Password: "p"}
+	args := redisServerArgs(rc, "0.0.0.0")
+	if slices.Contains(args, "--replicaof") || slices.Contains(args, "--masterauth") {
+		t.Errorf("replica flags present without ReplicaHost: %v", args)
+	}
+}

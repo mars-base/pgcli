@@ -103,7 +103,7 @@ Currently supported add-ons:
   minio       single-node S3-compatible object storage (web console included; Linux host network, macOS bridge)
   silo        MinIO's Pigsty fork — same S3 object storage, from the public docker.io/pgsty/silo image (console + mcli client bundled; Linux host network, macOS bridge)
   rustfs      Rust S3-compatible object storage from pgcli's wrapper image, ghcr.io/mars-base/pgcli/pgcli-rustfs (console included; Linux only; the fixed upstream uid 10001 is handled inside the container, three topologies SNSD/SNMD/MNMD, each drive on its own physical device)
-  redis       standalone KV store (cache/session/ranking/counters) from the plain upstream docker.io/library/redis image; --version 7|8 selects the major, requirepass auto-generated, RDB persistence, single-node only
+  redis       standalone KV store (cache/session/ranking/counters) from the plain upstream docker.io/library/redis image; --version 7|8 selects the major, requirepass auto-generated, RDB persistence, read replicas via --replica-of (no automatic failover)
   postgrest   stateless REST API in front of a PostgreSQL schema (single container; Linux host network, macOS bridge)
 
 Two modes (pgbouncer, postgrest):
@@ -156,6 +156,8 @@ Linux and macOS; the first version-selectable addon):
                          [--listen 0.0.0.0] [--password ...] [--maxmemory 256mb]
                          [--maxmemory-policy noeviction] [--aof]
                          [--appendfsync always|everysec|no] [--save "900 1 300 10"|no]
+                         [--replica-of <masterName>]
+                         [--replica-of-host <ip> --replica-of-port <N> --password ...]
                          [--data-dir ...] [--image ...] [--force]
   --version chooses the major; each maps to a pinned upstream tag (see
   docs/images.md) and defaults to "8" when omitted. --image overrides the tag
@@ -171,6 +173,12 @@ Linux and macOS; the first version-selectable addon):
   --save overrides the snapshot schedule or "no" disables snapshots entirely.
   Listen defaults to 0.0.0.0 — requirepass is always on, so pass
   --listen 127.0.0.1 to keep it loopback-only.
+  --replica-of <masterName> turns the instance into a read-only replica of a
+  local master addon (same major required; it borrows the master's password and
+  endpoint). For a cross-host master use --replica-of-host/--replica-of-port
+  with --password equal to the master's. Replicas serve reads only — writes are
+  rejected READONLY — and there is no automatic failover: promote with
+  "pg redis-cli --name <r> replicaof no one".
   Talk to it with "pg redis-cli" (a short-lived redis-cli container wired to the
   first redis addon; see that command's help).
 
@@ -210,6 +218,8 @@ Examples:
   pg addon install redis
   pg addon install redis --name cache --version 7 --maxmemory 256mb
   pg addon install redis --name session --listen 127.0.0.1
+  pg addon install redis --name cache-r --replica-of cache
+  pg addon install redis --name remote-r --replica-of-host 10.0.0.9 --replica-of-port 6379 --password <master-pw>
   pg addon install postgrest -i proj01 --schema api --anon-role web_anon
   pg addon install postgrest --dsn "postgres://api:pass@127.0.0.1:5000/appdb" --pg-name app-api --schema api`,
 	Args: cobra.ExactArgs(1),
@@ -416,6 +426,9 @@ func init() {
 	addonInstallCmd.Flags().Bool("aof", false, "Redis: enable AOF (appendonly yes) — a write-ahead log on top of the RDB snapshot, for crash-safe no-eviction stores; off by default")
 	addonInstallCmd.Flags().String("appendfsync", "", "Redis AOF flush strength: always (durability) | everysec (default) | no (throughput); requires --aof")
 	addonInstallCmd.Flags().String("save", "", `Redis RDB snapshot schedule, e.g. "900 1 300 10" (empty keeps Redis's own default; "no" disables snapshots, e.g. for an AOF-only instance)`)
+	addonInstallCmd.Flags().String("replica-of", "", "Redis: make this instance a read-only replica of the named local master addon (its host/port/password are resolved from the config; the master must already be installed and on the same major)")
+	addonInstallCmd.Flags().String("replica-of-host", "", "Redis: address of a remote master to replicate (cross-host; pair with --replica-of-port and --password matching the master's; mutually exclusive with --replica-of)")
+	addonInstallCmd.Flags().Int("replica-of-port", 0, "Redis: remote master's port, paired with --replica-of-host")
 
 	// start / stop flags
 	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs or redis instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"redis\")")
@@ -2300,15 +2313,96 @@ var redisEvictionPolicies = []string{
 // redisAppendFsyncs are the --appendfsync strengths, in durability order.
 var redisAppendFsyncs = []string{"always", "everysec", "no"}
 
-// validateRedisKnobs rejects nonsense in the persistence/eviction knobs before
-// anything is pulled or created. It runs on the effective merged config, so
-// constraints apply across reinstalls too (a stored --maxmemory-policy without
-// a cap — from a hand-edit or a dropped flag — is still caught). Each knob is
-// opt-in: an empty value means "Redis's own default" and is always valid. The
-// save schedule is validated as pairs of integers (or the "no" disable token)
-// because a malformed schedule would otherwise surface as a redis-server
-// startup failure inside the container, where it is much harder to diagnose.
+// resolveRedisReplica turns the --replica-of / --replica-of-host /
+// --replica-of-port flags into the stored ReplicaHost/ReplicaPort (and, for a
+// local master, the borrowed Password and matched major) on rc. It runs after
+// the flags are merged into the existing config entry but before the version is
+// resolved and before any pull/create, so a bad topology is a fast, clear
+// error rather than a half-installed container. rc is mutated in place.
+//
+//   - neither --replica-of nor --replica-of-host: this is a master; a stored
+//     replica role survives untouched only if reinstall passes neither (a plain
+//     no-flag reinstall must not silently promote a replica to master by
+//     clearing the role — but that clearing would drop --replicaof from the
+//     argv, so we deliberately do NOT re-derive the role from flags when both
+//     are absent: rc keeps whatever its stored ReplicaHost/Port already say).
+//   - both given: rejected (ambiguous).
+//   - --replica-of <name> (local): the master addon must exist, be a different
+//     instance, and share the major; the replica inherits the master's port
+//     target (127.0.0.1 + master.Port) and, unless --password pinned an equal
+//     value, the master's password — so one password spans requirepass and
+//     masterauth.
+//   - --replica-of-host <host> (remote): --replica-of-port is required, and
+//     --password is required too (a remote master's password is not in this
+//     config, so the operator must supply it; it must still equal the master's,
+//     which only the operator can guarantee). No major check across hosts.
+func resolveRedisReplica(cfg *config.Config, rc *config.RedisConfig, selfName, replicaOf, replicaOfHost, version string, replicaOfPort int, passwordGiven bool) error {
+	if replicaOf != "" && replicaOfHost != "" {
+		return fmt.Errorf("--replica-of (a local master addon) and --replica-of-host (a remote master) are mutually exclusive")
+	}
+	switch {
+	case replicaOf == "" && replicaOfHost == "":
+		// Neither replica flag: leave any stored role in place (this is a
+		// plain reinstall of an existing instance — master or replica).
+		return nil
+
+	case replicaOf != "":
+		if replicaOf == selfName {
+			return fmt.Errorf("--replica-of %q cannot name the instance itself", replicaOf)
+		}
+		master, ok := cfg.Addons.Redis[replicaOf]
+		if !ok {
+			return fmt.Errorf("--replica-of %q is not an installed redis addon (available: %v)", replicaOf, sortedAddonNames(cfg.Addons.Redis))
+		}
+		// A replica must run the same major as its master — cross-version
+		// replication is unsupported by Redis. `version` is the raw --version
+		// flag (rc.Version is only the previously-stored value at this point);
+		// reject an explicit mismatch, else adopt the master's major so the
+		// version resolve below re-derives a matching image tag.
+		wantMajor := version
+		if wantMajor == "" {
+			wantMajor = rc.Version
+		}
+		if wantMajor != "" && wantMajor != master.Version {
+			return fmt.Errorf("replica major %q does not match master %q (%s) — Redis cannot replicate across majors", wantMajor, replicaOf, master.Version)
+		}
+		rc.Version = master.Version
+		rc.ReplicaHost = "127.0.0.1"
+		rc.ReplicaPort = master.Port
+		if passwordGiven && rc.Password != "" && rc.Password != master.Password {
+			return fmt.Errorf("replica --password must equal the master %q's password (requirepass and masterauth share one value)", replicaOf)
+		}
+		rc.Password = master.Password
+		return nil
+
+	default: // replicaOfHost != ""
+		if replicaOfPort == 0 {
+			return fmt.Errorf("--replica-of-host %q needs --replica-of-port (the remote master's port)", replicaOfHost)
+		}
+		if rc.Password == "" {
+			return fmt.Errorf("a remote replica needs --password matching the master's (its value is not in this config to inherit)")
+		}
+		rc.ReplicaHost = replicaOfHost
+		rc.ReplicaPort = replicaOfPort
+		return nil
+	}
+}
+
+// validateRedisKnobs rejects nonsense in the persistence/eviction knobs and the
+// replica target before anything is pulled or created. It runs on the effective
+// merged config, so constraints apply across reinstalls too (a stored
+// --maxmemory-policy without a cap — from a hand-edit or a dropped flag — is
+// still caught). Each knob is opt-in: an empty value means "Redis's own
+// default" and is always valid. The save schedule is validated as pairs of
+// integers (or the "no" disable token) because a malformed schedule would
+// otherwise surface as a redis-server startup failure inside the container,
+// where it is much harder to diagnose. Cross-instance replica checks (master
+// exists, same major, password equality) live in resolveRedisReplica, which has
+// the whole config; only the self-contained host/port invariant is checked here.
 func validateRedisKnobs(rc config.RedisConfig) error {
+	if rc.ReplicaHost != "" && rc.ReplicaPort == 0 {
+		return fmt.Errorf("a replica needs a master port (ReplicaHost %q set with ReplicaPort 0 — reinstall with --replica-of/--replica-of-port)", rc.ReplicaHost)
+	}
 	if rc.MaxMemoryPolicy != "" {
 		if rc.MaxMemory == "" {
 			return fmt.Errorf("--maxmemory-policy requires --maxmemory (the policy only applies under a memory cap)")
@@ -2349,6 +2443,17 @@ func redisEffectivePolicy(rc config.RedisConfig) string {
 		return rc.MaxMemoryPolicy
 	}
 	return "allkeys-lru"
+}
+
+// redisRoleSummary renders the replication Role line shared by the install
+// summary and addon list: a plain master, or a read replica naming the master
+// endpoint it syncs from (the stored ReplicaHost is the resolved target, so
+// what is displayed is what the argv carries).
+func redisRoleSummary(rc config.RedisConfig) string {
+	if rc.ReplicaHost != "" {
+		return fmt.Sprintf("replica of %s:%d (read-only)", rc.ReplicaHost, rc.ReplicaPort)
+	}
+	return "master"
 }
 
 // redisPersistenceSummary renders the persistence line shared by the install
@@ -2444,6 +2549,9 @@ func runAddonInstallRedis(cmd *cobra.Command) error {
 	aofSet := cmd.Flags().Changed("aof")
 	appendfsync, _ := cmd.Flags().GetString("appendfsync")
 	saveSchedule, _ := cmd.Flags().GetString("save")
+	replicaOf, _ := cmd.Flags().GetString("replica-of")
+	replicaOfHost, _ := cmd.Flags().GetString("replica-of-host")
+	replicaOfPort, _ := cmd.Flags().GetInt("replica-of-port")
 	force, _ := cmd.Flags().GetBool("force")
 
 	path := cfgPath
@@ -2494,6 +2602,14 @@ func runAddonInstallRedis(cmd *cobra.Command) error {
 	}
 	if saveSchedule != "" {
 		existing.SaveSchedule = saveSchedule
+	}
+	// Resolve the replica role (if requested) before validating and before the
+	// version step: a local --replica-of adopts the master's major and password,
+	// and a bad topology (missing master, cross-major, remote without a
+	// password) fails here rather than at pull time.
+	passwordGiven := cmd.Flags().Changed("password")
+	if err := resolveRedisReplica(cfg, &existing, name, replicaOf, replicaOfHost, version, replicaOfPort, passwordGiven); err != nil {
+		return err
 	}
 	// Validate the effective (merged) values: stored flags count too, so
 	// --maxmemory-policy alone is legal on an instance that already has a
@@ -2571,6 +2687,9 @@ func runAddonInstallRedis(cmd *cobra.Command) error {
 		if rc.SaveSchedule == "no" && !rc.AOF {
 			fmt.Println("-> NOTE: snapshots are disabled and AOF is off — this instance loses its whole dataset on restart. Pair --save no with --aof for a durable store.")
 		}
+		if rc.ReplicaHost != "" {
+			fmt.Printf("-> NOTE: read replica — it starts an initial full sync from the master at %s:%d into its own data dir, and rejects writes (READONLY). Send writes to the master.\n", rc.ReplicaHost, rc.ReplicaPort)
+		}
 		fmt.Println("-> Starting redis container...")
 		if err := rm.EnsureContainer(&rc); err != nil {
 			return err
@@ -2594,6 +2713,7 @@ func runAddonInstallRedis(cmd *cobra.Command) error {
 	fmt.Printf("  Image:      %s\n", rc.ImageTag)
 	fmt.Printf("  Data:       %s\n", rm.DataDir(&rc))
 	fmt.Printf("  Address:    %s:%d\n", rc.Listen, rc.Port)
+	fmt.Printf("  Role:       %s\n", redisRoleSummary(rc))
 	if rc.MaxMemory != "" {
 		fmt.Printf("  Maxmemory:   %s (%s)\n", rc.MaxMemory, redisEffectivePolicy(rc))
 	}
@@ -3387,6 +3507,7 @@ func runAddonList() error {
 				fmt.Printf("    Version:     %s\n", version)
 			}
 			fmt.Printf("    Address:     %s:%d\n", rc.Listen, rc.Port)
+			fmt.Printf("    Role:        %s\n", redisRoleSummary(rc))
 			auth := "off"
 			if rc.Password != "" {
 				auth = "on (requirepass)"

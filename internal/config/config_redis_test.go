@@ -109,6 +109,18 @@ func TestRedisSaveLoadRoundTrip(t *testing.T) {
 			SaveSchedule:    "900 1 300 10",
 			Autostart:       true,
 		},
+		// The replica role is stored, not re-derived: `pg addon start` rebuilds
+		// --replicaof from these two fields with no master lookup.
+		"cache-r": {
+			ContainerName: "pgcli-redis-cache-r",
+			Name:          "cache-r",
+			Version:       "7",
+			ImageTag:      redisMajorImages["7"],
+			Port:          36400,
+			Password:      "aX9kQ2mZx7Lp4RtVbNcE",
+			ReplicaHost:   "127.0.0.1",
+			ReplicaPort:   36399,
+		},
 	}
 	if err := cfg.Save(path); err != nil {
 		t.Fatalf("save: %v", err)
@@ -154,6 +166,17 @@ func TestRedisSaveLoadRoundTrip(t *testing.T) {
 	}
 	if !rc.Autostart {
 		t.Error("autostart not persisted")
+	}
+
+	rr, ok := got.Addons.Redis["cache-r"]
+	if !ok {
+		t.Fatal("replica addon not persisted")
+	}
+	if rr.ReplicaHost != "127.0.0.1" || rr.ReplicaPort != 36399 {
+		t.Errorf("replica target not persisted: %q:%d", rr.ReplicaHost, rr.ReplicaPort)
+	}
+	if _, ok := got.Addons.Redis["cache"]; !ok {
+		t.Fatal("master addon lost when a replica shares the map")
 	}
 
 	// A second ApplyDefaults must not move the assigned port, rewrite the

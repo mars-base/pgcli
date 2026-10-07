@@ -30,8 +30,10 @@ Pick Redis for cache/session/ranking/counter workloads next to your PostgreSQL
 instances; it is independent of the PG stack, coexists with any other addon,
 and several instances (even across majors) can run on one host.
 
-> **Out of scope:** standalone only. Sentinel (HA) and Redis Cluster are not
-> managed by pgcli — see [Known limitations](#known-limitations).
+> **Out of scope:** Sentinel (automatic failover) and Redis Cluster are not
+> managed by pgcli. Read replicas *are* — `--replica-of` turns an instance into
+> a read-only follower of another; see [Read replicas](#read-replicas) and
+> [Known limitations](#known-limitations).
 
 ## Parameters
 
@@ -47,12 +49,15 @@ per instance runs the plain upstream image (no pgcli wrapper, unlike
 | `--image` / `image_tag` | resolved from the version table | — | override the tag verbatim |
 | `--port` / `port` | auto from `redis_start_port` (base **6379**) | `--port` | host port |
 | `--listen` / `listen` | `0.0.0.0` | `--bind` | bind address (`127.0.0.1` to tighten) |
-| `--password` / `password` | generated, 20 chars | `--requirepass` | auth; always required |
+| `--password` / `password` | generated, 20 chars | `--requirepass` | auth; always required (a replica's must equal the master's) |
 | `--maxmemory` / `maxmemory` | unset (no cap) | `--maxmemory` | dataset cap that turns eviction on |
 | `--maxmemory-policy` / `maxmemory_policy` | `allkeys-lru` | `--maxmemory-policy` | eviction policy, only under a cap |
 | `--aof` / `aof` | off | `--appendonly yes` | write-ahead log on top of the snapshot |
 | `--appendfsync` / `appendfsync` | `everysec` (Redis's own) | `--appendfsync` | AOF flush strength, only with `--aof` |
 | `--save` / `save` | Redis's default schedule | `--save` | RDB snapshot plan; `no` disables snapshots |
+| `--replica-of` / `replica_host`+`replica_port` | unset (master) | `--replicaof` + `--masterauth` | read-only replica of a *local* master addon (its host/port/password are resolved from the config) |
+| `--replica-of-host` / `replica_host` | — | `--replicaof` | master *address* for a cross-host replica (pair with `--replica-of-port` + `--password`) |
+| `--replica-of-port` / `replica_port` | — | `--replicaof` | master port, paired with `--replica-of-host` |
 | `--data-dir` / `data_dir` | `<base-dir>/addon/redis/<name>/data` | `--dir /data` (host dir bind-mounted at `/data`) | where the data lives |
 | — | `autostart: false` | — | start on boot (`pg autostart enable --redis`) |
 
@@ -77,10 +82,16 @@ How the knobs combine:
   `--maxmemory` entirely for no cap. The policy flag requires `--maxmemory`;
   `--appendfsync` requires `--aof` — the CLI rejects those combinations before
   it pulls or creates anything.
+- **`--replica-of` makes a read replica** — see [Read
+  replicas](#read-replicas). The persistence/eviction knobs stay orthogonal: a
+  replica may cap memory or enable AOF exactly like a master.
 
-Not every Redis option is a flag, by design: the multi-node surface (Sentinel,
-Cluster, replication) is out of scope — see [Known
-limitations](#known-limitations). And `--image` is the escape hatch for the
+Not every Redis option is a flag, by design: the multi-node control plane
+(Sentinel, Redis Cluster, automatic failover) is out of scope — see [Known
+limitations](#known-limitations). Read replicas are supported
+([Read replicas](#read-replicas)); it is the *orchestration* (promoting a
+replica automatically when the master dies) that pgcli leaves to you.
+And `--image` is the escape hatch for the
 engine itself: `pg addon install redis --image docker.io/valkey/valkey:8`
 runs [Valkey](https://valkey.io/) (the Redis fork), its major reverse-parsing
 as `8`.
@@ -122,6 +133,10 @@ pg addon install redis --name cache --listen 127.0.0.1
 
 # pin the password (stable across reinstalls) and a fixed port
 pg addon install redis --name sessions --password 'S3ssions!' --port 6379
+
+# a read-only replica of the local "sessions" instance (borrows its password,
+# major and endpoint)
+pg addon install redis --name sessions-ro --replica-of sessions
 ```
 
 The install summary prints everything a client needs:
@@ -133,6 +148,7 @@ The install summary prints everything a client needs:
   Image:      docker.io/library/redis:8.10.2
   Data:       ~/pg/addon/redis/cache/data
   Address:    0.0.0.0:6379
+  Role:       master
   Persistence: rdb snapshots (default save schedule)
 
   Password:    <generated>
@@ -204,6 +220,61 @@ Any Redis client works; the DSN printed at install has the shape
 `redis://:<password>@<host>:<port>/0`. For TLS you would need a stunnel or
 redis' own TLS build in front — see [Known limitations](#known-limitations).
 
+## Read replicas
+
+`--replica-of` turns a new instance into a **read-only replica** of an existing
+master addon: it streams the master's writes continuously and serves reads,
+while writes to it are rejected with `READONLY`. This is read scaling and data
+redundancy, **not** high availability — pgcli does not run Sentinel, so a dead
+master is not promoted automatically (see [Known
+limitations](#known-limitations)).
+
+```bash
+# master (writable)
+pg addon install redis --name cache
+
+# same-host replica: it borrows the master's major, password and endpoint
+pg addon install redis --name cache-ro --replica-of cache
+```
+
+A local `--replica-of` resolves everything from the config: the replica adopts
+the master's version (cross-major replication is unsupported — a mismatch is a
+fast error), its password, and the endpoint `127.0.0.1:<master-port>`. That one
+password then serves both `requirepass` (the replica's own clients auth with it)
+and `--masterauth` (the replica authenticating *to* the master), so
+`--password`/`--maxmemory`/`--aof` etc. stay exactly as on a master. The stored
+`replica_host`/`replica_port` mean `pg addon start` rebuilds the same
+`--replicaof` argv even if the master is gone from the config.
+
+**Cross-host masters** use the explicit form — pgcli cannot look up a remote
+master's password, so you supply it (it must equal the master's):
+
+```bash
+pg addon install redis --name cache-r2 \
+    --replica-of-host 10.0.0.7 --replica-of-port 6379 --password <master-password>
+```
+
+`pg addon list` and the install summary show a `Role:` line — `master`, or
+`replica of <host>:<port> (read-only)` — and `pg redis-cli --name cache-ro
+info replication` reports `role:replica` with `master_link_status:up` once the
+(initial, RDB-carrying) sync completes. Send reads to the replica and writes to
+the master, e.g. with the DSNs:
+
+```bash
+# read traffic -> the replica
+redis://:<password>@127.0.0.1:<replica-port>/0
+```
+
+To promote a replica to an independent master at runtime (the manual failover
+pgcli deliberately leaves to you), clear its replication and then, if you want
+it to persist across restarts, drop its role from the config:
+
+```bash
+pg redis-cli --name cache-ro replicaof no one   # stop following the master
+pg addon remove redis --name cache-ro          # keep the data, forget the role
+pg addon install redis --name cache-ro         # reinstall as a plain master
+```
+
 ## Ports
 
 Each instance takes **one port** from Redis's own pool, `redis_start_port`
@@ -214,7 +285,6 @@ collide:
 ```bash
 pg addon install redis  --name cache    # 6379
 pg addon install redis  --name sessions # 6380
-pg addon install minio  --name store    # 9000 / 9001 (different pool)
 ```
 
 `--port` fixes an instance to a specific port; auto-assignment skips anything
@@ -243,13 +313,17 @@ addons:
       # aof: true                        # write-ahead log on top of snapshots
       # appendfsync: always              # only with aof; default everysec
       # save: "900 1 300 10"             # RDB schedule; "no" disables snapshots
+      # replica_host: 127.0.0.1          # set by --replica-of: this is a read replica
+      # replica_port: 6379               # the master's port, paired with replica_host
       autostart: false                   # pg autostart enable --redis --name cache
 ```
 
 Edits to `listen`, `port`, `password`, `maxmemory`/`maxmemory_policy`,
-`aof`/`appendfsync`/`save`, `image_tag`/`version`, or `data_dir` take effect
-after the next `pg addon install redis --name cache --force` (or via the
-matching flags).
+`aof`/`appendfsync`/`save`, `replica_host`/`replica_port`,
+`image_tag`/`version`, or `data_dir` take effect after the next
+`pg addon install redis --name cache --force` (or via the matching flags). The
+replica role is normally set by the `--replica-of*` flags rather than hand-
+edited — see [Read replicas](#read-replicas).
 
 ### List
 
@@ -263,6 +337,7 @@ Infra add-ons (redis):
     Status:      running
     Version:     8
     Address:     0.0.0.0:6379
+    Role:        master
     Auth:        on (requirepass)
     Maxmemory:   256mb (allkeys-lru)
     Persistence: rdb + aof (default save schedule, appendonly yes)
@@ -341,14 +416,23 @@ pg logs addon redis --name cache -f     # follow
   suggests `--image` rather than silently rewriting your value.
 - **Port already live** — auto-assignment scans host listeners and skips
   them; pin `--port` when you need a stable number.
+- **A replica rejects writes (`READONLY`)** — that is the role, not a fault:
+  send writes to the master. To make it an independent master, see [Read
+  replicas](#read-replicas).
+- **A freshly-created replica briefly shows `master_link_status:down`** —
+  normal during the first (RDB-carrying) full sync, and redis 8 reloads the
+  link once more when the snapshot transfers over its rdbchannel. Watch
+  `info replication`; it settles at `up` and `role:replica`.
 
 ## Known limitations
 
-- **Standalone only** — Sentinel (HA failover) and Redis Cluster (sharding) are
-  out of scope, and so is replication (a redis replica of another host). A
-  single instance is a single point: it can be made *durable* on disk with
-  `--aof`, but it cannot fail over to another node — that needs a topology this
-  addon does not manage.
+- **No automatic failover** — read replicas are supported
+  ([Read replicas](#read-replicas)), but the HA control plane is not: Sentinel
+  and Redis Cluster (sharding) are out of scope. A replica gives read scaling
+  and a redundant copy of the data, not a self-healing pair — when the master
+  dies you promote a replica yourself (`replicaof no one`, above). A single
+  instance with no replica is a single point: it can be made *durable* on disk
+  with `--aof`, but it cannot fail over to another node.
 - **No TLS** — Redis 7's native TLS exists in some builds but is not wired
   here; treat the network path as trusted and rely on `requirepass`, or keep
   the instance loopback-only (`--listen 127.0.0.1`).

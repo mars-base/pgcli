@@ -24,8 +24,9 @@ weight: 50
 在 PostgreSQL 实例旁边做缓存/会话/排行榜/计数就选 Redis；它与 PG 栈无关，可
 与任何插件并存，同一主机也能跑多个实例（甚至跨大版本）。
 
-> **范围之外：** 仅单机。Sentinel（高可用）与 Redis Cluster 不由 pgcli 管理
-> ——见[已知限制](#已知限制)。
+> **范围之外：** Sentinel（自动故障转移）与 Redis Cluster 不由 pgcli 管理。读
+> 副本**是**支持的——`--replica-of` 把一个实例变成对另一个主节点的只读跟随，
+> 见[读副本](#读副本)与[已知限制](#已知限制)。
 
 ## 参数设置
 
@@ -40,12 +41,15 @@ wrapper，这点与 [rustfs](../rustfs/) 不同）。下表列出每个可调项
 | `--image` / `image_tag` | 由版本映射表解析 | — | 直接指定任意 tag |
 | `--port` / `port` | 从 `redis_start_port` 自动分配（基 **6379**） | `--port` | 宿主端口 |
 | `--listen` / `listen` | `0.0.0.0` | `--bind` | 监听地址（`127.0.0.1` 收紧） |
-| `--password` / `password` | 自动生成 20 字符 | `--requirepass` | 认证；始终必须存在 |
+| `--password` / `password` | 自动生成 20 字符 | `--requirepass` | 认证；始终必须存在（副本的必须与主节点相同） |
 | `--maxmemory` / `maxmemory` | 不设（无上限） | `--maxmemory` | 数据集上限，开启驱逐 |
 | `--maxmemory-policy` / `maxmemory_policy` | `allkeys-lru` | `--maxmemory-policy` | 驱逐策略，仅在设了上限时有意义 |
 | `--aof` / `aof` | 关 | `--appendonly yes` | 在快照之上叠加写前日志 |
 | `--appendfsync` / `appendfsync` | `everysec`（Redis 自身默认） | `--appendfsync` | AOF 刷盘强度，仅在开 `--aof` 时有意义 |
 | `--save` / `save` | Redis 默认计划 | `--save` | RDB 快照计划；`no` 关闭快照 |
+| `--replica-of` / `replica_host`+`replica_port` | 不设（主节点） | `--replicaof` + `--masterauth` | 成为*本机*主实例的只读副本（host/port/密码都从配置里取） |
+| `--replica-of-host` / `replica_host` | — | `--replicaof` | 跨机副本的**主节点地址**（与 `--replica-of-port` + `--password` 搭配） |
+| `--replica-of-port` / `replica_port` | — | `--replicaof` | 主节点端口，与 `--replica-of-host` 搭配 |
 | `--data-dir` / `data_dir` | `<base-dir>/addon/redis/<name>/data` | `--dir /data`（主机目录 bind 挂载到 `/data`） | 数据落盘位置 |
 | — | `autostart: false` | — | 开机自启（`pg autostart enable --redis`） |
 
@@ -65,11 +69,15 @@ wrapper，这点与 [rustfs](../rustfs/) 不同）。下表列出每个可调项
   就驱逐"。传 `--maxmemory-policy noeviction` 变成硬顶（超上限写失败而非驱逐
   键），或干脆不设 `--maxmemory` 表示无上限。policy 依赖 `--maxmemory`、
   `--appendfsync` 依赖 `--aof`——CLI 在拉镜像/建容器之前就拒绝这类组合。
+- **`--replica-of` 造只读副本**——见[读副本](#读副本)。持久化/驱逐旋钮与角色
+  正交：副本也能设 `--maxmemory` 或开 `--aof`，跟主节点一模一样。
 
-Redis/Valkey 的选项空间远比这张表大，pgcli 有意不包装多节点拓扑（Sentinel、
-Cluster、复制）——见[已知限制](#已知限制)。引擎本身倒是可以用 `--image` 变
-通：`pg addon install redis --image docker.io/valkey/valkey:8` 跑的是
-[Valkey](https://valkey.io/)（Redis 的分支），大版本反解析为 `8`。
+Redis/Valkey 的选项空间远比这张表大，pgcli 有意不包装多节点**控制面**
+（Sentinel、Redis Cluster、自动故障转移）——见[已知限制](#已知限制)。读副本
+是支持的（[读副本](#读副本)），pgcli 留下的只是*编排*那一层：主节点挂了不自
+动提升副本。引擎本身倒是可以用 `--image` 变通：`pg addon install redis
+--image docker.io/valkey/valkey:8` 跑的是 [Valkey](https://valkey.io/)（Redis
+的分支），大版本反解析为 `8`。
 
 ## 版本选择
 
@@ -105,6 +113,9 @@ pg addon install redis --name cache --listen 127.0.0.1
 
 # 固定密码（跨重装保持稳定）与固定端口
 pg addon install redis --name sessions --password 'S3ssions!' --port 6379
+
+# 本机 "sessions" 的只读副本（借用它的大版本、密码与端点）
+pg addon install redis --name sessions-ro --replica-of sessions
 ```
 
 安装摘要打印客户端所需的一切：
@@ -116,6 +127,7 @@ pg addon install redis --name sessions --password 'S3ssions!' --port 6379
   Image:      docker.io/library/redis:8.10.2
   Data:       ~/pg/addon/redis/cache/data
   Address:    0.0.0.0:6379
+  Role:       master
   Persistence: rdb snapshots (default save schedule)
 
   Password:    <generated>
@@ -182,6 +194,55 @@ REDISCLI_AUTH=otherpass pg redis-cli dbsize
 `redis://:<password>@<host>:<port>/0`。需要 TLS 则要在前面架 stunnel 之类
 ——见[已知限制](#已知限制)。
 
+## 读副本
+
+`--replica-of` 把新实例变成已有主实例的**只读副本**：它持续拉取主节点的写入
+并提供读，对它的写会被 `READONLY` 拒绝。这是读扩展与数据冗余，**不是**高可
+用——pgcli 不跑 Sentinel，主节点挂掉不会自动提升副本（见[已知限制](#已知限
+制)）。
+
+```bash
+# 主节点（可写）
+pg addon install redis --name cache
+
+# 同机副本：借用主节点的大版本、密码与端点
+pg addon install redis --name cache-ro --replica-of cache
+```
+
+本机的 `--replica-of` 一切从配置解析：副本采用主节点的 version（跨大版本复制
+不受支持——不一致会立刻报错）、它的密码，以及端点 `127.0.0.1:<主节点端口>`。
+这**一个**密码随后同时服务 `requirepass`（副本自己的客户端用它认证）与
+`--masterauth`（副本向主节点认证），所以 `--password`/`--maxmemory`/`--aof`
+等与主节点完全一致。存储下来的 `replica_host`/`replica_port` 意味着即使主节点
+已从配置中删除，`pg addon start` 也能重建出同样的 `--replicaof` argv。
+
+**跨机主节点**用显式形式——pgcli 查不到远程主节点的密码，得由你给（必须与主
+节点相同）：
+
+```bash
+pg addon install redis --name cache-r2 \
+    --replica-of-host 10.0.0.7 --replica-of-port 6379 --password <master-password>
+```
+
+`pg addon list` 与安装摘要都会打印 `Role:` 行——`master`，或
+`replica of <host>:<port> (read-only)`；`pg redis-cli --name cache-ro info
+replication` 在（携带 RDB 的）首轮同步完成后显示 `role:replica` 且
+`master_link_status:up`。读流量指向副本、写流量指向主节点，例如用各自的 DSN：
+
+```bash
+# 读流量 -> 副本
+redis://:<password>@127.0.0.1:<副本端口>/0
+```
+
+要在运行时把一个副本提升为独立主节点（这类手工故障转移正是 pgcli 有意留给你的
+部分），先解除复制，再——若希望重启后依然成立——把角色从配置里去掉：
+
+```bash
+pg redis-cli --name cache-ro replicaof no one   # 停止跟随主节点
+pg addon remove redis --name cache-ro          # 保留数据，忘掉角色
+pg addon install redis --name cache-ro         # 作为普通主节点重装
+```
+
 ## 端口
 
 每个实例从 Redis 自己的池 `redis_start_port`（默认 **6379**）取**一个**端口
@@ -191,7 +252,6 @@ rustfs 实例互不冲突：
 ```bash
 pg addon install redis  --name cache      # 6379
 pg addon install redis  --name sessions   # 6380
-pg addon install minio  --name store      # 9000 / 9001（另一个池）
 ```
 
 `--port` 可钉死某个端口；自动分配会跳过显式占用的与主机上已监听的。
@@ -219,12 +279,16 @@ addons:
       # aof: true                        # 在快照之上叠加写前日志
       # appendfsync: always              # 仅在开 aof 时有效；默认 everysec
       # save: "900 1 300 10"             # RDB 计划；"no" 关闭快照
+      # replica_host: 127.0.0.1          # 由 --replica-of 写入：本实例是读副本
+      # replica_port: 6379               # 主节点端口，与 replica_host 搭配
       autostart: false                   # pg autostart enable --redis --name cache
 ```
 
 改 `listen`、`port`、`password`、`maxmemory`/`maxmemory_policy`、
-`aof`/`appendfsync`/`save`、`image_tag`/`version` 或 `data_dir` 后，下一次
-`pg addon install redis --name cache --force`（或用对应 flag）生效。
+`aof`/`appendfsync`/`save`、`replica_host`/`replica_port`、
+`image_tag`/`version` 或 `data_dir` 后，下一次
+`pg addon install redis --name cache --force`（或用对应 flag）生效。副本角色
+通常由 `--replica-of*` 这组 flag 设定，而非手改——见[读副本](#读副本)。
 
 ### 列表
 
@@ -238,6 +302,7 @@ Infra add-ons (redis):
     Status:      running
     Version:     8
     Address:     0.0.0.0:6379
+    Role:        master
     Auth:        on (requirepass)
     Maxmemory:   256mb (allkeys-lru)
     Persistence: rdb + aof (default save schedule, appendonly yes)
@@ -310,12 +375,19 @@ pg logs addon redis --name cache -f     # 跟随
   不会静默改写你的值。
 - **端口已被监听** —— 自动分配会扫描主机监听并跳过；要稳定端口号就用
   `--port` 钉死。
+- **副本拒绝写入（`READONLY`）** —— 这是角色本身，不是故障：写请发往主节点。
+  要让它成为独立主节点，见[读副本](#读副本)。
+- **刚建好的副本短暂显示 `master_link_status:down`** —— 首轮（携带 RDB 的）
+  全量同步期间正常；redis 8 经 rdbchannel 传快照时还会再重连一次链路。看
+  `info replication`，最终会稳定为 `up` 且 `role:replica`。
 
 ## 已知限制
 
-- **仅单机** —— Sentinel（HA 故障转移）与 Redis Cluster（分片）不在范围内，
-  复制（作为他机 redis 的副本）同样不做。单实例是单点：可以用 `--aof` 让它
-  在磁盘上*耐久*，但无法故障转移到其它节点——那需要本插件不管理的拓扑。
+- **无自动故障转移** —— 读副本是支持的（见[读副本](#读副本)），但 HA 控制面不
+  是：Sentinel 与 Redis Cluster（分片）不在范围内。副本给你的是读扩展与一份
+  冗余数据，不是一对能自愈的节点——主节点挂掉时由你自己提升副本（`replicaof
+  no one`，见上）。没有副本的单实例是单点：可以用 `--aof` 让它在磁盘上*耐
+  久*，但无法故障转移到其它节点。
 - **无 TLS** —— Redis 7 的部分构建支持原生 TLS，但这里未接入；按可信网络对
   待链路并依赖 `requirepass`，或干脆 `--listen 127.0.0.1` 仅回环。
 - **macOS 代码完备、未实测** —— bridge 路径（发布端口、`pg redis-cli` 走
