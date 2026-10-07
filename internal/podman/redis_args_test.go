@@ -65,3 +65,73 @@ func TestRedisServerArgsMaxMemory(t *testing.T) {
 	flagPair(t, args, "--maxmemory", "256mb")
 	flagPair(t, args, "--maxmemory-policy", "allkeys-lru")
 }
+
+// An explicit policy replaces the allkeys-lru default — that is the escape hatch
+// for a hard-ceiling store instead of an evicting cache.
+func TestRedisServerArgsMaxMemoryPolicyOverride(t *testing.T) {
+	rc := &config.RedisConfig{
+		Port:            6380,
+		Password:        "p",
+		MaxMemory:       "1gb",
+		MaxMemoryPolicy: "noeviction",
+	}
+
+	args := redisServerArgs(rc, "0.0.0.0")
+
+	flagPair(t, args, "--maxmemory", "1gb")
+	flagPair(t, args, "--maxmemory-policy", "noeviction")
+	if slices.Contains(args, "allkeys-lru") {
+		t.Errorf("default policy leaked through an override: %v", args)
+	}
+}
+
+func TestRedisServerArgsAOF(t *testing.T) {
+	rc := &config.RedisConfig{Port: 6379, Password: "p", AOF: true}
+	args := redisServerArgs(rc, "0.0.0.0")
+	flagPair(t, args, "--appendonly", "yes")
+	// Without an explicit strength, Redis's own everysec default applies —
+	// emitting nothing is the point.
+	if slices.Contains(args, "--appendfsync") {
+		t.Errorf("--appendfsync emitted without AppendFsync set: %v", args)
+	}
+
+	rc.AppendFsync = "always"
+	args = redisServerArgs(rc, "0.0.0.0")
+	flagPair(t, args, "--appendfsync", "always")
+}
+
+// An AOF-off instance must not emit any appendonly machinery.
+func TestRedisServerArgsAOFOff(t *testing.T) {
+	rc := &config.RedisConfig{Port: 6379, Password: "p", AppendFsync: "always"}
+	args := redisServerArgs(rc, "0.0.0.0")
+	if slices.Contains(args, "--appendonly") || slices.Contains(args, "--appendfsync") {
+		t.Errorf("aof flags present with AOF off: %v", args)
+	}
+}
+
+// The whole schedule is one argv element: splitting "900 1 300 10" would make
+// the trailing numbers parse as config-file arguments.
+func TestRedisServerArgsSaveSchedule(t *testing.T) {
+	rc := &config.RedisConfig{Port: 6379, Password: "p", SaveSchedule: "900 1 300 10"}
+	args := redisServerArgs(rc, "0.0.0.0")
+	flagPair(t, args, "--save", "900 1 300 10")
+
+	rc.SaveSchedule = "  3600  1  "
+	args = redisServerArgs(rc, "0.0.0.0")
+	flagPair(t, args, "--save", "3600 1")
+}
+
+// "no" is pgcli's disable token and must arrive as Redis's own empty value.
+func TestRedisServerArgsSaveDisabled(t *testing.T) {
+	rc := &config.RedisConfig{Port: 6379, Password: "p", SaveSchedule: "no"}
+	args := redisServerArgs(rc, "0.0.0.0")
+	flagPair(t, args, "--save", "")
+}
+
+func TestRedisServerArgsSaveDefaultUntouched(t *testing.T) {
+	rc := &config.RedisConfig{Port: 6379, Password: "p"}
+	args := redisServerArgs(rc, "0.0.0.0")
+	if slices.Contains(args, "--save") {
+		t.Errorf("--save emitted without SaveSchedule set: %v", args)
+	}
+}

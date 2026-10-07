@@ -19,10 +19,12 @@ It is deliberately the simplest addon in the fleet:
   `--version 7|8` resolves through a built-in table to a pinned
   `docker.io/library/redis` tag (7 → `7.4.11`, 8 → `8.10.2`, the default).
   `--image` still bypasses the table with any tag you like.
-- **RDB snapshot persistence.** The dataset lives in a bind-mounted host
-  directory as a plain `dump.rdb` — it survives restarts, and survives
+- **Persistence you can dial in.** By default the dataset is an RDB snapshot in
+  a bind-mounted host directory — it survives restarts, and survives
   `pg addon remove` (without `--clean-data`) so reinstalling the same name
-  revives the data.
+  revives the data. `--aof` adds the write-ahead log on top for crash-safe,
+  no-eviction stores, and `--save no` turns snapshots off entirely (see
+  [Parameters](#parameters)).
 
 Pick Redis for cache/session/ranking/counter workloads next to your PostgreSQL
 instances; it is independent of the PG stack, coexists with any other addon,
@@ -37,45 +39,51 @@ pgcli keeps Redis's parameter surface deliberately small: one flag per knob,
 each mapping to a native `redis-server` option — argv overrides through the
 image's own entrypoint, no `redis.conf` file is generated, and one container
 per instance runs the plain upstream image (no pgcli wrapper, unlike
-[rustfs](../rustfs/)). The table lists every knob with its default and the
-equivalent from Pigsty's [REDIS module
-parameters](https://pigsty.cc/docs/redis/param/) for reference:
+[rustfs](../rustfs/)). The table lists every knob and its default:
 
-| Flag / `pg.yaml` key | Default | Redis option | Pigsty equivalent |
-|----------------------|---------|--------------|-------------------|
-| `--version` / `version` | `8` | — (picks the image tag) | `redis_type` (engine choice, closest analogue) |
-| `--image` / `image_tag` | resolved from the version table | — | package/version selection |
-| `--port` / `port` | auto from `redis_start_port` (base **6379**) | `--port` | the instance key in `redis_instances` |
-| `--listen` / `listen` | `0.0.0.0` | `--bind` | `redis_bind_address` |
-| `--password` / `password` | generated, 20 chars | `--requirepass` | `redis_password` — Pigsty defaults to empty (no auth); pgcli always requires one |
-| `--maxmemory` / `maxmemory` | unset (no cap) | `--maxmemory` + `--maxmemory-policy allkeys-lru` | `redis_max_memory` + `redis_mem_policy` (pgcli pins the policy to `allkeys-lru`) |
-| `--data-dir` / `data_dir` | `<base-dir>/addon/redis/<name>/data` | `--dir /data` (host dir bind-mounted at `/data`) | `redis_fs_main` |
-| — | `autostart: false` | — | — (pgcli-level: `pg autostart enable --redis`) |
+| Flag / `pg.yaml` key | Default | Redis option | Meaning |
+|----------------------|---------|--------------|---------|
+| `--version` / `version` | `8` | — (picks the image tag) | major to install (see [Version selection](#version-selection)) |
+| `--image` / `image_tag` | resolved from the version table | — | override the tag verbatim |
+| `--port` / `port` | auto from `redis_start_port` (base **6379**) | `--port` | host port |
+| `--listen` / `listen` | `0.0.0.0` | `--bind` | bind address (`127.0.0.1` to tighten) |
+| `--password` / `password` | generated, 20 chars | `--requirepass` | auth; always required |
+| `--maxmemory` / `maxmemory` | unset (no cap) | `--maxmemory` | dataset cap that turns eviction on |
+| `--maxmemory-policy` / `maxmemory_policy` | `allkeys-lru` | `--maxmemory-policy` | eviction policy, only under a cap |
+| `--aof` / `aof` | off | `--appendonly yes` | write-ahead log on top of the snapshot |
+| `--appendfsync` / `appendfsync` | `everysec` (Redis's own) | `--appendfsync` | AOF flush strength, only with `--aof` |
+| `--save` / `save` | Redis's default schedule | `--save` | RDB snapshot plan; `no` disables snapshots |
+| `--data-dir` / `data_dir` | `<base-dir>/addon/redis/<name>/data` | `--dir /data` (host dir bind-mounted at `/data`) | where the data lives |
+| — | `autostart: false` | — | start on boot (`pg autostart enable --redis`) |
 
-Policy that is fixed, not exposed as flags:
+How the knobs combine:
 
 - **`requirepass` is always on** — an unauthenticated Redis is not a reachable
-  state, even if `--password` is passed empty by hand into `pg.yaml`.
-- **Persistence is RDB snapshots only** — Redis's own default `save` schedule
-  applies, plus a final snapshot on shutdown (`--stop-timeout 30` gives Redis
-  the time to write it) and a replay from `dump.rdb` at start. This matches
-  the intent of Pigsty's `redis_rdb_save: ['1200 1']`; AOF
-  (`redis_aof_enabled: false`) is deliberately off for both.
-- **`--maxmemory-policy` is pinned to `allkeys-lru`** whenever `--maxmemory` is
-  set: the cap means "cache, evict to stay under", never "hard store". For a
-  no-eviction store, omit `--maxmemory` and size the host instead.
+  state, even if `--password` is left empty by hand in `pg.yaml`.
+- **Persistence defaults to RDB snapshots** — Redis's own `save` schedule, plus
+  a final snapshot on shutdown (`--stop-timeout 30` gives Redis the time to
+  write it) and a replay from `dump.rdb` at start.
+- **`--aof` adds the write-ahead log** (`--appendonly yes`) alongside the
+  snapshot — the durable, no-eviction shape. `--appendfsync` tunes its flush:
+  `always` (durability) / `everysec` (the default) / `no` (throughput). The AOF
+  lives in an `appendonlydir/` under the data dir and is replayed before the
+  snapshot, so it is the source of truth when both are on.
+- **`--save no` disables snapshots** — pair it with `--aof` for an AOF-only
+  store (the summary then reads `aof only`); on its own it means a purely
+  in-memory instance that loses its dataset on restart (the install warns).
+- **`--maxmemory` implies eviction**, defaulting to `allkeys-lru` — the cap
+  means "cache, evict to stay under". Pass `--maxmemory-policy noeviction` for
+  a hard ceiling (writes fail past the cap instead of evicting), or omit
+  `--maxmemory` entirely for no cap. The policy flag requires `--maxmemory`;
+  `--appendfsync` requires `--aof` — the CLI rejects those combinations before
+  it pulls or creates anything.
 
-Pigsty parameters pgcli does not manage: everything behind multi-node
-topology (`redis_mode: sentinel|cluster`, `redis_cluster_replicas`,
-`redis_sentinel_monitor`, per-instance `replica_of`), the config-file
-template (`redis_conf`), dangerous-command renaming
-(`redis_rename_commands`), and monitoring (`redis_exporter_*` — run a
-`redis_exporter` container yourself if wanted). The `REDIS_REMOVE` knobs map
-partially: `--clean-data` is pgcli's `redis_rm_data`; `redis_safeguard` and
-`redis_rm_pkg` have no meaning when nothing is installed on the host. The one
-knob you *can* bend through `--image`: `redis_type: valkey` is just another
-tag — `pg addon install redis --image docker.io/valkey/valkey:8` works, and
-the major reverse-parses as `8`.
+Not every Redis option is a flag, by design: the multi-node surface (Sentinel,
+Cluster, replication) is out of scope — see [Known
+limitations](#known-limitations). And `--image` is the escape hatch for the
+engine itself: `pg addon install redis --image docker.io/valkey/valkey:8`
+runs [Valkey](https://valkey.io/) (the Redis fork), its major reverse-parsing
+as `8`.
 
 ## Version selection
 
@@ -125,26 +133,28 @@ The install summary prints everything a client needs:
   Image:      docker.io/library/redis:8.10.2
   Data:       ~/pg/addon/redis/cache/data
   Address:    0.0.0.0:6379
+  Persistence: rdb snapshots (default save schedule)
 
   Password:    <generated>
 
   Client:      pg redis-cli ping
   Raw DSN:     redis://:<password>@0.0.0.0:6379/0
-  NOTE: listening on every interface (the Pigsty default); the password above is the only gate.
+  NOTE: listening on every interface; the password above is the only gate.
         loopback-only: pg addon install redis --name cache --listen 127.0.0.1 --force
 ```
 
-> **Security model.** Following the Pigsty convention, `listen` defaults to
-> **`0.0.0.0`** — on Linux (host networking) the port is published on every
-> interface, and `requirepass` is the only gate. That is convenient for
-> app-on-another-host setups but means the password is load-bearing: pass
-> `--listen 127.0.0.1` to keep an instance loopback-only. `pg addon list` and
-> the logs never print the password; read it from `pg.yaml`.
+> **Security model.** `listen` defaults to **`0.0.0.0`** — on Linux (host
+> networking) the port is published on every interface, and `requirepass` is
+> the only gate. That is convenient for app-on-another-host setups but means
+> the password is load-bearing: pass `--listen 127.0.0.1` to keep an instance
+> loopback-only. `pg addon list` and the logs never print the password; read it
+> from `pg.yaml`.
 
 Re-running `install` is idempotent: a running container is left alone, a
 stopped one is started. To apply changed ports/listen/password/image, add
 `--force` (the container is recreated from the config; the data dir is
-untouched).
+untouched). The persistence knobs (`--aof`/`--appendfsync`/`--save`/
+`--maxmemory-policy`) take effect the same way.
 
 ## Using Redis
 
@@ -210,16 +220,21 @@ addons:
       version: "8"                       # major as selected/stored
       image_tag: docker.io/library/redis:8.10.2
       # data_dir: /srv/redis-cache       # omit for <base-dir>/addon/redis/cache/data
-      listen: 0.0.0.0                    # Pigsty default; 127.0.0.1 to tighten
+      listen: 0.0.0.0                    # default (all interfaces); 127.0.0.1 to tighten
       port: 6379
       password: <generated>              # written on first install
-      # maxmemory: 256mb                 # optional cap → allkeys-lru eviction
+      # maxmemory: 256mb                 # optional cap
+      # maxmemory_policy: noeviction     # only with a cap; default allkeys-lru
+      # aof: true                        # write-ahead log on top of snapshots
+      # appendfsync: always              # only with aof; default everysec
+      # save: "900 1 300 10"             # RDB schedule; "no" disables snapshots
       autostart: false                   # pg autostart enable --redis --name cache
 ```
 
-Edits to `listen`, `port`, `password`, `maxmemory`, `image_tag`/`version`, or
-`data_dir` take effect after the next `pg addon install redis --name cache
---force` (or via the matching flags).
+Edits to `listen`, `port`, `password`, `maxmemory`/`maxmemory_policy`,
+`aof`/`appendfsync`/`save`, `image_tag`/`version`, or `data_dir` take effect
+after the next `pg addon install redis --name cache --force` (or via the
+matching flags).
 
 ### List
 
@@ -235,6 +250,7 @@ Infra add-ons (redis):
     Address:     0.0.0.0:6379
     Auth:        on (requirepass)
     Maxmemory:   256mb (allkeys-lru)
+    Persistence: rdb + aof (default save schedule, appendonly yes)
     Data:        ~/pg/addon/redis/cache/data
     Image:       docker.io/library/redis:8.10.2
     Container:   pgcli-redis-default-cache
@@ -293,10 +309,15 @@ pg logs addon redis --name cache -f     # follow
 - **`NOAUTH Authentication required` from a raw client** — expected: every
   instance has a `requirepass`. Read it from `pg.yaml`
   (`addons.redis.<name>.password`) or use `pg redis-cli`, which injects it.
-- **`maxmemory` evicting more than you wanted** — `--maxmemory` implies
-  `allkeys-lru` (evict any key to stay under the cap: a cache, not a hard
-  store). For a strict no-eviction store, omit `--maxmemory` and size the host
-  instead.
+- **`maxmemory` evicting more than you wanted** — under a `--maxmemory` cap the
+  default policy is `allkeys-lru` (evict any key to stay under: a cache, not a
+  hard store). Pass `--maxmemory-policy noeviction` to make the cap a hard
+  ceiling instead (writes fail past it rather than evicting), or omit
+  `--maxmemory` for no cap at all.
+- **AOF not replaying the newest writes** — `--appendfsync everysec` (the
+  default) can lose the last second of writes on a hard crash; use
+  `--appendfsync always` when you cannot afford that. A graceful `pg stop`
+  always flushes, so this only bites on an unclean kill.
 - **Image not found at install** — both majors are plain
   `docker.io/library/redis` images pulled on demand; on an air-gapped host,
   `podman load` the tar first (the catalog and export steps live in
@@ -310,13 +331,16 @@ pg logs addon redis --name cache -f     # follow
 
 - **Standalone only** — Sentinel (HA failover) and Redis Cluster (sharding) are
   out of scope, and so is replication (a redis replica of another host). A
-  single instance is a single point: durable workloads want persistence
-  semantics (AOF) or replicas, which this addon does not manage.
+  single instance is a single point: it can be made *durable* on disk with
+  `--aof`, but it cannot fail over to another node — that needs a topology this
+  addon does not manage.
 - **No TLS** — Redis 7's native TLS exists in some builds but is not wired
   here; treat the network path as trusted and rely on `requirepass`, or keep
   the instance loopback-only (`--listen 127.0.0.1`).
 - **macOS is code-complete, untested** — the bridge path (published ports,
   `host.containers.internal` for `pg redis-cli`) mirrors the object stores; it
   has not yet been exercised on a Mac.
-- **RDB granularity** — a crash loses writes since the last snapshot; accept
-  it for cache/session data or move durable data to PostgreSQL.
+- **Default persistence is RDB granularity** — a crash loses writes since the
+  last snapshot. Enable `--aof` when that gap matters (at `everysec` you still
+  lose at most one second; `always` closes it); accept snapshots-only for
+  cache/session data, or move durable data to PostgreSQL.

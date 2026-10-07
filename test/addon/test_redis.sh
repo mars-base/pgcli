@@ -17,6 +17,11 @@
 #   4. --clean-data under rootless must reclaim redis's mapped-uid dump.rdb via
 #      the `podman unshare rm` fallback — proven with a control rm that must
 #      FAIL where pgcli's removal succeeds.
+#   5. PERSISTENCE KNOBS — --aof/--appendfsync/--save land in the container
+#      argv and the config; an AOF instance replays post-snapshot writes across
+#      SIGKILL (no graceful save), the --save no + --aof shape is AOF-only, and
+#      the knob-combination validators reject nonsense before anything is
+#      pulled or created.
 #
 # Usage:
 #   bash test/addon/test_redis.sh                 # full test, cleans up
@@ -163,14 +168,27 @@ file_exists_elevated() {
     test -f "$1" || podman unshare test -f "$1" 2>/dev/null
 }
 
+# rd_cmd <name> — the redis-server argv recorded on the container.
+rd_cmd() {
+    podman inspect "pgcli-redis-$NAMESPACE-$1" --format '{{json .Config.Cmd}}'
+}
+rd_has() { rd_cmd "$1" | grep -qF -- "$2"; }
+
+# hard_kill <name> — SIGKILL (podman kill's flag form is --signal, not -9), so
+# Redis never gets its final SIGTERM save. Only an enabled AOF can bring data
+# written after the last snapshot back.
+hard_kill() { podman kill --signal KILL "pgcli-redis-$NAMESPACE-$1" >/dev/null 2>&1; }
+
 cleanup() {
     if [ "$SKIP_DESTROY" = true ]; then
         yellow "Skipping cleanup (--skip-destroy)"; return
     fi
     section "Cleanup"
-    pg addon remove redis --name "$LEGACY" --clean-data 2>/dev/null || true
-    pg addon remove redis --name "$CACHE"  --clean-data 2>/dev/null || true
-    pg addon remove redis --name "imgtest" --clean-data 2>/dev/null || true
+    pg addon remove redis --name "$LEGACY"  --clean-data 2>/dev/null || true
+    pg addon remove redis --name "$CACHE"   --clean-data 2>/dev/null || true
+    pg addon remove redis --name "imgtest"  --clean-data 2>/dev/null || true
+    pg addon remove redis --name "aoftest"  --clean-data 2>/dev/null || true
+    pg addon remove redis --name "rdbtest"  --clean-data 2>/dev/null || true
     rm -rf "$CONFIG_DIR"
     [ -d "$TEST_DIR" ] && { podman unshare rm -rf "$TEST_DIR" 2>/dev/null || rm -rf "$TEST_DIR" 2>/dev/null || true; }
     green "  Cleanup done"
@@ -272,7 +290,7 @@ main() {
     fi
     TESTS=$((TESTS + 1))
     if REDISCLI_AUTH="wrong-password" pg redis-cli --name "$CACHE" ping 2>&1 \
-        | grep -qiE 'NOAUTH|invalid password|AUTH'; then
+        | grep -qiE 'NOAUTH|WRONGPASS|invalid password|AUTH'; then
         pass "wrong REDISCLI_AUTH is refused (proves the env var is what authenticates)"
     else
         fail "wrong REDISCLI_AUTH unexpectedly accepted"
@@ -405,6 +423,116 @@ main() {
     else
         fail "no local redis image to seed the --image fixture (podman load the tar first)"
     fi
+
+    # ---- AOF: appendonly + appendfsync + save schedule knobs ----
+    # --aof turns on the write-ahead log; appendfsync tunes its flush; --save
+    # overrides/disables the RDB schedule. The headline is a SIGKILL: only an
+    # enabled AOF replays writes made after the last snapshot.
+    section "AOF (--aof --appendfsync --save)"
+    TESTS=$((TESTS + 1))
+    if AOF_OUT="$(pg addon install redis --name aoftest --aof --appendfsync everysec \
+                    --save "900 1 300 10" 2>&1)"; then
+        pass "install redis --name aoftest --aof --appendfsync --save"
+    else
+        fail "install with --aof"; echo "$AOF_OUT" | sed 's/^/      | /'
+    fi
+    echo "$AOF_OUT" | sed 's/^/      /'
+    run_grep "summary shows the aof persistence line" "rdb + aof" echo "$AOF_OUT"
+    run_grep "summary echoes the save schedule" "save 900 1 300 10" echo "$AOF_OUT"
+    run_test "aof stored" test "$(redis_field aoftest aof)" = "true"
+    run_test "appendfsync stored" test "$(redis_field aoftest appendfsync)" = "everysec"
+    run_test "save schedule stored" test "$(redis_field aoftest save)" = "900 1 300 10"
+    run_test "--appendonly yes in the container command" rd_has aoftest "--appendonly"
+    run_test "--appendfsync in the container command" rd_has aoftest "--appendfsync"
+    run_test "--save in the container command" rd_has aoftest "--save"
+    AOFPORT="$(redis_field aoftest port)"
+    run_test "aof answers ping" redis_ping aoftest
+    # Write a value, then SIGKILL (no graceful save, no snapshot in this
+    # window), start explicitly (podman's restart policy needs a systemd
+    # timer we don't assume here), and read back: only the AOF can replay a
+    # write that no dump.rdb ever contained.
+    pg redis-cli --name aoftest set aof:key "aof-survivor" >/dev/null 2>&1 || true
+    sleep 2   # let appendfsync everysec flush the write to the log
+    hard_kill aoftest
+    run_test "aof container down after SIGKILL" rd_down aoftest
+    run_grep "start brings it back" "started" pg addon start redis --name aoftest
+    run_test "port answers after restart" wait_port "$AOFPORT"
+    TESTS=$((TESTS + 1))
+    if [ "$(redis_get aoftest aof:key)" = "aof-survivor" ]; then
+        pass "post-SIGKILL restart replayed the AOF (write after last snapshot survived)"
+    else
+        fail "AOF did not replay the post-snapshot write: got '$(redis_get aoftest aof:key)'"
+    fi
+    # appendonlydir is the AOF's own on-disk tree under the data dir.
+    run_test "appendonlydir created under the data dir" \
+        bash -c "ls -d '$(data_dir_of aoftest)'/appendonlydir >/dev/null 2>&1 || podman unshare ls -d '$(data_dir_of aoftest)'/appendonlydir >/dev/null 2>&1"
+
+    # Control: an RDB-only instance (no --aof), never snapshotted, same hard
+    # kill — the write is GONE. This is what makes the AOF result above
+    # meaningful: same kill, opposite outcome, and the only difference is AOF.
+    pg addon install redis --name rdbtest >/dev/null 2>&1 || true
+    RDBPORT="$(redis_field rdbtest port)"
+    pg redis-cli --name rdbtest set rdb:key "gone-after-kill" >/dev/null 2>&1 || true
+    sleep 2   # Redis's own schedules need 60s+ here, so no snapshot can exist
+    hard_kill rdbtest
+    run_test "rdb-only container down after SIGKILL" rd_down rdbtest
+    pg addon start redis --name rdbtest >/dev/null 2>&1 || true
+    run_test "rdb-only instance answers again" wait_port "$RDBPORT"
+    TESTS=$((TESTS + 1))
+    if [ -z "$(redis_get rdbtest rdb:key)" ]; then
+        pass "control: RDB-only instance LOSES the un-snapshotted write after SIGKILL"
+    else
+        fail "RDB-only instance unexpectedly kept the write (control invalid): '$(redis_get rdbtest rdb:key)'"
+    fi
+    pg addon remove redis --name rdbtest --clean-data >/dev/null 2>&1 || true
+
+    # --save no + AOF = aof-only (snapshots disabled). Recreating with --force
+    # applies the new schedule; the unique thing to prove is the CLI-side
+    # mapping (pgcli's "no" → Redis's own empty --save value), which a plain
+    # SIGKILL replay already covers for durability (section above).
+    TESTS=$((TESTS + 1))
+    if AOFONLY_OUT="$(pg addon install redis --name aoftest --save no --force 2>&1)"; then
+        pass "re-install --save no --force (snapshots off, AOF kept)"
+    else
+        fail "--save no reinstall"; echo "$AOFONLY_OUT" | sed 's/^/      | /'
+    fi
+    echo "$AOFONLY_OUT" | sed 's/^/      /'
+    run_grep "summary shows aof-only persistence" "aof only" echo "$AOFONLY_OUT"
+    run_test "aof still on after --save no reinstall" test "$(redis_field aoftest aof)" = "true"
+    run_test "save stored as 'no'" test "$(redis_field aoftest save)" = "no"
+    # The container must carry --save whose value is the empty disable token.
+    # Match tolerantly: podman's {{json}} Cmd array may or may not space the
+    # comma, so --save","" and --save", "" are both acceptable.
+    TESTS=$((TESTS + 1))
+    if rd_cmd aoftest | grep -qE -- '--save",[[:space:]]*""'; then
+        pass "--save no mapped to an empty --save in the container argv"
+    else
+        fail "--save no did not map to empty --save: $(rd_cmd aoftest)"
+    fi
+    # The recreate replaced the container, so the dataset must have come back
+    # purely from the AOF replay under the new aof-only argv.
+    run_test "aof-only recreate replayed the earlier write" \
+        test "$(redis_get aoftest aof:key)" = "aof-survivor"
+
+    # Knobs that need their partner are rejected before anything is created.
+    run_fails "--maxmemory-policy without --maxmemory" "requires --maxmemory" \
+        pg addon install redis --name badknob --maxmemory-policy noeviction
+    run_fails "--appendfsync without --aof" "requires --aof" \
+        pg addon install redis --name badknob --appendfsync always
+    run_fails "unknown --maxmemory-policy" "unknown --maxmemory-policy" \
+        pg addon install redis --name badknob --maxmemory 64mb --maxmemory-policy allkeys-fifo
+    run_fails "unknown --appendfsync" "unknown --appendfsync" \
+        pg addon install redis --name badknob --aof --appendfsync sometimes
+    run_fails "malformed --save (odd count)" "malformed --save" \
+        pg addon install redis --name badknob --save "900 1 300"
+    run_fails "malformed --save (non-integer)" "non-negative integer" \
+        pg addon install redis --name badknob --save "900 one"
+    # A rejected install must not leave a config entry behind.
+    run_not_grep "badknob never entered the config" "badknob:" cat "$CONFIG_FILE"
+
+    run_test "remove aoftest --clean-data" pg addon remove redis --name aoftest --clean-data
+    run_test "aoftest gone" rd_gone aoftest
+    run_test "aoftest data deleted" test ! -d "$(data_dir_of aoftest)"
 
     # ---- Remove: data kept by default; --clean-data deletes ----
     section "Remove / --clean-data"

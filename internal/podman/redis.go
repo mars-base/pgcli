@@ -163,7 +163,8 @@ func (m *RedisManager) StartContainer(rc *config.RedisConfig) error {
 
 // createContainer runs redis-server with the argv from redisServerArgs
 // (pure, unit-tested there). Linux: host networking — the published port is
-// simply rc.Port on sc.Listen's bind, default 0.0.0.0 (Pigsty semantics).
+// simply rc.Port on sc.Listen's bind, default 0.0.0.0 (requirepass is on, so
+// publishing the port is safe).
 // macOS: the same port on the pgcli-net bridge, published -p N:N, with the
 // bind widened to 0.0.0.0 via proxyBindHost so gvproxy can reach it.
 // --stop-timeout 30 lets Redis answer SIGTERM with its usual final RDB save

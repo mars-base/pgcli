@@ -2,6 +2,7 @@ package podman
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/mars-base/pgcli/internal/config"
 )
@@ -21,8 +22,14 @@ const redisContainerDataDir = "/data"
 // --requirepass is always emitted: rc.Password is generated at first install
 // (config.ApplyDefaults never fills it), and Redis has no auth otherwise — a
 // Listen default of 0.0.0.0 would be a bare open port without it. --dir pins
-// the RDB location. --maxmemory is opt-in; when set, allkeys-lru makes it a
-// real cache (evicts any key) rather than just a hard write ceiling.
+// the persistence files' location. Every knob beyond port/requirepass/bind/dir
+// is opt-in, and empty means "leave Redis's own default alone": --maxmemory
+// pairs with allkeys-lru unless MaxMemoryPolicy says otherwise, --appendonly
+// comes with an optional --appendfsync strength, and --save overrides (or, as
+// "no", disables) the RDB snapshot schedule.
+//
+// The flag values are validated by the CLI layer, not here — see
+// validateRedisKnobs in internal/cli/addon.go.
 func redisServerArgs(rc *config.RedisConfig, bindHost string) []string {
 	args := []string{
 		"redis-server",
@@ -32,7 +39,28 @@ func redisServerArgs(rc *config.RedisConfig, bindHost string) []string {
 		"--dir", redisContainerDataDir,
 	}
 	if rc.MaxMemory != "" {
-		args = append(args, "--maxmemory", rc.MaxMemory, "--maxmemory-policy", "allkeys-lru")
+		policy := rc.MaxMemoryPolicy
+		if policy == "" {
+			policy = "allkeys-lru"
+		}
+		args = append(args, "--maxmemory", rc.MaxMemory, "--maxmemory-policy", policy)
+	}
+	if rc.AOF {
+		args = append(args, "--appendonly", "yes")
+		if rc.AppendFsync != "" {
+			args = append(args, "--appendfsync", rc.AppendFsync)
+		}
+	}
+	if rc.SaveSchedule != "" {
+		// The whole schedule is one argv element: redis-server's own
+		// command-line syntax is --save "900 1 300 10", and splitting it
+		// would make the trailing numbers look like config files. pgcli's
+		// "no" token maps to the native disable value, the empty string.
+		val := strings.Join(strings.Fields(rc.SaveSchedule), " ")
+		if val == "no" {
+			val = ""
+		}
+		args = append(args, "--save", val)
 	}
 	return args
 }

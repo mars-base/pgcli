@@ -693,21 +693,41 @@ type RustfsConfig struct {
 // Version/ImageTag implement the first version-selection mechanism in pgcli:
 // Version is the major ("7" | "8"), ImageTag the resolved full reference
 // (redisMajorImages below). --image overrides ImageTag directly and Version is
-// then reverse-parsed for display only. Redis defaults to Listen 0.0.0.0 —
-// the Pigsty redis_bind_address convention — with Password always generated
-// (requirepass), since a port published on every interface is meaningless
-// without auth. Persistence is the native RDB snapshot into /data (DataDir);
-// AOF is not exposed as an option.
+// then reverse-parsed for display only. Redis defaults to Listen 0.0.0.0 with
+// Password always generated (requirepass), since a port published on every
+// interface is meaningless without auth. Persistence is the native RDB
+// snapshot into /data (DataDir); AOF is opt-in via AOF. The persistence and
+// eviction knobs (SaveSchedule, AppendFsync, MaxMemoryPolicy) stay opt-in too:
+// an empty value means "Redis's own default", so the flags widen the surface
+// without ever changing the shape of a default install.
 type RedisConfig struct {
 	ContainerName string `yaml:"container_name"`      // pgcli-redis<ns>-<name>
 	Name          string `yaml:"name,omitempty"`      // addon key, defaults to the map key
 	Version       string `yaml:"version,omitempty"`   // Redis major: "7" | "8"
 	ImageTag      string `yaml:"image_tag,omitempty"` // docker.io/library/redis:<x.y.z>, resolved from Version
 	DataDir       string `yaml:"data_dir,omitempty"`  // host dir bound to /data; default <base-dir>/addon/redis/<name>/data
-	Listen        string `yaml:"listen,omitempty"`    // bind address, default 0.0.0.0 (Pigsty convention)
+	Listen        string `yaml:"listen,omitempty"`    // bind address, default 0.0.0.0
 	Port          int    `yaml:"port,omitempty"`      // host port, 6379+ auto-assigned
 	Password      string `yaml:"password,omitempty"`  // → requirepass, generated on first install
 	MaxMemory     string `yaml:"maxmemory,omitempty"` // optional cap, e.g. "256mb"; empty = unlimited
+
+	// MaxMemoryPolicy is the eviction policy paired with MaxMemory. Empty means
+	// allkeys-lru — the cache default pgcli pins when --maxmemory is given
+	// without a policy. Only meaningful with a MaxMemory cap.
+	MaxMemoryPolicy string `yaml:"maxmemory_policy,omitempty"`
+
+	// AOF turns on appendonly: a write-ahead log under DataDir in front of the
+	// RDB snapshot, for crash-safe no-eviction stores. Off by default.
+	AOF bool `yaml:"aof,omitempty"`
+
+	// AppendFsync is the AOF flush strength: always | everysec | no. Empty
+	// means Redis's own default (everysec). Only meaningful with AOF.
+	AppendFsync string `yaml:"appendfsync,omitempty"`
+
+	// SaveSchedule is the RDB snapshot plan as space-separated
+	// "seconds changes" pairs ("900 1 300 10"). Empty means Redis's own
+	// default schedule; "no" disables snapshots (the AOF-only shape).
+	SaveSchedule string `yaml:"save,omitempty"`
 
 	// Autostart brings this container up on host boot via the boot service
 	// (pg autostart enable --redis). Start-only: it starts the existing
@@ -1510,9 +1530,9 @@ func (c *Config) ApplyDefaults() {
 	// configs surface as an image-not-found pull error, not a silent rewrite).
 	// Password is deliberately NOT generated here — ApplyDefaults must stay
 	// deterministic (it runs on every load), so the CLI install handler fills it
-	// once, same as rustfs's RootPassword. Listen defaults to 0.0.0.0 (the
-	// Pigsty redis_bind_address convention): requirepass is always set, so an
-	// unauthenticated Redis is not a reachable state.
+	// once, same as rustfs's RootPassword. Listen defaults to 0.0.0.0:
+	// requirepass is always set, so an unauthenticated Redis is not a
+	// reachable state.
 	for name, addon := range c.Addons.Redis {
 		if addon.Name == "" {
 			addon.Name = name

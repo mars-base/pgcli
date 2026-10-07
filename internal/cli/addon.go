@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -153,6 +154,8 @@ Infra addon (redis — standalone KV store for cache/session/ranking/counters,
 Linux and macOS; the first version-selectable addon):
   pg addon install redis [--name cache] [--version 7|8] [--port N]
                          [--listen 0.0.0.0] [--password ...] [--maxmemory 256mb]
+                         [--maxmemory-policy noeviction] [--aof]
+                         [--appendfsync always|everysec|no] [--save "900 1 300 10"|no]
                          [--data-dir ...] [--image ...] [--force]
   --version chooses the major; each maps to a pinned upstream tag (see
   docs/images.md) and defaults to "8" when omitted. --image overrides the tag
@@ -160,11 +163,14 @@ Linux and macOS; the first version-selectable addon):
   tag). The port is drawn from its own pool (redis_start_port, default 6379).
   A requirepass password is generated on first install, printed once, and stored
   under addons.redis.<name>; pass --password to pin it yourself. --maxmemory
-  caps the dataset and turns on allkeys-lru eviction (a real cache); empty means
+  caps the dataset and defaults to allkeys-lru eviction (a real cache); pair it
+  with --maxmemory-policy noeviction for a hard ceiling, or leave it empty for
   no cap. Persistence is the native RDB snapshot into --data-dir (default
-  <base_dir>/addon/redis/<name>/data), so remove/reinstall revives the data.
-  Listen defaults to 0.0.0.0 (the Pigsty redis_bind_address convention) —
-  requirepass is always on, so pass --listen 127.0.0.1 to keep it loopback-only.
+  <base_dir>/addon/redis/<name>/data), so remove/reinstall revives the data;
+  --aof adds the write-ahead log on top (--appendfsync tunes its flush), and
+  --save overrides the snapshot schedule or "no" disables snapshots entirely.
+  Listen defaults to 0.0.0.0 — requirepass is always on, so pass
+  --listen 127.0.0.1 to keep it loopback-only.
   Talk to it with "pg redis-cli" (a short-lived redis-cli container wired to the
   first redis addon; see that command's help).
 
@@ -406,6 +412,10 @@ func init() {
 	addonInstallCmd.Flags().String("version", "", "Redis major version to install: 7 or 8 (default \"8\"); each maps to a pinned upstream docker.io/library/redis tag. Ignored for every other addon")
 	addonInstallCmd.Flags().String("password", "", "Redis requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls)")
 	addonInstallCmd.Flags().String("maxmemory", "", "Redis memory cap, e.g. 256mb or 2gb — turns the instance into a real cache (allkeys-lru evicts keys at the cap); empty means no cap")
+	addonInstallCmd.Flags().String("maxmemory-policy", "", "Redis eviction policy to pair with --maxmemory (noeviction | allkeys-lru | allkeys-lfu | volatile-lru | volatile-lfu | volatile-ttl; default allkeys-lru; requires --maxmemory)")
+	addonInstallCmd.Flags().Bool("aof", false, "Redis: enable AOF (appendonly yes) — a write-ahead log on top of the RDB snapshot, for crash-safe no-eviction stores; off by default")
+	addonInstallCmd.Flags().String("appendfsync", "", "Redis AOF flush strength: always (durability) | everysec (default) | no (throughput); requires --aof")
+	addonInstallCmd.Flags().String("save", "", `Redis RDB snapshot schedule, e.g. "900 1 300 10" (empty keeps Redis's own default; "no" disables snapshots, e.g. for an AOF-only instance)`)
 
 	// start / stop flags
 	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs or redis instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"redis\")")
@@ -2280,6 +2290,97 @@ func runAddonInstallRustfs(cmd *cobra.Command) error {
 	return nil
 }
 
+// redisEvictionPolicies are the --maxmemory-policy values pgcli accepts — the
+// native redis-server set minus the lfu/random variants tied to maxmemory-
+// samples tuning that pgcli does not expose.
+var redisEvictionPolicies = []string{
+	"noeviction", "allkeys-lru", "allkeys-lfu", "volatile-lru", "volatile-lfu", "volatile-ttl",
+}
+
+// redisAppendFsyncs are the --appendfsync strengths, in durability order.
+var redisAppendFsyncs = []string{"always", "everysec", "no"}
+
+// validateRedisKnobs rejects nonsense in the persistence/eviction knobs before
+// anything is pulled or created. It runs on the effective merged config, so
+// constraints apply across reinstalls too (a stored --maxmemory-policy without
+// a cap — from a hand-edit or a dropped flag — is still caught). Each knob is
+// opt-in: an empty value means "Redis's own default" and is always valid. The
+// save schedule is validated as pairs of integers (or the "no" disable token)
+// because a malformed schedule would otherwise surface as a redis-server
+// startup failure inside the container, where it is much harder to diagnose.
+func validateRedisKnobs(rc config.RedisConfig) error {
+	if rc.MaxMemoryPolicy != "" {
+		if rc.MaxMemory == "" {
+			return fmt.Errorf("--maxmemory-policy requires --maxmemory (the policy only applies under a memory cap)")
+		}
+		if !slices.Contains(redisEvictionPolicies, rc.MaxMemoryPolicy) {
+			return fmt.Errorf("unknown --maxmemory-policy %q (available: %s)", rc.MaxMemoryPolicy, strings.Join(redisEvictionPolicies, ", "))
+		}
+	}
+	if rc.AppendFsync != "" {
+		if !rc.AOF {
+			return fmt.Errorf("--appendfsync requires --aof (it tunes the AOF flush the log enables)")
+		}
+		if !slices.Contains(redisAppendFsyncs, rc.AppendFsync) {
+			return fmt.Errorf("unknown --appendfsync %q (available: %s)", rc.AppendFsync, strings.Join(redisAppendFsyncs, ", "))
+		}
+	}
+	if rc.SaveSchedule != "" && rc.SaveSchedule != "no" {
+		fields := strings.Fields(rc.SaveSchedule)
+		if len(fields)%2 != 0 {
+			return fmt.Errorf(`malformed --save %q: want "seconds changes" pairs, e.g. "900 1 300 10" (or "no" to disable snapshots)`, rc.SaveSchedule)
+		}
+		for _, f := range fields {
+			n, err := strconv.Atoi(f)
+			if err != nil || n < 0 {
+				return fmt.Errorf(`malformed --save %q: %q is not a non-negative integer (want "seconds changes" pairs, e.g. "900 1 300 10")`, rc.SaveSchedule, f)
+			}
+		}
+	}
+	return nil
+}
+
+// redisEffectivePolicy is the eviction policy actually in force under a
+// memory cap — the stored one, or allkeys-lru when the operator did not pick
+// one (same fallback redisServerArgs emits, so displays never disagree with
+// the container's argv).
+func redisEffectivePolicy(rc config.RedisConfig) string {
+	if rc.MaxMemoryPolicy != "" {
+		return rc.MaxMemoryPolicy
+	}
+	return "allkeys-lru"
+}
+
+// redisPersistenceSummary renders the persistence line shared by the install
+// summary and addon list: what actually protects the data right now.
+func redisPersistenceSummary(rc config.RedisConfig) string {
+	snapshotsOff := rc.SaveSchedule == "no"
+	switch {
+	case rc.AOF && snapshotsOff:
+		return "aof only (appendonly yes" + redisFsyncSuffix(rc) + ", snapshots off)"
+	case rc.AOF:
+		return "rdb + aof (" + redisSaveLabel(rc) + ", appendonly yes" + redisFsyncSuffix(rc) + ")"
+	case snapshotsOff:
+		return "none (snapshots off, no aof)"
+	default:
+		return "rdb snapshots (" + redisSaveLabel(rc) + ")"
+	}
+}
+
+func redisFsyncSuffix(rc config.RedisConfig) string {
+	if rc.AppendFsync == "" {
+		return ""
+	}
+	return ", appendfsync " + rc.AppendFsync
+}
+
+func redisSaveLabel(rc config.RedisConfig) string {
+	if rc.SaveSchedule == "" {
+		return "default save schedule"
+	}
+	return "save " + rc.SaveSchedule
+}
+
 // resolveRedisVersion applies the version-selection rules for the redis addon
 // and writes the outcome into rc (Version / ImageTag). Precedence: an explicit
 // --image wins outright and --version is demoted to a display label
@@ -2338,6 +2439,11 @@ func runAddonInstallRedis(cmd *cobra.Command) error {
 	listenAddr, _ := cmd.Flags().GetString("listen")
 	password, _ := cmd.Flags().GetString("password")
 	maxMemory, _ := cmd.Flags().GetString("maxmemory")
+	maxMemoryPolicy, _ := cmd.Flags().GetString("maxmemory-policy")
+	aof, _ := cmd.Flags().GetBool("aof")
+	aofSet := cmd.Flags().Changed("aof")
+	appendfsync, _ := cmd.Flags().GetString("appendfsync")
+	saveSchedule, _ := cmd.Flags().GetString("save")
 	force, _ := cmd.Flags().GetBool("force")
 
 	path := cfgPath
@@ -2376,6 +2482,24 @@ func runAddonInstallRedis(cmd *cobra.Command) error {
 	}
 	if maxMemory != "" {
 		existing.MaxMemory = maxMemory
+	}
+	if maxMemoryPolicy != "" {
+		existing.MaxMemoryPolicy = maxMemoryPolicy
+	}
+	if aofSet {
+		existing.AOF = aof
+	}
+	if appendfsync != "" {
+		existing.AppendFsync = appendfsync
+	}
+	if saveSchedule != "" {
+		existing.SaveSchedule = saveSchedule
+	}
+	// Validate the effective (merged) values: stored flags count too, so
+	// --maxmemory-policy alone is legal on an instance that already has a
+	// --maxmemory cap.
+	if err := validateRedisKnobs(existing); err != nil {
+		return err
 	}
 	if existing.Name == "" {
 		existing.Name = name
@@ -2438,7 +2562,14 @@ func runAddonInstallRedis(cmd *cobra.Command) error {
 			return err
 		}
 		if rc.MaxMemory != "" {
-			fmt.Println("-> NOTE: --maxmemory is set, so eviction policy is allkeys-lru — Redis will evict keys to stay under the cap (a cache, not a hard store).")
+			if redisEffectivePolicy(rc) == "noeviction" {
+				fmt.Println("-> NOTE: --maxmemory with noeviction — writes fail past the cap instead of evicting (a hard ceiling).")
+			} else {
+				fmt.Printf("-> NOTE: --maxmemory with %s — Redis evicts keys to stay under the cap (a cache, not a hard store).\n", redisEffectivePolicy(rc))
+			}
+		}
+		if rc.SaveSchedule == "no" && !rc.AOF {
+			fmt.Println("-> NOTE: snapshots are disabled and AOF is off — this instance loses its whole dataset on restart. Pair --save no with --aof for a durable store.")
 		}
 		fmt.Println("-> Starting redis container...")
 		if err := rm.EnsureContainer(&rc); err != nil {
@@ -2464,15 +2595,16 @@ func runAddonInstallRedis(cmd *cobra.Command) error {
 	fmt.Printf("  Data:       %s\n", rm.DataDir(&rc))
 	fmt.Printf("  Address:    %s:%d\n", rc.Listen, rc.Port)
 	if rc.MaxMemory != "" {
-		fmt.Printf("  Maxmemory:  %s (allkeys-lru)\n", rc.MaxMemory)
+		fmt.Printf("  Maxmemory:   %s (%s)\n", rc.MaxMemory, redisEffectivePolicy(rc))
 	}
+	fmt.Printf("  Persistence: %s\n", redisPersistenceSummary(rc))
 	fmt.Println()
 	fmt.Printf("  Password:    %s\n", rc.Password)
 	fmt.Println()
 	fmt.Printf("  Client:      pg redis-cli ping\n")
 	fmt.Printf("  Raw DSN:     redis://:%s@%s:%d/0\n", rc.Password, rc.Listen, rc.Port)
 	if rc.Listen == "0.0.0.0" {
-		fmt.Println("  NOTE: listening on every interface (the Pigsty default); the password above is the only gate.")
+		fmt.Println("  NOTE: listening on every interface; the password above is the only gate.")
 		fmt.Printf("        loopback-only: pg addon install redis --name %s --listen 127.0.0.1 --force\n", name)
 	}
 	return nil
@@ -3261,8 +3393,9 @@ func runAddonList() error {
 			}
 			fmt.Printf("    Auth:        %s\n", auth)
 			if rc.MaxMemory != "" {
-				fmt.Printf("    Maxmemory:   %s (allkeys-lru)\n", rc.MaxMemory)
+				fmt.Printf("    Maxmemory:   %s (%s)\n", rc.MaxMemory, redisEffectivePolicy(rc))
 			}
+			fmt.Printf("    Persistence: %s\n", redisPersistenceSummary(rc))
 			fmt.Printf("    Data:        %s\n", rm.DataDir(&rc))
 			fmt.Printf("    Image:       %s\n", rc.ImageTag)
 			fmt.Printf("    Container:   %s\n", rc.ContainerName)

@@ -16,9 +16,10 @@ weight: 50
 - **版本选择。** 首个支持版本选择的插件：`--version 7|8` 通过内置映射表解析
   到固定的 `docker.io/library/redis` 标签（7 → `7.4.11`，8 → `8.10.2`，默认
   8）。`--image` 仍可绕过映射表直接指定任意标签。
-- **RDB 快照持久化。** 数据集以 `dump.rdb` 形式落在 bind 挂载的主机目录
-  ——重启后仍在，`pg addon remove`（不带 `--clean-data`）后也仍在，重装同名
-  实例即可复活数据。
+- **可调的持久化。** 默认数据集是落在 bind 挂载主机目录里的 RDB 快照——重启
+  后仍在，`pg addon remove`（不带 `--clean-data`）后也仍在，重装同名实例即可
+  复活数据。`--aof` 在其上叠加写前日志，用于崩溃安全、不驱逐的存储；
+  `--save no` 可彻底关闭快照（见[参数设置](#参数设置)）。
 
 在 PostgreSQL 实例旁边做缓存/会话/排行榜/计数就选 Redis；它与 PG 栈无关，可
 与任何插件并存，同一主机也能跑多个实例（甚至跨大版本）。
@@ -31,41 +32,44 @@ weight: 50
 pgcli 刻意把 Redis 的参数面做得很小：一个可调项对应一个 flag，最终都落到
 `redis-server` 的原生选项上——经镜像自带 entrypoint 用 argv 覆盖，不生成
 `redis.conf`；一个实例一个容器，直接用纯上游镜像（pgcli 不为 Redis 构建
-wrapper，这点与 [rustfs](../rustfs/) 不同）。下表列出每个可调项、默认值，以及
-Pigsty [REDIS 模块参数](https://pigsty.cc/docs/redis/param/) 里的对应项供参照：
+wrapper，这点与 [rustfs](../rustfs/) 不同）。下表列出每个可调项及其默认值：
 
-| Flag / `pg.yaml` 键 | 默认值 | Redis 选项 | Pigsty 对应参数 |
+| Flag / `pg.yaml` 键 | 默认值 | Redis 选项 | 含义 |
 |---|---|---|---|
-| `--version` / `version` | `8` | —（决定镜像 tag） | `redis_type`（引擎选择，最接近的对应） |
-| `--image` / `image_tag` | 由版本映射表解析 | — | 版本/包选择 |
-| `--port` / `port` | 从 `redis_start_port` 自动分配（基 **6379**） | `--port` | `redis_instances` 的实例键 |
-| `--listen` / `listen` | `0.0.0.0` | `--bind` | `redis_bind_address` |
-| `--password` / `password` | 自动生成 20 字符 | `--requirepass` | `redis_password`——Pigsty 默认留空即禁用密码，pgcli 始终要求一个 |
-| `--maxmemory` / `maxmemory` | 不设（无上限） | `--maxmemory` + `--maxmemory-policy allkeys-lru` | `redis_max_memory` + `redis_mem_policy`（pgcli 把策略钉死为 `allkeys-lru`） |
-| `--data-dir` / `data_dir` | `<base-dir>/addon/redis/<name>/data` | `--dir /data`（主机目录 bind 挂载到 `/data`） | `redis_fs_main` |
-| — | `autostart: false` | — | —（pgcli 层：`pg autostart enable --redis`） |
+| `--version` / `version` | `8` | —（决定镜像 tag） | 安装的大版本（见[版本选择](#版本选择)） |
+| `--image` / `image_tag` | 由版本映射表解析 | — | 直接指定任意 tag |
+| `--port` / `port` | 从 `redis_start_port` 自动分配（基 **6379**） | `--port` | 宿主端口 |
+| `--listen` / `listen` | `0.0.0.0` | `--bind` | 监听地址（`127.0.0.1` 收紧） |
+| `--password` / `password` | 自动生成 20 字符 | `--requirepass` | 认证；始终必须存在 |
+| `--maxmemory` / `maxmemory` | 不设（无上限） | `--maxmemory` | 数据集上限，开启驱逐 |
+| `--maxmemory-policy` / `maxmemory_policy` | `allkeys-lru` | `--maxmemory-policy` | 驱逐策略，仅在设了上限时有意义 |
+| `--aof` / `aof` | 关 | `--appendonly yes` | 在快照之上叠加写前日志 |
+| `--appendfsync` / `appendfsync` | `everysec`（Redis 自身默认） | `--appendfsync` | AOF 刷盘强度，仅在开 `--aof` 时有意义 |
+| `--save` / `save` | Redis 默认计划 | `--save` | RDB 快照计划；`no` 关闭快照 |
+| `--data-dir` / `data_dir` | `<base-dir>/addon/redis/<name>/data` | `--dir /data`（主机目录 bind 挂载到 `/data`） | 数据落盘位置 |
+| — | `autostart: false` | — | 开机自启（`pg autostart enable --redis`） |
 
-固定、不对外暴露为 flag 的策略：
+各旋钮的组合方式：
 
-- **`requirepass` 始终开启**——即使手工往 `pg.yaml` 里塞空 `password`，也不存在
-  "未认证的 Redis" 这种可达状态。
-- **持久化仅 RDB 快照**——沿用 Redis 自身的默认 `save` 计划，外加停机时补一份
-  最终快照（`--stop-timeout 30` 给足时间）与启动时从 `dump.rdb` 回放。这与
-  Pigsty `redis_rdb_save: ['1200 1']` 的意图一致；AOF（`redis_aof_enabled:
-  false`）两边都刻意关着。
-- **设了 `--maxmemory` 就把 `--maxmemory-policy` 钉为 `allkeys-lru`**：上限的
-  语义是"缓存，超了就驱逐"，不是"硬存储"。要严格不驱逐就别设 `--maxmemory`，
-  改为按主机容量规划。
+- **`requirepass` 始终开启**——即使手工往 `pg.yaml` 里留空 `password`，也不
+  存在"未认证的 Redis"这种可达状态。
+- **持久化默认只有 RDB 快照**——沿用 Redis 自身的 `save` 计划，外加停机时补
+  一份最终快照（`--stop-timeout 30` 给足时间）与启动时从 `dump.rdb` 回放。
+- **`--aof` 在快照之上叠加写前日志**（`--appendonly yes`）——耐久、不驱逐的
+  存储形态。`--appendfsync` 调节刷盘强度：`always`（耐久）/ `everysec`（默
+  认）/ `no`（吞吐）。AOF 文件在数据目录的 `appendonlydir/` 下，启动时先于
+  快照回放，两者同开时以 AOF 为准。
+- **`--save no` 关闭快照**——与 `--aof` 搭配即 AOF-only（安装摘要显示
+  `aof only`）；单独使用则是纯内存实例，重启丢数据（install 会警告）。
+- **`--maxmemory` 隐含驱逐**，默认 `allkeys-lru`——上限的语义是"缓存，超了
+  就驱逐"。传 `--maxmemory-policy noeviction` 变成硬顶（超上限写失败而非驱逐
+  键），或干脆不设 `--maxmemory` 表示无上限。policy 依赖 `--maxmemory`、
+  `--appendfsync` 依赖 `--aof`——CLI 在拉镜像/建容器之前就拒绝这类组合。
 
-Pigsty 参数中 pgcli 不管理的那些：多节点拓扑相关的一切（`redis_mode:
-sentinel|cluster`、`redis_cluster_replicas`、`redis_sentinel_monitor`、实例级
-`replica_of`）、配置文件模板（`redis_conf`）、危险命令重命名
-（`redis_rename_commands`）、监控（`redis_exporter_*`——需要的话自行跑一个
-`redis_exporter` 容器）。`REDIS_REMOVE` 只部分对应：`--clean-data` 即
-pgcli 的 `redis_rm_data`；`redis_safeguard` 与 `redis_rm_pkg` 在"主机上没装任何
-东西"的容器模型下没有意义。唯一能靠 `--image` 变通的是 `redis_type: valkey`——
-它不过是另一个 tag：`pg addon install redis --image
-docker.io/valkey/valkey:8` 可用，大版本反解析为 `8`。
+Redis/Valkey 的选项空间远比这张表大，pgcli 有意不包装多节点拓扑（Sentinel、
+Cluster、复制）——见[已知限制](#已知限制)。引擎本身倒是可以用 `--image` 变
+通：`pg addon install redis --image docker.io/valkey/valkey:8` 跑的是
+[Valkey](https://valkey.io/)（Redis 的分支），大版本反解析为 `8`。
 
 ## 版本选择
 
@@ -112,23 +116,25 @@ pg addon install redis --name sessions --password 'S3ssions!' --port 6379
   Image:      docker.io/library/redis:8.10.2
   Data:       ~/pg/addon/redis/cache/data
   Address:    0.0.0.0:6379
+  Persistence: rdb snapshots (default save schedule)
 
   Password:    <generated>
 
   Client:      pg redis-cli ping
   Raw DSN:     redis://:<password>@0.0.0.0:6379/0
-  NOTE: listening on every interface (the Pigsty default); the password above is the only gate.
+  NOTE: listening on every interface; the password above is the only gate.
         loopback-only: pg addon install redis --name cache --listen 127.0.0.1 --force
 ```
 
-> **安全模型。** 按 Pigsty 惯例，`listen` 默认 **`0.0.0.0`**——Linux（host
-> 网络）下端口发布在所有网卡上，`requirepass` 是唯一的闸门。这对"应用跑在另
-> 一台机器"很方便，但也意味着密码是分量的：用 `--listen 127.0.0.1` 可把实例
-> 收紧为仅回环。`pg addon list` 与日志从不打印密码；需要时从 `pg.yaml` 读。
+> **安全模型。** `listen` 默认 **`0.0.0.0`**——Linux（host 网络）下端口发布在
+> 所有网卡上，`requirepass` 是唯一的闸门。这对"应用跑在另一台机器"很方便，但
+> 也意味着密码是分量的：用 `--listen 127.0.0.1` 可把实例收紧为仅回环。
+> `pg addon list` 与日志从不打印密码；需要时从 `pg.yaml` 读。
 
 重复执行 `install` 是幂等的：运行中的容器原样不动，停止的容器会被拉起。要让
-改动的端口/监听/密码/镜像生效，加 `--force`（容器按配置重建；数据目录不受
-影响）。
+改动的端口/监听/密码/镜像生效，加 `--force`（容器按配置重建；数据目录不受影
+响）。持久化类旋钮（`--aof`/`--appendfsync`/`--save`/`--maxmemory-policy`）同
+样靠 `--force` 生效。
 
 ## 使用 Redis
 
@@ -190,16 +196,20 @@ addons:
       version: "8"                       # 记录/展示用的大版本
       image_tag: docker.io/library/redis:8.10.2
       # data_dir: /srv/redis-cache       # 省略则为 <base-dir>/addon/redis/cache/data
-      listen: 0.0.0.0                    # Pigsty 默认值；127.0.0.1 收紧
+      listen: 0.0.0.0                    # 默认（全网卡）；127.0.0.1 收紧
       port: 6379
       password: <generated>              # 首次安装写入
-      # maxmemory: 256mb                 # 可选上限 → allkeys-lru 驱逐
+      # maxmemory: 256mb                 # 可选上限
+      # maxmemory_policy: noeviction     # 仅在设了上限时有效；默认 allkeys-lru
+      # aof: true                        # 在快照之上叠加写前日志
+      # appendfsync: always              # 仅在开 aof 时有效；默认 everysec
+      # save: "900 1 300 10"             # RDB 计划；"no" 关闭快照
       autostart: false                   # pg autostart enable --redis --name cache
 ```
 
-改 `listen`、`port`、`password`、`maxmemory`、`image_tag`/`version` 或
-`data_dir` 后，下一次 `pg addon install redis --name cache --force`（或用对
-应 flag）生效。
+改 `listen`、`port`、`password`、`maxmemory`/`maxmemory_policy`、
+`aof`/`appendfsync`/`save`、`image_tag`/`version` 或 `data_dir` 后，下一次
+`pg addon install redis --name cache --force`（或用对应 flag）生效。
 
 ### 列表
 
@@ -215,6 +225,7 @@ Infra add-ons (redis):
     Address:     0.0.0.0:6379
     Auth:        on (requirepass)
     Maxmemory:   256mb (allkeys-lru)
+    Persistence: rdb + aof (default save schedule, appendonly yes)
     Data:        ~/pg/addon/redis/cache/data
     Image:       docker.io/library/redis:8.10.2
     Container:   pgcli-redis-default-cache
@@ -270,9 +281,13 @@ pg logs addon redis --name cache -f     # 跟随
 - **裸客户端报 `NOAUTH Authentication required`** ——预期行为：每个实例都有
   `requirepass`。从 `pg.yaml`（`addons.redis.<name>.password`）读，或直接用
   会注入密码的 `pg redis-cli`。
-- **`maxmemory` 驱逐超出预期** —— `--maxmemory` 隐含 `allkeys-lru`（到上限
-  就驱逐任何 key：是缓存，不是硬存储）。要严格不驱逐的存储就别设
-  `--maxmemory`，改为按主机容量规划。
+- **`maxmemory` 驱逐超出预期** —— 设了 `--maxmemory` 上限后默认策略是
+  `allkeys-lru`（到上限就驱逐任何 key：是缓存，不是硬存储）。要把上限变成
+  硬天花板就传 `--maxmemory-policy noeviction`（超限后写入报错而非驱逐），或
+  干脆不设 `--maxmemory`（无上限）。
+- **AOF 未回放最新写入** —— `--appendfsync everysec`（默认）在硬崩溃时可能
+  丢最后一秒的写入；承受不起就用 `--appendfsync always`。优雅 `pg stop` 总会
+  刷盘，所以只有非正常 kill 才会踩到。
 - **安装时报镜像不存在** —— 两个大版本都是按需拉取的纯
   `docker.io/library/redis` 镜像；隔离网络的主机先 `podman load` tar 包
   （目录与导出步骤见仓库内 `docs/images.md`），之后会跳过拉取。
@@ -284,11 +299,12 @@ pg logs addon redis --name cache -f     # 跟随
 ## 已知限制
 
 - **仅单机** —— Sentinel（HA 故障转移）与 Redis Cluster（分片）不在范围内，
-  复制（作为他机 redis 的副本）同样不做。单实例是单点：耐久数据需要持久化
-  语义（AOF）或副本，这些不由本插件管理。
+  复制（作为他机 redis 的副本）同样不做。单实例是单点：可以用 `--aof` 让它
+  在磁盘上*耐久*，但无法故障转移到其它节点——那需要本插件不管理的拓扑。
 - **无 TLS** —— Redis 7 的部分构建支持原生 TLS，但这里未接入；按可信网络对
   待链路并依赖 `requirepass`，或干脆 `--listen 127.0.0.1` 仅回环。
 - **macOS 代码完备、未实测** —— bridge 路径（发布端口、`pg redis-cli` 走
   `host.containers.internal`）与对象存储同构；尚未在 Mac 上跑过。
-- **RDB 粒度** —— 崩溃会丢失上次快照之后的写入；缓存/会话数据可接受，耐久
-  数据请放 PostgreSQL。
+- **默认持久化是 RDB 粒度** —— 崩溃会丢失上次快照之后的写入。这个缺口要紧时
+  启用 `--aof`（`everysec` 下最多仍丢一秒；`always` 可封死）；缓存/会话数据
+  接受仅快照即可，耐久数据请放 PostgreSQL。
