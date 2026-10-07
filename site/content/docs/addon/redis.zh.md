@@ -151,11 +151,26 @@ pg redis-cli lrange queue 0 -1                 # 负数索引原样透传
 pg redis-cli --name legacy zrevrange leaderboard 0 9
 ```
 
-目标是 `--name <实例>`，省略时取按名字排序的第一个 redis 实例（装了多个时，
+本地目标是 `--name <实例>`，省略时取按名字排序的第一个 redis 实例（装了多个时，
 实际选中的目标会提示在 stderr）。pgcli 自己的 flag 只在命令词之前解析；命令
-词之后一切原样转发给 `redis-cli`——包括它的 `-h`/`-p`，所以
-`pg redis-cli info -h 10.0.0.7 -p 6380` 可以打到外部端点。`REDISCLI_AUTH`
-（redis-cli 原生环境变量）若已设置，覆盖存储的密码：
+词之后一切原样转发给 `redis-cli`——负数索引、经 `--` 的选项 flag 都靠这个。
+
+**连接远程端点** —— `--host`/`--port` 覆盖客户端连去哪里，无需把远程注册成
+插件：
+
+```bash
+# 复用本地实例的镜像 + 密码，但连到远程主机（如副本）
+pg redis-cli --host 10.0.0.7 ping
+pg redis-cli --host 10.0.0.7 --port 6380 --name cache info
+
+# 本机没有任何实例：用默认大版本镜像，密码走 REDISCLI_AUTH
+REDISCLI_AUTH=s3cret pg redis-cli --host 10.0.0.7 dbsize
+```
+
+要连远程用这两个，而不是 redis-cli 自己的 `-h`/`-p`：后者落在命令词之后，会
+被当成命令参数（`ping -h 10.0.0.7` 报错），而连接用的 `-h`/`-p` 由 pgcli 负
+责注入。`REDISCLI_AUTH`（redis-cli 原生环境变量）若已设置，任何模式下都覆盖
+存储的密码：
 
 ```bash
 REDISCLI_AUTH=otherpass pg redis-cli dbsize

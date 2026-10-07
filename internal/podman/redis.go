@@ -259,28 +259,36 @@ func (m *RedisManager) Stop(name string) (string, error) {
 // the addon's config password is injected. Networking mirrors MCRunner — Linux
 // uses host networking to reach the port on the host loopback, macOS the
 // default bridge with host.containers.internal as the target (host
-// networking there would only see the VM's loopback). The image is pulled
-// first if the host does not already have it.
-func (m *RedisManager) RedisCLI(imageTag, password string, port int, args []string) error {
+// networking there would only see the VM's loopback). An explicit host (from
+// pg redis-cli --host) replaces that local target, so a remote endpoint is
+// reachable from either platform. The image is pulled first if the host does
+// not already have it.
+func (m *RedisManager) RedisCLI(imageTag, password, host string, port int, args []string) error {
 	if err := m.EnsureImage(imageTag); err != nil {
 		return err
 	}
 
-	host := "127.0.0.1"
-	// Linux: host networking, so the port on the host's bind (default
-	// 0.0.0.0, at worst loopback) is reachable directly. macOS: the default
-	// bridge and host.containers.internal — podman's documented container→host
-	// address; host networking there would only see the VM's loopback, not the
-	// published port.
+	if host == "" {
+		// Local addon target. Linux: host networking reaches the port on the
+		// host's bind (default 0.0.0.0, at worst loopback) directly. macOS: the
+		// default bridge and host.containers.internal — podman's documented
+		// container→host address; host networking there would only see the VM's
+		// loopback, not the published port.
+		if m.bridge {
+			host = "host.containers.internal"
+		} else {
+			host = "127.0.0.1"
+		}
+	}
 	runArgs := []string{"run", "--rm"}
 	if isTerminal(os.Stdin) {
 		runArgs = append(runArgs, "-it")
 	} else {
 		runArgs = append(runArgs, "-i=false")
 	}
-	if m.bridge {
-		host = "host.containers.internal"
-	} else {
+	// An explicit remote --host needs no host networking; the default bridge
+	// routes outbound on both platforms. Linux keeps host networking either way.
+	if !m.bridge {
 		runArgs = append(runArgs, "--network", "host")
 	}
 	// Same reason as createContainer: proxy injection would risk hijacking the

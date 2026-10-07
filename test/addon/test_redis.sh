@@ -289,11 +289,40 @@ main() {
         fail "REDISCLI_AUTH override rejected"
     fi
     TESTS=$((TESTS + 1))
-    if REDISCLI_AUTH="wrong-password" pg redis-cli --name "$CACHE" ping 2>&1 \
-        | grep -qiE 'NOAUTH|WRONGPASS|invalid password|AUTH'; then
+    wa_out=$(REDISCLI_AUTH="wrong-password" pg redis-cli --name "$CACHE" ping 2>&1 || true)
+    if echo "$wa_out" | grep -qiE 'NOAUTH|WRONGPASS|invalid password|AUTH'; then
         pass "wrong REDISCLI_AUTH is refused (proves the env var is what authenticates)"
     else
-        fail "wrong REDISCLI_AUTH unexpectedly accepted"
+        fail "wrong REDISCLI_AUTH unexpectedly accepted: $wa_out"
+    fi
+
+    # ---- Remote-targeting flags (--host/--port) ----
+    section "pg redis-cli --host/--port"
+    # On Linux host networking, --host 127.0.0.1 is the same endpoint the local
+    # path already uses; a PONG proves the flag is honoured (and that an
+    # explicit host does not duplicate the injected -h/-p).
+    TESTS=$((TESTS + 1))
+    if pg redis-cli --host 127.0.0.1 --name "$CACHE" ping 2>/dev/null | grep -q '^PONG$'; then
+        pass "--host 127.0.0.1 reaches the addon (still injects the password)"
+    else
+        fail "--host 127.0.0.1 did not reach the addon"
+    fi
+    # --port with --host: point at the addon's own port explicitly.
+    TESTS=$((TESTS + 1))
+    if pg redis-cli --host 127.0.0.1 --port "$PORT" --name "$CACHE" ping 2>/dev/null | grep -q '^PONG$'; then
+        pass "--host + --port reaches the addon"
+    else
+        fail "--host + --port did not reach the addon"
+    fi
+    # An unknown --name is an error even with --host (no silent fallback).
+    # Capture the output first: under `set -o pipefail`, pg's expected
+    # non-zero exit would mask the grep result in a direct pipeline.
+    TESTS=$((TESTS + 1))
+    nh_out=$(pg redis-cli --host 127.0.0.1 --name nosuch ping 2>&1 || true)
+    if echo "$nh_out" | grep -qi 'not found'; then
+        pass "unknown --name + --host still errors"
+    else
+        fail "unknown --name + --host did not error: $nh_out"
     fi
 
     # ---- RDB persistence across stop/start ----

@@ -426,6 +426,10 @@ const DefaultPostgrestImageTag = "docker.io/postgrest/postgrest:v16.3"
 // given: "8", the current stable line upstream (docker.io/library/redis).
 const DefaultRedisMajor = "8"
 
+// DefaultRedisPort is Redis's standard port — the base of the addon's pool and
+// the fallback for `pg redis-cli --host` when no local addon port applies.
+const DefaultRedisPort = 6379
+
 // redisMajorImages maps a Redis major to the default upstream image tag. This
 // is pgcli's first version-selection mechanism — every other add-on pins a
 // single image — so the shape is deliberately local: a table plus the two

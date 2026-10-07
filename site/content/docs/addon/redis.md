@@ -171,13 +171,28 @@ pg redis-cli lrange queue 0 -1                 # negative indexes pass through
 pg redis-cli --name legacy zrevrange leaderboard 0 9
 ```
 
-The target is `--name <addon>` or, when omitted, the first redis addon by
+The local target is `--name <addon>` or, when omitted, the first redis addon by
 name (with several installed, the chosen target is announced on stderr).
 pgcli's own flags are parsed only before the command word; everything after is
-forwarded to `redis-cli` verbatim — including its `-h`/`-p`, so
-`pg redis-cli info -h 10.0.0.7 -p 6380` talks to a foreign endpoint.
-`REDISCLI_AUTH` (redis-cli's native env var), if set, overrides the stored
-password:
+forwarded to `redis-cli` verbatim — negative indexes and option flags (via `--`)
+work that way.
+
+**Reaching a remote endpoint** — `--host`/`--port` override where the client
+connects, without registering the remote as an addon:
+
+```bash
+# reuse a local addon's image + password, but talk to a remote host (e.g. a replica)
+pg redis-cli --host 10.0.0.7 ping
+pg redis-cli --host 10.0.0.7 --port 6380 --name cache info
+
+# no local addon at all: default-major image, password via REDISCLI_AUTH
+REDISCLI_AUTH=s3cret pg redis-cli --host 10.0.0.7 dbsize
+```
+
+Use these instead of redis-cli's own `-h`/`-p`: those sit *after* the command
+word and would be read as command arguments (`ping -h 10.0.0.7` errors), while
+pgcli injects the connection `-h`/`-p` itself. `REDISCLI_AUTH` (redis-cli's
+native env var), if set, overrides the stored password in every mode:
 
 ```bash
 REDISCLI_AUTH=otherpass pg redis-cli dbsize
