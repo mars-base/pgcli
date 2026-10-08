@@ -25,6 +25,7 @@ pgcli 使用的容器镜像及其默认 tag。
 | `ghcr.io/pgdogdev/pgdog` | `v0.1.57` | PostgreSQL 代理 / 连接池 | `config.go:204` |
 | `docker.io/library/redis` | `7.4.11` | Redis 大版本 7（`--version 7`），纯上游镜像无 wrapper | `redisMajorImages["7"]` |
 | `docker.io/library/redis` | `8.10.2` | Redis 大版本 8（默认，`--version 8`），纯上游镜像无 wrapper | `redisMajorImages["8"]` |
+| `ghcr.io/mars-base/pgcli/predixy` | `7.0.1-alpine` | Predixy（Redis 集群代理），建立在上游 free edition 二进制之上的 wrapper，单架构 amd64 | `DefaultPredixyImageTag` |
 
 ## 镜像导出
 
@@ -74,6 +75,11 @@ podman pull --platform linux/amd64 docker.io/library/redis:7.4.11
 podman save -o "$TARGET/redis_7.4.11.tar" docker.io/library/redis:7.4.11
 podman pull --platform linux/amd64 docker.io/library/redis:8.10.2
 podman save -o "$TARGET/redis_8.10.2.tar" docker.io/library/redis:8.10.2
+
+# predixy 镜像本身就是单架构 amd64（上游只发 amd64 二进制），直接 save
+podman pull ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine
+podman save -o "$TARGET/predixy_7.0.1-alpine.tar" \
+  ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine
 ```
 
 ### rustfs（双架构 manifest 不能直接 save）
@@ -120,8 +126,16 @@ done
 - **redis**：纯上游 `docker.io/library/redis`，无 wrapper；两个大版本各自
   pin 一个补丁 tag（`redisMajorImages` 映射表，默认大版本 8），tag 跟随各大
   版本的最新补丁、与 `internal/config/config.go` 的映射表一起升级
+- **predixy**：pgcli 自建 wrapper（`ghcr.io/mars-base/pgcli/predixy`），把上游
+  joyieldInc/predixy 的 **free edition** amd64 glibc 二进制放到 alpine:3.22 +
+  gcompat + libgcc 上跑；上游只发 amd64 二进制，所以这是**单架构镜像**（不是
+  manifest list，可直接 `podman save`）。`make container-build-predixy` 在构建
+  前下载 release 包、并用当前的 `license2026.conf` 覆盖包内那份（自带 license
+  已过期，free 二进制拒绝启动），因此**镜像内置 license 的有效期随构建时间滚动**
+  （现镜像为 `ClientLimit 128`、2026-12-31 到期）；pgcli 本身不分发也不管理
+  license，到期就重新 build + push
 - **pgbouncer** / **postgrest** / **haproxy** / **etcd** / **pgdog**：上游官方或社区维护的稳定版本
 
 ---
 
-**最后更新**：2026-10-06（新增 redis 两个大版本镜像）
+**最后更新**：2026-10-08（新增 predixy 镜像与插件）

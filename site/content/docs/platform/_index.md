@@ -54,6 +54,7 @@ across machines, or that depend on Linux-only container internals, stay
 | Addon — **silo** | ✅ host network | ✅ bridge, published ports |
 | Addon — **rustfs** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
 | Addon — **Redis** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
+| Addon — **Predixy** | ✅ host network (single- and cross-host clusters) | ❌ Linux only |
 | Client — **`pg mc`** (MinIO client) | ✅ host network | ✅ bridge (see below) |
 | HA — **Patroni** (`pg ha`) | ✅ incl. cross-host | ❌ Linux only |
 
@@ -127,6 +128,11 @@ Addon networking differs per component:
   `pg redis-cli` dials `host.containers.internal` — the same bridge path the
   object stores use, code-complete but not yet exercised on a Mac, so the e2e
   coverage is Linux-only for now.
+- **[Predixy](/docs/addon/predixy/)** — **Linux only.** Like HAProxy, it needs
+  host networking to dial its backend cluster nodes (single- and cross-host,
+  both verified). The wrapper image is amd64-only — upstream ships an amd64
+  binary — so an arm64 host needs `--platform linux/amd64` emulation, and the
+  macOS podman machine path does not exist.
 - **[`pg mc`](/docs/addon/minio/#using-the-mc-client)** (MinIO client) — **both
   platforms.** It runs the `mc` binary from a throwaway container, with your
   `~/.mc/config.json` mounted as its own default config path and local file

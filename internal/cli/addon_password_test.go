@@ -6,13 +6,19 @@ import (
 	"github.com/mars-base/pgcli/internal/config"
 )
 
-// addonPasswords indexes the four addons that carry a pgcli-generated stored
-// password; the key "<addon>:<name>" is what `pg addon password` resolves
-// against, so a wrong key shape is a silent not-found for the user.
+// addonPasswords indexes the five addons that carry a stored password; the key
+// "<addon>:<name>" is what `pg addon password` resolves against, so a wrong key
+// shape is a silent not-found for the user. Four of the five are pgcli-generated
+// (redis/minio/silo/rustfs); predixy's is the operator-supplied copy of the
+// proxied cluster's requirepass, but it's still what the proxy authenticates
+// clients with, so it belongs in the same index.
 func passwordCfg() *config.Config {
 	cfg := config.Default()
 	cfg.Addons.Redis = map[string]config.RedisConfig{
 		"cache": {Name: "cache", Password: "pw-cache"},
+	}
+	cfg.Addons.Predixy = map[string]config.PredixyConfig{
+		"proxy": {Name: "proxy", Password: "pw-predixy"},
 	}
 	cfg.Addons.Minio = map[string]config.MinioConfig{
 		"store": {Name: "store", RootUser: "admin", RootPassword: "pw-minio"},
@@ -29,10 +35,11 @@ func passwordCfg() *config.Config {
 func TestAddonPasswordsKeysAndSecrets(t *testing.T) {
 	all := addonPasswords(passwordCfg())
 	cases := map[string]string{
-		"redis:cache":  "pw-cache",
-		"minio:store":  "pw-minio",
-		"silo:store":   "pw-silo",
-		"rustfs:store": "pw-rustfs",
+		"redis:cache":   "pw-cache",
+		"predixy:proxy": "pw-predixy",
+		"minio:store":   "pw-minio",
+		"silo:store":    "pw-silo",
+		"rustfs:store":  "pw-rustfs",
 	}
 	for key, want := range cases {
 		got, ok := all[key]

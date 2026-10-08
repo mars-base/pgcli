@@ -379,6 +379,9 @@ pg redis-cli --host 10.10.0.158 --port 6379 -- -a <组密码> -c get foo
 （`get foo -a …`）会报 "wrong number of arguments"——它会被当成命令参数。除
 非是敲一条就跑，否则优先用环境变量；两者在认证上完全等价。
 
+如果你的客户端完全无法做成集群感知的，就在集群前放一个 [Predixy 代理](../predixy/)：
+它自己跟随重定向，对外只暴露一个普通的 `redis://` 端点。
+
 集群总线是**每成员的第二个端口**：永远是 `client + 10000`（Redis 的固定
 规则，比如 `6379`→`16379`）——不从 `redis_start_port` 池分配、不写入
 `pg.yaml`；`pg addon list` 会在组名旁把它一并显示出来：
@@ -391,6 +394,15 @@ pg redis-cli --host 10.10.0.158 --port 6379 -- -a <组密码> -c get foo
 拓扑会自愈：每个节点的 `--cluster-config-file nodes.conf` 落在自己
 `--dir /data` 的 bind 挂载里，所以 `pg addon stop`/`start`（或主机重启）后
 整个集群原样回来，不需要再 create——与本仓库 autostart 的"只启动"模型一致。
+
+两条命令可以直接检查集群健康，都走透传（是的，`-c` 那条是客户端侧 flag，所以放在 `--` 之后）：
+
+```bash
+# 单个成员眼里的全集群——找 cluster_state:ok / cluster_size:N
+pg redis-cli --host <ip> --port <port> -- -c cluster info
+# 整组全面体检（slot 覆盖、副本、链路）——redis-cli 的管理面
+pg redis-cli -- --cluster check <ip>:<port>
+```
 
 ### 跨机成员：`--advertise-host`
 

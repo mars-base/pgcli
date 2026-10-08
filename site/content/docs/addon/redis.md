@@ -431,6 +431,10 @@ fails with "wrong number of arguments" — it would be passed as a command
 argument. For anything beyond a one-off command, prefer the env var; they are
 otherwise equivalent for authentication.
 
+If your clients cannot be made cluster-aware at all, put a
+[Predixy proxy](../predixy/) in front of the cluster: it follows the redirects
+itself and exposes one plain `redis://` endpoint.
+
 The cluster bus is a **second port per member**: always `client port + 10000`
 (Redis's own fixed rule, e.g. `6379`→`16379`) — it is not drawn from
 `redis_start_port`, not stored in `pg.yaml`, and `pg addon list` shows it
@@ -445,6 +449,16 @@ Topology is self-healing: each node's `--cluster-config-file nodes.conf` lives
 in its own `--dir /data` bind mount, so `pg addon stop`/`start` (or a host
 reboot) brings the whole cluster back with no re-create step — same
 start-only model as autostart for everything else here.
+
+Two commands check the cluster's health directly, both through the passthrough
+(yes, the `-c` one is a data-path client flag, so it goes after the `--`):
+
+```bash
+# one member's view of the whole cluster — look for cluster_state:ok / cluster_size:N
+pg redis-cli --host <ip> --port <port> -- -c cluster info
+# full group health check (slot coverage, replicas, links) — redis-cli's admin surface
+pg redis-cli -- --cluster check <ip>:<port>
+```
 
 ### Cross-host members: `--advertise-host`
 

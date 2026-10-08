@@ -50,6 +50,7 @@ pgcli 在 Linux 和 macOS 上都是驱动 [Podman](https://podman.io) 容器运�
 | 插件 —— **silo** | ✅ host 网络 | ✅ bridge，发布端口 |
 | 插件 —— **rustfs** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
 | 插件 —— **Redis** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
+| 插件 —— **Predixy** | ✅ host 网络（单机与跨机集群皆已验证） | ❌ 仅 Linux |
 | 客户端 —— **`pg mc`**（MinIO 客户端） | ✅ host 网络 | ✅ bridge（见下） |
 | 高可用 —— **Patroni**（`pg ha`） | ✅ 含跨主机 | ❌ 仅 Linux |
 
@@ -112,6 +113,10 @@ macOS 上这些都是**单主机**：跨主机副本、跨多机的连接池属�
   回环）；macOS 上加入 `pgcli-net` 并发布端口，`pg redis-cli` 拨
   `host.containers.internal` —— 与对象存储相同的 bridge 路径，代码完备但尚未在
   Mac 上跑过，e2e 覆盖目前仅限 Linux。
+- **[Predixy](/docs/addon/predixy/)** —— **仅 Linux。** 与 HAProxy 一样，它需要
+  host 网络才能拨通后端的集群节点（单机与跨机集群都已验证）。wrapper 镜像只有
+  amd64 —— 上游只发 amd64 二进制 —— 因此 arm64 主机需要 `--platform linux/amd64`
+  模拟运行，而 macOS 的 podman machine 路径根本不存在。
 - **[`pg mc`](/docs/addon/minio/#使用-mc-客户端)**（MinIO 客户端）——
   **两个平台都支持**。它在一次性容器里运行 `mc`：宿主的 `~/.mc/config.json`
   按其原生默认路径挂载，`cp`/`mirror`/`diff` 的本地文件参数也会按真实路径动态

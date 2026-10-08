@@ -75,8 +75,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartRedis(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --redis)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --redis / --predixy)")
 		return nil
 	}
 
@@ -172,6 +172,14 @@ func startAutostart() error {
 	// redis instances (top-level infra addon, a KV store). Independent of the
 	// PostgreSQL stack like the object stores, so it goes last.
 	if err := startAutostartRedis(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// predixy proxies (top-level infra addon). Strictly after redis: the proxy
+	// dials its cluster backends at startup, so a same-host cluster is up by the
+	// time the listener comes over (a cross-host backend set is the operator's
+	// own reachability concern — ordering cannot help there).
+	if err := startAutostartPredixies(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -616,6 +624,49 @@ func startAutostartRedis(c *config.Config) error {
 		rc := c.Addons.Redis[name]
 		if err := rm.StartContainer(&rc); err != nil {
 			fmt.Printf("  [X] redis autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartPredixy reports whether any predixy instance is autostart-enabled.
+func hasAutostartPredixy(c *config.Config) bool {
+	for _, pc := range c.Addons.Predixy {
+		if pc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartPredixies starts each autostart-enabled predixy instance.
+// Start-only like the other config-file addons: the container comes up reading
+// the predixy.conf already on disk, recreating it if the container was removed —
+// install first. Order is sorted by instance name for deterministic boot logs.
+func startAutostartPredixies(c *config.Config) error {
+	var names []string
+	for name, pc := range c.Addons.Predixy {
+		if pc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	pm, err := podman.NewPredixyManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		pc := c.Addons.Predixy[name]
+		if err := pm.StartContainer(&pc); err != nil {
+			fmt.Printf("  [X] predixy autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}

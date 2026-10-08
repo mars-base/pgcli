@@ -31,6 +31,7 @@ type Config struct {
 	MinioStartPort          int                       `yaml:"minio_start_port,omitempty"`           // starting MinIO API host port, default 9000 (console takes the next free port)
 	PostgrestStartPort      int                       `yaml:"postgrest_start_port,omitempty"`       // starting PostgREST HTTP host port, default 3500
 	RedisStartPort          int                       `yaml:"redis_start_port,omitempty"`           // starting Redis host port, default 6379
+	PredixyStartPort        int                       `yaml:"predixy_start_port,omitempty"`         // starting Predixy proxy listener host port, default 7617
 	Postgres                PostgresConfig            `yaml:"postgres"`
 	Podman                  PodmanConfig              `yaml:"podman"`
 	PITR                    PITRConfig                `yaml:"pitr"`
@@ -91,6 +92,7 @@ type TopAddonsConfig struct {
 	Silo      map[string]SiloConfig           `yaml:"silo,omitempty"`
 	Rustfs    map[string]RustfsConfig         `yaml:"rustfs,omitempty"`
 	Redis     map[string]RedisConfig          `yaml:"redis,omitempty"`
+	Predixy   map[string]PredixyConfig        `yaml:"predixy,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -829,6 +831,55 @@ func (r RedisConfig) PeerAddr() string {
 	return "127.0.0.1"
 }
 
+// DefaultPredixyImageTag pins the Predixy image — a self-built wrapper of
+// joyieldInc/predixy on Alpine (embed/predixy.Containerfile, built and pushed by
+// `make container-build-predixy`). The wrapper exists because Predixy is
+// config-file-only and ships a signed free-tier license.conf that expires; the
+// build swaps in a fresh license, so pgcli never distributes or manages license
+// life-cycle itself, it just bind-mounts its rendered predixy.conf OVER the
+// baked path and lets the image's sibling license.conf show through. Pull-only,
+// like the other pgcli add-on images. The tag is the single source of truth that
+// ApplyDefaults and the podman manager agree on.
+const DefaultPredixyImageTag = "ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine"
+
+// DefaultPredixyWorkers is Predixy's factory WorkerThreads value, used when
+// --workers is not given.
+const DefaultPredixyWorkers = 1
+
+// PredixyConfig holds a Predixy proxy addon: a transparent Redis-Cluster proxy
+// that re-exposes a native cluster (the redis addon's --cluster shape) as one
+// ordinary redis:// endpoint, so clients need no cluster awareness — no -c, no
+// MOVED handling. Like haproxy it is shared infrastructure driven purely by a
+// generated config file, so it lives at the top level (addons.predixy.<name>).
+//
+// Backends are given explicitly as the full node list (--backend) rather than
+// derived from local redis config: Predixy discovers the rest on its own, but
+// pinning every node makes the intent visible in pg.yaml and removes any
+// dependence on discovery timing.
+type PredixyConfig struct {
+	ContainerName string `yaml:"container_name"`      // pgcli-predixy<ns>-<name>
+	Name          string `yaml:"name,omitempty"`      // addon key, defaults to the map key
+	ImageTag      string `yaml:"image_tag,omitempty"` // ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine (default)
+	Listen        string `yaml:"listen,omitempty"`    // bind address, default 0.0.0.0
+	Port          int    `yaml:"port,omitempty"`      // client-facing host port, 7617+ auto-assigned
+	Workers       int    `yaml:"workers,omitempty"`   // → WorkerThreads, default 1
+
+	// Backend is the proxied cluster's full node list as "host:port" entries,
+	// written verbatim into ClusterServerPool.Servers. Required.
+	Backend []string `yaml:"backend,omitempty"`
+
+	// Password is ONE password serving two sides: the client-facing Authority
+	// Auth (clients must AUTH it to the proxy) and ClusterServerPool.Password
+	// (proxy to cluster). That is deliberate — it is the proxied cluster's own
+	// requirepass, so `PW=$(pg addon password redis --name n1)` feeds both.
+	Password string `yaml:"password,omitempty"`
+
+	// Autostart brings this container up on host boot via the boot service
+	// (pg autostart enable --predixy). Start-only: it starts the existing
+	// container reading the predixy.conf already on disk, so install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
 // PostgresConfig holds PostgreSQL connection settings.
 type PostgresConfig struct {
 	URL      string `yaml:"url"`      // connection string (postgres://user:pass@host:port/db)
@@ -923,6 +974,7 @@ func Default() *Config {
 		MinioStartPort:          9000,
 		PostgrestStartPort:      3500,
 		RedisStartPort:          6379,
+		PredixyStartPort:        7617,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -1122,6 +1174,7 @@ type displayConfig struct {
 	MinioStartPort          int                       `yaml:"minio_start_port,omitempty"`
 	PostgrestStartPort      int                       `yaml:"postgrest_start_port,omitempty"`
 	RedisStartPort          int                       `yaml:"redis_start_port,omitempty"`
+	PredixyStartPort        int                       `yaml:"predixy_start_port,omitempty"`
 	Logging                 LoggingConfig             `yaml:"logging"`
 	Backup                  BackupConfig              `yaml:"backup"`
 	Pigsty                  PigstyConfig              `yaml:"pigsty"`
@@ -1146,6 +1199,7 @@ func (c *Config) Display() displayConfig {
 		MinioStartPort:          c.MinioStartPort,
 		PostgrestStartPort:      c.PostgrestStartPort,
 		RedisStartPort:          c.RedisStartPort,
+		PredixyStartPort:        c.PredixyStartPort,
 		Logging:                 c.Logging,
 		Backup:                  c.Backup,
 		Pigsty:                  c.Pigsty,
@@ -1237,6 +1291,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.RedisStartPort == 0 {
 		c.RedisStartPort = d.RedisStartPort
+	}
+	if c.PredixyStartPort == 0 {
+		c.PredixyStartPort = d.PredixyStartPort
 	}
 
 	// Postgres
@@ -1646,6 +1703,30 @@ func (c *Config) ApplyDefaults() {
 			addon.Listen = "0.0.0.0"
 		}
 		c.Addons.Redis[name] = addon
+	}
+
+	// Top-level addons defaults (Predixy). Password and Backend are deliberately
+	// NOT defaulted here — the CLI install handler requires them (ApplyDefaults
+	// must stay deterministic). Listen defaults to 0.0.0.0 like Redis: a proxy
+	// whose only access contract is AUTH has no reason to bind loopback-only.
+	// Workers defaults to Predixy's own factory value (1).
+	for name, addon := range c.Addons.Predixy {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-predixy" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultPredixyImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "0.0.0.0"
+		}
+		if addon.Workers == 0 {
+			addon.Workers = DefaultPredixyWorkers
+		}
+		c.Addons.Predixy[name] = addon
 	}
 
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
@@ -2153,6 +2234,42 @@ func (c *Config) autoAssignPorts() {
 				next = addon.Port + 1
 			}
 			c.Addons.Redis[name] = addon
+		}
+	}
+
+	// Allocate ports for Predixy addons from their own pool (predixy_start_port,
+	// default 7617 — the image's only EXPOSEd port). One port per instance: the
+	// proxy has a single client-facing listener, no stats or console port.
+	{
+		predixyBase := c.PredixyStartPort
+		assignedPredixy := map[int]bool{}
+		for _, addon := range c.Addons.Predixy {
+			if addon.Port != 0 {
+				assignedPredixy[addon.Port] = true
+			}
+		}
+		next := predixyBase
+		nextFreePredixy := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedPredixy[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.Predixy))
+		for name := range c.Addons.Predixy {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.Predixy[name]
+			if addon.Port == 0 && predixyBase > 0 {
+				addon.Port = nextFreePredixy()
+			} else if addon.Port >= next {
+				next = addon.Port + 1
+			}
+			c.Addons.Predixy[name] = addon
 		}
 	}
 }

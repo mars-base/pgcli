@@ -32,6 +32,7 @@ The following addons are currently supported:
 | [`silo`](./silo/) | S3-compatible object storage (Pigsty's MinIO fork) — same feature surface as the minio addon, shares one port pool; ships its own `mcli` client (Linux and macOS) |
 | [`rustfs`](./rustfs/) | S3-compatible object storage (Rust reimplementation) — SNSD/SNMD/MNMD erasure-coded layouts, fixed container uid handled inside pgcli's wrapper image, shares the one port pool (Linux only) |
 | [`redis`](./redis/) | Standalone key-value store for cache, session, ranking and counter data — selectable majors 7/8, auto-generated `requirepass`, RDB persistence, read replicas, native cluster sharding via `--cluster`, own port pool (Linux; macOS code-complete, untested) |
+| [`predixy`](./predixy/) | Redis protocol proxy — turns a native cluster into one plain `redis://` endpoint, so clients need no cluster awareness at all; own port pool (Linux only) |
 
 Each addon has its own page with commands, parameters, and troubleshooting.
 
@@ -60,4 +61,4 @@ pg addon remove <addon> [flags]     # remove the addon, container, and data
 ```
 
 See each addon's page for its specific flags and examples:
-[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [PostgREST](./postgrest/) · [HAProxy](./haproxy/) · [MinIO](./minio/) · [Silo](./silo/) · [rustfs](./rustfs/) · [Redis](./redis/). Patroni pages live in [HA Cluster](../ha-cluster/).
+[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [PostgREST](./postgrest/) · [HAProxy](./haproxy/) · [MinIO](./minio/) · [Silo](./silo/) · [rustfs](./rustfs/) · [Redis](./redis/) · [Predixy](./predixy/). Patroni pages live in [HA Cluster](../ha-cluster/).
