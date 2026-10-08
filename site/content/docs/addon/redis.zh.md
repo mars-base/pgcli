@@ -351,6 +351,34 @@ pg redis-cli --name n1 -- --cluster check 127.0.0.1:6379   # 管理型子命令�
 （这类子命令会按操作数自己拨到目标节点），pgcli 会**抑制** `-c` 注入——它是
 组建/管理面，不是数据命令。
 
+上面的自动 `-c` 依赖 pgcli 从 `pg.yaml` 读到一个**本地**集群成员（即 `--name`
+路径）。当你从一台没配该 addon 的机器用 `--host`/`--port` **远程**连集群时，
+pgcli 无从知道目标是不是集群节点，于是什么都不注入——一个未跟随重定向的
+`get`/`set` 落到错误的节点，只会返回 `MOVED ...`。这时你自己透传 redis-cli 的
+`-c`（它是 redis-cli 的 flag，所以放在 `--` 透传之后、命令字之前）：
+
+```bash
+export REDISCLI_AUTH=<组密码>
+pg redis-cli --host 10.10.0.158 --port 6379 -- -c get foo   # 替你跟随 MOVED
+pg redis-cli --host 10.10.0.158 --port 6379 -- -c set foo bar
+```
+
+`-c` 对写和读一样重要：不带它，指向非持槽节点的 `set` 会返回 `MOVED` 且**不会
+生效**，那个 key 根本不存在。写的时候也带上 `-c`，任意单个节点即可服务整个
+键空间。
+
+也可以不用环境变量、改用 redis-cli 自己的 `-a` 传密码——它同样是连接选项，
+所以放在同一个透传位置、**命令字之前**：
+
+```bash
+pg redis-cli --host 10.10.0.158 --port 6379 -- -a <组密码> -c get foo
+```
+
+与 `REDISCLI_AUTH` 相比有两点区别：redis-cli 每次都会打印一条安全警告（`-a`/
+`-u` 写在命令行上，同机用户可以用 `ps` 看到），而把 flag 放到命令字之后
+（`get foo -a …`）会报 "wrong number of arguments"——它会被当成命令参数。除
+非是敲一条就跑，否则优先用环境变量；两者在认证上完全等价。
+
 集群总线是**每成员的第二个端口**：永远是 `client + 10000`（Redis 的固定
 规则，比如 `6379`→`16379`）——不从 `redis_start_port` 池分配、不写入
 `pg.yaml`；`pg addon list` 会在组名旁把它一并显示出来：

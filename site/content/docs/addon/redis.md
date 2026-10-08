@@ -398,6 +398,39 @@ redis-cli's own `--cluster <subcommand>` (which dials the nodes named in its
 operands itself), pgcli suppresses the `-c` injection — it's the assembly/admin
 surface from step 2, not a data command.
 
+The auto-`-c` above depends on pgcli reading a **local** cluster member from
+`pg.yaml` (the `--name` path). When you reach the cluster **remotely** with
+`--host`/`--port` from a machine that has no such addon configured, pgcli has no
+way to know the endpoint is a cluster node, so it injects nothing — and an
+unredirected `get`/`set` that lands on the wrong node just returns `MOVED ...`.
+Forward redis-cli's `-c` yourself (it is redis-cli's own flag, so it goes after
+the `--` passthrough, before the command word):
+
+```bash
+export REDISCLI_AUTH=<the group password>
+pg redis-cli --host 10.10.0.158 --port 6379 -- -c get foo   # follows MOVED for you
+pg redis-cli --host 10.10.0.158 --port 6379 -- -c set foo bar
+```
+
+`-c` matters for writes as much as reads: without it a `set` aimed at a
+non-owner returns `MOVED` and is **not** applied, so the key never exists. Put
+`-c` on the write, and any single node serves the whole keyspace.
+
+You can also skip the env var and pass the password with redis-cli's own `-a`
+— it is a connection option too, so it goes in the same passthrough slot,
+*before* the command word:
+
+```bash
+pg redis-cli --host 10.10.0.158 --port 6379 -- -a <the group password> -c get foo
+```
+
+Two caveats distinguish it from `REDISCLI_AUTH`: redis-cli prints a security
+warning on every invocation (`-a`/`-u` on a command line is visible to other
+users via `ps`), and placing the flag after the command word (`get foo -a …`)
+fails with "wrong number of arguments" — it would be passed as a command
+argument. For anything beyond a one-off command, prefer the env var; they are
+otherwise equivalent for authentication.
+
 The cluster bus is a **second port per member**: always `client port + 10000`
 (Redis's own fixed rule, e.g. `6379`→`16379`) — it is not drawn from
 `redis_start_port`, not stored in `pg.yaml`, and `pg addon list` shows it
