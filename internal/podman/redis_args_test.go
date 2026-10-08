@@ -2,6 +2,7 @@ package podman
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/mars-base/pgcli/internal/config"
@@ -178,5 +179,74 @@ func TestRedisServerArgsMasterHasNoReplicaFlags(t *testing.T) {
 	args := redisServerArgs(rc, "0.0.0.0")
 	if slices.Contains(args, "--replicaof") || slices.Contains(args, "--masterauth") {
 		t.Errorf("replica flags present without ReplicaHost: %v", args)
+	}
+}
+
+// A single-host cluster member gets the three cluster flags and no announce
+// block — nodes.conf is relative to --dir /data so it lands in the instance's
+// own bind mount and self-heals across a rebuild.
+func TestRedisServerArgsClusterSingleHost(t *testing.T) {
+	rc := &config.RedisConfig{Port: 6379, Password: "p", Cluster: "app"}
+	args := redisServerArgs(rc, "0.0.0.0")
+	flagPair(t, args, "--cluster-enabled", "yes")
+	flagPair(t, args, "--cluster-config-file", "nodes.conf")
+	flagPair(t, args, "--cluster-node-timeout", "5000")
+	// --masterauth=rc.Password unconditionally: any member Redis promotes to a
+	// follower at create time must be able to auth to its master, else it spins
+	// in a reconnect storm. The group shares one password, so masterauth ==
+	// requirepass. (Regression: 3-master x 1-replica cluster left followers
+	// master_link_status:down with no masterauth.)
+	flagPair(t, args, "--masterauth", "p")
+	if slices.Contains(args, "--cluster-announce-ip") {
+		t.Errorf("announce flags present without AdvertiseHost (single-host is reached at its bind): %v", args)
+	}
+	// Orthogonal to the cluster role: the memory cap still applies.
+	rc.MaxMemory = "10mb"
+	args = redisServerArgs(rc, "0.0.0.0")
+	flagPair(t, args, "--maxmemory", "10mb")
+	flagPair(t, args, "--cluster-enabled", "yes")
+}
+
+// A cross-host member announces the peer-visible address plus the exact
+// client/bus ports so peers don't dial the container's own view of itself. The
+// bus port is always client+10000 (Redis's own rule), which pgcli mirrors here
+// rather than storing.
+func TestRedisServerArgsClusterAdvertise(t *testing.T) {
+	rc := &config.RedisConfig{Port: 6381, Password: "p", Cluster: "app", AdvertiseHost: "10.10.0.158"}
+	args := redisServerArgs(rc, "0.0.0.0")
+	flagPair(t, args, "--cluster-announce-ip", "10.10.0.158")
+	flagPair(t, args, "--cluster-announce-port", "6381")
+	flagPair(t, args, "--cluster-announce-bus-port", "16381")
+	flagPair(t, args, "--cluster-enabled", "yes")
+}
+
+// A standalone instance (no Cluster) must not emit any cluster flag — the
+// argv is otherwise byte-identical to before the feature.
+func TestRedisServerArgsNoClusterFlagsByDefault(t *testing.T) {
+	rc := &config.RedisConfig{Port: 6379, Password: "p", AOF: true}
+	args := redisServerArgs(rc, "0.0.0.0")
+	for _, a := range args {
+		if strings.HasPrefix(a, "--cluster") {
+			t.Errorf("cluster flag %q present without Cluster set: %v", a, args)
+		}
+	}
+}
+
+// RedisCLI gates the cluster-aware -c flag off when the forwarded command is
+// redis-cli's own --cluster admin subcommand (which dials its operand nodes
+// itself). The args reach this predicate already past cobra's `--`, so the
+// subcommand is literally args[0].
+func TestStartsClusterSubcmd(t *testing.T) {
+	if !startsClusterSubcmd([]string{"--cluster", "create", "127.0.0.1:6379"}) {
+		t.Error("--cluster create must suppress -c")
+	}
+	if startsClusterSubcmd([]string{"get", "k"}) {
+		t.Error("an ordinary command must keep -c")
+	}
+	if startsClusterSubcmd([]string{"info", "--", "--cluster"}) {
+		t.Error("only a leading --cluster is the subcommand; a trailing one is an arg")
+	}
+	if startsClusterSubcmd(nil) {
+		t.Error("empty args must not match")
 	}
 }

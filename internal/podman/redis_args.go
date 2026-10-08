@@ -29,7 +29,13 @@ const redisContainerDataDir = "/data"
 // "no", disables) the RDB snapshot schedule. A non-empty ReplicaHost turns the
 // instance into a read replica: --replicaof <host> <port> plus --masterauth
 // (which equals requirepass, since resolveRedisReplica pins a replica's
-// password to the master's).
+// password to the master's). A non-empty Cluster instead makes it a native-
+// cluster member: --cluster-enabled yes with its nodes.conf under --dir (so it
+// self-heals across restarts), --masterauth=rc.Password (so any member Redis
+// later promotes to follower can authenticate to its master — the group shares
+// one password), and, when AdvertiseHost is set, --cluster-announce-* so
+// cross-host peers can reach it; Redis opens the +10000 bus port itself.
+// Cluster and ReplicaHost are mutually exclusive, enforced by the CLI layer.
 //
 // The flag values are validated by the CLI layer, not here — see
 // validateRedisKnobs in internal/cli/addon.go.
@@ -64,6 +70,33 @@ func redisServerArgs(rc *config.RedisConfig, bindHost string) []string {
 			val = ""
 		}
 		args = append(args, "--save", val)
+	}
+	if rc.Cluster != "" {
+		// Native-cluster member. The bus port (client + 10000) is opened by
+		// Redis itself; nodes.conf lands in --dir /data (this instance's bind
+		// mount), so a restart/rebuild re-joins the cluster from it without any
+		// pgcli re-add. --cluster-announce-* only when a peer-visible address is
+		// set: a single-host member is reached at 127.0.0.1 and needs none.
+		//
+		// --masterauth is emitted unconditionally here, NOT gated on
+		// ClusterReplicas: which members end up masters vs followers is decided
+		// by Redis at --cluster create time, not at install, and every member of
+		// a group shares one password (rc.Password == requirepass), so
+		// --masterauth=rc.Password lets any member authenticate to whichever
+		// master it is later assigned. Without it a follower could never auth to
+		// its master and spins in a reconnect storm (found assembling a 3-master
+		// x 1-replica cluster). Harmless on a member that stays a master.
+		args = append(args,
+			"--cluster-enabled", "yes",
+			"--cluster-config-file", "nodes.conf",
+			"--cluster-node-timeout", "5000",
+			"--masterauth", rc.Password)
+		if rc.AdvertiseHost != "" {
+			args = append(args,
+				"--cluster-announce-ip", rc.AdvertiseHost,
+				"--cluster-announce-port", fmt.Sprintf("%d", rc.Port),
+				"--cluster-announce-bus-port", fmt.Sprintf("%d", rc.ClusterBusPort()))
+		}
 	}
 	if rc.ReplicaHost != "" {
 		// Read replica: --replicaof points at the master, and --masterauth is

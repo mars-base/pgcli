@@ -430,6 +430,33 @@ const DefaultRedisMajor = "8"
 // the fallback for `pg redis-cli --host` when no local addon port applies.
 const DefaultRedisPort = 6379
 
+// RedisClusterMinMasters is the minimum number of masters a native-Redis
+// cluster needs before `--cluster create` can cover all 16384 hash slots. pgcli
+// uses it only to shape the install-summary hint: below this many masters'
+// worth of configured members of one --cluster token (which for a
+// --cluster-replicas N group is RedisClusterMinMasters*(1+N) nodes in total)
+// the next-step line says "install N more" rather than giving a --cluster create
+// command that would itself fail.
+const RedisClusterMinMasters = 3
+
+// RedisClusterMaxReplicas caps --cluster-replicas as a sanity guard against a
+// typo'd huge number — Redis itself has no fixed upper limit here (bounded only
+// by having enough nodes), so this is a "did you mean that?" ceiling, not a
+// protocol rule.
+const RedisClusterMaxReplicas = 10
+
+// RedisClusterMinNodes is the smallest number of cluster-enabled nodes that can
+// satisfy RedisClusterMinMasters once each master carries `replicas` followers:
+// every master needs itself plus its replicas, so the total is
+// RedisClusterMinMasters*(1+replicas). Negative replicas are clamped to 0 so a
+// bad value can never make this smaller than the masters-only floor.
+func RedisClusterMinNodes(replicas int) int {
+	if replicas < 0 {
+		replicas = 0
+	}
+	return RedisClusterMinMasters * (1 + replicas)
+}
+
 // redisMajorImages maps a Redis major to the default upstream image tag. This
 // is pgcli's first version-selection mechanism — every other add-on pins a
 // single image — so the shape is deliberately local: a table plus the two
@@ -748,10 +775,58 @@ type RedisConfig struct {
 	// live master lookup.
 	ReplicaPort int `yaml:"replica_port,omitempty"`
 
+	// Cluster groups this node into a Redis native cluster: non-empty turns on
+	// --cluster-enabled. Members sharing the same value form one cluster and
+	// share the first member's password (so one REDISCLI_AUTH reaches them all
+	// at `--cluster create`). pgcli does NOT assemble the cluster — it only
+	// installs cluster-enabled nodes; you run `pg redis-cli -- --cluster create
+	// ...` once. Empty means standalone/replica (unchanged shape). Mutually
+	// exclusive with ReplicaHost (a node is either a cluster member or a
+	// read-replica, not both — see resolveRedisCluster/validateRedisKnobs).
+	Cluster string `yaml:"cluster,omitempty"`
+
+	// AdvertiseHost is --cluster-announce-ip: the address this node announces to
+	// peers and the operand host `--cluster create` should dial. Empty = it is
+	// reached at 127.0.0.1 (single-host cluster); set a LAN IP/FQDN for a
+	// cross-host cluster (Redis has no NAT/port remapping). Only meaningful with
+	// Cluster set.
+	AdvertiseHost string `yaml:"advertise_host,omitempty"`
+
+	// ClusterReplicas is the per-master replica count this group is assembled
+	// with: it is ONLY the operator's intent, echoed back in the install summary
+	// so the suggested `pg redis-cli -- --cluster create ... --cluster-replicas N`
+	// carries the right number, and so the summary counts nodes against
+	// RedisClusterMinMasters*(1+N) instead of calling every member a master. It
+	// changes NOTHING in the node's own argv — which members end up masters vs
+	// followers is decided by Redis at --cluster create time, not at install.
+	// Every member of one --cluster group shares the first member's value (like
+	// the password). 0 (default) = masters-only.
+	ClusterReplicas int `yaml:"cluster_replicas,omitempty"`
+
 	// Autostart brings this container up on host boot via the boot service
 	// (pg autostart enable --redis). Start-only: it starts the existing
 	// container, so install first.
 	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// ClusterEnabled reports whether this instance is a native-cluster member
+// (Cluster set), i.e. whether redis-server should be launched --cluster-enabled.
+func (r RedisConfig) ClusterEnabled() bool { return r.Cluster != "" }
+
+// ClusterBusPort is the cluster-bus port Redis derives for this node: always
+// client port + 10000. It is not configured or pooled — Redis opens it itself —
+// so pgcli only needs it to document the cross-host firewall requirement and to
+// fill --cluster-announce-bus-port.
+func (r RedisConfig) ClusterBusPort() int { return r.Port + 10000 }
+
+// PeerAddr is the host peers (and the `--cluster create` operands) should use to
+// reach this node: the explicit AdvertiseHost for a cross-host member, else
+// loopback for a single-host cluster. Mirrors EtcdConfig.AdvertiseAddr.
+func (r RedisConfig) PeerAddr() string {
+	if r.AdvertiseHost != "" {
+		return r.AdvertiseHost
+	}
+	return "127.0.0.1"
 }
 
 // PostgresConfig holds PostgreSQL connection settings.
@@ -2044,7 +2119,10 @@ func (c *Config) autoAssignPorts() {
 	// default 6379) — one port per instance, unlike the object stores which
 	// take an API+console pair from the shared minio pool. Redis is not
 	// co-located with them by design (different role, different defaults), and
-	// it has no second port unless TLS is added later.
+	// it has no second port unless TLS is added later. A native-cluster member
+	// does implicitly open a cluster-bus port, but that is client port + 10000
+	// derived by Redis itself at runtime — not something to allocate here — so
+	// the pool stays one client port per instance even for cluster nodes.
 	{
 		redisBase := c.RedisStartPort
 		assignedRedis := map[int]bool{}

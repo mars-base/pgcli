@@ -274,7 +274,12 @@ func (m *RedisManager) Stop(name string) (string, error) {
 // pg redis-cli --host) replaces that local target, so a remote endpoint is
 // reachable from either platform. The image is pulled first if the host does
 // not already have it.
-func (m *RedisManager) RedisCLI(imageTag, password, host string, port int, args []string) error {
+//
+// cluster turns on the client's -c flag so MOVED redirects follow themselves;
+// it is gated off when args start with `--cluster` (that subcommand does its own
+// dialling and -c is redundant, though per the VM01 dry-check a stray -c is
+// harmless either way — we still emit a clean command).
+func (m *RedisManager) RedisCLI(imageTag, password, host string, port int, cluster bool, args []string) error {
 	if err := m.EnsureImage(imageTag); err != nil {
 		return err
 	}
@@ -313,6 +318,11 @@ func (m *RedisManager) RedisCLI(imageTag, password, host string, port int, args 
 	runArgs = append(runArgs,
 		imageTag,
 		"redis-cli",
+	)
+	if cluster && !startsClusterSubcmd(args) {
+		runArgs = append(runArgs, "-c")
+	}
+	runArgs = append(runArgs,
 		"-h", host,
 		"-p", fmt.Sprintf("%d", port),
 	)
@@ -327,6 +337,13 @@ func (m *RedisManager) RedisCLI(imageTag, password, host string, port int, args 
 		return fmt.Errorf("running redis-cli: %w", err)
 	}
 	return nil
+}
+
+// startsClusterSubcmd reports whether forwarded args open with redis-cli's
+// `--cluster` admin subcommand (create/check/add-node/…), for which the
+// cluster-aware -c flag is redundant.
+func startsClusterSubcmd(args []string) bool {
+	return len(args) > 0 && args[0] == "--cluster"
 }
 
 // --- Internal helpers ---------------------------------------------------

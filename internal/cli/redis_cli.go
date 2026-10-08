@@ -45,6 +45,13 @@ redis-cli's own option flags (via --) work that way. To retarget the connection,
 use --host/--port, not redis-cli's -h/-p (those land after the command word and
 become command arguments).
 
+For a native-cluster node (installed with --cluster) the client runs with -c, so
+key MOVED redirects between masters are followed automatically. To assemble a
+cluster or run redis-cli's cluster admin subcommands, forward them after --:
+pgcli injects the (shared) cluster password via REDISCLI_AUTH and redis-cli's
+--cluster does its own dialling, e.g.
+  pg redis-cli --name n1 -- --cluster create n1host:p1 n2host:p2 n3host:p3 --cluster-replicas 0
+
 Examples:
   pg redis-cli ping
   pg redis-cli set session:42 '{"user":1}'
@@ -53,7 +60,8 @@ Examples:
   pg redis-cli --host 10.10.0.158 ping
   pg redis-cli --host 10.10.0.158 --port 6380 info
   REDISCLI_AUTH=otherpass pg redis-cli --host 10.10.0.158 dbsize
-  pg redis-cli info -- --no-auth-warning`,
+  pg redis-cli info -- --no-auth-warning
+  pg redis-cli --name n1 -- --cluster create 127.0.0.1:6379 127.0.0.1:6380 127.0.0.1:6381 --cluster-replicas 0`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := loadConfigForDSN(); err != nil {
@@ -78,7 +86,7 @@ Examples:
 			fmt.Fprintf(os.Stderr, "-> redis-cli → %s (%s:%d) — pick another with --name, or a remote with --host\n",
 				target.addonName, target.host, target.port)
 		}
-		return rm.RedisCLI(target.imageTag, target.password, target.host, target.port, args)
+		return rm.RedisCLI(target.imageTag, target.password, target.host, target.port, target.cluster, args)
 	},
 }
 
@@ -89,6 +97,7 @@ type redisCLITarget struct {
 	password  string // may be empty; REDISCLI_AUTH in the environment wins
 	host      string // empty = manager default (local loopback / bridge)
 	port      int
+	cluster   bool // a native-cluster node: RedisCLI injects -c so MOVED follows itself
 }
 
 // resolveRedisCLITarget turns the (name, --host, --port) flag trio plus the
@@ -139,6 +148,7 @@ func resolveRedisCLITarget(cfg *config.Config, name, host string, port int) (red
 			imageTag:  rc.ImageTag,
 			password:  rc.Password,
 			port:      p,
+			cluster:   rc.ClusterEnabled(),
 		}, nil
 
 	case name != "" || haveAddons:
@@ -160,6 +170,7 @@ func resolveRedisCLITarget(cfg *config.Config, name, host string, port int) (red
 			password:  rc.Password,
 			host:      host,
 			port:      p,
+			cluster:   rc.ClusterEnabled(),
 		}, nil
 
 	default:

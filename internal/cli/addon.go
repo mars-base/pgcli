@@ -68,8 +68,12 @@ Infra addons (shared, not tied to one instance):
           (each maps to a pinned patch tag); a requirepass password is generated
           on first install and persisted, so the default 0.0.0.0 bind is always
           authenticated. Data is an RDB snapshot under the addon's data dir, kept
-          across remove/reinstall. Read replicas via --replica-of; no
-          automatic failover (sentinel/cluster are out of scope).
+          across remove/reinstall. Read replicas via --replica-of (no
+          automatic failover); native cluster members via --cluster — install
+          every member, then assemble once with "pg redis-cli -- --cluster
+          create ..." (pgcli installs cluster-enabled nodes; it does not run
+          the assembly). --cluster-replicas N sets followers per master for that
+          create (0 = masters-only). Sentinel is out of scope.
   pg addon install postgrest
           Exposes a PostgreSQL schema as a REST API (single stateless
           container, dual mode like pgbouncer): local -i fronting an
@@ -104,7 +108,7 @@ Currently supported add-ons:
   minio       single-node S3-compatible object storage (web console included; Linux host network, macOS bridge)
   silo        MinIO's Pigsty fork — same S3 object storage, from the public docker.io/pgsty/silo image (console + mcli client bundled; Linux host network, macOS bridge)
   rustfs      Rust S3-compatible object storage from pgcli's wrapper image, ghcr.io/mars-base/pgcli/pgcli-rustfs (console included; Linux only; the fixed upstream uid 10001 is handled inside the container, three topologies SNSD/SNMD/MNMD, each drive on its own physical device)
-  redis       standalone KV store (cache/session/ranking/counters) from the plain upstream docker.io/library/redis image; --version 7|8 selects the major, requirepass auto-generated, RDB persistence, read replicas via --replica-of (no automatic failover)
+  redis       standalone KV store (cache/session/ranking/counters) from the plain upstream docker.io/library/redis image; --version 7|8 selects the major, requirepass auto-generated, RDB persistence, read replicas via --replica-of (no automatic failover), native cluster masters via --cluster (assemble once with "pg redis-cli -- --cluster create")
   postgrest   stateless REST API in front of a PostgreSQL schema (single container; Linux host network, macOS bridge)
 
 Two modes (pgbouncer, postgrest):
@@ -180,6 +184,16 @@ Linux and macOS; the first version-selectable addon):
   with --password equal to the master's. Replicas serve reads only — writes are
   rejected READONLY — and there is no automatic failover: promote with
   "pg redis-cli --name <r> replicaof no one".
+  --cluster <name> marks the instance a member of a native Redis cluster: it is
+  installed cluster-enabled (bus port = client+10000) but NOT assembled — pgcli
+  never runs --cluster create for you. Install every member (they share the
+  first member's password; use --advertise-host for cross-host), then assemble
+  once yourself: "pg redis-cli --name <m1> -- --cluster create m1:p1 m2:p2
+  m3:p3 --cluster-replicas N". N (per-master replicas, --cluster-replicas) is
+  0 by default = masters-only, minimum 3 masters; with N>0 you need 3*(1+N)
+  nodes total and Redis decides which become followers at create time. Clients
+  follow redirects automatically: "pg redis-cli --name <m> get k" runs with -c.
+  A cluster member cannot also be a read replica.
   Talk to it with "pg redis-cli" (a short-lived redis-cli container wired to the
   first redis addon; see that command's help).
 
@@ -422,9 +436,10 @@ func init() {
 	addonInstallCmd.Flags().Int("client-port", 0, "etcd client host port (0=auto-assign from etcd_start_port)")
 	addonInstallCmd.Flags().Int("peer-port", 0, "etcd peer host port (0=auto-assign, next free port after client)")
 	addonInstallCmd.Flags().String("image", "", "override the addon image tag verbatim (etcd default quay.io/coreos/etcd:v3.5.30; redis default resolved from --version, e.g. docker.io/library/redis:8.10.2)")
-	addonInstallCmd.Flags().String("cluster", "", "etcd cluster name (--initial-cluster-token, default \"pgcli-etcd\")")
+	addonInstallCmd.Flags().String("cluster", "", "cluster grouping token: etcd --initial-cluster-token (default \"pgcli-etcd\"); redis native-cluster name (--cluster-enabled yes, members sharing it form one cluster you assemble once with `pg redis-cli -- --cluster create ...`)")
+	addonInstallCmd.Flags().Int("cluster-replicas", 0, "redis native-cluster only: per-master replica count for the --cluster create you will run (default 0 = masters-only). Only shapes the suggested assemble command and node-count guidance — which nodes become followers is decided by Redis at create time, not here; the whole group inherits the first member's value")
 	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs or redis instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data)")
-	addonInstallCmd.Flags().String("advertise-host", "", "host advertised in this member's peer/client URLs (empty=127.0.0.1 for single-host; set a LAN IP or FQDN for cross-host clusters)")
+	addonInstallCmd.Flags().String("advertise-host", "", "peer-visible host: etcd member peer/client URLs, and redis native-cluster --cluster-announce-ip (empty=127.0.0.1 single-host; set a LAN IP or FQDN for cross-host clusters)")
 	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.0.0.12:2379 (implies --initial-cluster-state existing; requires --advertise-host)")
 	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo or rustfs instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\")")
 	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/redis data directory (object storage / backup repository / key-value data)")
@@ -2438,6 +2453,11 @@ func resolveRedisReplica(cfg *config.Config, rc *config.RedisConfig, selfName, r
 // exists, same major, password equality) live in resolveRedisReplica, which has
 // the whole config; only the self-contained host/port invariant is checked here.
 func validateRedisKnobs(rc config.RedisConfig) error {
+	// Cluster and replica are mutually exclusive; resolveRedisCluster enforces
+	// it for the flag path, this catches a hand-edited pg.yaml that sets both.
+	if rc.Cluster != "" && rc.ReplicaHost != "" {
+		return fmt.Errorf("an instance cannot be both a native-cluster member (cluster %q) and a read replica of %s:%d — pick one role", rc.Cluster, rc.ReplicaHost, rc.ReplicaPort)
+	}
 	if rc.ReplicaHost != "" && rc.ReplicaPort == 0 {
 		return fmt.Errorf("a replica needs a master port (ReplicaHost %q set with ReplicaPort 0 — reinstall with --replica-of/--replica-of-port)", rc.ReplicaHost)
 	}
@@ -2484,14 +2504,144 @@ func redisEffectivePolicy(rc config.RedisConfig) string {
 }
 
 // redisRoleSummary renders the replication Role line shared by the install
-// summary and addon list: a plain master, or a read replica naming the master
+// summary and addon list: a plain master, a read replica naming the master
 // endpoint it syncs from (the stored ReplicaHost is the resolved target, so
-// what is displayed is what the argv carries).
+// what is displayed is what the argv carries), or a native-cluster member
+// naming its group and the peer-visible endpoint peers reach it at.
 func redisRoleSummary(rc config.RedisConfig) string {
+	if rc.ClusterEnabled() {
+		return fmt.Sprintf("cluster member of %q (%s:%d)", rc.Cluster, rc.PeerAddr(), rc.Port)
+	}
 	if rc.ReplicaHost != "" {
 		return fmt.Sprintf("replica of %s:%d (read-only)", rc.ReplicaHost, rc.ReplicaPort)
 	}
 	return "master"
+}
+
+// resolveRedisCluster is the cluster analogue of resolveRedisReplica, run at
+// install before validation. A native cluster is assembled ONCE by the operator
+// (`pg redis-cli -- --cluster create ...`), so pgcli's only jobs here are: mark
+// this instance a member of the --cluster group, pin its peer-visible address
+// (--advertise-host → --cluster-announce-ip), and make every member of one group
+// share ONE password.
+//
+// The shared password is load-bearing, not cosmetic: redis-cli --cluster
+// authenticates to every node in its operand list with a single -a/--password
+// (the dry-check on VM01 confirmed --cluster ignores -h/-p and honours
+// REDISCLI_AUTH alone). So after the first member of a group is installed,
+// subsequent --cluster installs inherit that member's stored password; an
+// explicit --password that disagrees is rejected up front rather than surfacing
+// as a per-node auth failure inside --cluster create.
+//
+// cluster="" is a no-op: it preserves any stored Cluster/AdvertiseHost across a
+// plain reinstall (same as the replica path leaves a stored role alone).
+//
+// --cluster-replicas N is only the operator's intent echoed back by the summary
+// (it never reaches redis-server argv — Redis assigns master vs follower at
+// --cluster create). Like the password it is a GROUP property: the first member
+// sets it, later members inherit it, and an explicit disagreement is rejected so
+// the copy-pasteable create command and the node-count guidance stay consistent.
+func resolveRedisCluster(cfg *config.Config, rc *config.RedisConfig, selfName, cluster, advertiseHost, replicaOf, replicaOfHost string, replicas int, replicasGiven, passwordGiven bool) error {
+	if cluster == "" {
+		return nil
+	}
+	if rc.ReplicaHost != "" || replicaOf != "" || replicaOfHost != "" {
+		return fmt.Errorf("--cluster (native-cluster member) and --replica-of/--replica-of-host (read replica) are mutually exclusive — an instance is either a cluster member or a replica of a master, never both")
+	}
+	if replicas < 0 {
+		return fmt.Errorf("--cluster-replicas must be >= 0 (0 = masters-only), got %d", replicas)
+	}
+	if replicas > config.RedisClusterMaxReplicas {
+		return fmt.Errorf("--cluster-replicas %d is above the sanity cap of %d — this wants very many nodes and is almost certainly a typo", replicas, config.RedisClusterMaxReplicas)
+	}
+	rc.Cluster = cluster
+	if advertiseHost != "" {
+		rc.AdvertiseHost = advertiseHost
+	}
+	// Base password = the first OTHER configured member of this group, by name
+	// (deterministic; matches how the group's members were installed in order).
+	var base *config.RedisConfig
+	for _, name := range sortedAddonNames(cfg.Addons.Redis) {
+		if name == selfName {
+			continue
+		}
+		other := cfg.Addons.Redis[name]
+		if other.Cluster == cluster {
+			base = &other
+			break
+		}
+	}
+	if base == nil {
+		// First member of the group: leave Password alone (empty → the install
+		// path generates it; an explicit --password is honoured as the group's
+		// shared value that later members inherit). The replicas hint likewise
+		// starts here — this member's --cluster-replicas becomes the group's.
+		if replicasGiven {
+			rc.ClusterReplicas = replicas
+		}
+		return nil
+	}
+	if passwordGiven && rc.Password != "" && rc.Password != base.Password {
+		return fmt.Errorf("cluster member %q must share the group's password (set by cluster %q's first member) — omit --password to inherit it", selfName, cluster)
+	}
+	rc.Password = base.Password
+	if replicasGiven && replicas != base.ClusterReplicas {
+		return fmt.Errorf("cluster member %q must share the group's --cluster-replicas (set to %d by cluster %q) — omit it to inherit, or assemble a different cluster", selfName, base.ClusterReplicas, cluster)
+	}
+	rc.ClusterReplicas = base.ClusterReplicas
+	return nil
+}
+
+// redisClusterPeerAddrs returns the "addr:port" operands for every configured
+// member of self's --cluster group (self included), ordered by name and
+// dialled at each member's PeerAddr (--advertise-host, else 127.0.0.1). This is
+// exactly the node list `--cluster create` takes, so the summary hands the
+// operator a copy-pasteable command instead of a description.
+func redisClusterPeerAddrs(cfg *config.Config, self config.RedisConfig) []string {
+	var out []string
+	for _, name := range sortedAddonNames(cfg.Addons.Redis) {
+		m := cfg.Addons.Redis[name]
+		if m.Cluster == "" || m.Cluster != self.Cluster {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s:%d", m.PeerAddr(), m.Port))
+	}
+	return out
+}
+
+// redisClusterNextSteps builds the install-summary guidance for a
+// native-cluster member. pgcli installs cluster-enabled nodes but never
+// assembles them, so this returns the ONE command the operator runs to form the
+// cluster — once enough nodes are configured — or, below that, how many more
+// members to install first. The count is in NODES, not masters: a --cluster-replicas
+// N group needs RedisClusterMinMasters*(1+N) nodes (each master plus its
+// followers), and which member ends up a follower is Redis's decision at
+// --cluster create, so pgcli only echoes the operator's replica intent back into
+// the suggested command. Keeping the assembled command out of pgcli (no
+// automatic --cluster create) is the deliberate two-stage design.
+func redisClusterNextSteps(cfg *config.Config, selfName string, self config.RedisConfig) string {
+	peers := redisClusterPeerAddrs(cfg, self)
+	operands := strings.Join(peers, " ")
+	minNodes := config.RedisClusterMinNodes(self.ClusterReplicas)
+	out := "\n"
+	// masters-only reads naturally as "N masters configured"; with followers it
+	// would mislabel every node as a master, so switch to a node count there.
+	noun := "masters"
+	if self.ClusterReplicas > 0 {
+		noun = "nodes"
+	}
+	if len(peers) < minNodes {
+		need := minNodes - len(peers)
+		out += fmt.Sprintf("  Cluster:     %q — %d/%d %s configured. Install %d more with --cluster %s, then:\n",
+			self.Cluster, len(peers), minNodes, noun, need, self.Cluster)
+	} else {
+		out += fmt.Sprintf("  Cluster:     %q — %d %s configured. Assemble once (pgcli does not run this):\n",
+			self.Cluster, len(peers), noun)
+	}
+	out += fmt.Sprintf("               pg redis-cli --name %s -- --cluster create %s --cluster-replicas %d\n",
+		selfName, operands, self.ClusterReplicas)
+	out += "               (bus port = client+10000; for cross-host peers open it on the firewall, and give each member --advertise-host)\n"
+	return out
 }
 
 // redisPersistenceSummary renders the persistence line shared by the install
@@ -2590,6 +2740,9 @@ func runAddonInstallRedis(cmd *cobra.Command) error {
 	replicaOf, _ := cmd.Flags().GetString("replica-of")
 	replicaOfHost, _ := cmd.Flags().GetString("replica-of-host")
 	replicaOfPort, _ := cmd.Flags().GetInt("replica-of-port")
+	clusterToken, _ := cmd.Flags().GetString("cluster")
+	clusterReplicas, _ := cmd.Flags().GetInt("cluster-replicas")
+	advertiseHost, _ := cmd.Flags().GetString("advertise-host")
 	force, _ := cmd.Flags().GetBool("force")
 
 	path := cfgPath
@@ -2646,6 +2799,13 @@ func runAddonInstallRedis(cmd *cobra.Command) error {
 	// and a bad topology (missing master, cross-major, remote without a
 	// password) fails here rather than at pull time.
 	passwordGiven := cmd.Flags().Changed("password")
+	replicasGiven := cmd.Flags().Changed("cluster-replicas")
+	// Cluster membership first: it decides the shared password (inherited from
+	// the group's first member) and owns the cluster↔replica exclusion, so a
+	// `--cluster ... --replica-of ...` collision fails before the replica path.
+	if err := resolveRedisCluster(cfg, &existing, name, clusterToken, advertiseHost, replicaOf, replicaOfHost, clusterReplicas, replicasGiven, passwordGiven); err != nil {
+		return err
+	}
 	if err := resolveRedisReplica(cfg, &existing, name, replicaOf, replicaOfHost, version, replicaOfPort, passwordGiven); err != nil {
 		return err
 	}
@@ -2728,6 +2888,9 @@ func runAddonInstallRedis(cmd *cobra.Command) error {
 		if rc.ReplicaHost != "" {
 			fmt.Printf("-> NOTE: read replica — it starts an initial full sync from the master at %s:%d into its own data dir, and rejects writes (READONLY). Send writes to the master.\n", rc.ReplicaHost, rc.ReplicaPort)
 		}
+		if rc.ClusterEnabled() {
+			fmt.Printf("-> NOTE: native-cluster member of %q — it comes up cluster-enabled but INCOMPLETE until you assemble the group once (see the \"Cluster:\" line below). pgcli does not run --cluster create for you.\n", rc.Cluster)
+		}
 		fmt.Println("-> Starting redis container...")
 		if err := rm.EnsureContainer(&rc); err != nil {
 			return err
@@ -2764,6 +2927,9 @@ func runAddonInstallRedis(cmd *cobra.Command) error {
 	if rc.Listen == "0.0.0.0" {
 		fmt.Println("  NOTE: listening on every interface; the password above is the only gate.")
 		fmt.Printf("        loopback-only: pg addon install redis --name %s --listen 127.0.0.1 --force\n", name)
+	}
+	if rc.ClusterEnabled() {
+		fmt.Print(redisClusterNextSteps(cfg, name, rc))
 	}
 	return nil
 }
@@ -3558,6 +3724,13 @@ func runAddonList(showPassword bool) error {
 			}
 			fmt.Printf("    Address:     %s:%d\n", rc.Listen, rc.Port)
 			fmt.Printf("    Role:        %s\n", redisRoleSummary(rc))
+			if rc.ClusterEnabled() {
+				cluster := rc.Cluster
+				if rc.AdvertiseHost != "" {
+					cluster += " @" + rc.AdvertiseHost
+				}
+				fmt.Printf("    Cluster:     %s (bus %d)\n", cluster, rc.ClusterBusPort())
+			}
 			auth := "off"
 			if rc.Password != "" {
 				auth = "on (requirepass)"

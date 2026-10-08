@@ -265,3 +265,85 @@ func TestRedisMajors(t *testing.T) {
 		t.Error("major 6 unexpectedly resolvable")
 	}
 }
+
+// Cluster and AdvertiseHost must survive a Save/Load and ApplyDefaults: the
+// stored Cluster is what turns --cluster-enabled back on at `pg addon start`
+// (start rebuilds argv from config, with no --cluster flag involved), and
+// AdvertiseHost is the cross-host --cluster-announce-ip. ApplyDefaults must
+// leave both alone — it never auto-clusters anything.
+func TestRedisClusterRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pg.yaml")
+
+	cfg := Default()
+	cfg.Addons.Redis = map[string]RedisConfig{
+		"n1": {
+			ContainerName: "pgcli-redis-n1",
+			Name:          "n1",
+			Cluster:       "app",
+			Port:          36479,
+			Password:      "shared-cluster-pw",
+		},
+		"n2": {
+			ContainerName:   "pgcli-redis-n2",
+			Name:            "n2",
+			Cluster:         "app",
+			AdvertiseHost:   "10.10.0.159",
+			ClusterReplicas: 1,
+			Port:            36480,
+			Password:        "shared-cluster-pw",
+		},
+	}
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	got.ApplyDefaults()
+	if c := got.Addons.Redis["n1"].Cluster; c != "app" {
+		t.Errorf("n1 cluster = %q, want app (single-host member still marked cluster-enabled)", c)
+	}
+	n2 := got.Addons.Redis["n2"]
+	if n2.Cluster != "app" || n2.AdvertiseHost != "10.10.0.159" {
+		t.Errorf("n2 cluster/advertise = %q/%q, want app/10.10.0.159", n2.Cluster, n2.AdvertiseHost)
+	}
+	if got.Addons.Redis["n1"].Port != 36479 || n2.Port != 36480 {
+		t.Errorf("ApplyDefaults moved stored cluster ports: %d/%d", got.Addons.Redis["n1"].Port, n2.Port)
+	}
+
+	// Bus port and peer address are pure derivations (never stored): the bus is
+	// Redis's own client+10000 rule; PeerAddr is the create-operand host.
+	if bp := n2.ClusterBusPort(); bp != 46480 {
+		t.Errorf("ClusterBusPort = %d, want 46480 (client+10000)", bp)
+	}
+	if pa := n2.PeerAddr(); pa != "10.10.0.159" {
+		t.Errorf("PeerAddr (advertised) = %q, want the AdvertiseHost", pa)
+	}
+	if pa := got.Addons.Redis["n1"].PeerAddr(); pa != "127.0.0.1" {
+		t.Errorf("PeerAddr (single-host) = %q, want 127.0.0.1", pa)
+	}
+	if !n2.ClusterEnabled() || got.Addons.Redis["n1"].ClusterEnabled() == false {
+		t.Error("ClusterEnabled disagrees with stored Cluster")
+	}
+	// ClusterReplicas is the group's per-master replica hint — stored, survives
+	// Save/Load/ApplyDefaults (it is not derived). n1 left it at 0 (masters-only).
+	if n2.ClusterReplicas != 1 {
+		t.Errorf("n2 ClusterReplicas = %d, want 1 to survive the round trip", n2.ClusterReplicas)
+	}
+	if r := got.Addons.Redis["n1"].ClusterReplicas; r != 0 {
+		t.Errorf("n1 ClusterReplicas = %d, want 0 (masters-only default omits the key)", r)
+	}
+}
+
+// RedisClusterMinNodes is the node-count floor the install summary counts
+// against: masters-only is the 3-master minimum, and each follower multiplies
+// it by (1+N). A negative hint clamps to the masters-only floor.
+func TestRedisClusterMinNodes(t *testing.T) {
+	cases := map[int]int{0: 3, 1: 6, 2: 9, 5: 18, -1: 3}
+	for replicas, want := range cases {
+		if got := RedisClusterMinNodes(replicas); got != want {
+			t.Errorf("RedisClusterMinNodes(%d) = %d, want %d", replicas, got, want)
+		}
+	}
+}
