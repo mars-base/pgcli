@@ -6,7 +6,9 @@ hero:
   title_lines:
     - words: [{ text: pgcli }]
     - words: [{ text: Simplify PostgreSQL management }]
-  lead: Using PostgreSQL databases as naturally as breathing. One command to create, manage, backup, clone, and replicate with isolated containers.
+  lead: Using PostgreSQL databases as naturally as breathing — and extending them just as naturally, with a rich catalog of PostgreSQL extensions and companion infrastructure around your database and storage.
+  note: pgcli is your lightsaber — as powerful in a Jedi's hand, letting you forge your database and storage foundation with ease.
+  note_icon: fa-solid fa-bolt
   actions:
     - { label: Read the docs, url: docs/, icon: fa-solid fa-book, style: primary }
     - { label: Quick start, url: docs/quickstart/, icon: fa-solid fa-rocket, style: ghost }
@@ -33,7 +35,7 @@ cards:
       icon: fa-solid fa-sitemap
       url: docs/ha-cluster/
     - title: Addons
-      desc: "One-command companion containers around an instance or cluster: pgbouncer, PgDog, etcd, HAProxy, and MinIO."
+      desc: "One-command companion containers around an instance or cluster: PgBouncer, etcd, PgDog, PostgREST, HAProxy, MinIO / silo / rustfs, Redis, and Predixy."
       icon: fa-solid fa-cubes
       url: docs/addon/
     - title: Extensions

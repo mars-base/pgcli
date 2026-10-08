@@ -6,7 +6,9 @@ hero:
   title_lines:
     - words: [{ text: pgcli }]
     - words: [{ text: 简化 PostgreSQL 管理 }]
-  lead: 让使用 PostgreSQL 数据库像呼吸一样简单自然。一个命令即可创建、管理、备份、克隆和复制，使用隔离容器。
+  lead: 让 PostgreSQL 用起来像呼吸一样自然，扩展它也一样自然——丰富的 PostgreSQL 扩展，以及围绕数据库和存储的周边基础设施。
+  note: pgcli 就像绝地武士的光剑——威力强大，让你轻松打造数据库与存储底座。
+  note_icon: fa-solid fa-bolt
   actions:
     - { label: 阅读文档, url: docs/, icon: fa-solid fa-book, style: primary }
     - { label: 快速开始, url: docs/quickstart/, icon: fa-solid fa-rocket, style: ghost }
@@ -33,7 +35,7 @@ cards:
       icon: fa-solid fa-sitemap
       url: docs/ha-cluster/
     - title: 插件
-      desc: 围绕实例或集群的一条命令配套容器：pgbouncer、PgDog、etcd、HAProxy 与 MinIO。
+      desc: 围绕实例或集群的一条命令配套容器：PgBouncer、etcd、PgDog、PostgREST、HAProxy、MinIO / silo / rustfs、Redis，以及 Predixy（Redis 集群代理）。
       icon: fa-solid fa-cubes
       url: docs/addon/
     - title: 扩展
