@@ -31,7 +31,7 @@ The following addons are currently supported:
 | [`minio`](./minio/) | S3-compatible object storage with web console — standalone or distributed erasure-coded cluster across hosts (Linux and macOS) |
 | [`silo`](./silo/) | S3-compatible object storage (Pigsty's MinIO fork) — same feature surface as the minio addon, shares one port pool; ships its own `mcli` client (Linux and macOS) |
 | [`rustfs`](./rustfs/) | S3-compatible object storage (Rust reimplementation) — SNSD/SNMD/MNMD erasure-coded layouts, fixed container uid handled inside pgcli's wrapper image, shares the one port pool (Linux only) |
-| [`redis`](./redis/) | Standalone key-value store for cache, session, ranking and counter data — selectable majors 7/8, auto-generated `requirepass`, RDB persistence, own port pool (Linux; macOS code-complete, untested) |
+| [`redis`](./redis/) | Standalone key-value store for cache, session, ranking and counter data — selectable majors 7/8, auto-generated `requirepass`, RDB persistence, read replicas, native cluster sharding via `--cluster`, own port pool (Linux; macOS code-complete, untested) |
 
 Each addon has its own page with commands, parameters, and troubleshooting.
 

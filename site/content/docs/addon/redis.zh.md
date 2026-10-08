@@ -24,9 +24,12 @@ weight: 50
 在 PostgreSQL 实例旁边做缓存/会话/排行榜/计数就选 Redis；它与 PG 栈无关，可
 与任何插件并存，同一主机也能跑多个实例（甚至跨大版本）。
 
-> **范围之外：** Sentinel（自动故障转移）与 Redis Cluster 不由 pgcli 管理。读
-> 副本**是**支持的——`--replica-of` 把一个实例变成对另一个主节点的只读跟随，
-> 见[读副本](#读副本)与[已知限制](#已知限制)。
+> **范围之外：** Sentinel（自动故障转移）不由 pgcli 管理。Redis 的*原生集
+> 群*是支持的——`--cluster` 把实例变成 cluster-enabled 成员，组建由你自己跑
+> 一次 `pg redis-cli -- --cluster create`（默认纯主分片，用 `--cluster-replicas
+> N` 可给每个主加从属，见[原生集
+> 群](#原生集群)）。读副本**也**支持——`--replica-of` 把一个实例变成对另一个
+> 主节点的只读跟随（见[读副本](#读副本)与[已知限制](#已知限制)）。
 
 ## 参数设置
 
@@ -50,6 +53,9 @@ wrapper，这点与 [rustfs](../rustfs/) 不同）。下表列出每个可调项
 | `--replica-of` / `replica_host`+`replica_port` | 不设（主节点） | `--replicaof` + `--masterauth` | 成为*本机*主实例的只读副本（host/port/密码都从配置里取） |
 | `--replica-of-host` / `replica_host` | — | `--replicaof` | 跨机副本的**主节点地址**（与 `--replica-of-port` + `--password` 搭配） |
 | `--replica-of-port` / `replica_port` | — | `--replicaof` | 主节点端口，与 `--replica-of-host` 搭配 |
+| `--cluster` / `cluster` | 不设（独立实例） | `--cluster-enabled yes` + `--masterauth` | 原生集群成员：非空值即组名——同名归同一集群，且同组成员共用**首成员**的密码（`--cluster create` 用一个密码认证全部操作数节点，与"副本密码必须等于主节点"同理）。每个成员还会带上 `--masterauth`，以便 Redis 在组建时被提升为从属的节点能向主节点认证。与 `--replica-of`/`--replica-of-host` 互斥——一个实例要么是集群成员，要么是读副本。pgcli 只装节点，组建由你自己做——见[原生集群](#原生集群) |
+| `--cluster-replicas` / `cluster_replicas` | `0`（纯主分片） | —（仅回显进建议的 `--cluster create`） | 组建步骤里每个主的从属数：摘要按 `3*(1+N)` 个**节点**计数，打印的命令以 `--cluster-replicas N` 结尾。哪些成员成为从属是 Redis 在 `--cluster create` 时的决定，而非安装时。它是与密码同类的组属性——首成员设定，后续成员继承，显式不一致会被拒绝 |
+| `--advertise-host` / `advertise_host` | 不设（`127.0.0.1`，单机） | `--cluster-announce-ip`/`-port`/`-bus-port` | 本成员向对等节点宣告的地址——填局域网 IP，跨机集群必备（Redis 集群总线不支持 NAT/端口重映射） |
 | `--data-dir` / `data_dir` | `<base-dir>/addon/redis/<name>/data` | `--dir /data`（主机目录 bind 挂载到 `/data`） | 数据落盘位置 |
 | — | `autostart: false` | — | 开机自启（`pg autostart enable --redis`） |
 
@@ -71,13 +77,18 @@ wrapper，这点与 [rustfs](../rustfs/) 不同）。下表列出每个可调项
   `--appendfsync` 依赖 `--aof`——CLI 在拉镜像/建容器之前就拒绝这类组合。
 - **`--replica-of` 造只读副本**——见[读副本](#读副本)。持久化/驱逐旋钮与角色
   正交：副本也能设 `--maxmemory` 或开 `--aof`，跟主节点一模一样。
+- **`--cluster` 造集群成员，与 `--replica-of`/`--replica-of-host` 互斥**——
+  一个实例只有一个角色。同 `--cluster` 组成员自动共用首成员的密码（后续成员
+  带**不同**的 `--password` 会在拉镜像/建容器之前被拒绝）；每主从属数由
+  `--cluster-replicas N` 同样按组继承。见[原生集群](#原生集群)。
 
 Redis/Valkey 的选项空间远比这张表大，pgcli 有意不包装多节点**控制面**
-（Sentinel、Redis Cluster、自动故障转移）——见[已知限制](#已知限制)。读副本
-是支持的（[读副本](#读副本)），pgcli 留下的只是*编排*那一层：主节点挂了不自
-动提升副本。引擎本身倒是可以用 `--image` 变通：`pg addon install redis
---image docker.io/valkey/valkey:8` 跑的是 [Valkey](https://valkey.io/)（Redis
-的分支），大版本反解析为 `8`。
+（Sentinel、自动故障转移），集群**编排**也一样：pgcli 装 cluster-enabled 节
+点，但从不替你跑 `--cluster create`/`add-node`/resharding/缩容——见[原生集
+群](#原生集群)与[已知限制](#已知限制)。读副本是支持的（[读副本](#读副本)），
+pgcli 留下的只是*编排*那一层：主节点挂了不自动提升副本。引擎本身倒是可以用
+`--image` 变通：`pg addon install redis --image docker.io/valkey/valkey:8` 跑的
+是 [Valkey](https://valkey.io/)（Redis 的分支），大版本反解析为 `8`。
 
 ## 版本选择
 
@@ -244,6 +255,154 @@ pg addon remove redis --name cache-ro          # 保留数据，忘掉角色
 pg addon install redis --name cache-ro         # 作为普通主节点重装
 ```
 
+## 原生集群
+
+`--cluster` 把实例变成 **Redis 原生集群** 的成员——按 16384 个哈希槽分片，而
+非对某个主节点做只读复制。这是 pgcli 唯一支持的多节点拓扑；[Sentinel](#已知
+限制) 不支持。
+
+pgcli 在这件事上的角色刻意很窄：**装 cluster-enabled 的节点，但从不替你组
+建**。这本来就是 Redis 自己的两步流程，不是 pgcli 发明的花活——集群 = 若干
+`cluster-enabled yes` 的服务器 + 一条对它们整体跑一次的 `redis-cli --cluster
+create`。把这两步拆开，pgcli 就不必去猜"这是不是我等着的最后一个成员、现在
+该不该把集群拉起来"（那种 etcd 式的自动 bootstrap 状态机）；组建永远是**你
+的决定**，跑一次，跟你对着裸 `redis-server` 做的事一模一样。
+
+```bash
+# 1. 装成员——一个 --cluster <组名> 把每台变成 cluster-enabled 节点；同名意味着
+#    "同一个集群"。最少 3 个主节点（Redis 自己的法定人数规则）。纯主分片是默认
+#    （装 3 个，--cluster-replicas 0）；要每台主带一个从属，就装 3*(1+N) 个成员，
+#    在第一个安装时传 --cluster-replicas N（其余自动继承）——见第 2 步。
+pg addon install redis --name n1 --cluster app --maxmemory 10mb
+pg addon install redis --name n2 --cluster app --maxmemory 10mb
+pg addon install redis --name n3 --cluster app --maxmemory 10mb
+```
+
+同组成员**自动共用首成员的密码**：`--cluster create` 用一个 `-a`（这里是
+`pg redis-cli` 注入的那一个 `REDISCLI_AUTH`）认证操作数里的每个节点，所以
+必须一个密码打通全组——和"[读副本](#读副本)的密码必须等于主节点"是同一条
+规则。后续成员带**不同**的 `--password` 会在拉镜像/建容器之前被拒绝；不带
+`--password` 则自动继承组内的值。每个成员还会带上 `--masterauth`（与
+requirepass 相同的共享密码）：`--cluster create` 时 Redis 可以把任意节点提升
+为从属，从属需要 `--masterauth` 才能向**主节点**认证——没有它节点就会陷入永久
+的重连风暴（`master_link_status:down`，CPU 满载）。`--cluster` 与
+`--replica-of`/`--replica-of-host` 在一次安装里互斥——一个实例要么是集群成员，
+要么是读副本，绝不兼得。
+
+```bash
+# 2. 一次组建，走 pg redis-cli 的透传（pgcli 从不替你跑这一步）
+pg redis-cli --name n1 -- --cluster create 127.0.0.1:6379 127.0.0.1:6380 127.0.0.1:6381 --cluster-replicas 0
+```
+
+三个 `addr:port` 操作数就是每个成员的 `PeerAddr:port`——单机集群里是
+`127.0.0.1:<端口>`，跨机集群里是每个成员的 `--advertise-host:<端口>`（见下
+文）。安装摘要已经会打印出这条命令，按当下配置好的 `--cluster app` 成员现
+场拼装（比如装到 n3 时看到 `pg redis-cli --name n3 -- --cluster create
+127.0.0.1:6379 127.0.0.1:6380 127.0.0.1:6381 --cluster-replicas 0`），复制
+粘贴即可用，不需要手工拼：
+
+```
+-> NOTE: native-cluster member of "app" — it comes up cluster-enabled but INCOMPLETE
+   until you assemble the group once (see the "Cluster:" line below). pgcli does not
+   run --cluster create for you.
+...
+  Cluster:     "app" — 3 masters configured. Assemble once (pgcli does not run this):
+               pg redis-cli --name n3 -- --cluster create 127.0.0.1:6379 127.0.0.1:6380 127.0.0.1:6381 --cluster-replicas 0
+               (bus port = client+10000; for cross-host peers open it on the firewall, and give each member --advertise-host)
+```
+
+（安装摘要/列表的输出与英文文档格式一致——`pg` CLI 的输出本身是英文，两种
+语言下字节相同。）
+
+`--cluster-replicas 0`（默认）就是"纯主分片"——每个成员各管一段槽，且都没有
+从属。要让每台主带从属（这样某台主挂掉时它的从属能自动顶上，槽区间不至于随
+之失联），在第一个安装时传 `--cluster-replicas N` 并装够成员数：每台主需要它
+自己加它的 `N` 个从属，所以总数是 `3*(1+N)`——N=1 时是 6 个成员：
+
+```bash
+pg addon install redis --name n1 --cluster app --cluster-replicas 1 --maxmemory 10mb
+pg addon install redis --name n2 --cluster app --maxmemory 10mb   # 继承 replicas=1
+# …装到 6 个成员，然后：
+pg redis-cli --name n1 -- --cluster create \
+    127.0.0.1:6379 127.0.0.1:6380 127.0.0.1:6381 \
+    127.0.0.1:6382 127.0.0.1:6383 127.0.0.1:6384 --cluster-replicas 1
+```
+
+哪些成员被 Redis 选为主、哪些选为从，是它在 `--cluster create` 时的决定（能
+跨主机均衡时它会尽量均衡），所以 pgcli 的实例命名刻意是角色中立的；从属重启
+后会从自己的 `nodes.conf` 重新接上主——角色与 masterauth 配对都能跨重启保留，
+无需重新 create。上面的安装摘要在引入从属后会从"3 masters configured"切换为
+按**节点**计数（"6 nodes configured"），并把组内的 `--cluster-replicas N` 回显
+进建议命令；它绝不会把从属所在组的节点叫成 master。
+
+### 组建之后
+
+连到 cluster 成员的 `pg redis-cli` 自动是**集群感知客户端**：pgcli 会注入
+redis-cli 自己的 `-c`，`get`/`set` 落到"错的那个节点"时会跟着 `MOVED` 重定
+向跑到真正持槽的那台——不用你记 `-c`，随便指哪个 `--name` 都一样：
+
+```bash
+pg redis-cli --name n1 set foo bar      # 可能实际由 n3 应答（MOVED 跟随）
+pg redis-cli --name n2 get foo          # 同一个 key，再跟一次重定向
+pg redis-cli --name n1 -- --cluster check 127.0.0.1:6379   # 管理型子命令，不归 -c 管
+```
+
+最后一行是例外，不是规则：命令是 redis-cli 自己的 `--cluster <子命令>` 时
+（这类子命令会按操作数自己拨到目标节点），pgcli 会**抑制** `-c` 注入——它是
+组建/管理面，不是数据命令。
+
+集群总线是**每成员的第二个端口**：永远是 `client + 10000`（Redis 的固定
+规则，比如 `6379`→`16379`）——不从 `redis_start_port` 池分配、不写入
+`pg.yaml`；`pg addon list` 会在组名旁把它一并显示出来：
+
+```
+    Role:        cluster member of "app" (127.0.0.1:6381)
+    Cluster:     app (bus 16381)
+```
+
+拓扑会自愈：每个节点的 `--cluster-config-file nodes.conf` 落在自己
+`--dir /data` 的 bind 挂载里，所以 `pg addon stop`/`start`（或主机重启）后
+整个集群原样回来，不需要再 create——与本仓库 autostart 的"只启动"模型一致。
+
+### 跨机成员：`--advertise-host`
+
+单机集群默认用 `127.0.0.1` 拨对端，不需要额外 flag。Redis 集群总线**不支
+持** NAT 或端口重映射，所以跨机成员必须显式宣告"对端实际能到达"的地址：
+
+```bash
+# 在 10.10.0.158 上——首成员决定全组的那一个密码，装完读出来：
+pg addon install redis --name n1 --cluster app --advertise-host 10.10.0.158
+PW=$(pg addon password redis --name n1)
+# 在 10.10.0.159、10.10.0.160 上——把同一个密码带过去：
+pg addon install redis --name n2 --cluster app --advertise-host 10.10.0.159 --password "$PW"
+pg addon install redis --name n3 --cluster app --advertise-host 10.10.0.160 --password "$PW"
+# 一次组建（从能连通三台的任意一台执行）——操作数是各成员的宣告地址+各自端口
+# （这里每台一个成员，各主机自己的端口池都从 6379 起，所以三台都是 :6379）：
+pg redis-cli --name n1 -- --cluster create \
+    10.10.0.158:6379 10.10.0.159:6379 10.10.0.160:6379 --cluster-replicas 0
+```
+
+`--advertise-host` 会往节点 argv 里加 `--cluster-announce-ip/-port/-bus-port`，
+并且把 `PeerAddr`（就是上面拼 `--cluster create` 操作数用的地址）从
+`127.0.0.1` 换成这个地址。你自己还得做对两件事：主机间防火墙**放行每个成员
+的总线端口（client+10000——默认 `6379` 时即 `16379`）**——不只是客户端端口
+——并且组内**每个**成员都要带这个 flag，不能只给新加入的补。
+
+后续每台主机上的 `--password "$PW"` 不是摆设：共享密码的继承只在**同一份
+`pg.yaml` 内**生效——单机上，后续成员自动采用组内密码；跨机上每台主机有自己
+独立的配置文件，各自生成各自的秘密。因此跨机集群必须**在每台主机上显式钉同
+一个密码**，密码从首成员用 `pg addon password` 读出来。
+
+（`--cluster create` 用这一个密码认证操作数里的每一个节点，不一致会以逐节点
+认证错误的形式暴露出来。）
+
+> **状态：** 跨机集群已**在三台主机上端到端验证**（`--advertise-host` →
+> `--cluster-announce-*`、跨机 `--cluster create`、跨机 MOVED 重定向，以及各
+> 自主机 stop/start 后的自愈）。单机流程另有自动化 e2e
+> （`test/addon/test_redis_cluster.sh`），在其中覆盖两种形态：纯三主组，以及
+> 3 主 × 1 从组（缺失 `--masterauth` 的重连风暴正是这样被抓出来的）。**多机场
+> 景目前还是手工流程**，尚未进测试套件。
+
 ## 端口
 
 每个实例从 Redis 自己的池 `redis_start_port`（默认 **6379**）取**一个**端口
@@ -255,7 +414,9 @@ pg addon install redis  --name cache      # 6379
 pg addon install redis  --name sessions   # 6380
 ```
 
-`--port` 可钉死某个端口；自动分配会跳过显式占用的与主机上已监听的。
+`--port` 可钉死某个端口；自动分配会跳过显式占用的与主机上已监听的。[原生集
+群](#原生集群)成员也一样——集群总线端口永远是 Redis 自己的 `client+10000`
+（由客户端端口推导出来），不占这个池。
 
 ## 配置
 
@@ -282,14 +443,18 @@ addons:
       # save: "900 1 300 10"             # RDB 计划；"no" 关闭快照
       # replica_host: 127.0.0.1          # 由 --replica-of 写入：本实例是读副本
       # replica_port: 6379               # 主节点端口，与 replica_host 搭配
+      # cluster: app                     # 由 --cluster 写入：本实例是原生集群成员
+      # cluster_replicas: 1              # 由 --cluster-replicas 写入：每个主的从属数，供 --cluster create 用（0=纯主分片；全组共用）
+      # advertise_host: 10.10.0.158      # 由 --advertise-host 写入：对等节点可见地址（仅跨机）
       autostart: false                   # pg autostart enable --redis --name cache
 ```
 
 改 `listen`、`port`、`password`、`maxmemory`/`maxmemory_policy`、
 `aof`/`appendfsync`/`save`、`replica_host`/`replica_port`、
-`image_tag`/`version` 或 `data_dir` 后，下一次
-`pg addon install redis --name cache --force`（或用对应 flag）生效。副本角色
-通常由 `--replica-of*` 这组 flag 设定，而非手改——见[读副本](#读副本)。
+`cluster`/`cluster_replicas`/`advertise_host`、`image_tag`/`version` 或 `data_dir` 后，
+下一次 `pg addon install redis --name cache --force`（或用对应 flag）生效。副本角色
+与集群角色通常分别由 `--replica-of*` / `--cluster`（含 `--cluster-replicas`）/
+`--advertise-host` 这组 flag 设定，而非手改——见[读副本](#读副本)与[原生集群](#原生集群)。
 
 ### 列表
 
@@ -394,13 +559,28 @@ pg logs addon redis --name cache -f     # 跟随
 
 ## 已知限制
 
-- **无自动故障转移** —— 读副本是支持的（见[读副本](#读副本)），但 HA 控制面不
-  是：Sentinel 与 Redis Cluster（分片）不在范围内。副本给你的是读扩展与一份
-  冗余数据，不是一对能自愈的节点——主节点挂掉时由你自己提升副本（`replicaof
-  no one`，见上）。没有副本的单实例是单点：可以用 `--aof` 让它在磁盘上*耐
-  久*，但无法故障转移到其它节点。
+- **无自动故障转移** —— 读副本是支持的（见[读副本](#读副本)），原生集群分片
+  也支持（见[原生集群](#原生集群)），但 HA *控制面*不支持：**Sentinel** 不在
+  范围内，集群**编排**也一样——pgcli 装 cluster 成员，但从不替你组建、扩容、
+  再平衡。副本给你的是读扩展与一份冗余数据，不是一对能自愈的节点——主节点挂
+  掉时由你自己提升副本（`replicaof no one`，见上）。没有副本的单实例是单点：
+  可以用 `--aof` 让它在磁盘上*耐久*，但无法故障转移到其它节点。
+- **原生集群的组建与再整形仍为手工** —— `--cluster` 装 cluster-enabled 节点，
+  `--cluster-replicas N`（回显进建议命令）可让每台主带从属，某台主挂掉时它的从
+  属能自动顶上。pgcli 不替你做的事是：跑 `--cluster create`/`add-node`/
+  resharding/`del-node`；`pg addon remove` 删成员就是纯删除，不会搬槽——要缩
+  容或改拓扑请先在 Redis 层把它的槽挪空、把节点忘记，再删。另注意：纯主分片
+  （`--cluster-replicas 0`）没有可提升的从属——一台主挂掉，它负责的那段槽就随
+  之不可用，直到你介入。
+- **跨机集群（`--advertise-host`）为手工流程、未进 e2e 套件** —— flag、它产生
+  的 `--cluster-announce-*` argv、防火墙/总线端口规则都已实现、单元测过，并
+  且已**在三台主机上手工验证**（组建、跨机 MOVED 重定向、自愈均通过）。单机
+  流程（纯主分片与 3 主 × 1 从）有自动 e2e；跨机带从属尚无自动 e2e，但它依赖
+  的正是让单机从属连上的那同一份逐成员 `--masterauth`。见[原生集群](#原生集
+  群)里的状态说明。
 - **无 TLS** —— Redis 7 的部分构建支持原生 TLS，但这里未接入；按可信网络对
-  待链路并依赖 `requirepass`，或干脆 `--listen 127.0.0.1` 仅回环。
+  待链路并依赖 `requirepass`，或干脆 `--listen 127.0.0.1` 仅回环。跨机集群意
+  味着成员间的总线流量同样是明文。
 - **macOS 代码完备、未实测** —— bridge 路径（发布端口、`pg redis-cli` 走
   `host.containers.internal`）与对象存储同构；尚未在 Mac 上跑过。
 - **默认持久化是 RDB 粒度** —— 崩溃会丢失上次快照之后的写入。这个缺口要紧时
