@@ -6,9 +6,7 @@ hero:
   title_lines:
     - words: [{ text: pgcli }]
     - words: [{ text: 简化 PostgreSQL 管理 }]
-  lead: 让 PostgreSQL 用起来像呼吸一样自然，扩展它也一样自然——丰富的 PostgreSQL 扩展，以及围绕数据库和存储的周边基础设施。
-  note: pgcli 就像绝地武士的光剑——威力强大，让你轻松打造数据库与存储底座。
-  note_icon: fa-solid fa-bolt
+  lead: 让 PostgreSQL 用起来像呼吸一样自然，扩展它也一样自然——丰富的 PostgreSQL 扩展，以及围绕数据库和存储的周边基础设施。pgcli 就像绝地武士的光剑，威力强大，让你轻松打造数据库与存储底座。
   actions:
     - { label: 阅读文档, url: docs/, icon: fa-solid fa-book, style: primary }
     - { label: 快速开始, url: docs/quickstart/, icon: fa-solid fa-rocket, style: ghost }

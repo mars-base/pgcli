@@ -6,9 +6,7 @@ hero:
   title_lines:
     - words: [{ text: pgcli }]
     - words: [{ text: Simplify PostgreSQL management }]
-  lead: Using PostgreSQL databases as naturally as breathing — and extending them just as naturally, with a rich catalog of PostgreSQL extensions and companion infrastructure around your database and storage.
-  note: pgcli is your lightsaber — as powerful in a Jedi's hand, letting you forge your database and storage foundation with ease.
-  note_icon: fa-solid fa-bolt
+  lead: "Using PostgreSQL databases as naturally as breathing — and extending them just as naturally, with a rich catalog of PostgreSQL extensions and companion infrastructure around your database and storage. pgcli is your lightsaber: as powerful in a Jedi's hand, letting you forge your database and storage foundation with ease."
   actions:
     - { label: Read the docs, url: docs/, icon: fa-solid fa-book, style: primary }
     - { label: Quick start, url: docs/quickstart/, icon: fa-solid fa-rocket, style: ghost }
