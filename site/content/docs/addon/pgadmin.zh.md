@@ -25,6 +25,26 @@ autostart / remove），全部通过 `pg.yaml` 管理。
   `servers.json` 预注册一个服务器，让浏览器打开时列表里已有它。这只是一个便利
   ——不是运行期耦合：pgAdmin 不会因它阻塞，之后可在 UI 里增删。
 
+> **建议：每个数据库一个 pgAdmin，随开随用。** pgcli 管理的 pgAdmin 是单个轻
+> 量容器，秒级启动、内存占用极小——完全可以当一次性工具用。与其跑一个共享的
+> pgAdmin 把所有服务器都注册进去，不如为当前正在操作的数据库创建专用实例，用完
+> 即删：
+>
+> ```bash
+> # 快速查看 proj01
+> pg addon install pgadmin --name proj01 --pg-name proj01
+> # ... 浏览、查询、完成
+> pg addon remove proj01 --clean-data
+>
+> # 检查远程生产只读副本
+> pg addon install pgadmin --name prod-ro \
+>     --dsn "postgres://reader@10.0.0.7:5432/proddb"
+> pg addon remove prod-ro --clean-data
+> ```
+>
+> 每个实例有独立的端口（自动分配）、独立的登录、独立的 pgpass——数据库之间无
+> 交叉污染，共享会话存储里不会残留陈旧连接。下次需要时，秒级重装。
+
 > **不在范围内：** 这里 pgAdmin 只提供明文 HTTP——没有接入 TLS 终止（需要
 > HTTPS 就在前面架反向代理）。`servers.json` 本身不能携带目标服务器的密码
 > （pgAdmin 拒绝导入），但当预置 DSN *带了*密码时，pgcli 通过 pgAdmin 的 pgpass

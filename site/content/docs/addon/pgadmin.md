@@ -28,6 +28,30 @@ It is the fleet's one *UI* addon, which shapes its design:
   that server already listed. It is a convenience, not a runtime coupling —
   pgAdmin never blocks on it, and you can add/remove servers in the UI after.
 
+> **Tip: one pgAdmin per database, spin up on demand.** A pgcli-managed
+> pgAdmin is a single lightweight container that starts in seconds and
+> consumes very little memory — cheap enough to treat as disposable. Rather
+> than running one shared pgAdmin with every server registered in it, create
+> a dedicated instance for the database you are working on right now, and
+> remove it when done:
+>
+> ```bash
+> # quick look at proj01
+> pg addon install pgadmin --name proj01 --pg-name proj01
+> # ... browse, query, done
+> pg addon remove proj01 --clean-data
+>
+> # inspect a remote production read-replica
+> pg addon install pgadmin --name prod-ro \
+>     --dsn "postgres://reader@10.0.0.7:5432/proddb"
+> pg addon remove prod-ro --clean-data
+> ```
+>
+> Each instance gets its own port (auto-assigned), its own login, and its own
+> pgpass — no cross-contamination between databases, no stale connections
+> lingering in a shared session store. When you need it again, reinstall in
+> seconds.
+
 > **Out of scope:** pgAdmin serves plain HTTP here — no TLS termination is wired
 > in (put a reverse proxy in front if you need HTTPS). `servers.json` itself
 > cannot carry the target server's password (pgAdmin refuses to import one), but
