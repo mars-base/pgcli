@@ -29,11 +29,13 @@ pgcli 使用的容器镜像及其默认 tag。
 
 ## 镜像导出
 
-将所有镜像导出到本地存储（用于离线环境或备份）：
+**推荐一步式**：`make container-images-export` 把下面全部清单镜像（amd64）
+`podman pull --platform linux/amd64` + `podman save` 到项目内 `images/` 目录
+（已 gitignore，tar 不进 git），供离线 VM 同步 load。手工等价命令如下。
 
 ```bash
-# 导出到指定目录
-TARGET=/path/to/images
+# 导出到指定目录（默认约定为项目 images/，已在 .gitignore）
+TARGET=./images
 mkdir -p "$TARGET"
 
 podman save -o "$TARGET/pgcli-pg_18-2.58.0.tar" \
@@ -102,7 +104,8 @@ podman save --format docker-archive \
 `make container-build-rustfs`（本地 `:1.0.0` 是双架构 manifest），等价做法是
 把其产出的单架构 tag 覆盖到规范名再 save——`podman tag …:1.0.0-amd64
 …:1.0.0 && podman save …:1.0.0`，之后用 `make container-build-rustfs` 恢复
-本地 manifest。
+本地 manifest。（`make container-images-export` 已内置「先按 amd64 pull 再
+save」，对 rustfs/redis 均自动处理。）
 
 ## 镜像加载（离线环境）
 
