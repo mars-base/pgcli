@@ -157,20 +157,20 @@ func TestPgAdminArgsAndEnv(t *testing.T) {
 		}
 	})
 
-	// The seed passfile mounts INSIDE /var/lib/pgadmin so the image's
-	// entrypoint chown -R reaches it (libpq refuses a passfile not owned by the
-	// connecting uid) — and therefore must NOT be read-only, or that chown
-	// fails with EROFS.
-	t.Run("seed passfile mounts writable inside the chowned tree", func(t *testing.T) {
+	// The seed passfile mounts INSIDE the user's storage directory under
+	// /var/lib/pgadmin/storage/<email_dir>/ — pgAdmin's get_complete_file_path()
+	// only resolves files there (paths outside are silently rejected). The
+	// mount must NOT be :ro, or the entrypoint's chown fails with EROFS.
+	t.Run("seed passfile mounts writable inside the user storage dir", func(t *testing.T) {
 		ac := base()
 		args := pgadminArgsAndEnv(ac, false, "pgcli-net", "/data",
 			"/home/u/.pgcli/addon/pgadmin/ui/servers.json",
 			"/home/u/.pgcli/addon/pgadmin/ui/pgpass")
 
-		if !hasMount(args, "/home/u/.pgcli/addon/pgadmin/ui/pgpass:/var/lib/pgadmin/pgpass:z") {
-			t.Errorf("pgpass mount missing: %v", args)
+		if !hasMount(args, "/home/u/.pgcli/addon/pgadmin/ui/pgpass:/var/lib/pgadmin/storage/admin_pgcli.lan/pgpass:z") {
+			t.Errorf("pgpass mount into user storage dir missing: %v", args)
 		}
-		if hasMount(args, "/var/lib/pgadmin/pgpass:ro") {
+		if hasMount(args, "pgpass:ro") {
 			t.Errorf("pgpass must NOT be :ro (the entrypoint chowns it to 5050): %v", args)
 		}
 		// No PGPASSFILE env: pgAdmin takes the path from

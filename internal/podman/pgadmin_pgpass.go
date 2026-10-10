@@ -21,12 +21,12 @@ import (
 // is not owned by the connecting uid and not private to them, and the
 // entrypoint's chown to 5050 fixes the ownership for free.
 
-// pgAdminContainerPgPass is the container-side path pgcli mounts the seed
-// passfile at. It lives under /var/lib/pgadmin so the image's entrypoint —
-// which `chown -R`s that tree to uid 5050 on every start — keeps it readable
-// only by the pgadmin user (libpq's hard requirement), with no host-side
-// chown machinery in pgcli.
-const pgAdminContainerPgPass = "/var/lib/pgadmin/pgpass"
+// pgAdminStoragePgPass is the pgpass file's name INSIDE the user's storage
+// directory. pgAdmin runs in SERVER_MODE, and get_complete_file_path() only
+// resolves files under /var/lib/pgadmin/storage/<email_dir>/ — paths outside
+// that tree are silently rejected (returns None). We therefore mount the
+// passfile there and reference it by bare name in ConnectionParameters.passfile.
+const pgAdminStoragePgPass = "pgpass"
 
 // errNoPgPassPassword is the sentinel when a DSN carries no password — the
 // seed then renders servers.json only, and pgAdmin prompts on first connect as

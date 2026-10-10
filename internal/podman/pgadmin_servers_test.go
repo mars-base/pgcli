@@ -157,9 +157,10 @@ func TestRenderServersJSON(t *testing.T) {
 // password stays out of servers.json (pgAdmin cannot import one) and is instead
 // referenced through ConnectionParameters.passfile — the field the pgAdmin 9.18
 // Import/Export Servers example documents. pgAdmin's connect() skips the
-// password prompt when that field is set and points at an existing file.
+// password prompt when that field is set and get_complete_file_path() resolves
+// the bare filename inside the user's storage directory.
 func TestRenderServersJSONPassfile(t *testing.T) {
-	raw, err := RenderServersJSON("postgres://app:sup3rs3cret@dbhost:5432/appdb", "seeded", "/var/lib/pgadmin/pgpass")
+	raw, err := RenderServersJSON("postgres://app:sup3rs3cret@dbhost:5432/appdb", "seeded", "pgpass")
 	if err != nil {
 		t.Fatalf("RenderServersJSON: %v", err)
 	}
@@ -170,8 +171,10 @@ func TestRenderServersJSONPassfile(t *testing.T) {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got := doc.Servers["1"].ConnectionParams["passfile"]; got != "/var/lib/pgadmin/pgpass" {
-		t.Errorf("ConnectionParameters.passfile = %v, want /var/lib/pgadmin/pgpass", got)
+	// The passfile value is a bare name — pgAdmin resolves it inside the
+	// user's storage directory via get_complete_file_path().
+	if got := doc.Servers["1"].ConnectionParams["passfile"]; got != "pgpass" {
+		t.Errorf("ConnectionParameters.passfile = %v, want bare name pgpass", got)
 	}
 	if got := doc.Servers["1"].ConnectionParams["sslmode"]; got != "prefer" {
 		t.Errorf("sslmode must survive alongside passfile, got %v", got)

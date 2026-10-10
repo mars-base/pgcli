@@ -46,7 +46,15 @@ type PgAdminManager struct {
 const (
 	pgAdminContainerDataDir    = "/var/lib/pgadmin" // session/config db; entrypoint chowns to 5050
 	pgAdminContainerServersDir = "/pgadmin4"        // entrypoint loads servers.json from here on first launch
+	pgAdminContainerStorageDir = "/var/lib/pgadmin/storage" // per-user storage; get_complete_file_path resolves here
 )
+
+// pgAdminStorageDir converts an email to pgAdmin's storage directory name.
+// pgAdmin's preprocess_username replaces @ with _, so "admin@pgcli.lan" becomes
+// "admin_pgcli.lan".
+func pgAdminStorageDir(email string) string {
+	return strings.ReplaceAll(email, "@", "_")
+}
 
 // NewPgAdminManager creates a PgAdminManager. It works on both platforms: Linux
 // serves over host networking, macOS over the pgcli-net bridge with the port
@@ -211,12 +219,13 @@ func (m *PgAdminManager) StartContainer(ac *config.PgAdminConfig) error {
 //     image's default /pgadmin4/servers.json and sets
 //     PGADMIN_REPLACE_SERVERS_ON_STARTUP=True so a re-rendered file takes effect
 //     on every start (declarative), not just first launch.
-//   - pgPassHostPath non-empty bind-mounts the seed passfile at
-//     /var/lib/pgadmin/pgpass (the path servers.json's passfile points at, so
-//     the seeded server connects without prompting). Deliberately NOT :ro: the
-//     entrypoint's chown -R must be able to fix its owner to 5050 on every
-//     start (libpq refuses a passfile not owned by the connecting uid), and
-//     chown on a read-only mount fails with EROFS.
+//   - pgPassHostPath non-empty bind-mounts the seed passfile into the user's
+//     storage directory at /var/lib/pgadmin/storage/<email_dir>/pgpass (the path
+//     pgAdmin's get_complete_file_path() resolves — paths outside that tree are
+//     silently rejected). servers.json references it by bare name "pgpass".
+//     Deliberately NOT :ro: the entrypoint's chown -R must be able to fix its
+//     owner to 5050 on every start (libpq refuses a passfile not owned by the
+//     connecting uid), and chown on a read-only mount fails with EROFS.
 //   - The bind address goes through proxyBindHost so a loopback listen is
 //     widened to 0.0.0.0 under bridge (the published port must be reachable).
 //
@@ -244,8 +253,11 @@ func pgadminArgsAndEnv(ac *config.PgAdminConfig, bridge bool, network, dataDir, 
 	}
 	if pgPassHostPath != "" {
 		// No :ro here — see the pgPassHostPath note in the doc comment.
+		// Mount into the user's storage directory — pgAdmin's
+		// get_complete_file_path() only resolves files under this tree.
+		storageDir := filepath.Join(pgAdminContainerStorageDir, pgAdminStorageDir(ac.Email))
 		args = append(args,
-			"-v", fmt.Sprintf("%s:%s:z", hostMountPath(pgPassHostPath), pgAdminContainerPgPass),
+			"-v", fmt.Sprintf("%s:%s:z", hostMountPath(pgPassHostPath), filepath.Join(storageDir, pgAdminStoragePgPass)),
 		)
 	}
 	args = append(args, ac.ImageTag)
@@ -276,7 +288,7 @@ func (m *PgAdminManager) createContainer(ac *config.PgAdminConfig) error {
 			}
 		} else {
 			pgPass = m.pgPassPath(ac)
-			pgPassContainer = pgAdminContainerPgPass
+			pgPassContainer = pgAdminStoragePgPass
 		}
 		path := m.serversJSONPath(ac)
 		if err := WriteServersJSON(path, ac.DSN, ac.ServerName, pgPassContainer); err != nil {
