@@ -77,42 +77,6 @@ How the knobs combine:
   control are fine — a real, deliverable address is not required, the
   deliverability check is off).
 
-## Privileges
-
-pgAdmin is the one addon worth spelling out here, because the naive reading
-("the container writes to a bind mount as uid 5050, so pgcli must pre-chown the
-host dir") is **wrong**, and pgcli deliberately does none of that ownership
-machinery rustfs needs.
-
-The `dpage/pgadmin4` entrypoint starts as **container root**, `chown`s
-`/var/lib/pgadmin` to its own `pgadmin` user (uid/gid **5050**), then `su-exec`s
-gunicorn down to it. So pgcli passes `--user 0` and gets out of the way:
-
-- **No host-side chown.** pgcli never runs `chown`/`podman unshare chown` on
-  your data dir. The dir is created `0755` by the install and the image fixes
-  ownership from inside.
-- **Rootless stays unprivileged.** Under rootless podman, `--user 0` is
-  *mapped* — container root is your own host uid, and the 5050 the dir ends up
-  owned by is the mapped subordinate uid. Nothing on the host runs as real root.
-- **Teardown goes through `removeHostDir`.** Precisely because those files are
-  mapped-uid, a plain host `rm -rf` of the data dir hits `EACCES` under
-  rootless. `pg addon remove pgadmin --clean-data` falls back through
-  `podman unshare rm` to reclaim them — the same path redis/rustfs use. (The
-  e2e proves this both ways: the control `rm` must *fail* while `--clean-data`
-  succeeds.)
-
-The e2e asserts `.Config.User == 0` on the container and `5050:0` on
-`/var/lib/pgadmin` inside it — which together show the *image* dropped
-privileges, not pgcli.
-
-**One mount is deliberately NOT `:ro`.** When the seed DSN carries a password,
-pgcli writes a libpq `pgpass` file on the host and mounts it at
-`/var/lib/pgadmin/pgpass` — *inside* the tree the entrypoint `chown`s to uid
-5050. That mount must be writable: the entrypoint has to fix the file's owner
-to 5050 on every start, or libpq would ignore it (a passfile not owned by the
-connecting uid is treated as insecure and silently dropped). `servers.json`
-stays `:ro` since it sits at `/pgadmin4/servers.json`, outside the chown tree.
-
 ## Install
 
 ```bash
@@ -186,11 +150,11 @@ pg addon install pgadmin --image docker.io/dpage/pgadmin4:9.19 --force
 
 Two caveats worth stating:
 
-- **`email` / `password` still only re-apply to an empty data dir** (see
-  [Privileges](#privileges)). `--force` alone does not reset the web login
-  once pgAdmin has initialised `pgadmin4.db` — pair it with
-  `--clean-data` (which removes the store first) to actually reset the
-  account.
+- **`email` / `password` still only re-apply to an empty data dir.** pgAdmin
+  reads `PGADMIN_DEFAULT_*` while it *initialises* `pgadmin4.db`; once that
+  file exists the stored account is authoritative and the env vars are ignored.
+  `--force` alone does not reset the web login — pair it with `--clean-data`
+  (which removes the store first) to actually reset the account.
 - **A running container is recreated, not left alone.** If the UI is open in a
   browser, `--force` kills the session; the next page load re-authenticates
   against the new container.
@@ -350,9 +314,9 @@ addons:
 Edits to `listen`, `host_port`, `email`, `password`, `image_tag`, `dsn`/
 `server_name`, or `data_dir` take effect after the next
 `pg addon install pgadmin --name console --force` (or via the matching flags).
-Remember the [Privileges](#privileges) caveat: `email`/`password` only re-apply
-to an **empty** data dir, so changing them against an existing store needs
-`--clean-data` first (or accept that the running account is the original one).
+Remember: `email`/`password` only re-apply to an **empty** data dir, so
+changing them against an existing store needs `--clean-data` first (or accept
+that the running account is the original one).
 
 ### List
 
@@ -412,13 +376,13 @@ pg addon remove pgadmin --name console --clean-data  # also delete the data dir
 ```
 
 Without `--clean-data` the host data dir (and its `pgadmin4.db`) stays in place
-— reinstalling the same name revives the saved servers and session store (but
-see the [Privileges](#privileges) note: the revived login is the original one,
-not a freshly generated password). `--clean-data` deletes it, falling back
-through `podman unshare rm` when rootless podman's mapped uid makes pgAdmin's
-files undeletable by the host user. An empty per-instance parent directory is
-pruned; a custom `data_dir` parent is never touched. `servers.json` (if seeded)
-is host-owned and removed with the instance directory either way.
+— reinstalling the same name revives the saved servers and session store (the
+revived login is the original one, not a freshly generated password).
+`--clean-data` deletes it, falling back through `podman unshare rm` when
+rootless podman's mapped uid makes pgAdmin's files undeletable by the host
+user. An empty per-instance parent directory is pruned; a custom `data_dir`
+parent is never touched. `servers.json` (if seeded) is host-owned and removed
+with the instance directory either way.
 
 ## Logs
 
@@ -471,9 +435,10 @@ pg logs addon pgadmin --name console -f     # follow
   `servers.json` is mode 0600 but not encrypted; removing the instance cleans
   it up. There is no way to pre-configure the password without a file on disk
   (pgAdmin has no KMS/keyring integration).
-- **Login only applies to a fresh store** — see
-  [Privileges](#privileges)/[Troubleshooting](#troubleshooting); there is no
-  in-place password reset, only `--clean-data` + reinstall.
+- **Login only applies to a fresh store** — pgAdmin reads `PGADMIN_DEFAULT_*`
+  while it *initialises* `pgadmin4.db`; once that file exists the stored
+  account is authoritative. There is no in-place password reset, only
+  `--clean-data` + reinstall.
 - **macOS is code-complete, untested** — the bridge path (published ports,
   `proxyBindHost` widening loopback to `0.0.0.0` on the bridge) mirrors redis;
   it has not yet been exercised on a Mac.

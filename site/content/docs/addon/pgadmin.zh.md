@@ -67,38 +67,6 @@ autostart / remove），全部通过 `pg.yaml` 管理。
   `admin@pgcli.lan` 正是为通过校验而选；自己起名时同理（`.lan`、`.internal`
   这类由你掌控的名字都行——不要求是真实可投递的地址，投递检查是关掉的）。
 
-## 权限模型
-
-pgAdmin 是插件族里值得单独讲清楚的一个，因为直觉读法（"容器以 uid 5050 写
-bind 挂载目录，所以 pgcli 必须预 chown 宿主目录"）是**错的**，而且 pgcli 刻意
-没有做 rustfs 需要的那套属主机械。
-
-`dpage/pgadmin4` 的 entrypoint 以**容器 root** 启动，把 `/var/lib/pgadmin`
-`chown` 给它自己的 `pgadmin` 用户（uid/gid **5050**），然后 `su-exec` 降权运行
-gunicorn。所以 pgcli 传 `--user 0` 然后让开路：
-
-- **无宿主侧 chown。** pgcli 从不对你的数据目录跑
-  `chown`/`podman unshare chown`。目录由 install 建成 `0755`，镜像自己在容器
-  内修属主。
-- **rootless 保持非特权。** rootless podman 下 `--user 0` 是*映射*的——容器
-  root 就是你自己的宿主 uid，目录最终归属的 5050 是映射后的 subordinate uid。
-  宿主上没有任何东西以真 root 运行。
-- **清理走 `removeHostDir`。** 正因为那些文件是映射 uid 的，rootless 下普通
-  宿主 `rm -rf` 数据目录会 `EACCES`。
-  `pg addon remove pgadmin --clean-data` 经 `podman unshare rm` 兜底回收它们
-  ——与 redis/rustfs 同源。（e2e 双向验证：对照组的 `rm` 必须*失败*，而
-  `--clean-data` 必须成功。）
-
-e2e 断言容器 `.Config.User == 0` 且容器内 `/var/lib/pgadmin` 是 `5050:0`——
-两者合起来证明降权的是*镜像*，不是 pgcli。
-
-**有一个挂载刻意不是 `:ro`。** 当预置 DSN 携带密码时，pgcli 在宿主上写一个
-libpq `pgpass` 文件并挂载到 `/var/lib/pgadmin/pgpass`——*在* entrypoint `chown`
-到 uid 5050 的目录树*内部*。该挂载必须可写：entrypoint 每次启动都要把文件的属
-主修到 5050，否则 libpq 会忽略它（passfile 属主不是连接发起的 uid 时被视作不
-安全而静默丢弃）。`servers.json` 保持 `:ro`，因为它在 `/pgadmin4/servers.json`，
-chown 目录树之外。
-
 ## 安装
 
 ```bash
@@ -166,9 +134,10 @@ pg addon install pgadmin --image docker.io/dpage/pgadmin4:9.19 --force
 
 两个值得说清的坑：
 
-- **`email` / `password` 仍然只对空数据目录重新生效**（见[权限模型](#权限模型)）。
-  pgAdmin 已经初始化过 `pgadmin4.db` 之后，单 `--force` 不会重置 Web 登录——要真正
-  重置账号，得配合 `--clean-data`（先把存储清掉）。
+- **`email` / `password` 仍然只对空数据目录重新生效。** pgAdmin 只在*初始化*
+  `pgadmin4.db` 期间读取 `PGADMIN_DEFAULT_*`；该文件一旦存在，库里的账号就是
+  权威，环境变量被忽略。单 `--force` 不会重置 Web 登录——要真正重置账号，得配合
+  `--clean-data`（先把存储清掉）。
 - **运行中的容器会被重建，不是原样保留。** 如果浏览器正开着 UI，`--force` 会杀
   掉会话；下一次页面加载会重新认证新容器。
 
@@ -309,9 +278,9 @@ addons:
 
 对 `listen`、`host_port`、`email`、`password`、`image_tag`、`dsn`/
 `server_name`、`data_dir` 的修改，在下一次
-`pg addon install pgadmin --name console --force`（或对应 flags）后生效。记住
-[权限模型](#权限模型)的告诫：`email`/`password` 只对**空**数据目录重新生效，所
-以对既有存储改它们需要先 `--clean-data`（或接受生效账号仍是原账号）。
+`pg addon install pgadmin --name console --force`（或对应 flags）后生效。记住：
+`email`/`password` 只对**空**数据目录重新生效，所以对既有存储改它们需要先
+`--clean-data`（或接受生效账号仍是原账号）。
 
 ### 列出
 
@@ -367,11 +336,11 @@ pg addon remove pgadmin --name console --clean-data  # 同时删除数据目录
 ```
 
 不带 `--clean-data` 时宿主数据目录（连同 `pgadmin4.db`）原地保留——重装同名实
-例即复活已存服务器与会话存储（但见[权限模型](#权限模型)的注：复活后可用的登录
-是原密码，不是新生成的）。`--clean-data` 删除它，当 rootless podman 的映射 uid
-使 pgAdmin 的文件对宿主用户不可删时，经 `podman unshare rm` 兜底。空的实例父目
-录被修剪；自定义 `data_dir` 的父目录从不动。`servers.json`（若预置过）宿主所
-有，两种移除都随实例目录一并删掉。
+例即复活已存服务器与会话存储（复活后可用的登录是原密码，不是新生成的）。
+`--clean-data` 删除它，当 rootless podman 的映射 uid 使 pgAdmin 的文件对宿主用
+户不可删时，经 `podman unshare rm` 兜底。空的实例父目录被修剪；自定义
+`data_dir` 的父目录从不动。`servers.json`（若预置过）宿主所有，两种移除都随实
+例目录一并删掉。
 
 ## 日志
 
@@ -414,8 +383,9 @@ pg logs addon pgadmin --name console -f     # 跟踪
 - **预置密码以明文存于磁盘** —— `servers.json` 旁边的 pgpass 文件是 mode 0600
   但没有加密；移除实例时一并清理。没有办法预配置密码而不落盘文件（pgAdmin 没有
   KMS/keyring 集成）。
-- **登录只对新存储生效** —— 见[权限模型](#权限模型)/[排障](#排障)；没有原地改
-  密码的路，只有 `--clean-data` + 重装。
+- **登录只对新存储生效** —— pgAdmin 只在*初始化* `pgadmin4.db` 期间读取
+  `PGADMIN_DEFAULT_*`；该文件一旦存在，库里的账号就是权威。没有原地改密码的路，
+  只有 `--clean-data` + 重装。
 - **macOS 代码完备、未实测** —— bridge 路径（发布端口、bridge 下
   `proxyBindHost` 把 loopback 放宽到 `0.0.0.0`）与 redis 同构；尚未在 Mac 上演
   练过。
