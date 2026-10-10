@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -251,6 +252,12 @@ func (m *NginxManager) WriteConfigs(nc *config.NginxConfig) (string, error) {
 		if len(data) == 0 {
 			return "", fmt.Errorf("user conf file %s is empty", nc.ConfFile)
 		}
+
+		// Inject worker_connections if explicitly set (overrides user's events block).
+		if nc.WorkerConnections > 0 {
+			data = injectWorkerConnections(data, nc.WorkerConnections)
+		}
+
 		if err := os.WriteFile(confPath, data, 0644); err != nil {
 			return "", fmt.Errorf("writing nginx.conf: %w", err)
 		}
@@ -604,4 +611,29 @@ func (m *NginxManager) TestFile(confFile, imageTag string) error {
 		"nginx", "-t",
 	}
 	return m.runInteractive(args...)
+}
+
+// injectWorkerConnections patches a user-provided nginx.conf to set or replace
+// the worker_connections directive. It handles three cases:
+//  1. events block with existing worker_connections → replace in place
+//  2. events block without worker_connections → insert at the top
+//  3. no events block → prepend a minimal one
+func injectWorkerConnections(data []byte, workerConns int) []byte {
+	content := string(data)
+	wcDirective := fmt.Sprintf("worker_connections %d;", workerConns)
+
+	// Case 1: events block already has worker_connections — replace it.
+	re := regexp.MustCompile(`(?s)(events\s*\{[^}]*?)worker_connections\s+\d+;`)
+	if re.MatchString(content) {
+		return []byte(re.ReplaceAllString(content, "${1}"+wcDirective))
+	}
+
+	// Case 2: events block exists but no worker_connections — inject after the opening brace.
+	re = regexp.MustCompile(`(?s)(events\s*\{)`)
+	if re.MatchString(content) {
+		return []byte(re.ReplaceAllString(content, "${1}\n    "+wcDirective))
+	}
+
+	// Case 3: no events block at all — prepend one.
+	return []byte("events {\n    " + wcDirective + "\n}\n\n" + content)
 }

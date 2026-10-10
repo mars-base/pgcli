@@ -5353,6 +5353,14 @@ func runAddonInstallNginx(cmd *cobra.Command) error {
 		return err
 	}
 
+	// Snapshot the existing config on disk before overwriting (for diff + rollback).
+	baseDir := cfg.BaseDir
+	if baseDir == "" {
+		baseDir = platform.DefaultConfigDir()
+	}
+	oldConfPath := filepath.Join(baseDir, "addon", "nginx", name, "nginx.conf")
+	oldConf, _ := os.ReadFile(oldConfPath)
+
 	cfgPathOut, err := nm.WriteConfigs(&nc)
 	if err != nil {
 		return err
@@ -5360,9 +5368,27 @@ func runAddonInstallNginx(cmd *cobra.Command) error {
 
 	force, _ := cmd.Flags().GetBool("force")
 	if !force {
-		exists, err := nm.ContainerRunning(nc.ContainerName)
-		if err == nil && exists {
-			fmt.Println("  [OK] nginx container already running (pass --force to recreate with updated config)")
+		running, err := nm.ContainerRunning(nc.ContainerName)
+		if err == nil && running {
+			// Config on disk has been updated by WriteConfigs above.
+			// If it actually changed, auto-test and reload (rollback on failure).
+			newConf, _ := os.ReadFile(cfgPathOut)
+			if len(oldConf) > 0 && string(oldConf) != string(newConf) {
+				fmt.Println("-> Config changed, testing new configuration...")
+				if testErr := nm.Test(&nc); testErr != nil {
+					// Rollback: restore old config
+					_ = os.WriteFile(cfgPathOut, oldConf, 0644)
+					return fmt.Errorf("config validation failed, rolled back: %w", testErr)
+				}
+				fmt.Println("-> Reloading nginx...")
+				if reloadErr := nm.Reload(&nc); reloadErr != nil {
+					_ = os.WriteFile(cfgPathOut, oldConf, 0644)
+					return fmt.Errorf("reload failed, rolled back config: %w", reloadErr)
+				}
+				fmt.Println("  ✓ Config reloaded successfully")
+			} else {
+				fmt.Println("  [OK] nginx running, config unchanged")
+			}
 			fmt.Println()
 			fmt.Printf("✓ nginx installed: %q\n", name)
 			fmt.Printf("  Container:    %s\n", nc.ContainerName)
@@ -5371,11 +5397,16 @@ func runAddonInstallNginx(cmd *cobra.Command) error {
 			if nc.TLS && nc.HTTPSPort > 0 {
 				fmt.Printf("  HTTPS:        https://%s:%d/\n", nc.Listen, nc.HTTPSPort)
 			}
-			fmt.Printf("  Backends:     %d\n", len(nc.Backends))
-			for _, b := range nc.Backends {
-				fmt.Printf("    %s -> %s%s\n", b.Path, strings.Join(b.Backends, ", "), " ("+b.Name+")")
+			if nc.ConfFile != "" {
+				fmt.Printf("  Config:       %s (from %s)\n", cfgPathOut, nc.ConfFile)
+			} else {
+				fmt.Printf("  Backends:     %d\n", len(nc.Backends))
+				for _, b := range nc.Backends {
+					fmt.Printf("    %s -> %s%s\n", b.Path, strings.Join(b.Backends, ", "), " ("+b.Name+")")
+				}
+				fmt.Printf("  Config:       %s\n", cfgPathOut)
 			}
-			fmt.Printf("  Config:       %s\n", cfgPathOut)
+			fmt.Printf("  Logs:         %s\n", filepath.Dir(cfgPathOut)+"/log/")
 			return nil
 		}
 	}
@@ -6397,6 +6428,9 @@ func runAddonNginxTest(cmd *cobra.Command) error {
 		}
 		if image == "" {
 			image = podman.DefaultNginxImageTag
+		}
+		if err := loadConfigForDSN(); err != nil {
+			return err
 		}
 		mgr, err := podman.NewNginxManager(cfg)
 		if err != nil {

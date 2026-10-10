@@ -436,7 +436,9 @@ type NginxConfig struct {
 
 	// WorkerConnections sets the maximum number of simultaneous connections per
 	// worker process (nginx worker_connections). Default is 1024. Increase this
-	// for high-traffic reverse proxies. Ignored when ConfFile is set.
+	// for high-traffic reverse proxies. When ConfFile is set, this value is
+	// injected into the user-provided config (replacing any existing
+	// worker_connections directive, or adding one to the events block).
 	WorkerConnections int `yaml:"worker_connections,omitempty"`
 
 	// TLS enables an HTTPS listener alongside the HTTP one. When true and
