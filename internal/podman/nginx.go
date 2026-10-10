@@ -42,8 +42,9 @@ type NginxManager struct {
 
 // nginx container-side paths, fixed by the image contract.
 const (
-	nginxContainerConfDir = "/etc/nginx/conf.d" // bind-mount point for rendered server blocks
-	nginxContainerCertDir = "/etc/nginx/certs"   // bind-mount point for TLS cert+key (when TLS)
+	nginxContainerConfDir = "/etc/nginx/conf.d"      // bind-mount point for rendered server blocks
+	nginxContainerCertDir = "/etc/nginx/certs"        // bind-mount point for TLS cert+key (when TLS)
+	nginxContainerLogDir  = "/var/log/nginx"          // bind-mount point for access/error logs
 )
 
 // NewNginxManager creates an NginxManager. It works on both platforms: Linux
@@ -79,6 +80,11 @@ func nginxTLSDir(baseDir, name string) string {
 	return filepath.Join(nginxConfigDir(baseDir, name), "tls")
 }
 
+// logDir returns the host sub-directory for nginx log files.
+func nginxLogDir(baseDir, name string) string {
+	return filepath.Join(nginxConfigDir(baseDir, name), "log")
+}
+
 // RenderNginxCfg builds the nginx.conf text for one instance. Pure function
 // of the config so it can be unit-tested without podman. The output is a
 // single-file nginx config (no conf.d includes) with upstream and server
@@ -88,8 +94,12 @@ func nginxTLSDir(baseDir, name string) string {
 // (e.g. /etc/nginx/certs/public.crt) — the caller is responsible for
 // bind-mounting the actual files there.
 func RenderNginxCfg(nc *config.NginxConfig) (string, error) {
+	// ConfFile mode: user provides the full config, skip rendering.
+	if nc.ConfFile != "" {
+		return "", nil
+	}
 	if len(nc.Backends) == 0 {
-		return "", fmt.Errorf("nginx %q has no backend targets — pass --backend name=...,path=...,backend=... or --pgadmin-name/--postgrest-name", nc.Name)
+		return "", fmt.Errorf("nginx %q has no backend targets — pass --upstream name=...,path=...,backend=... or --pgadmin-name/--postgrest-name", nc.Name)
 	}
 
 	listen := nc.Listen
@@ -104,14 +114,19 @@ func RenderNginxCfg(nc *config.NginxConfig) (string, error) {
 	b.WriteString("pid /tmp/nginx.pid;\n")
 	b.WriteString("\n")
 
+	workerConns := nc.WorkerConnections
+	if workerConns <= 0 {
+		workerConns = 1024
+	}
+
 	b.WriteString("events {\n")
-	b.WriteString("    worker_connections 1024;\n")
+	fmt.Fprintf(&b, "    worker_connections %d;\n", workerConns)
 	b.WriteString("}\n")
 	b.WriteString("\n")
 
 	b.WriteString("http {\n")
-	b.WriteString("    access_log /dev/stdout;\n")
-	b.WriteString("    error_log  /dev/stderr;\n")
+	b.WriteString("    access_log /var/log/nginx/access.log;\n")
+	b.WriteString("    error_log  /var/log/nginx/error.log;\n")
 	b.WriteString("\n")
 
 	// Upstream blocks — one per backend
@@ -129,12 +144,15 @@ func RenderNginxCfg(nc *config.NginxConfig) (string, error) {
 	// HTTP server block
 	b.WriteString("    server {\n")
 	fmt.Fprintf(&b, "        listen %s:%d;\n", listen, nc.HTTPPort)
+	b.WriteString("        access_log /var/log/nginx/access.log;\n")
+	b.WriteString("        error_log  /var/log/nginx/error.log;\n")
 	b.WriteString("\n")
 	for _, be := range nc.Backends {
 		name := be.Name
 		if name == "" {
 			name = "upstream_" + sanitizeNginxName(be.Path)
 		}
+		logName := sanitizeNginxName(name)
 		path := be.Path
 		if path == "" {
 			path = "/"
@@ -145,6 +163,8 @@ func RenderNginxCfg(nc *config.NginxConfig) (string, error) {
 		b.WriteString("            proxy_set_header X-Real-IP $remote_addr;\n")
 		b.WriteString("            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n")
 		b.WriteString("            proxy_set_header X-Forwarded-Proto $scheme;\n")
+		fmt.Fprintf(&b, "            access_log /var/log/nginx/%s.access.log;\n", logName)
+		fmt.Fprintf(&b, "            error_log  /var/log/nginx/%s.error.log;\n", logName)
 		b.WriteString("        }\n")
 		b.WriteString("\n")
 	}
@@ -160,12 +180,15 @@ func RenderNginxCfg(nc *config.NginxConfig) (string, error) {
 		fmt.Fprintf(&b, "        ssl_certificate     %s;\n", certFile)
 		fmt.Fprintf(&b, "        ssl_certificate_key %s;\n", keyFile)
 		b.WriteString("        ssl_protocols TLSv1.2 TLSv1.3;\n")
+		b.WriteString("        access_log /var/log/nginx/access.log;\n")
+		b.WriteString("        error_log  /var/log/nginx/error.log;\n")
 		b.WriteString("\n")
 		for _, be := range nc.Backends {
 			name := be.Name
 			if name == "" {
 				name = "upstream_" + sanitizeNginxName(be.Path)
 			}
+			logName := sanitizeNginxName(name)
 			path := be.Path
 			if path == "" {
 				path = "/"
@@ -176,6 +199,8 @@ func RenderNginxCfg(nc *config.NginxConfig) (string, error) {
 			b.WriteString("            proxy_set_header X-Real-IP $remote_addr;\n")
 			b.WriteString("            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n")
 			b.WriteString("            proxy_set_header X-Forwarded-Proto $scheme;\n")
+			fmt.Fprintf(&b, "            access_log /var/log/nginx/%s.access.log;\n", logName)
+			fmt.Fprintf(&b, "            error_log  /var/log/nginx/%s.error.log;\n", logName)
 			b.WriteString("        }\n")
 			b.WriteString("\n")
 		}
@@ -197,13 +222,37 @@ func sanitizeNginxName(s string) string {
 }
 
 // WriteConfigs renders nginx.conf for the given instance into
-// <baseDir>/addon/nginx/<name>/. When TLS is enabled and no BYO cert is
-// provided, a self-signed cert is generated via tlsca.Generate. The file
-// carries no secrets (unless TLS with BYO key), so it is world-readable.
+// <baseDir>/addon/nginx/<name>/. When ConfFile is set, the user's file is
+// copied instead of rendering the template. When TLS is enabled and no BYO
+// cert is provided, a self-signed cert is generated via tlsca.Generate. The
+// file carries no secrets (unless TLS with BYO key), so it is world-readable.
 func (m *NginxManager) WriteConfigs(nc *config.NginxConfig) (string, error) {
 	dir := nginxConfigDir(m.dataDir, nc.Name)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", fmt.Errorf("creating nginx config dir: %w", err)
+	}
+
+	// Create log directory (always, for both template and ConfFile modes)
+	logDir := nginxLogDir(m.dataDir, nc.Name)
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return "", fmt.Errorf("creating nginx log dir: %w", err)
+	}
+
+	confPath := filepath.Join(dir, "nginx.conf")
+
+	// ConfFile mode: copy the user's file instead of rendering.
+	if nc.ConfFile != "" {
+		data, err := os.ReadFile(nc.ConfFile)
+		if err != nil {
+			return "", fmt.Errorf("reading user conf file %s: %w", nc.ConfFile, err)
+		}
+		if len(data) == 0 {
+			return "", fmt.Errorf("user conf file %s is empty", nc.ConfFile)
+		}
+		if err := os.WriteFile(confPath, data, 0644); err != nil {
+			return "", fmt.Errorf("writing nginx.conf: %w", err)
+		}
+		return confPath, nil
 	}
 
 	// TLS: generate self-signed cert or validate BYO paths
@@ -219,11 +268,10 @@ func (m *NginxManager) WriteConfigs(nc *config.NginxConfig) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, "nginx.conf")
-	if err := os.WriteFile(path, []byte(cfg), 0644); err != nil {
+	if err := os.WriteFile(confPath, []byte(cfg), 0644); err != nil {
 		return "", fmt.Errorf("writing nginx.conf: %w", err)
 	}
-	return path, nil
+	return confPath, nil
 }
 
 // EnsureContainer creates or restarts the nginx container (install semantics:
@@ -329,6 +377,7 @@ func nginxArgsAndEnv(nc *config.NginxConfig, bridge bool, network, configHostDir
 		"--http-proxy=false",
 		"--restart", "unless-stopped",
 		"-v", fmt.Sprintf("%s:%s:ro,z", hostMountPath(filepath.Join(configHostDir, "nginx.conf")), "/etc/nginx/nginx.conf"),
+		"-v", fmt.Sprintf("%s:%s:z", hostMountPath(filepath.Join(configHostDir, "log")), nginxContainerLogDir),
 	)
 
 	// TLS cert mount
@@ -490,4 +539,55 @@ func (m *NginxManager) containerRunning(name string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// Test validates nginx config syntax using a temporary (--rm) container.
+// Does NOT require the nginx container to be running — it spins up a
+// throwaway container with the same image + mounts, runs `nginx -t`, and
+// exits. This lets users test config changes before reloading.
+func (m *NginxManager) Test(nc *config.NginxConfig) error {
+	dir := nginxConfigDir(m.dataDir, nc.Name)
+	confPath := filepath.Join(dir, "nginx.conf")
+	if _, err := os.Stat(confPath); err != nil {
+		return fmt.Errorf("nginx config %s not found — run 'pg addon install nginx' first", confPath)
+	}
+
+	args := []string{
+		"run", "--rm", "--name", nc.ContainerName + "-test",
+		"-v", hostMountPath(confPath) + ":/etc/nginx/nginx.conf:ro,z",
+		"-v", hostMountPath(filepath.Join(dir, "log")) + ":" + nginxContainerLogDir + ":z",
+	}
+	// Mount TLS certs if enabled (cert dir exists)
+	if nc.TLS {
+		tlsHostDir := nginxTLSDir(m.dataDir, nc.Name)
+		args = append(args, "-v", hostMountPath(tlsHostDir)+":"+nginxContainerCertDir+":ro,z")
+	}
+	args = append(args, nc.ImageTag, "nginx", "-t")
+	return m.runInteractive(args...)
+}
+
+// Reload sends a reload signal to nginx inside the running container (graceful restart).
+func (m *NginxManager) Reload(nc *config.NginxConfig) error {
+	running, err := m.containerRunning(nc.ContainerName)
+	if err != nil {
+		return err
+	}
+	if !running {
+		return fmt.Errorf("nginx container %s is not running — run 'pg addon start nginx --name %s' first", nc.ContainerName, nc.Name)
+	}
+	return m.runInteractive("exec", nc.ContainerName, "nginx", "-s", "reload")
+}
+
+// Exec runs an arbitrary command inside the nginx container, with stdio passthrough.
+func (m *NginxManager) Exec(nc *config.NginxConfig, args []string) error {
+	running, err := m.containerRunning(nc.ContainerName)
+	if err != nil {
+		return err
+	}
+	if !running {
+		return fmt.Errorf("nginx container %s is not running — run 'pg addon start nginx --name %s' first", nc.ContainerName, nc.Name)
+	}
+	execArgs := []string{"exec", "-i", nc.ContainerName}
+	execArgs = append(execArgs, args...)
+	return m.runInteractive(execArgs...)
 }

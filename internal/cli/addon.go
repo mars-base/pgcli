@@ -501,6 +501,11 @@ Examples:
 func init() {
 	rootCmd.AddCommand(addonCmd)
 	addonCmd.AddCommand(addonInstallCmd, addonListCmd, addonPasswordCmd, addonRemoveCmd, addonStartCmd, addonStopCmd)
+	addonCmd.AddCommand(addonNginxCmd)
+	addonNginxCmd.AddCommand(addonNginxReloadCmd, addonNginxTestCmd, addonNginxExecCmd)
+	addonNginxReloadCmd.Flags().String("name", "", "nginx instance name (default \"nginx\")")
+	addonNginxTestCmd.Flags().String("name", "", "nginx instance name (default \"nginx\")")
+	addonNginxExecCmd.Flags().String("name", "", "nginx instance name (default \"nginx\")")
 
 	// Basic flags
 	addonInstallCmd.Flags().String("dsn", "", "PG instance connection string for remote mode (postgres://user:pass@host:port/db) / pgadmin: a one-time server to pre-register in its UI (mutually exclusive with --pg-name there)")
@@ -559,9 +564,11 @@ func init() {
 	// nginx flags (top-level HTTP reverse proxy in front of web services)
 	addonInstallCmd.Flags().Int("http-port", 0, "nginx HTTP listener host port (0=auto-assign from nginx_start_port)")
 	addonInstallCmd.Flags().Int("https-port", 0, "nginx HTTPS listener host port, TLS only (0=auto-assign, next free port)")
+	addonInstallCmd.Flags().Int("worker-connections", 0, "nginx worker_connections (max simultaneous connections per worker; default 1024)")
 	addonInstallCmd.Flags().StringArray("upstream", nil, "nginx upstream target name=<upstream>,path=<location>,backend=<host:port> (repeatable; e.g. --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050)")
 	addonInstallCmd.Flags().String("pgadmin-name", "", "convenience: auto-add the named pgAdmin addon as an nginx backend at /admin")
 	addonInstallCmd.Flags().String("postgrest-name", "", "convenience: auto-add the named PostgREST addon as an nginx backend at /api")
+	addonInstallCmd.Flags().String("conf-file", "", "path to a custom nginx.conf file (mutually exclusive with --upstream/--pgadmin-name/--postgrest-name; pgcli manages container lifecycle only, you control the full nginx config)")
 
 	// minio flags (top-level single-node S3-compatible object storage)
 	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo/rustfs S3 API host port (0=auto-assign from the shared minio_start_port pool)")
@@ -5219,9 +5226,11 @@ func runAddonInstallNginx(cmd *cobra.Command) error {
 	imageTag, _ := cmd.Flags().GetString("image")
 	httpPort, _ := cmd.Flags().GetInt("http-port")
 	httpsPort, _ := cmd.Flags().GetInt("https-port")
+	workerConns, _ := cmd.Flags().GetInt("worker-connections")
 	backendSpecs, _ := cmd.Flags().GetStringArray("upstream")
 	pgadminName, _ := cmd.Flags().GetString("pgadmin-name")
 	postgrestName, _ := cmd.Flags().GetString("postgrest-name")
+	confFile, _ := cmd.Flags().GetString("conf-file")
 	tls, _ := cmd.Flags().GetBool("tls")
 	tlsCert, _ := cmd.Flags().GetString("tls-cert")
 	tlsKey, _ := cmd.Flags().GetString("tls-key")
@@ -5237,6 +5246,25 @@ func runAddonInstallNginx(cmd *cobra.Command) error {
 		tls = true // BYO cert implies TLS
 	}
 
+	// --conf-file is mutually exclusive with --upstream/--pgadmin-name/--postgrest-name
+	if confFile != "" && (len(backendSpecs) > 0 || pgadminName != "" || postgrestName != "") {
+		return fmt.Errorf("--conf-file is mutually exclusive with --upstream/--pgadmin-name/--postgrest-name")
+	}
+
+	// Validate --conf-file if provided
+	if confFile != "" {
+		info, err := os.Stat(confFile)
+		if os.IsNotExist(err) {
+			return fmt.Errorf("--conf-file: %s not found", confFile)
+		}
+		if err != nil {
+			return fmt.Errorf("--conf-file: %w", err)
+		}
+		if info.Size() == 0 {
+			return fmt.Errorf("--conf-file: %s is empty", confFile)
+		}
+	}
+
 	path := cfgPath
 	if path == "" {
 		path = platform.DefaultConfigPath()
@@ -5249,50 +5277,54 @@ func runAddonInstallNginx(cmd *cobra.Command) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// Build backend list: explicit --backend specs + convenience flags
-	backends := make([]config.NginxBackend, 0, len(backendSpecs))
-	for _, s := range backendSpecs {
-		b, err := parseNginxBackend(s)
-		if err != nil {
-			return err
+	// Build backend list: explicit --upstream specs + convenience flags
+	// (skipped when --conf-file is used)
+	var backends []config.NginxBackend
+	if confFile == "" {
+		backends = make([]config.NginxBackend, 0, len(backendSpecs))
+		for _, s := range backendSpecs {
+			b, err := parseNginxBackend(s)
+			if err != nil {
+				return err
+			}
+			backends = append(backends, b)
 		}
-		backends = append(backends, b)
-	}
 
-	// Convenience: --pgadmin-name resolves the pgAdmin addon's listen + port
-	if pgadminName != "" {
-		if cfg.Addons.PgAdmin == nil {
-			return fmt.Errorf("--pgadmin-name: no pgadmin addons configured")
+		// Convenience: --pgadmin-name resolves the pgAdmin addon's listen + port
+		if pgadminName != "" {
+			if cfg.Addons.PgAdmin == nil {
+				return fmt.Errorf("--pgadmin-name: no pgadmin addons configured")
+			}
+			pa, ok := cfg.Addons.PgAdmin[pgadminName]
+			if !ok {
+				return fmt.Errorf("--pgadmin-name: pgadmin %q not found", pgadminName)
+			}
+			backends = append(backends, config.NginxBackend{
+				Name:    "pgadmin",
+				Path:    "/admin",
+				Backend: pa.Listen + ":" + strconv.Itoa(pa.HostPort),
+			})
 		}
-		pa, ok := cfg.Addons.PgAdmin[pgadminName]
-		if !ok {
-			return fmt.Errorf("--pgadmin-name: pgadmin %q not found", pgadminName)
-		}
-		backends = append(backends, config.NginxBackend{
-			Name:    "pgadmin",
-			Path:    "/admin",
-			Backend: pa.Listen + ":" + strconv.Itoa(pa.HostPort),
-		})
-	}
 
-	// Convenience: --postgrest-name resolves the PostgREST addon's listen + port
-	if postgrestName != "" {
-		if cfg.Addons.Postgrest == nil {
-			return fmt.Errorf("--postgrest-name: no postgrest addons configured")
+		// Convenience: --postgrest-name resolves the PostgREST addon's listen + port
+		if postgrestName != "" {
+			if cfg.Addons.Postgrest == nil {
+				return fmt.Errorf("--postgrest-name: no postgrest addons configured")
+			}
+			pr, ok := cfg.Addons.Postgrest[postgrestName]
+			if !ok {
+				return fmt.Errorf("--postgrest-name: postgrest %q not found", postgrestName)
+			}
+			backends = append(backends, config.NginxBackend{
+				Name:    "postgrest",
+				Path:    "/api",
+				Backend: pr.Listen + ":" + strconv.Itoa(pr.HostPort),
+			})
 		}
-		pr, ok := cfg.Addons.Postgrest[postgrestName]
-		if !ok {
-			return fmt.Errorf("--postgrest-name: postgrest %q not found", postgrestName)
-		}
-		backends = append(backends, config.NginxBackend{
-			Name:    "postgrest",
-			Path:    "/api",
-			Backend: pr.Listen + ":" + strconv.Itoa(pr.HostPort),
-		})
-	}
 
-	if len(backends) == 0 {
-		return fmt.Errorf("no backends: pass --backend name=...,path=...,backend=... (repeatable), or --pgadmin-name/--postgrest-name")
+		if len(backends) == 0 {
+			return fmt.Errorf("no backends: pass --upstream name=...,path=...,backend=... (repeatable), --pgadmin-name/--postgrest-name, or --conf-file for a custom nginx.conf")
+		}
 	}
 
 	if cfg.Addons.Nginx == nil {
@@ -5320,7 +5352,9 @@ func runAddonInstallNginx(cmd *cobra.Command) error {
 	existing.TLS = tls
 	existing.TLSCert = tlsCert
 	existing.TLSKey = tlsKey
+	existing.WorkerConnections = workerConns
 	existing.Backends = backends
+	existing.ConfFile = confFile
 	if existing.Name == "" {
 		existing.Name = name
 	}
@@ -5389,11 +5423,16 @@ func runAddonInstallNginx(cmd *cobra.Command) error {
 			fmt.Printf("  TLS cert:     BYO (%s)\n", nc.TLSCert)
 		}
 	}
-	fmt.Printf("  Backends:     %d\n", len(nc.Backends))
-	for _, b := range nc.Backends {
-		fmt.Printf("    %s -> %s%s\n", b.Path, b.Backend, " ("+b.Name+")")
+	if nc.ConfFile != "" {
+		fmt.Printf("  Config:       %s (from %s)\n", cfgPathOut, nc.ConfFile)
+	} else {
+		fmt.Printf("  Backends:     %d\n", len(nc.Backends))
+		for _, b := range nc.Backends {
+			fmt.Printf("    %s -> %s%s\n", b.Path, b.Backend, " ("+b.Name+")")
+		}
+		fmt.Printf("  Config:       %s\n", cfgPathOut)
 	}
-	fmt.Printf("  Config:       %s\n", cfgPathOut)
+	fmt.Printf("  Logs:         %s\n", filepath.Dir(cfgPathOut)+"/log/")
 	return nil
 }
 
@@ -6281,4 +6320,128 @@ func nsSuffixCLI(namespace string) string {
 		return ""
 	}
 	return "-" + namespace
+}
+
+// ---------------------------------------------------------------------------
+// nginx-specific subcommands: reload / test / exec
+// ---------------------------------------------------------------------------
+
+var addonNginxCmd = &cobra.Command{
+	Use:   "nginx",
+	Short: "Manage nginx addon instances",
+	Long: `Manage nginx addon instances with dedicated subcommands.
+
+Subcommands:
+  test     Test nginx configuration syntax (nginx -t) using a temporary container
+  reload   Reload nginx configuration (nginx -s reload) without restarting the container
+  exec     Execute a command inside the running nginx container
+
+Examples:
+  pg addon nginx test --name proxy           # validate config syntax (works even when stopped)
+  pg addon nginx reload --name proxy         # graceful restart after config change
+  pg addon nginx exec --name proxy -- nginx -V
+  pg addon nginx exec --name proxy -- cat /etc/nginx/nginx.conf`,
+}
+
+var addonNginxTestCmd = &cobra.Command{
+	Use:   "test",
+	Short: "Test nginx configuration syntax (nginx -t)",
+	Long: `Validate the nginx configuration syntax by running 'nginx -t' in a temporary
+container. Does NOT require the nginx container to be running — a throwaway
+container is created with the same image and config mounts, runs the test,
+and is automatically removed. This is the safe way to check config changes
+before applying them with reload.`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runAddonNginxTest(cmd)
+	},
+}
+
+var addonNginxReloadCmd = &cobra.Command{
+	Use:   "reload",
+	Short: "Reload nginx configuration (nginx -s reload)",
+	Long: `Send a reload signal to the running nginx process, causing it to re-read
+its configuration files without restarting the container. Use 'test' first
+to validate the config syntax before reloading.`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runAddonNginxReload(cmd)
+	},
+}
+
+var addonNginxExecCmd = &cobra.Command{
+	Use:   "exec -- <command> [args...]",
+	Short: "Execute a command inside the nginx container",
+	Long: `Run an arbitrary command inside the running nginx container with full
+stdin/stdout/stderr passthrough. Requires -- to separate pgcli flags from
+the container command.
+
+Examples:
+  pg addon nginx exec --name proxy -- cat /etc/nginx/nginx.conf
+  pg addon nginx exec --name proxy -- nginx -V
+  pg addon nginx exec --name proxy -- sh -c 'ls -la /etc/nginx/conf.d/'`,
+	DisableFlagParsing: false,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runAddonNginxExec(cmd, args)
+	},
+}
+
+// resolveNginxConfig loads the config and returns the NginxConfig for the
+// given --name (default "nginx"), or an error if not found.
+func resolveNginxConfig(cmd *cobra.Command) (*config.NginxConfig, error) {
+	if err := loadConfigForDSN(); err != nil {
+		return nil, err
+	}
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "nginx"
+	}
+	if cfg.Addons.Nginx == nil {
+		return nil, fmt.Errorf("no nginx addons configured")
+	}
+	nc, ok := cfg.Addons.Nginx[name]
+	if !ok {
+		return nil, fmt.Errorf("nginx instance %q not found (use 'pg addon list' to see available)", name)
+	}
+	return &nc, nil
+}
+
+func runAddonNginxTest(cmd *cobra.Command) error {
+	nc, err := resolveNginxConfig(cmd)
+	if err != nil {
+		return err
+	}
+	mgr, err := podman.NewNginxManager(cfg)
+	if err != nil {
+		return fmt.Errorf("nginx manager: %w", err)
+	}
+	return mgr.Test(nc)
+}
+
+func runAddonNginxReload(cmd *cobra.Command) error {
+	nc, err := resolveNginxConfig(cmd)
+	if err != nil {
+		return err
+	}
+	mgr, err := podman.NewNginxManager(cfg)
+	if err != nil {
+		return fmt.Errorf("nginx manager: %w", err)
+	}
+	return mgr.Reload(nc)
+}
+
+func runAddonNginxExec(cmd *cobra.Command, args []string) error {
+	nc, err := resolveNginxConfig(cmd)
+	if err != nil {
+		return err
+	}
+	dashIdx := cmd.ArgsLenAtDash()
+	if dashIdx == -1 || dashIdx >= len(args) {
+		return fmt.Errorf("exec requires -- <command>, e.g. pg addon nginx exec --name proxy -- cat /etc/nginx/nginx.conf")
+	}
+	mgr, err := podman.NewNginxManager(cfg)
+	if err != nil {
+		return fmt.Errorf("nginx manager: %w", err)
+	}
+	return mgr.Exec(nc, args[dashIdx:])
 }

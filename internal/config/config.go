@@ -406,6 +406,11 @@ type NginxConfig struct {
 	HTTPPort      int    `yaml:"http_port,omitempty"` // HTTP listener port, 8080+ auto-assigned
 	HTTPSPort     int    `yaml:"https_port,omitempty"` // HTTPS listener port (TLS only), next free port after HTTP
 
+	// WorkerConnections sets the maximum number of simultaneous connections per
+	// worker process (nginx worker_connections). Default is 1024. Increase this
+	// for high-traffic reverse proxies. Ignored when ConfFile is set.
+	WorkerConnections int `yaml:"worker_connections,omitempty"`
+
 	// TLS enables an HTTPS listener alongside the HTTP one. When true and
 	// TLSCert is empty, pgcli generates a self-signed cert via tlsca.Generate
 	// under <base>/addon/nginx/<name>/tls/. When TLSCert/TLSKey are set, the
@@ -419,6 +424,12 @@ type NginxConfig struct {
 	// container reading the nginx.conf already on disk — install first.
 	Autostart bool           `yaml:"autostart,omitempty"`
 	Backends  []NginxBackend `yaml:"backends,omitempty"` // upstream targets
+
+	// ConfFile is the path to a user-provided nginx.conf. When set, the
+	// template-driven Backends rendering is skipped — pgcli copies the file
+	// into the addon directory and manages only the container lifecycle.
+	// TLS/HTTPPort/HTTPSPort/Listen still take effect for container networking.
+	ConfFile string `yaml:"conf_file,omitempty"`
 }
 
 // DefaultMinioImageTag is the public pre-built single-node MinIO image
