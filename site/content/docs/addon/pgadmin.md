@@ -29,9 +29,10 @@ It is the fleet's one *UI* addon, which shapes its design:
   pgAdmin never blocks on it, and you can add/remove servers in the UI after.
 
 > **Out of scope:** pgAdmin serves plain HTTP here — no TLS termination is wired
-> in (put a reverse proxy in front if you need HTTPS). The seed `servers.json`
-> **cannot** carry the target server's password (pgAdmin refuses to import one);
-> you are prompted for it on first connect in the UI. See
+> in (put a reverse proxy in front if you need HTTPS). `servers.json` itself
+> cannot carry the target server's password (pgAdmin refuses to import one), but
+> when the seed DSN *does* carry one, pgcli pre-configures it through pgAdmin's
+> passfile support so the seeded server connects **without prompting** — see
 > [Seeding a server](#seeding-a-server).
 
 ## Parameters
@@ -44,11 +45,11 @@ reads. The table lists every knob and its default:
 |----------------------|---------|---------|---------|
 | `--image` / `image_tag` | `docker.io/dpage/pgadmin4:9.18` | — | override the tag verbatim |
 | `--port` / `host_port` | auto from `pgadmin_start_port` (base **5050**) | `PGADMIN_LISTEN_PORT` | web host port |
-| `--listen` / `listen` | `127.0.0.1` | `PGADMIN_LISTEN_ADDRESS` | bind address (`0.0.0.0` to expose) |
+| `--listen` / `listen` | `127.0.0.1` | `PGADMIN_LISTEN_ADDRESS` | bind address (`0.0.0.0` to expose — see [Listening and exposure](#listening-and-exposure)) |
 | `--email` / `email` | `admin@pgcli.lan` | `PGADMIN_DEFAULT_EMAIL` | web login account (validated — see [Troubleshooting](#troubleshooting)) |
 | `--password` / `password` | generated, 20 chars | `PGADMIN_DEFAULT_PASSWORD` | web login password — **not** a PG password |
-| `--dsn` / `dsn` | unset | — (renders `servers.json`) | one server to pre-register, given as a URI |
-| `--pg-name` | unset | — (renders `servers.json`) | resolve that one server from a locally-managed instance instead |
+| `--dsn` / `dsn` | unset | — (renders `servers.json` + pgpass) | one server to pre-register, given as a URI — when it carries a password, it is pre-filled too (host is dialed from the container — see [Seeded host vs. listen address](#seeded-host-vs-listen-address)) |
+| `--pg-name` | unset | — (renders `servers.json` + pgpass) | resolve that one server from a locally-managed instance instead |
 | `--data-dir` / `data_dir` | `<base-dir>/addon/pgadmin/<name>/data` | (`/var/lib/pgadmin`) | where the session store lives |
 | — | `autostart: false` | — | start on boot (`pg autostart enable --pgadmin`) |
 
@@ -62,10 +63,13 @@ How the knobs combine:
   `--clean-data` first, or pin `--password` to the original when reviving.
 - **`--dsn` and `--pg-name` are mutually exclusive** — both mean "seed this one
   server", one by URI and the other by resolving a local instance's endpoint.
-  `--name` is the addon's own key and has nothing to do with `--pg-name`.
+  `--name` is the addon's own key and has nothing to do with `--pg-name`. The
+  seed's host is where **pgAdmin** connects from, not where your browser does —
+  see [Seeded host vs. listen address](#seeded-host-vs-listen-address).
 - **`listen` defaults to loopback** — the web UI is a login gate, so it stays on
   `127.0.0.1` unless you pass `--listen 0.0.0.0` to reach it from another host
-  (the summary then warns that the login is the only gate).
+  (the summary then warns that the login is the only gate). Full picture in
+  [Listening and exposure](#listening-and-exposure).
 - **`email` must survive the image's validator** — the entrypoint checks it with
   `email_validator` and rejects reserved TLDs (`.local`, `.invalid`, `.test`)
   outright, crash-looping on one. The default `admin@pgcli.lan` is chosen to
@@ -101,6 +105,14 @@ The e2e asserts `.Config.User == 0` on the container and `5050:0` on
 `/var/lib/pgadmin` inside it — which together show the *image* dropped
 privileges, not pgcli.
 
+**One mount is deliberately NOT `:ro`.** When the seed DSN carries a password,
+pgcli writes a libpq `pgpass` file on the host and mounts it at
+`/var/lib/pgadmin/pgpass` — *inside* the tree the entrypoint `chown`s to uid
+5050. That mount must be writable: the entrypoint has to fix the file's owner
+to 5050 on every start, or libpq would ignore it (a passfile not owned by the
+connecting uid is treated as insecure and silently dropped). `servers.json`
+stays `:ro` since it sits at `/pgadmin4/servers.json`, outside the chown tree.
+
 ## Install
 
 ```bash
@@ -127,6 +139,7 @@ The install summary prints the URL and the (generated) web login:
   Data:       ~/pg/addon/pgadmin/console/data
   URL:        http://127.0.0.1:5050/
   Seeded:     proj01
+  Seed auth:  password pre-configured (pgpass) — no prompt on first connect
 
   Login email:    me@example.com
   Login password: <generated>
@@ -135,10 +148,52 @@ The install summary prints the URL and the (generated) web login:
   Add servers to browse in the web UI itself, or reinstall with --dsn/--pg-name to pre-seed one.
 ```
 
-The `Seeded:` line appears only when `--dsn`/`--pg-name` was passed. Re-running
-`install` is idempotent: a running container is left alone, a stopped one is
-started. To apply a changed port/listen/email/seed, add `--force` (the container
-is recreated from the config; the data dir is untouched).
+The `Seeded:` / `Seed auth:` lines appear only when `--dsn`/`--pg-name` was
+passed. `Seed auth:` says `password pre-configured (pgpass)` when the DSN
+carries a password, and `no password in the DSN — first connect will prompt`
+when it does not. Re-running `install` is idempotent: a running container is
+left alone, a stopped one is started. To apply a changed
+port/listen/email/seed, add `--force` (the container is recreated from the
+config; the data dir is untouched).
+
+### Rebuilding with `--force`
+
+`pg addon install pgadmin` without `--force` is a no-op on a running container
+— it leaves the live config alone and just makes sure the container is up.
+That is exactly the wrong behaviour when you *meant* to change something
+(port, listen, email, image, seed DSN, `--pg-name` target, `data_dir`): the
+running container is pinned to the config it was created with, so the edit
+looks accepted but nothing changes until the next recreate.
+
+`--force` is the knob that applies such edits. It stops the running container,
+removes it, and creates a new one from the current config; the data dir is
+**untouched**, so saved servers and browse history come back in the new
+container:
+
+```bash
+# change the bind address to expose the UI on the network
+pg addon install pgadmin --listen 0.0.0.0 --force
+
+# switch the seeded server to a different instance
+pg addon install pgadmin --pg-name proj02 --force
+
+# drop the seed entirely (no --dsn / --pg-name + --force)
+pg addon install pgadmin --force
+
+# retag to a different upstream image
+pg addon install pgadmin --image docker.io/dpage/pgadmin4:9.19 --force
+```
+
+Two caveats worth stating:
+
+- **`email` / `password` still only re-apply to an empty data dir** (see
+  [Privileges](#privileges)). `--force` alone does not reset the web login
+  once pgAdmin has initialised `pgadmin4.db` — pair it with
+  `--clean-data` (which removes the store first) to actually reset the
+  account.
+- **A running container is recreated, not left alone.** If the UI is open in a
+  browser, `--force` kills the session; the next page load re-authenticates
+  against the new container.
 
 ## Using the web UI
 
@@ -147,13 +202,35 @@ sign in with the login email + password, and pgAdmin's own server tree appears.
 Add connections in the UI, or pre-register one at install with
 [--dsn / --pg-name](#seeding-a-server).
 
-If the host isn't where your browser is, either set `--listen 0.0.0.0` (the
-login is then the only gate) or keep it loopback and SSH-tunnel the port:
+If the host isn't where your browser is, set `--listen 0.0.0.0` (the
+login is then the only gate):
+
+### Listening and exposure
+
+`--listen` (config key `listen`) is the address pgAdmin's HTTP server binds, and
+it defaults to loopback. The three postures, each applied with `--force` since
+the container is recreated to pick up the change:
 
 ```bash
-ssh -L 5050:127.0.0.1:5050 user@host
-# then browse http://127.0.0.1:5050/ locally
+# loopback only (default) — reachable on the podman host itself
+pg addon install pgadmin --name console --listen 127.0.0.1 --force
+
+# every interface — reachable from other hosts; login is the ONLY gate
+pg addon install pgadmin --name console --listen 0.0.0.0 --force
+
+# back to loopback after exposing
+pg addon install pgadmin --name console --listen 127.0.0.1 --force
 ```
+
+- **On Linux** the container shares the host network, so `--listen 0.0.0.0`
+  answers on `<host-ip>:<port>` and `--listen 127.0.0.1` on `127.0.0.1:<port>`.
+  Widening to `0.0.0.0` puts pgAdmin behind nothing but its email/password
+  login — the install summary warns so — so keep loopback unless the network
+  is trusted.
+- **On macOS** the picture inverts: the bridge network always binds `0.0.0.0`
+  inside the podman machine and pgcli *publishes* the port, so `listen` is
+  effectively widened there regardless, and you reach the UI from the Mac at
+  `127.0.0.1:<port>` via gvproxy. See [Platform](/docs/platform/).
 
 ### Retrieving the web login
 
@@ -170,20 +247,33 @@ you pass `--show-password`.
 `--dsn` and `--pg-name` both render a one-time `servers.json` that pgAdmin
 imports on first boot, so the browser opens with that server already in its
 tree. `--pg-name` resolves the endpoint from a locally-managed instance (its
-host/port/database/user, read from `pg.yaml`); `--dsn` gives it as a URI:
+host/port/database/user **and password**, read from `pg.yaml`); `--dsn` gives
+it as a URI:
 
 ```bash
 pg addon install pgadmin --name dev --pg-name proj01
 # or
-pg addon install pgadmin --name dev --dsn "postgres://app@127.0.0.1:5432/appdb"
+pg addon install pgadmin --name dev --dsn "postgres://app:secret@127.0.0.1:5432/appdb"
 ```
 
 What the seed does and does not carry:
 
-- **The target server's password is NOT stored** — pgAdmin cannot import one,
-  so you type it on first connect in the UI. pgcli's install says so explicitly
-  ("its password is NOT carried"). This is also why the seed is safe to
-  bind-mount: `servers.json` holds host/port/database/user only.
+- **The target server's password IS pre-configured when the DSN carries one.**
+  `servers.json` itself cannot hold a password (pgAdmin refuses to import one),
+  so pgcli writes a libpq `pgpass` file beside it and points the seeded entry
+  at it via `ConnectionParameters.passfile` — an absolute path pgAdmin honours
+  natively (documented in the pgAdmin 9.18 Import/Export Servers example).
+  Connecting from the browser skips the password prompt entirely. A DSN without
+  a password (e.g. `postgres://app@host/db`) renders `servers.json` only, and
+  pgAdmin prompts on first connect as before.
+- **The pgpass file holds the password in plaintext on disk.** It is mode 0600
+  under `<base-dir>/addon/pgadmin/<name>/pgpass`, readable only by the host
+  user and inside the container by uid 5050 — but it *is* on disk, unlike a
+  `servers.json` which never holds a secret. The tradeoff is the same one
+  every `.pgpass`-using tool makes: password-free connects cost a file on
+  disk. Removing the pgAdmin instance (with or without `--clean-data`) deletes
+  the pgpass alongside `servers.json` — the plaintext secret does not outlive
+  the instance.
 - **It's a one-time convenience, not a coupling.** After install, the server
   lives in pgAdmin's own `pgadmin4.db`; add, rename, or delete it in the UI. The
   addon keeps running regardless of whether the seed target is reachable.
@@ -193,6 +283,32 @@ What the seed does and does not carry:
 
 To drop the seed and stop the declarative re-load, reinstall with `--force` and
 neither `--dsn` nor `--pg-name`.
+
+### Seeded host vs. listen address
+
+These two knobs point at different machines and are often conflated. `--listen`
+controls who may reach the pgAdmin **web UI**; the seed's host controls where
+pgAdmin **dials the database from**. The dial is made server-side — by the
+pgAdmin container, not by your browser — so a locally-managed instance seeded
+with `--pg-name` correctly records `127.0.0.1`, because pgAdmin and that
+PostgreSQL share the podman host's loopback. Exposing the UI to the network
+does **not** require the seeded host to be routable from the browser:
+
+```bash
+# pgAdmin on vm01 fronting vm01's own instance, UI reachable from other hosts
+pg addon install pgadmin --listen 0.0.0.0 --pg-name demo --force
+# servers.json -> Host: 127.0.0.1, Port: <demo's pg port>   (dialed in-container)
+
+# seed a server on ANOTHER host instead — the host must be reachable from the
+# pgAdmin container, since it is the container that connects
+pg addon install pgadmin --listen 0.0.0.0 \
+    --dsn "postgres://app@10.241.20.148:35432/appdb" --force
+```
+
+The converse pitfall: seed a *remote* host with `--dsn` and point a browser at
+that same pgAdmin from elsewhere — the connection still originates inside the
+pgAdmin container, so that host must be reachable **from the container's
+network**, not from the laptop.
 
 ## Ports
 
@@ -328,13 +444,16 @@ pg logs addon pgadmin --name console -f     # follow
   address"* — the container then exits and, under the restart policy, spins.
   That is exactly why the default is `admin@pgcli.lan` and not `.local`.
 - **Can't reach the UI from another machine** — `listen` defaults to
-  `127.0.0.1`. Either SSH-tunnel the port (see [Using the web
-  UI](#using-the-web-ui)) or reinstall `--listen 0.0.0.0 --force` and accept
-  that the web login is then the only gate.
-- **The seeded server shows but won't connect** — expected: `servers.json`
-  never carries the target's password ([Seeding a server](#seeding-a-server));
-  enter it in the connect prompt. Confirm the host/port are reachable from
-  where pgAdmin runs.
+  `127.0.0.1`. Reinstall `--listen 0.0.0.0 --force` and accept that the web
+  login is then the only gate.
+- **The seeded server shows but won't connect** — if the seed DSN carried no
+  password, pgAdmin prompts for it on first connect ([Seeding a
+  server](#seeding-a-server)). If it *did* carry one and the prompt still
+  appears, the pgpass file was invalidated — most often because the container
+  was started without the entrypoint's `chown` running (e.g. someone passed
+  `--user 5050` directly instead of `--user 0`, so the file is owned by the
+  host user and libpq silently drops it). Confirm the host/port are reachable
+  from where pgAdmin runs.
 - **Image not found at install** — `docker.io/dpage/pgadmin4` is pulled on
   demand; on an air-gapped host, `podman load` the tar first (catalog and export
   steps in `docs/images.md` in the repo) and the pull is skipped.
@@ -348,9 +467,10 @@ pg logs addon pgadmin --name console -f     # follow
   (with `PGADMIN_URL_SCHEME`/`PGADMIN_DISABLE_STATIC_FILE_SERVER` tuning) in
   front; pgcli does not wire it. The loopback default keeps the common case on
   `127.0.0.1`.
-- **Seed cannot carry the target password** — a pgAdmin constraint, not a pgcli
-  one: `servers.json` passwords are not importable. The connection prompt
-  happens in the UI.
+- **Seed password lives on disk as plaintext** — the pgpass file beside
+  `servers.json` is mode 0600 but not encrypted; removing the instance cleans
+  it up. There is no way to pre-configure the password without a file on disk
+  (pgAdmin has no KMS/keyring integration).
 - **Login only applies to a fresh store** — see
   [Privileges](#privileges)/[Troubleshooting](#troubleshooting); there is no
   in-place password reset, only `--clean-data` + reinstall.
