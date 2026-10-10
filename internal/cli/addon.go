@@ -3712,8 +3712,16 @@ func runAddonInstallPgAdmin(cmd *cobra.Command) error {
 		if err := pgm.EnsureImage(ac.ImageTag); err != nil {
 			return err
 		}
-		if pgName != "" {
-			fmt.Printf("-> NOTE: seeding servers.json from instance %q — its password is NOT carried (pgAdmin cannot import one); you will be prompted on first connect.\n", pgName)
+		if dsn != "" {
+			src := "from --dsn"
+			if pgName != "" {
+				src = fmt.Sprintf("from instance %q", pgName)
+			}
+			if podman.DSNHasPassword(dsn) {
+				fmt.Printf("-> NOTE: seeding servers.json %s — the connection password is pre-configured via a pgpass file, so the seeded server connects without prompting.\n", src)
+			} else {
+				fmt.Printf("-> NOTE: seeding servers.json %s — it carries no password (pgAdmin cannot store one in servers.json), so you will be prompted on first connect.\n", src)
+			}
 		}
 		if revived {
 			// Pin the login block to point out the printed password is inert.
@@ -3742,6 +3750,11 @@ func runAddonInstallPgAdmin(cmd *cobra.Command) error {
 	fmt.Printf("  URL:        http://%s:%d/\n", ac.Listen, ac.HostPort)
 	if ac.DSN != "" {
 		fmt.Printf("  Seeded:     %s\n", pgadminSeededDisplay(ac))
+		if podman.DSNHasPassword(ac.DSN) {
+			fmt.Println("  Seed auth:  password pre-configured (pgpass) — no prompt on first connect")
+		} else {
+			fmt.Println("  Seed auth:  no password in the DSN — first connect will prompt")
+		}
 	}
 	fmt.Println()
 	fmt.Printf("  Login email:    %s\n", ac.Email)

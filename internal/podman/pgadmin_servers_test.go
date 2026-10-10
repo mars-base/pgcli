@@ -129,7 +129,7 @@ func TestRenderServersJSON(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			raw, err := RenderServersJSON(tc.dsn, tc.serverName)
+			raw, err := RenderServersJSON(tc.dsn, tc.serverName, "")
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected an error, got %s", raw)
@@ -153,12 +153,50 @@ func TestRenderServersJSON(t *testing.T) {
 	}
 }
 
+// TestRenderServersJSONPassfile pins the seed-password path: the plaintext
+// password stays out of servers.json (pgAdmin cannot import one) and is instead
+// referenced through ConnectionParameters.passfile — the field the pgAdmin 9.18
+// Import/Export Servers example documents. pgAdmin's connect() skips the
+// password prompt when that field is set and points at an existing file.
+func TestRenderServersJSONPassfile(t *testing.T) {
+	raw, err := RenderServersJSON("postgres://app:sup3rs3cret@dbhost:5432/appdb", "seeded", "/var/lib/pgadmin/pgpass")
+	if err != nil {
+		t.Fatalf("RenderServersJSON: %v", err)
+	}
+	if strings.Contains(string(raw), "sup3rs3cret") {
+		t.Errorf("servers.json leaked the DSN password:\n%s", raw)
+	}
+	var doc pgAdminServersFile
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := doc.Servers["1"].ConnectionParams["passfile"]; got != "/var/lib/pgadmin/pgpass" {
+		t.Errorf("ConnectionParameters.passfile = %v, want /var/lib/pgadmin/pgpass", got)
+	}
+	if got := doc.Servers["1"].ConnectionParams["sslmode"]; got != "prefer" {
+		t.Errorf("sslmode must survive alongside passfile, got %v", got)
+	}
+
+	// No passfile path → no passfile key at all (a password-less seed keeps
+	// prompting on first connect).
+	raw, err = RenderServersJSON("postgres://app@dbhost:5432/appdb", "seeded", "")
+	if err != nil {
+		t.Fatalf("RenderServersJSON: %v", err)
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, present := doc.Servers["1"].ConnectionParams["passfile"]; present {
+		t.Errorf("passfile key should be absent without a path:\n%s", raw)
+	}
+}
+
 // TestWriteServersJSON checks the file lands world-readable: under rootless
 // podman the container's 5050 is a mapped uid, and a :ro bind mount of a
 // 0600 file would not be readable inside.
 func TestWriteServersJSON(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "servers.json")
-	if err := WriteServersJSON(path, "postgres://app:pw@dbhost:5432/appdb", "seeded"); err != nil {
+	if err := WriteServersJSON(path, "postgres://app:pw@dbhost:5432/appdb", "seeded", ""); err != nil {
 		t.Fatalf("WriteServersJSON: %v", err)
 	}
 	fi, err := os.Stat(path)

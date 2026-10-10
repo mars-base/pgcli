@@ -58,7 +58,7 @@ func TestPgAdminArgsAndEnv(t *testing.T) {
 
 	t.Run("linux host networking", func(t *testing.T) {
 		ac := base()
-		args := pgadminArgsAndEnv(ac, false, "pgcli-net", "/home/u/.pgcli/addon/pgadmin/ui/data", "")
+		args := pgadminArgsAndEnv(ac, false, "pgcli-net", "/home/u/.pgcli/addon/pgadmin/ui/data", "", "")
 
 		if !slices.Contains(args, "--network") || !slices.Contains(args, "host") {
 			t.Errorf("expected --network host, got %v", args)
@@ -116,7 +116,7 @@ func TestPgAdminArgsAndEnv(t *testing.T) {
 
 	t.Run("macOS bridge networking widens loopback bind and publishes port", func(t *testing.T) {
 		ac := base()
-		args := pgadminArgsAndEnv(ac, true, "pgcli-net", "/data", "")
+		args := pgadminArgsAndEnv(ac, true, "pgcli-net", "/data", "", "")
 
 		if !slices.Contains(args, "--network") || !slices.Contains(args, "pgcli-net") {
 			t.Errorf("expected --network pgcli-net, got %v", args)
@@ -136,7 +136,7 @@ func TestPgAdminArgsAndEnv(t *testing.T) {
 	t.Run("explicit non-loopback listen passes through", func(t *testing.T) {
 		ac := base()
 		ac.Listen = "10.0.0.5"
-		args := pgadminArgsAndEnv(ac, true, "pgcli-net", "/data", "")
+		args := pgadminArgsAndEnv(ac, true, "pgcli-net", "/data", "", "")
 		if !hasEnv(args, "PGADMIN_LISTEN_ADDRESS=10.0.0.5") {
 			t.Errorf("explicit bind should pass through under bridge: %v", args)
 		}
@@ -147,13 +147,44 @@ func TestPgAdminArgsAndEnv(t *testing.T) {
 	// that points --pg-name/--dsn somewhere else actually takes effect.
 	t.Run("servers.json seed mounts read-only and enables replace", func(t *testing.T) {
 		ac := base()
-		args := pgadminArgsAndEnv(ac, false, "pgcli-net", "/data", "/home/u/.pgcli/addon/pgadmin/ui/servers.json")
+		args := pgadminArgsAndEnv(ac, false, "pgcli-net", "/data", "/home/u/.pgcli/addon/pgadmin/ui/servers.json", "")
 
 		if !hasMount(args, "/home/u/.pgcli/addon/pgadmin/ui/servers.json:/pgadmin4/servers.json:ro,z") {
 			t.Errorf("servers.json read-only mount missing: %v", args)
 		}
 		if !hasEnv(args, "PGADMIN_REPLACE_SERVERS_ON_STARTUP=True") {
 			t.Errorf("PGADMIN_REPLACE_SERVERS_ON_STARTUP=True missing: %v", args)
+		}
+	})
+
+	// The seed passfile mounts INSIDE /var/lib/pgadmin so the image's
+	// entrypoint chown -R reaches it (libpq refuses a passfile not owned by the
+	// connecting uid) — and therefore must NOT be read-only, or that chown
+	// fails with EROFS.
+	t.Run("seed passfile mounts writable inside the chowned tree", func(t *testing.T) {
+		ac := base()
+		args := pgadminArgsAndEnv(ac, false, "pgcli-net", "/data",
+			"/home/u/.pgcli/addon/pgadmin/ui/servers.json",
+			"/home/u/.pgcli/addon/pgadmin/ui/pgpass")
+
+		if !hasMount(args, "/home/u/.pgcli/addon/pgadmin/ui/pgpass:/var/lib/pgadmin/pgpass:z") {
+			t.Errorf("pgpass mount missing: %v", args)
+		}
+		if hasMount(args, "/var/lib/pgadmin/pgpass:ro") {
+			t.Errorf("pgpass must NOT be :ro (the entrypoint chowns it to 5050): %v", args)
+		}
+		// No PGPASSFILE env: pgAdmin takes the path from
+		// servers.json's ConnectionParameters.passfile instead.
+		if hasEnvKey(args, "PGPASSFILE") {
+			t.Errorf("PGPASSFILE should be absent (passfile is a per-server param): %v", args)
+		}
+	})
+
+	t.Run("no passfile mount without a seed password", func(t *testing.T) {
+		ac := base()
+		args := pgadminArgsAndEnv(ac, false, "pgcli-net", "/data", "", "")
+		if hasMount(args, "pgpass") {
+			t.Errorf("pgpass mount should be absent without a seed password: %v", args)
 		}
 	})
 }

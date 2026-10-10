@@ -1,6 +1,7 @@
 package podman
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -90,6 +91,13 @@ func (m *PgAdminManager) DataDir(ac *config.PgAdminConfig) string {
 // servers.json to (beside the data dir, under the instance's addon dir).
 func (m *PgAdminManager) serversJSONPath(ac *config.PgAdminConfig) string {
 	return filepath.Join(m.dataDir, "addon", "pgadmin", ac.Name, "servers.json")
+}
+
+// pgPassPath returns the host path of the optional seed passfile, beside
+// servers.json. The file holds the seeded server's PostgreSQL password in
+// plaintext (libpq pgpass format) and is removed on every reinstall/remove.
+func (m *PgAdminManager) pgPassPath(ac *config.PgAdminConfig) string {
+	return filepath.Join(m.dataDir, "addon", "pgadmin", ac.Name, "pgpass")
 }
 
 // EnsureImage pulls the pgAdmin image if it is not present locally (pull-only:
@@ -203,12 +211,18 @@ func (m *PgAdminManager) StartContainer(ac *config.PgAdminConfig) error {
 //     image's default /pgadmin4/servers.json and sets
 //     PGADMIN_REPLACE_SERVERS_ON_STARTUP=True so a re-rendered file takes effect
 //     on every start (declarative), not just first launch.
+//   - pgPassHostPath non-empty bind-mounts the seed passfile at
+//     /var/lib/pgadmin/pgpass (the path servers.json's passfile points at, so
+//     the seeded server connects without prompting). Deliberately NOT :ro: the
+//     entrypoint's chown -R must be able to fix its owner to 5050 on every
+//     start (libpq refuses a passfile not owned by the connecting uid), and
+//     chown on a read-only mount fails with EROFS.
 //   - The bind address goes through proxyBindHost so a loopback listen is
 //     widened to 0.0.0.0 under bridge (the published port must be reachable).
 //
 // dataDir is the caller's already-resolved host data dir (the manager resolves
 // it from base+name+override), so this stays a pure function of its arguments.
-func pgadminArgsAndEnv(ac *config.PgAdminConfig, bridge bool, network, dataDir, serversJSONHostPath string) []string {
+func pgadminArgsAndEnv(ac *config.PgAdminConfig, bridge bool, network, dataDir, serversJSONHostPath, pgPassHostPath string) []string {
 	args := []string{"run", "-d", "--name", ac.ContainerName}
 	args = append(args, netFlags(bridge, network, ac.HostPort)...)
 	args = append(args,
@@ -228,6 +242,12 @@ func pgadminArgsAndEnv(ac *config.PgAdminConfig, bridge bool, network, dataDir, 
 			"-e", "PGADMIN_REPLACE_SERVERS_ON_STARTUP=True",
 		)
 	}
+	if pgPassHostPath != "" {
+		// No :ro here — see the pgPassHostPath note in the doc comment.
+		args = append(args,
+			"-v", fmt.Sprintf("%s:%s:z", hostMountPath(pgPassHostPath), pgAdminContainerPgPass),
+		)
+	}
 	args = append(args, ac.ImageTag)
 	return args
 }
@@ -237,23 +257,35 @@ func pgadminArgsAndEnv(ac *config.PgAdminConfig, bridge bool, network, dataDir, 
 // `--user 0` — chowns it to uid 5050 before dropping privileges, so pgcli
 // never chowns. When the config carries a DSN, an optional servers.json is
 // rendered beside the data dir and mounted so the UI opens with that server
-// pre-registered.
+// pre-registered; when that DSN also carries a password, a libpq pgpass file is
+// rendered alongside and referenced from servers.json, so the seeded server
+// connects without a password prompt (a password-less DSN keeps the old
+// prompt-on-first-connect behaviour).
 func (m *PgAdminManager) createContainer(ac *config.PgAdminConfig) error {
 	dataDir := m.resolveDataDir(ac)
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return fmt.Errorf("creating pgAdmin data dir %s: %w", dataDir, err)
 	}
 
-	var serversJSON string
+	var serversJSON, pgPass string
 	if ac.DSN != "" {
+		pgPassContainer := ""
+		if err := WritePgPass(m.pgPassPath(ac), ac.DSN); err != nil {
+			if !errors.Is(err, errNoPgPassPassword) {
+				return fmt.Errorf("rendering pgAdmin pgpass: %w", err)
+			}
+		} else {
+			pgPass = m.pgPassPath(ac)
+			pgPassContainer = pgAdminContainerPgPass
+		}
 		path := m.serversJSONPath(ac)
-		if err := WriteServersJSON(path, ac.DSN, ac.ServerName); err != nil {
+		if err := WriteServersJSON(path, ac.DSN, ac.ServerName, pgPassContainer); err != nil {
 			return fmt.Errorf("rendering pgAdmin servers.json: %w", err)
 		}
 		serversJSON = path
 	}
 
-	args := pgadminArgsAndEnv(ac, m.bridge, m.cfg.Podman.Network, dataDir, serversJSON)
+	args := pgadminArgsAndEnv(ac, m.bridge, m.cfg.Podman.Network, dataDir, serversJSON, pgPass)
 	slog.Debug("podman pgadmin run", "args", args)
 	if _, err := m.run(args...); err != nil {
 		return fmt.Errorf("creating pgAdmin container: %w", err)
@@ -273,12 +305,16 @@ func (m *PgAdminManager) Remove(ac *config.PgAdminConfig, cleanData bool) error 
 	}
 	fmt.Println("  [OK] pgAdmin container removed")
 
-	// The optional servers.json is pgcli-authored (host-owned), so a plain
-	// RemoveAll suffices — delete it regardless of cleanData so a reinstall
-	// without --dsn/--pg-name doesn't silently re-mount a stale file.
-	if sp := m.serversJSONPath(ac); sp != "" {
-		if err := os.Remove(sp); err != nil && !os.IsNotExist(err) {
-			fmt.Printf("  [!] Warning: removing servers.json %s: %v\n", sp, err)
+	// The optional servers.json and seed pgpass are pgcli-authored (host-owned),
+	// so a plain Remove suffices — delete them regardless of cleanData so a
+	// reinstall without --dsn/--pg-name doesn't silently re-mount a stale file,
+	// and so the plaintext seed password does not outlive its instance.
+	for _, p := range []string{m.serversJSONPath(ac), m.pgPassPath(ac)} {
+		if p == "" {
+			continue
+		}
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			fmt.Printf("  [!] Warning: removing %s: %v\n", p, err)
 		}
 	}
 

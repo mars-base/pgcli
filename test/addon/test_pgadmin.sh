@@ -15,8 +15,11 @@
 #   3. THE LOGIN PAGE IS UP — / answers 302 to the login page and /login answers
 #      200, with PGADMIN_LISTEN_PORT pinned to the assigned host port (the image
 #      would otherwise bind 80/8080).
-#   4. servers.json SEEDING (--dsn / --pg-name) — a one-time install-time seed,
-#      never carrying a password, mounted read-only with
+#   4. servers.json SEEDING (--dsn / --pg-name) — a one-time install-time seed.
+#      servers.json itself never carries a password (pgAdmin cannot import
+#      one); the DSN's password goes into a companion pgpass file referenced
+#      from it via ConnectionParameters.passfile, so the seeded server connects
+#      without a prompt. Mounted read-only with
 #      PGADMIN_REPLACE_SERVERS_ON_STARTUP=True so a re-point is declarative.
 #   5. DATA PERSISTENCE + --clean-data — the config/session DB survives remove,
 #      and under rootless the mapped-uid files are reclaimed only through pgcli's
@@ -46,7 +49,7 @@ UI="ui"                 # the plain instance (no seed)
 SEED="seeded"          # installed with --dsn (remote-style seed)
 INSTANCE="pgadmin-db"  # backing PG instance, for the --pg-name seed
 # A throwaway fixture DSN: host/port/db only, and the password below exists
-# solely to prove it is NOT carried into servers.json.
+# solely to prove it lands in the pgpass file but NOT in servers.json.
 FAKE_DSN="postgres://seeduser:seedpw@127.0.0.1:55999/seeddb"
 EMAIL_OVERRIDE="dba@example.com"
 
@@ -168,6 +171,7 @@ read_only_mount() {
 
 data_dir_of() { echo "$TEST_DIR/addon/pgadmin/$1/data"; }
 servers_json_of() { echo "$TEST_DIR/addon/pgadmin/$1/servers.json"; }
+pgpass_of() { echo "$TEST_DIR/addon/pgadmin/$1/pgpass"; }
 
 # http_code <port> [path] [flag...] — status code of a request (no -f: pgAdmin
 # answers 3xx/4xx deliberately).
@@ -207,6 +211,28 @@ readable_in() {
     podman exec "pgcli-pgadmin-$NAMESPACE-$1" test -r "$2" 2>/dev/null
 }
 
+# mode_in <name> <path> — permission bits of a path as seen INSIDE the container.
+mode_in() {
+    podman exec "pgcli-pgadmin-$NAMESPACE-$1" stat -c '%a' "$2" 2>/dev/null
+}
+
+# seed_connects <name> <host> <port> <user> <db> — libpq inside the pgAdmin
+# container authenticates through the mounted passfile with NO password in the
+# command: the seeded server must open without the first-connect prompt. Two
+# details make this a real proof rather than a file check:
+#   - it runs as uid 5050 (the entrypoint chowns the passfile to that uid and
+#     gunicorn runs as it), because libpq IGNORES a passfile not owned by the
+#     effective user;
+#   - it uses the image's own Python + psycopg, i.e. exactly the stack pgAdmin
+#     connects with (the image ships no psql).
+seed_connects() {
+    podman exec --user 5050 "pgcli-pgadmin-$NAMESPACE-$1" /venv/bin/python -c "
+import psycopg
+conn = psycopg.connect('host=$2 port=$3 user=$4 dbname=$5 passfile=/var/lib/pgadmin/pgpass')
+print(conn.execute('select 1').fetchone()[0])
+" 2>/dev/null | grep -q '^1$'
+}
+
 # restart_count <name> — how often podman has restarted the container. pgAdmin's
 # entrypoint EXITs on invalid env (e.g. an email with a reserved TLD), so under
 # the unless-stopped policy a bad config shows up as a climbing count — a far
@@ -236,7 +262,7 @@ seed_field() {
 # every one of them. NAMESPACE/TEST_DIR are read by the exported helpers too.
 export -f wait_http http_code redirect_to owner_in readable_in env_of env_has \
     mounts_of pa_up pgadmin_db_present seed_field data_dir_of servers_json_of \
-    restart_count
+    restart_count mode_in pgpass_of seed_connects
 export NAMESPACE TEST_DIR
 
 cleanup() {
@@ -510,6 +536,32 @@ main() {
     run_test "seeded UI is up without re-rendering anything" \
         bash -c "podman exec 'pgcli-pgadmin-$NAMESPACE-$SEED' grep -q seeddb /pgadmin4/servers.json"
 
+    # ---- the seed password goes into a pgpass file, not servers.json ----
+    # servers.json cannot carry a password ("Password fields cannot be imported
+    # or exported"); the mechanism that removes the first-connect prompt is the
+    # server's ConnectionParameters.passfile pointing at a libpq pgpass file.
+    section "Seed password via pgpass"
+    run_grep "summary reports the password is pre-configured" "password pre-configured" \
+        echo "$SEED_OUT"
+    run_test "pgpass written on the host" test -f "$(pgpass_of "$SEED")"
+    run_test "pgpass holds the DSN password in pgpass format" \
+        bash -c "grep -qF '127.0.0.1:55999:*:seeduser:seedpw' '$(pgpass_of "$SEED")'"
+    run_test "servers.json references the passfile" \
+        bash -c "grep -q '\"passfile\": \"/var/lib/pgadmin/pgpass\"' '$(servers_json_of "$SEED")'"
+    run_test "pgpass is mounted into the container" \
+        bash -c "mounts_of '$SEED' | grep -q ' /var/lib/pgadmin/pgpass\$'"
+    # Deliberately writable: the entrypoint's chown -R must reach it (libpq
+    # ignores a passfile not owned by the connecting uid), and chown on a
+    # read-only mount fails with EROFS.
+    run_test "the pgpass mount is writable (entrypoint chowns it)" \
+        bash -c "! read_only_mount '$SEED' /var/lib/pgadmin/pgpass"
+    run_test "the in-container pgpass is owned by the pgadmin uid" \
+        bash -c "[ \"\$(owner_in '$SEED' /var/lib/pgadmin/pgpass | cut -d: -f1)\" = '5050' ]"
+    run_test "the in-container pgpass is mode 600 (libpq rejects looser)" \
+        bash -c "[ \"\$(mode_in '$SEED' /var/lib/pgadmin/pgpass)\" = '600' ]"
+    run_test "no PGPASSFILE env (passfile is a per-server parameter)" \
+        env_lacks "$SEED" "PGPASSFILE="
+
     # ---- the --pg-name seed path against a real backing instance ----
     section "Seed via --pg-name (backing instance)"
     run_test "start the backing instance" pg start -i "$INSTANCE"
@@ -529,10 +581,23 @@ main() {
     else
         pass "the instance password was NOT carried into servers.json"
     fi
-    run_grep "the NOTE explains the password is not carried" "password is NOT carried" \
+    # ...but it must be in the pgpass file — that is what makes the seeded
+    # server open without a password prompt.
+    TESTS=$((TESTS + 1))
+    if [ -n "$INST_PW" ] && grep -qF "$INST_PW" "$(pgpass_of pgnameseed)"; then
+        pass "the instance password landed in the pgpass file"
+    else
+        fail "the instance password is missing from the pgpass file"
+    fi
+    run_grep "the NOTE explains the password is pre-configured" "password is pre-configured" \
         pg addon install pgadmin --name pgnameseed --pg-name "$INSTANCE" --force
+    # The headline proof: libpq inside the pgAdmin container authenticates
+    # through the mounted passfile with no password anywhere in the command.
+    run_test "seeded server connects with NO password prompt (passfile)" \
+        seed_connects pgnameseed 127.0.0.1 "$INST_PORT" admin "$(inst_field "$INSTANCE" database)"
     run_test "remove pgnameseed --clean-data" pg addon remove pgadmin --name pgnameseed --clean-data
     run_test "pgnameseed servers.json gone" test ! -f "$(servers_json_of pgnameseed)"
+    run_test "pgnameseed pgpass gone (no stale plaintext secret)" test ! -f "$(pgpass_of pgnameseed)"
 
     # ---- teardown of the seeded instance ----
     section "Remove the seed instance"
@@ -540,6 +605,7 @@ main() {
     run_test "$SEED container gone" pa_gone "$SEED"
     run_test "$SEED data deleted" test ! -d "$(data_dir_of "$SEED")"
     run_test "$SEED servers.json deleted" test ! -f "$(servers_json_of "$SEED")"
+    run_test "$SEED pgpass deleted" test ! -f "$(pgpass_of "$SEED")"
     run_test "$SEED parent dir pruned" test ! -d "$TEST_DIR/addon/pgadmin/$SEED"
 
     # ---- Remove keeps data by default; --clean-data deletes ----
