@@ -26,6 +26,7 @@ pgcli 使用的容器镜像及其默认 tag。
 | `docker.io/library/redis` | `7.4.11` | Redis 大版本 7（`--version 7`），纯上游镜像无 wrapper | `redisMajorImages["7"]` |
 | `docker.io/library/redis` | `8.10.2` | Redis 大版本 8（默认，`--version 8`），纯上游镜像无 wrapper | `redisMajorImages["8"]` |
 | `ghcr.io/mars-base/pgcli/predixy` | `7.0.1-alpine` | Predixy（Redis 集群代理），建立在上游 free edition 二进制之上的 wrapper，单架构 amd64 | `DefaultPredixyImageTag` |
+| `docker.io/dpage/pgadmin4` | `9.18` | pgAdmin 4（PostgreSQL 官方 Web 管理界面），纯上游镜像无 wrapper，双架构 manifest list | `DefaultPgAdminImageTag` |
 
 ## 镜像导出
 
@@ -82,6 +83,10 @@ podman save -o "$TARGET/redis_8.10.2.tar" docker.io/library/redis:8.10.2
 podman pull ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine
 podman save -o "$TARGET/predixy_7.0.1-alpine.tar" \
   ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine
+
+# pgAdmin 上游镜像与 redis 一样是双架构 manifest list，先按 amd64 pull 再 save
+podman pull --platform linux/amd64 docker.io/dpage/pgadmin4:9.18
+podman save -o "$TARGET/pgadmin4_9.18.tar" docker.io/dpage/pgadmin4:9.18
 ```
 
 ### rustfs（双架构 manifest 不能直接 save）
@@ -105,7 +110,7 @@ podman save --format docker-archive \
 把其产出的单架构 tag 覆盖到规范名再 save——`podman tag …:1.0.0-amd64
 …:1.0.0 && podman save …:1.0.0`，之后用 `make container-build-rustfs` 恢复
 本地 manifest。（`make container-images-export` 已内置「先按 amd64 pull 再
-save」，对 rustfs/redis 均自动处理。）
+save」，对 rustfs/redis/pgadmin4 均自动处理。）
 
 ## 镜像加载（离线环境）
 
@@ -137,8 +142,13 @@ done
   已过期，free 二进制拒绝启动），因此**镜像内置 license 的有效期随构建时间滚动**
   （现镜像为 `ClientLimit 128`、2026-12-31 到期）；pgcli 本身不分发也不管理
   license，到期就重新 build + push
+- **pgadmin4**：纯上游 `docker.io/dpage/pgadmin4`，无 wrapper（镜像自己的
+  entrypoint 把 `/var/lib/pgadmin` chown 给 uid 5050 后降权，所以 pgcli 不需要
+  rustfs 那套属主机制）；pin 到发布时的 `latest`（当前 `9.18`，双架构 manifest
+  list，amd64 + arm64——Apple Silicon 的 podman machine 可直接跑）；`9` 这个
+  major tag 与 `snapshot`（nightly）都存在，pgcli 一律不用不稳定的滚动 tag
 - **pgbouncer** / **postgrest** / **haproxy** / **etcd** / **pgdog**：上游官方或社区维护的稳定版本
 
 ---
 
-**最后更新**：2026-10-08（新增 predixy 镜像与插件）
+**最后更新**：2026-10-10（新增 pgAdmin 4 镜像与插件）

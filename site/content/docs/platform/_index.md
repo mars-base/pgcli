@@ -55,6 +55,7 @@ across machines, or that depend on Linux-only container internals, stay
 | Addon — **rustfs** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
 | Addon — **Redis** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
 | Addon — **Predixy** | ✅ host network (single- and cross-host clusters) | ❌ Linux only |
+| Addon — **pgAdmin 4** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
 | Client — **`pg mc`** (MinIO client) | ✅ host network | ✅ bridge (see below) |
 | HA — **Patroni** (`pg ha`) | ✅ incl. cross-host | ❌ Linux only |
 
@@ -133,6 +134,14 @@ Addon networking differs per component:
   both verified). The wrapper image is amd64-only — upstream ships an amd64
   binary — so an arm64 host needs `--platform linux/amd64` emulation, and the
   macOS podman machine path does not exist.
+- **[pgAdmin 4](/docs/addon/pgadmin/)** — **Linux, tested; macOS expected.** A
+  plain upstream `docker.io/dpage/pgadmin4` image with no wrapper — the image's
+  own entrypoint chowns `/var/lib/pgadmin` to uid 5050 and drops privileges, so
+  pgcli passes `--user 0` and never chowns on the host (unlike rustfs). On Linux
+  it serves over host networking on `pgadmin_start_port` (loopback by default);
+  on macOS it joins `pgcli-net` with the port published and its `listen` widened
+  to `0.0.0.0` — the same bridge path redis/the object stores use, code-complete
+  but not yet exercised on a Mac, so the e2e coverage is Linux-only for now.
 - **[`pg mc`](/docs/addon/minio/#using-the-mc-client)** (MinIO client) — **both
   platforms.** It runs the `mc` binary from a throwaway container, with your
   `~/.mc/config.json` mounted as its own default config path and local file

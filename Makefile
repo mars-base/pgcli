@@ -209,7 +209,8 @@ IMAGES := \
 	quay.io/coreos/etcd:v3.5.30 \
 	ghcr.io/pgdogdev/pgdog:v0.1.57 \
 	docker.io/library/redis:7.4.11 \
-	docker.io/library/redis:8.10.2
+	docker.io/library/redis:8.10.2 \
+	docker.io/dpage/pgadmin4:9.18
 
 container-images-export:
 	@mkdir -p images

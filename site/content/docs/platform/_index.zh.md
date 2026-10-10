@@ -51,6 +51,7 @@ pgcli 在 Linux 和 macOS 上都是驱动 [Podman](https://podman.io) 容器运�
 | 插件 —— **rustfs** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
 | 插件 —— **Redis** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
 | 插件 —— **Predixy** | ✅ host 网络（单机与跨机集群皆已验证） | ❌ 仅 Linux |
+| 插件 —— **pgAdmin 4** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
 | 客户端 —— **`pg mc`**（MinIO 客户端） | ✅ host 网络 | ✅ bridge（见下） |
 | 高可用 —— **Patroni**（`pg ha`） | ✅ 含跨主机 | ❌ 仅 Linux |
 
@@ -117,6 +118,13 @@ macOS 上这些都是**单主机**：跨主机副本、跨多机的连接池属�
   host 网络才能拨通后端的集群节点（单机与跨机集群都已验证）。wrapper 镜像只有
   amd64 —— 上游只发 amd64 二进制 —— 因此 arm64 主机需要 `--platform linux/amd64`
   模拟运行，而 macOS 的 podman machine 路径根本不存在。
+- **[pgAdmin 4](/docs/addon/pgadmin/)** —— **Linux 已实测；macOS 预期可用**。纯
+  上游 `docker.io/dpage/pgadmin4` 镜像，没有 wrapper —— 镜像自己的 entrypoint 把
+  `/var/lib/pgadmin` chown 给 uid 5050 并降权，所以 pgcli 传 `--user 0`、从不在
+  宿主上 chown（与 rustfs 不同）。Linux 上走 host 网络，端口取自
+  `pgadmin_start_port`（默认仅回环）；macOS 上加入 `pgcli-net` 并发布端口、
+  `listen` 放宽到 `0.0.0.0` —— 与 redis/对象存储相同的 bridge 路径，代码完备但
+  尚未在 Mac 上跑过，e2e 覆盖目前仅限 Linux。
 - **[`pg mc`](/docs/addon/minio/#使用-mc-客户端)**（MinIO 客户端）——
   **两个平台都支持**。它在一次性容器里运行 `mc`：宿主的 `~/.mc/config.json`
   按其原生默认路径挂载，`cp`/`mirror`/`diff` 的本地文件参数也会按真实路径动态

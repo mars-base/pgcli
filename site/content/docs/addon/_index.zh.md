@@ -34,6 +34,7 @@ pgcli 支持通过插件系统扩展 PostgreSQL 功能。插件是独立的容�
 | [`rustfs`](./rustfs/) | S3 兼容对象存储（Rust 重新实现）——SNSD/SNMD/MNMD 纠删码布局，固定的容器 uid 由 pgcli 定制镜像在内部消化，共用同一端口池（仅 Linux） |
 | [`redis`](./redis/) | 独立键值存储，用于缓存/会话/排行榜/原子计数——大版本 7/8 可选，自动生成 `requirepass`，RDB 持久化，读副本，`--cluster` 原生集群分片，独立的端口池（Linux；macOS 代码完备、未实测） |
 | [`predixy`](./predixy/) | Redis 协议代理——把原生集群变成一个普通的 `redis://` 端点，客户端完全无需感知集群；独立端口池（仅 Linux） |
+| [`pgadmin`](./pgadmin/) | pgAdmin 4——PostgreSQL 官方 Web 管理界面，单容器直接跑上游镜像；Web 登录自动生成，可选经 `--dsn`/`--pg-name` 一次性预置服务器，持久化会话存储；独立端口池（Linux；macOS 代码完备、未实测） |
 
 每个插件都有独立页面，包含命令、参数与故障排除说明。
 
@@ -62,4 +63,4 @@ pg addon remove <addon> [flags]     # 移除插件、容器与数据
 ```
 
 各插件的具体参数与示例见其独立页面：
-[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [PostgREST](./postgrest/) · [HAProxy](./haproxy/) · [MinIO](./minio/) · [Silo](./silo/) · [rustfs](./rustfs/) · [Redis](./redis/) · [Predixy](./predixy/)。Patroni 相关页面见 [HA 集群](../ha-cluster/)。
+[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [PostgREST](./postgrest/) · [HAProxy](./haproxy/) · [MinIO](./minio/) · [Silo](./silo/) · [rustfs](./rustfs/) · [Redis](./redis/) · [Predixy](./predixy/) · [pgAdmin 4](./pgadmin/)。Patroni 相关页面见 [HA 集群](../ha-cluster/)。
