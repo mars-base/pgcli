@@ -272,7 +272,6 @@ pgAdmin 4 (the official web administration UI; top-level addon, Linux and macOS)
 nginx (HTTP reverse proxy in front of web services; top-level addon, Linux and macOS):
   pg addon install nginx [--name proxy]
                          [--upstream name=<n>,path=<p>,backend=<h:p>] (repeatable)
-                         [--pgadmin-name <name>] [--postgrest-name <name>]
                          [--http-port N] [--https-port N] [--listen 127.0.0.1]
                          [--tls] [--tls-cert FILE] [--tls-key FILE]
                          [--image ...] [--force]
@@ -280,9 +279,8 @@ nginx (HTTP reverse proxy in front of web services; top-level addon, Linux and m
   that fronts multiple web services (pgAdmin, PostgREST, etc.) with path-based
   routing and optional TLS termination. Each --upstream adds one backend:
   name is the upstream name (defaults to a sanitized path if omitted), path is
-  the location (defaults to /), backend is the host:port to proxy to.
-  --pgadmin-name and --postgrest-name are convenience flags that auto-resolve
-  the named addon's endpoint and add it at /admin or /api respectively.
+  the location (defaults to /), backend is the host:port to proxy to (repeat
+  backend=... for multiple servers in the same upstream, or use backends=h1:p1,h2:p2).
   --tls enables an HTTPS listener alongside HTTP; without --tls-cert/--tls-key
   pgcli generates a self-signed cert via tlsca. Re-running install with --force
   recreates the container to apply changed backends or TLS settings.
@@ -318,7 +316,7 @@ Examples:
   pg addon install pgadmin --pg-name proj01
   pg addon install pgadmin --dsn "postgres://readonly:pass@127.0.0.1:5000/appdb"
   pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050
-  pg addon install nginx --name proxy --pgadmin-name admin --postgrest-name api --tls`,
+  pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050 --upstream name=postgrest,path=/api,backend=127.0.0.1:3000 --tls`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonInstall(args[0], cmd)
@@ -505,6 +503,8 @@ func init() {
 	addonNginxCmd.AddCommand(addonNginxReloadCmd, addonNginxTestCmd, addonNginxExecCmd)
 	addonNginxReloadCmd.Flags().String("name", "", "nginx instance name (default \"nginx\")")
 	addonNginxTestCmd.Flags().String("name", "", "nginx instance name (default \"nginx\")")
+	addonNginxTestCmd.Flags().String("conf-file", "", "path to an nginx.conf file to test directly (no installed instance required; overrides --name)")
+	addonNginxTestCmd.Flags().String("image", "", "image tag to use for the temporary test container (default: docker.io/library/nginx:1.27-alpine)")
 	addonNginxExecCmd.Flags().String("name", "", "nginx instance name (default \"nginx\")")
 
 	// Basic flags
@@ -565,10 +565,8 @@ func init() {
 	addonInstallCmd.Flags().Int("http-port", 0, "nginx HTTP listener host port (0=auto-assign from nginx_start_port)")
 	addonInstallCmd.Flags().Int("https-port", 0, "nginx HTTPS listener host port, TLS only (0=auto-assign, next free port)")
 	addonInstallCmd.Flags().Int("worker-connections", 0, "nginx worker_connections (max simultaneous connections per worker; default 1024)")
-	addonInstallCmd.Flags().StringArray("upstream", nil, "nginx upstream target name=<upstream>,path=<location>,backend=<host:port> (repeatable; e.g. --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050)")
-	addonInstallCmd.Flags().String("pgadmin-name", "", "convenience: auto-add the named pgAdmin addon as an nginx backend at /admin")
-	addonInstallCmd.Flags().String("postgrest-name", "", "convenience: auto-add the named PostgREST addon as an nginx backend at /api")
-	addonInstallCmd.Flags().String("conf-file", "", "path to a custom nginx.conf file (mutually exclusive with --upstream/--pgadmin-name/--postgrest-name; pgcli manages container lifecycle only, you control the full nginx config)")
+	addonInstallCmd.Flags().StringArray("upstream", nil, "nginx upstream target name=<upstream>,path=<location>,backend=<host:port> (repeatable; e.g. --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050, or backends=h1:p1,h2:p2 for multiple servers)")
+	addonInstallCmd.Flags().String("conf-file", "", "path to a custom nginx.conf file (mutually exclusive with --upstream; pgcli manages container lifecycle only, you control the full nginx config)")
 
 	// minio flags (top-level single-node S3-compatible object storage)
 	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo/rustfs S3 API host port (0=auto-assign from the shared minio_start_port pool)")
@@ -5232,9 +5230,8 @@ func parseNginxBackend(spec string) (config.NginxBackend, error) {
 // The image is pull-only from the public docker.io/library repo. Config is
 // rendered to nginx.conf and bind-mounted read-only.
 //
-// Backends can be specified explicitly (--backend name=...,path=...,backend=...
-// repeatable) or via convenience flags that resolve from locally-managed
-// addons (--pgadmin-name, --postgrest-name).
+// Backends can be specified explicitly (--upstream name=...,path=...,backend=...
+// repeatable).
 func runAddonInstallNginx(cmd *cobra.Command) error {
 	name, _ := cmd.Flags().GetString("name")
 	if name == "" {
@@ -5245,8 +5242,6 @@ func runAddonInstallNginx(cmd *cobra.Command) error {
 	httpsPort, _ := cmd.Flags().GetInt("https-port")
 	workerConns, _ := cmd.Flags().GetInt("worker-connections")
 	backendSpecs, _ := cmd.Flags().GetStringArray("upstream")
-	pgadminName, _ := cmd.Flags().GetString("pgadmin-name")
-	postgrestName, _ := cmd.Flags().GetString("postgrest-name")
 	confFile, _ := cmd.Flags().GetString("conf-file")
 	tls, _ := cmd.Flags().GetBool("tls")
 	tlsCert, _ := cmd.Flags().GetString("tls-cert")
@@ -5263,9 +5258,9 @@ func runAddonInstallNginx(cmd *cobra.Command) error {
 		tls = true // BYO cert implies TLS
 	}
 
-	// --conf-file is mutually exclusive with --upstream/--pgadmin-name/--postgrest-name
-	if confFile != "" && (len(backendSpecs) > 0 || pgadminName != "" || postgrestName != "") {
-		return fmt.Errorf("--conf-file is mutually exclusive with --upstream/--pgadmin-name/--postgrest-name")
+	// --conf-file is mutually exclusive with --upstream
+	if confFile != "" && len(backendSpecs) > 0 {
+		return fmt.Errorf("--conf-file is mutually exclusive with --upstream")
 	}
 
 	// Validate --conf-file if provided
@@ -5307,40 +5302,8 @@ func runAddonInstallNginx(cmd *cobra.Command) error {
 			backends = append(backends, b)
 		}
 
-		// Convenience: --pgadmin-name resolves the pgAdmin addon's listen + port
-		if pgadminName != "" {
-			if cfg.Addons.PgAdmin == nil {
-				return fmt.Errorf("--pgadmin-name: no pgadmin addons configured")
-			}
-			pa, ok := cfg.Addons.PgAdmin[pgadminName]
-			if !ok {
-				return fmt.Errorf("--pgadmin-name: pgadmin %q not found", pgadminName)
-			}
-			backends = append(backends, config.NginxBackend{
-				Name:     "pgadmin",
-				Path:     "/admin",
-				Backends: []string{pa.Listen + ":" + strconv.Itoa(pa.HostPort)},
-			})
-		}
-
-		// Convenience: --postgrest-name resolves the PostgREST addon's listen + port
-		if postgrestName != "" {
-			if cfg.Addons.Postgrest == nil {
-				return fmt.Errorf("--postgrest-name: no postgrest addons configured")
-			}
-			pr, ok := cfg.Addons.Postgrest[postgrestName]
-			if !ok {
-				return fmt.Errorf("--postgrest-name: postgrest %q not found", postgrestName)
-			}
-			backends = append(backends, config.NginxBackend{
-				Name:     "postgrest",
-				Path:     "/api",
-				Backends: []string{pr.Listen + ":" + strconv.Itoa(pr.HostPort)},
-			})
-		}
-
 		if len(backends) == 0 {
-			return fmt.Errorf("no backends: pass --upstream name=...,path=...,backend=... (repeatable), --pgadmin-name/--postgrest-name, or --conf-file for a custom nginx.conf")
+			return fmt.Errorf("no backends: pass --upstream name=...,path=...,backend=... (repeatable), or --conf-file for a custom nginx.conf")
 		}
 	}
 
@@ -6424,6 +6387,25 @@ func resolveNginxConfig(cmd *cobra.Command) (*config.NginxConfig, error) {
 }
 
 func runAddonNginxTest(cmd *cobra.Command) error {
+	confFile, _ := cmd.Flags().GetString("conf-file")
+	image, _ := cmd.Flags().GetString("image")
+
+	// Direct file test: no installed instance required
+	if confFile != "" {
+		if _, err := os.Stat(confFile); err != nil {
+			return fmt.Errorf("--conf-file: %w", err)
+		}
+		if image == "" {
+			image = podman.DefaultNginxImageTag
+		}
+		mgr, err := podman.NewNginxManager(cfg)
+		if err != nil {
+			return fmt.Errorf("nginx manager: %w", err)
+		}
+		return mgr.TestFile(confFile, image)
+	}
+
+	// Instance test: use the installed config
 	nc, err := resolveNginxConfig(cmd)
 	if err != nil {
 		return err

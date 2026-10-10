@@ -593,3 +593,15 @@ func (m *NginxManager) Exec(nc *config.NginxConfig, args []string) error {
 	execArgs = append(execArgs, args...)
 	return m.runInteractive(execArgs...)
 }
+
+// TestFile validates an nginx config file without requiring an installed instance.
+// It runs nginx -t in a temporary container with the provided config file mounted.
+func (m *NginxManager) TestFile(confFile, imageTag string) error {
+	args := []string{
+		"run", "--rm",
+		"-v", confFile + ":/etc/nginx/nginx.conf:ro",
+		imageTag,
+		"nginx", "-t",
+	}
+	return m.runInteractive(args...)
+}
