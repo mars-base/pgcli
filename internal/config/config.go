@@ -378,13 +378,41 @@ func (h HAProxyConfig) EffectiveMode() string {
 }
 
 // NginxBackend is one upstream target in an nginx reverse proxy: a web
-// service reached at a host:port, exposed under a location path. The path is
-// the nginx `location` prefix (e.g. "/admin" → pgAdmin, "/api" → PostgREST);
-// the backend is the upstream server address (e.g. "127.0.0.1:5050").
+// service reached at one or more host:port addresses, exposed under a location
+// path. The path is the nginx `location` prefix (e.g. "/admin" → pgAdmin,
+// "/api" → PostgREST); the backends are the upstream server addresses
+// (e.g. ["127.0.0.1:5050", "127.0.0.1:5051"]). When multiple backends are
+// provided, nginx load-balances across them (round-robin by default).
 type NginxBackend struct {
-	Name    string `yaml:"name"`    // upstream name in nginx.conf (e.g. "pgadmin")
-	Path    string `yaml:"path"`    // location path prefix (e.g. "/admin")
-	Backend string `yaml:"backend"` // host:port (e.g. "127.0.0.1:5050")
+	Name     string   `yaml:"name"`     // upstream name in nginx.conf (e.g. "pgadmin")
+	Path     string   `yaml:"path"`     // location path prefix (e.g. "/admin")
+	Backends []string `yaml:"backends"` // host:port list (e.g. ["127.0.0.1:5050"])
+}
+
+// UnmarshalYAML supports both the old single-string "backend" field and the
+// new "backends" list. This preserves backward compatibility with existing
+// pg.yaml files written before multi-server upstream support was added.
+func (nb *NginxBackend) UnmarshalYAML(unmarshal func(any) error) error {
+	// Try new format first (backends list)
+	type plain NginxBackend
+	if err := unmarshal((*plain)(nb)); err == nil && len(nb.Backends) > 0 {
+		return nil
+	}
+	// Fall back to old format (single backend string)
+	var old struct {
+		Name    string `yaml:"name"`
+		Path    string `yaml:"path"`
+		Backend string `yaml:"backend"`
+	}
+	if err := unmarshal(&old); err != nil {
+		return err
+	}
+	nb.Name = old.Name
+	nb.Path = old.Path
+	if old.Backend != "" {
+		nb.Backends = []string{old.Backend}
+	}
+	return nil
 }
 
 // NginxConfig holds a standalone nginx reverse proxy addon. Like HAProxy it is

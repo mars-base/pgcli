@@ -136,7 +136,9 @@ func RenderNginxCfg(nc *config.NginxConfig) (string, error) {
 			name = "upstream_" + sanitizeNginxName(be.Path)
 		}
 		fmt.Fprintf(&b, "    upstream %s {\n", name)
-		fmt.Fprintf(&b, "        server %s;\n", be.Backend)
+		for _, srv := range be.Backends {
+			fmt.Fprintf(&b, "        server %s;\n", srv)
+		}
 		b.WriteString("    }\n")
 		b.WriteString("\n")
 	}

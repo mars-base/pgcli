@@ -4441,7 +4441,7 @@ func runAddonList(showPassword bool) error {
 			}
 			fmt.Printf("    Backends:    %d\n", len(nc.Backends))
 			for _, b := range nc.Backends {
-				fmt.Printf("      %-12s %s -> %s\n", b.Name, b.Path, b.Backend)
+				fmt.Printf("      %-12s %s -> %s\n", b.Name, b.Path, strings.Join(b.Backends, ", "))
 			}
 			fmt.Printf("    Image:       %s\n", nc.ImageTag)
 			fmt.Printf("    Container:   %s\n", nc.ContainerName)
@@ -5182,9 +5182,13 @@ func runAddonStopHAProxy(cmd *cobra.Command) error {
 // repeatable for multiple upstreams.
 func parseNginxBackend(spec string) (config.NginxBackend, error) {
 	var b config.NginxBackend
-	for _, part := range strings.Split(spec, ",") {
-		k, v, ok := strings.Cut(part, "=")
+	var hasBackend, hasBackends bool
+	parts := strings.Split(spec, ",")
+	for i := 0; i < len(parts); i++ {
+		k, v, ok := strings.Cut(parts[i], "=")
 		if !ok {
+			// No "=" — continuation of the previous key's value (for
+			// backends=h1:p1,h2:p2 where commas separate servers, not fields)
 			return b, fmt.Errorf("backend spec %q: expected key=value pairs separated by commas", spec)
 		}
 		switch k {
@@ -5193,9 +5197,19 @@ func parseNginxBackend(spec string) (config.NginxBackend, error) {
 		case "path":
 			b.Path = v
 		case "backend":
-			b.Backend = v
+			hasBackend = true
+			b.Backends = append(b.Backends, v)
+		case "backends":
+			hasBackends = true
+			b.Backends = append(b.Backends, v)
+			// Consume subsequent comma-separated parts that lack "=" —
+			// they are additional server addresses, not new keys.
+			for i+1 < len(parts) && !strings.Contains(parts[i+1], "=") {
+				i++
+				b.Backends = append(b.Backends, parts[i])
+			}
 		default:
-			return b, fmt.Errorf("backend spec %q: unknown key %q (expected name, path, backend)", spec, k)
+			return b, fmt.Errorf("backend spec %q: unknown key %q (expected name, path, backend, backends)", spec, k)
 		}
 	}
 	if b.Name == "" {
@@ -5204,8 +5218,11 @@ func parseNginxBackend(spec string) (config.NginxBackend, error) {
 	if b.Path == "" {
 		return b, fmt.Errorf("backend spec %q: path is required", spec)
 	}
-	if b.Backend == "" {
-		return b, fmt.Errorf("backend spec %q: backend is required", spec)
+	if len(b.Backends) == 0 {
+		return b, fmt.Errorf("backend spec %q: backend or backends is required", spec)
+	}
+	if hasBackend && hasBackends {
+		return b, fmt.Errorf("backend spec %q: backend and backends are mutually exclusive", spec)
 	}
 	return b, nil
 }
@@ -5300,9 +5317,9 @@ func runAddonInstallNginx(cmd *cobra.Command) error {
 				return fmt.Errorf("--pgadmin-name: pgadmin %q not found", pgadminName)
 			}
 			backends = append(backends, config.NginxBackend{
-				Name:    "pgadmin",
-				Path:    "/admin",
-				Backend: pa.Listen + ":" + strconv.Itoa(pa.HostPort),
+				Name:     "pgadmin",
+				Path:     "/admin",
+				Backends: []string{pa.Listen + ":" + strconv.Itoa(pa.HostPort)},
 			})
 		}
 
@@ -5316,9 +5333,9 @@ func runAddonInstallNginx(cmd *cobra.Command) error {
 				return fmt.Errorf("--postgrest-name: postgrest %q not found", postgrestName)
 			}
 			backends = append(backends, config.NginxBackend{
-				Name:    "postgrest",
-				Path:    "/api",
-				Backend: pr.Listen + ":" + strconv.Itoa(pr.HostPort),
+				Name:     "postgrest",
+				Path:     "/api",
+				Backends: []string{pr.Listen + ":" + strconv.Itoa(pr.HostPort)},
 			})
 		}
 
@@ -5393,7 +5410,7 @@ func runAddonInstallNginx(cmd *cobra.Command) error {
 			}
 			fmt.Printf("  Backends:     %d\n", len(nc.Backends))
 			for _, b := range nc.Backends {
-				fmt.Printf("    %s -> %s%s\n", b.Path, b.Backend, " ("+b.Name+")")
+				fmt.Printf("    %s -> %s%s\n", b.Path, strings.Join(b.Backends, ", "), " ("+b.Name+")")
 			}
 			fmt.Printf("  Config:       %s\n", cfgPathOut)
 			return nil
@@ -5428,7 +5445,7 @@ func runAddonInstallNginx(cmd *cobra.Command) error {
 	} else {
 		fmt.Printf("  Backends:     %d\n", len(nc.Backends))
 		for _, b := range nc.Backends {
-			fmt.Printf("    %s -> %s%s\n", b.Path, b.Backend, " ("+b.Name+")")
+			fmt.Printf("    %s -> %s%s\n", b.Path, strings.Join(b.Backends, ", "), " ("+b.Name+")")
 		}
 		fmt.Printf("  Config:       %s\n", cfgPathOut)
 	}

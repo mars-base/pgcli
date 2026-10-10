@@ -26,7 +26,7 @@ func TestRenderNginxCfg(t *testing.T) {
 				Listen:   "127.0.0.1",
 				HTTPPort: 8080,
 				Backends: []config.NginxBackend{
-					{Name: "pgadmin", Path: "/admin", Backend: "127.0.0.1:5050"},
+					{Name: "pgadmin", Path: "/admin", Backends: []string{"127.0.0.1:5050"}},
 				},
 			},
 			check: func(t *testing.T, cfg string) {
@@ -60,9 +60,9 @@ func TestRenderNginxCfg(t *testing.T) {
 				Listen:   "0.0.0.0",
 				HTTPPort: 8080,
 				Backends: []config.NginxBackend{
-					{Name: "pgadmin", Path: "/admin", Backend: "127.0.0.1:5050"},
-					{Name: "postgrest", Path: "/api", Backend: "127.0.0.1:3500"},
-					{Name: "root", Path: "/", Backend: "127.0.0.1:8000"},
+					{Name: "pgadmin", Path: "/admin", Backends: []string{"127.0.0.1:5050"}},
+					{Name: "postgrest", Path: "/api", Backends: []string{"127.0.0.1:3500"}},
+					{Name: "root", Path: "/", Backends: []string{"127.0.0.1:8000"}},
 				},
 			},
 			check: func(t *testing.T, cfg string) {
@@ -89,7 +89,7 @@ func TestRenderNginxCfg(t *testing.T) {
 				HTTPSPort: 8443,
 				TLS:       true,
 				Backends: []config.NginxBackend{
-					{Name: "pgadmin", Path: "/admin", Backend: "127.0.0.1:5050"},
+					{Name: "pgadmin", Path: "/admin", Backends: []string{"127.0.0.1:5050"}},
 				},
 			},
 			check: func(t *testing.T, cfg string) {
@@ -123,7 +123,7 @@ func TestRenderNginxCfg(t *testing.T) {
 				HTTPPort: 8080,
 				TLS:      true,
 				Backends: []config.NginxBackend{
-					{Name: "pgadmin", Path: "/admin", Backend: "127.0.0.1:5050"},
+					{Name: "pgadmin", Path: "/admin", Backends: []string{"127.0.0.1:5050"}},
 				},
 			},
 			check: func(t *testing.T, cfg string) {
@@ -139,7 +139,7 @@ func TestRenderNginxCfg(t *testing.T) {
 				Name:     "proxy",
 				HTTPPort: 8080,
 				Backends: []config.NginxBackend{
-					{Name: "root", Path: "", Backend: "127.0.0.1:8000"},
+					{Name: "root", Path: "", Backends: []string{"127.0.0.1:8000"}},
 				},
 			},
 			check: func(t *testing.T, cfg string) {
@@ -154,7 +154,7 @@ func TestRenderNginxCfg(t *testing.T) {
 				Name:     "proxy",
 				HTTPPort: 8080,
 				Backends: []config.NginxBackend{
-					{Name: "", Path: "/admin", Backend: "127.0.0.1:5050"},
+					{Name: "", Path: "/admin", Backends: []string{"127.0.0.1:5050"}},
 				},
 			},
 			check: func(t *testing.T, cfg string) {
@@ -180,7 +180,7 @@ func TestRenderNginxCfg(t *testing.T) {
 				Listen:   "",
 				HTTPPort: 8080,
 				Backends: []config.NginxBackend{
-					{Name: "test", Path: "/", Backend: "127.0.0.1:8000"},
+					{Name: "test", Path: "/", Backends: []string{"127.0.0.1:8000"}},
 				},
 			},
 			check: func(t *testing.T, cfg string) {
