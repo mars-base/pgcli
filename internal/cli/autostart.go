@@ -35,6 +35,7 @@ func init() {
 		c.Flags().Bool("redis", false, "select a redis instance (top-level addons)")
 		c.Flags().Bool("predixy", false, "select a predixy proxy instance (top-level addons)")
 		c.Flags().Bool("pgadmin", false, "select a pgAdmin instance (top-level addons)")
+		c.Flags().Bool("nginx", false, "select an nginx instance (top-level addons)")
 		c.Flags().String("scope", "", "Patroni cluster scope (required only with --ha)")
 	}
 }
@@ -171,6 +172,7 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	redisSel, _ := cmd.Flags().GetBool("redis")
 	predixySel, _ := cmd.Flags().GetBool("predixy")
 	pgadminSel, _ := cmd.Flags().GetBool("pgadmin")
+	nginxSel, _ := cmd.Flags().GetBool("nginx")
 	pgName, _ := cmd.Flags().GetString("pg-name")
 	addonName, _ := cmd.Flags().GetString("name")
 	scope, _ := cmd.Flags().GetString("scope")
@@ -220,14 +222,17 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	if pgadminSel {
 		sel++
 	}
+	if nginxSel {
+		sel++
+	}
 	if sel != 1 {
-		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --redis, --predixy, or --pgadmin")
+		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --redis, --predixy, --pgadmin, or --nginx")
 	}
 	if pgName != "" && !pgbSel && !prSel {
 		return fmt.Errorf("--pg-name requires --pgbouncer or --postgrest")
 	}
-	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !redisSel && !predixySel && !pgadminSel {
-		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --redis, --predixy, or --pgadmin")
+	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !redisSel && !predixySel && !pgadminSel && !nginxSel {
+		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --redis, --predixy, --pgadmin, or --nginx")
 	}
 	if scope != "" && !haSel {
 		return fmt.Errorf("--scope requires --ha")
@@ -325,6 +330,18 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		ac.Autostart = enable
 		cfg.Addons.PgAdmin[proxyName] = ac
 		targetDesc = fmt.Sprintf("pgadmin instance %q", proxyName)
+	case nginxSel:
+		proxyName := addonName
+		if proxyName == "" {
+			proxyName = "nginx"
+		}
+		nc, ok := cfg.Addons.Nginx[proxyName]
+		if !ok {
+			return fmt.Errorf("nginx instance %q not found in config", proxyName)
+		}
+		nc.Autostart = enable
+		cfg.Addons.Nginx[proxyName] = nc
+		targetDesc = fmt.Sprintf("nginx instance %q", proxyName)
 	case haSel:
 		cluster, ok := cfg.Addons.Patroni[scope]
 		if !ok {
@@ -528,6 +545,11 @@ func countAutostartTargets(c *config.Config) int {
 			n++
 		}
 	}
+	for _, nc := range c.Addons.Nginx {
+		if nc.Autostart {
+			n++
+		}
+	}
 	return n
 }
 
@@ -587,6 +609,9 @@ func runAutostartStatus(cmd *cobra.Command, args []string) error {
 	}
 	for name, ac := range cfg.Addons.PgAdmin {
 		fmt.Printf("  pgadmin %-13s %s\n", name, onOff(ac.Autostart))
+	}
+	for name, nc := range cfg.Addons.Nginx {
+		fmt.Printf("  nginx %-15s %s\n", name, onOff(nc.Autostart))
 	}
 
 	fmt.Println("\n=== Boot service ===")

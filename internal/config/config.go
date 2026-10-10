@@ -33,6 +33,7 @@ type Config struct {
 	RedisStartPort          int                       `yaml:"redis_start_port,omitempty"`           // starting Redis host port, default 6379
 	PredixyStartPort        int                       `yaml:"predixy_start_port,omitempty"`         // starting Predixy proxy listener host port, default 7617
 	PgAdminStartPort        int                       `yaml:"pgadmin_start_port,omitempty"`         // starting pgAdmin 4 web host port, default 5050
+	NginxStartPort          int                       `yaml:"nginx_start_port,omitempty"`           // starting nginx HTTP host port, default 8080 (HTTPS takes the next free port)
 	Postgres                PostgresConfig            `yaml:"postgres"`
 	Podman                  PodmanConfig              `yaml:"podman"`
 	PITR                    PITRConfig                `yaml:"pitr"`
@@ -95,6 +96,7 @@ type TopAddonsConfig struct {
 	Redis     map[string]RedisConfig          `yaml:"redis,omitempty"`
 	Predixy   map[string]PredixyConfig        `yaml:"predixy,omitempty"`
 	PgAdmin   map[string]PgAdminConfig        `yaml:"pgadmin,omitempty"`
+	Nginx     map[string]NginxConfig          `yaml:"nginx,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -373,6 +375,50 @@ func (h HAProxyConfig) EffectiveMode() string {
 		return "split"
 	}
 	return "unified"
+}
+
+// NginxBackend is one upstream target in an nginx reverse proxy: a web
+// service reached at a host:port, exposed under a location path. The path is
+// the nginx `location` prefix (e.g. "/admin" → pgAdmin, "/api" → PostgREST);
+// the backend is the upstream server address (e.g. "127.0.0.1:5050").
+type NginxBackend struct {
+	Name    string `yaml:"name"`    // upstream name in nginx.conf (e.g. "pgadmin")
+	Path    string `yaml:"path"`    // location path prefix (e.g. "/admin")
+	Backend string `yaml:"backend"` // host:port (e.g. "127.0.0.1:5050")
+}
+
+// NginxConfig holds a standalone nginx reverse proxy addon. Like HAProxy it is
+// shared infrastructure (it typically frontends multiple web services —
+// pgAdmin, PostgREST, even HAProxy stats — not a single instance's sidecar),
+// so it lives at the top level (addons.nginx.<name>). Unlike HAProxy it is
+// HTTP-only (path-based routing, optional TLS termination) rather than TCP
+// (port-based load balancing).
+//
+// The config is file-driven (rendered nginx.conf + optional conf.d/*.conf),
+// bind-mounted read-only into the official nginx:alpine image. TLS is optional:
+// when enabled, pgcli generates a self-signed cert via tlsca (or accepts a BYO
+// cert+key pair) and adds an HTTPS server block alongside the HTTP one.
+type NginxConfig struct {
+	ContainerName string `yaml:"container_name"`      // pgcli-nginx<ns>-<name>
+	Name          string `yaml:"name,omitempty"`      // addon key, defaults to the map key
+	ImageTag      string `yaml:"image_tag,omitempty"` // docker.io/library/nginx:1.27-alpine (default)
+	Listen        string `yaml:"listen,omitempty"`    // bind address, default 127.0.0.1
+	HTTPPort      int    `yaml:"http_port,omitempty"` // HTTP listener port, 8080+ auto-assigned
+	HTTPSPort     int    `yaml:"https_port,omitempty"` // HTTPS listener port (TLS only), next free port after HTTP
+
+	// TLS enables an HTTPS listener alongside the HTTP one. When true and
+	// TLSCert is empty, pgcli generates a self-signed cert via tlsca.Generate
+	// under <base>/addon/nginx/<name>/tls/. When TLSCert/TLSKey are set, the
+	// given files are bind-mounted instead (BYO cert).
+	TLS     bool   `yaml:"tls,omitempty"`
+	TLSCert string `yaml:"tls_cert,omitempty"` // BYO cert path (PEM leaf + chain)
+	TLSKey  string `yaml:"tls_key,omitempty"`  // BYO private key path (PEM)
+
+	// Autostart brings this container up on host boot via the boot service
+	// (pg autostart enable --nginx). Start-only: it starts the existing
+	// container reading the nginx.conf already on disk — install first.
+	Autostart bool           `yaml:"autostart,omitempty"`
+	Backends  []NginxBackend `yaml:"backends,omitempty"` // upstream targets
 }
 
 // DefaultMinioImageTag is the public pre-built single-node MinIO image
@@ -1027,6 +1073,7 @@ func Default() *Config {
 		RedisStartPort:          6379,
 		PredixyStartPort:        7617,
 		PgAdminStartPort:        5050,
+		NginxStartPort:          8080,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -1228,6 +1275,7 @@ type displayConfig struct {
 	RedisStartPort          int                       `yaml:"redis_start_port,omitempty"`
 	PredixyStartPort        int                       `yaml:"predixy_start_port,omitempty"`
 	PgAdminStartPort        int                       `yaml:"pgadmin_start_port,omitempty"`
+	NginxStartPort          int                       `yaml:"nginx_start_port,omitempty"`
 	Logging                 LoggingConfig             `yaml:"logging"`
 	Backup                  BackupConfig              `yaml:"backup"`
 	Pigsty                  PigstyConfig              `yaml:"pigsty"`
@@ -1254,6 +1302,7 @@ func (c *Config) Display() displayConfig {
 		RedisStartPort:          c.RedisStartPort,
 		PredixyStartPort:        c.PredixyStartPort,
 		PgAdminStartPort:        c.PgAdminStartPort,
+		NginxStartPort:          c.NginxStartPort,
 		Logging:                 c.Logging,
 		Backup:                  c.Backup,
 		Pigsty:                  c.Pigsty,
@@ -1351,6 +1400,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.PgAdminStartPort == 0 {
 		c.PgAdminStartPort = d.PgAdminStartPort
+	}
+	if c.NginxStartPort == 0 {
+		c.NginxStartPort = d.NginxStartPort
 	}
 
 	// Postgres
@@ -1662,6 +1714,25 @@ func (c *Config) ApplyDefaults() {
 			addon.Listen = "127.0.0.1"
 		}
 		c.Addons.HAProxy[name] = addon
+	}
+
+	// Top-level addons defaults (nginx reverse proxy in front of web services).
+	// Container name and image are filled here so `pg addon install nginx` need
+	// only set the flags.
+	for name, addon := range c.Addons.Nginx {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-nginx" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = "docker.io/library/nginx:1.27-alpine"
+		}
+		if addon.Listen == "" {
+			addon.Listen = "127.0.0.1"
+		}
+		c.Addons.Nginx[name] = addon
 	}
 
 	// Top-level addons defaults (MinIO single-node object storage). DataDir is
@@ -2392,6 +2463,50 @@ func (c *Config) autoAssignPorts() {
 				next = addon.HostPort + 1
 			}
 			c.Addons.PgAdmin[name] = addon
+		}
+	}
+
+	// Allocate ports for nginx addons from their own pool (nginx_start_port,
+	// default 8080). Each instance takes up to two ports: the HTTP listener and
+	// the HTTPS listener (TLS only). The two ports are allocated together so
+	// one instance's ports never overlap another's or any other service's.
+	{
+		nginxBASE := c.NginxStartPort
+		assignedNginx := map[int]bool{}
+		for _, addon := range c.Addons.Nginx {
+			for _, p := range []int{addon.HTTPPort, addon.HTTPSPort} {
+				if p != 0 {
+					assignedNginx[p] = true
+				}
+			}
+		}
+		next := nginxBASE
+		nextFreeNginx := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedNginx[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.Nginx))
+		for name := range c.Addons.Nginx {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.Nginx[name]
+			if addon.HTTPPort == 0 && nginxBASE > 0 {
+				addon.HTTPPort = nextFreeNginx()
+			} else if addon.HTTPPort >= next {
+				next = addon.HTTPPort + 1
+			}
+			if addon.TLS && addon.HTTPSPort == 0 && nginxBASE > 0 {
+				addon.HTTPSPort = nextFreeNginx()
+			} else if addon.HTTPSPort >= next {
+				next = addon.HTTPSPort + 1
+			}
+			c.Addons.Nginx[name] = addon
 		}
 	}
 }

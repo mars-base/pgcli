@@ -140,7 +140,7 @@ Examples:
 			if err != nil {
 				return err
 			}
-		case "etcd", "pgdog", "haproxy", "minio", "silo", "rustfs", "redis", "predixy", "pgadmin":
+		case "etcd", "pgdog", "haproxy", "minio", "silo", "rustfs", "redis", "predixy", "pgadmin", "nginx":
 			// (patroni is handled above; it shares --name but requires --scope.)
 			if pgName != "" {
 				return fmt.Errorf("--pg-name selects a remote PgBouncer or PostgREST; use --name for an %s", addonType)
@@ -232,6 +232,15 @@ Examples:
 					return fmt.Errorf("pgadmin instance %q not found (use 'pg addon list' to see available)", name)
 				}
 				containerName = ac.ContainerName
+			case "nginx":
+				if cfg.Addons.Nginx == nil {
+					return fmt.Errorf("no nginx addons configured")
+				}
+				nc, ok := cfg.Addons.Nginx[name]
+				if !ok {
+					return fmt.Errorf("nginx instance %q not found (use 'pg addon list' to see available)", name)
+				}
+				containerName = nc.ContainerName
 			}
 		case "pgbouncer":
 			if etcdName != "" {

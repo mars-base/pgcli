@@ -75,8 +75,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --redis / --predixy / --pgadmin)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartNginx(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --redis / --predixy / --pgadmin / --nginx)")
 		return nil
 	}
 
@@ -187,6 +187,14 @@ func startAutostart() error {
 	// stack like the other non-database addons — it is a browser UI that dials
 	// its servers itself, so there is no ordering constraint at all.
 	if err := startAutostartPgAdmin(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// nginx instances (top-level web addon). Strictly after pgAdmin and
+	// PostgREST: the proxy dials its backend services at startup, so same-host
+	// backends exist by the time the listener comes up (nginx tolerates
+	// backends being down anyway).
+	if err := startAutostartNginx(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -719,6 +727,49 @@ func startAutostartPgAdmin(c *config.Config) error {
 		ac := c.Addons.PgAdmin[name]
 		if err := am.StartContainer(&ac); err != nil {
 			fmt.Printf("  [X] pgadmin autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartNginx reports whether any nginx instance is autostart-enabled.
+func hasAutostartNginx(c *config.Config) bool {
+	for _, nc := range c.Addons.Nginx {
+		if nc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartNginx starts each autostart-enabled nginx instance. Start-only
+// like the other config-file addons: the container comes up reading the
+// nginx.conf already on disk, recreating it if the container was removed —
+// install first. Order is sorted by instance name for deterministic boot logs.
+func startAutostartNginx(c *config.Config) error {
+	var names []string
+	for name, nc := range c.Addons.Nginx {
+		if nc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	nm, err := podman.NewNginxManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		nc := c.Addons.Nginx[name]
+		if err := nm.StartContainer(&nc); err != nil {
+			fmt.Printf("  [X] nginx autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}

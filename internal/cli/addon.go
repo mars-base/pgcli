@@ -126,6 +126,7 @@ Currently supported add-ons:
   predixy     Redis protocol proxy fronting a native redis cluster as one plain redis:// endpoint (clients need no -c / MOVED handling; --backend lists the full node set, --password reuses the cluster's requirepass; Linux only)
   postgrest   stateless REST API in front of a PostgreSQL schema (single container; Linux host network, macOS bridge)
   pgadmin     pgAdmin 4 — the official web administration UI (single container from docker.io/dpage/pgadmin4; web login auto-generated; Linux host network, macOS bridge)
+  nginx       HTTP reverse proxy in front of web services (path-based routing, optional TLS termination; single container from docker.io/library/nginx; Linux host network, macOS bridge)
 
 Two modes (pgbouncer, postgrest):
   Local:  pg addon install pgbouncer -i <instance>
@@ -268,6 +269,24 @@ pgAdmin 4 (the official web administration UI; top-level addon, Linux and macOS)
   Re-running install reuses a live container; --force recreates it to apply a
   changed --port/--listen/--email/--password/--dsn/--pg-name.
 
+nginx (HTTP reverse proxy in front of web services; top-level addon, Linux and macOS):
+  pg addon install nginx [--name proxy]
+                         [--upstream name=<n>,path=<p>,backend=<h:p>] (repeatable)
+                         [--pgadmin-name <name>] [--postgrest-name <name>]
+                         [--http-port N] [--https-port N] [--listen 127.0.0.1]
+                         [--tls] [--tls-cert FILE] [--tls-key FILE]
+                         [--image ...] [--force]
+  Stored under top-level addons.nginx in config. nginx is an HTTP reverse proxy
+  that fronts multiple web services (pgAdmin, PostgREST, etc.) with path-based
+  routing and optional TLS termination. Each --upstream adds one backend:
+  name is the upstream name (defaults to a sanitized path if omitted), path is
+  the location (defaults to /), backend is the host:port to proxy to.
+  --pgadmin-name and --postgrest-name are convenience flags that auto-resolve
+  the named addon's endpoint and add it at /admin or /api respectively.
+  --tls enables an HTTPS listener alongside HTTP; without --tls-cert/--tls-key
+  pgcli generates a self-signed cert via tlsca. Re-running install with --force
+  recreates the container to apply changed backends or TLS settings.
+
 Re-running install is idempotent — it re-syncs all users and passwords from
 pg_shadow, regenerates config files and restarts the container.
 
@@ -297,7 +316,9 @@ Examples:
   pg addon install pgadmin
   pg addon install pgadmin --name console --email me@example.com
   pg addon install pgadmin --pg-name proj01
-  pg addon install pgadmin --dsn "postgres://readonly:pass@127.0.0.1:5000/appdb"`,
+  pg addon install pgadmin --dsn "postgres://readonly:pass@127.0.0.1:5000/appdb"
+  pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050
+  pg addon install nginx --name proxy --pgadmin-name admin --postgrest-name api --tls`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonInstall(args[0], cmd)
@@ -407,6 +428,7 @@ Supported add-ons:
   redis      pg addon start redis [--name cache]
   predixy    pg addon start predixy [--name proxy]
   pgadmin    pg addon start pgadmin [--name pgadmin]
+  nginx      pg addon start nginx [--name proxy]
   pgbouncer  pg addon start pgbouncer -i <instance>
              pg addon start pgbouncer --pg-name <remote-name>
   postgrest  pg addon start postgrest -i <instance>
@@ -422,6 +444,7 @@ Examples:
   pg addon start redis --name cache
   pg addon start predixy --name proxy
   pg addon start pgadmin
+  pg addon start nginx --name proxy
   pg addon start pgbouncer -i proj01
   pg addon start postgrest --pg-name app-api`,
 	Args: cobra.ExactArgs(1),
@@ -446,6 +469,7 @@ Supported add-ons:
   redis      pg addon stop redis [--name cache]
   predixy    pg addon stop predixy [--name proxy]
   pgadmin    pg addon stop pgadmin [--name pgadmin]
+  nginx      pg addon stop nginx [--name proxy]
   pgbouncer  pg addon stop pgbouncer -i <instance>
              pg addon stop pgbouncer --pg-name <remote-name>
   postgrest  pg addon stop postgrest -i <instance>
@@ -461,6 +485,7 @@ Examples:
   pg addon stop redis --name cache
   pg addon stop predixy --name proxy
   pg addon stop pgadmin
+  pg addon stop nginx --name proxy
   pg addon stop pgbouncer -i proj01
   pg addon stop postgrest --pg-name app-api`,
 	Args: cobra.ExactArgs(1),
@@ -530,6 +555,13 @@ func init() {
 	addonInstallCmd.Flags().Int("ro-port", 0, "HAProxy read-only listener host port, split mode only (0=auto-assign, next free port)")
 	addonInstallCmd.Flags().Int("stats-port", 0, "HAProxy stats page host port (0=auto-assign, next free port)")
 	addonInstallCmd.Flags().String("max-lag", "", "replica lag threshold for the read listener, e.g. 1MB (split mode; empty=no filter)")
+
+	// nginx flags (top-level HTTP reverse proxy in front of web services)
+	addonInstallCmd.Flags().Int("http-port", 0, "nginx HTTP listener host port (0=auto-assign from nginx_start_port)")
+	addonInstallCmd.Flags().Int("https-port", 0, "nginx HTTPS listener host port, TLS only (0=auto-assign, next free port)")
+	addonInstallCmd.Flags().StringArray("upstream", nil, "nginx upstream target name=<upstream>,path=<location>,backend=<host:port> (repeatable; e.g. --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050)")
+	addonInstallCmd.Flags().String("pgadmin-name", "", "convenience: auto-add the named pgAdmin addon as an nginx backend at /admin")
+	addonInstallCmd.Flags().String("postgrest-name", "", "convenience: auto-add the named PostgREST addon as an nginx backend at /api")
 
 	// minio flags (top-level single-node S3-compatible object storage)
 	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo/rustfs S3 API host port (0=auto-assign from the shared minio_start_port pool)")
@@ -610,10 +642,12 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallPostgrest(cmd)
 	case "pgadmin":
 		return runAddonInstallPgAdmin(cmd)
+	case "nginx":
+		return runAddonInstallNginx(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, predixy, postgrest, pgadmin)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, predixy, postgrest, pgadmin, nginx)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -4380,6 +4414,45 @@ func runAddonList(showPassword bool) error {
 		fmt.Println("  (none)")
 	}
 
+	// nginx (HTTP reverse proxy, top-level addon; Linux + macOS)
+	fmt.Println()
+	fmt.Println("Web add-ons (nginx):")
+	hasNginx := false
+	if nm, err := podman.NewNginxManager(cfg); err == nil {
+		for _, name := range sortedAddonNames(cfg.Addons.Nginx) {
+			nc := cfg.Addons.Nginx[name]
+			hasNginx = true
+			status := "stopped"
+			if running, err := nm.ContainerRunning(nc.ContainerName); err == nil && running {
+				status = "running"
+			}
+			fmt.Printf("  %s (name: %s)\n", "nginx", name)
+			fmt.Printf("    Status:      %s\n", status)
+			fmt.Printf("    HTTP:        http://%s:%d/\n", nc.Listen, nc.HTTPPort)
+			if nc.TLS && nc.HTTPSPort > 0 {
+				fmt.Printf("    HTTPS:       https://%s:%d/\n", nc.Listen, nc.HTTPSPort)
+			}
+			fmt.Printf("    Backends:    %d\n", len(nc.Backends))
+			for _, b := range nc.Backends {
+				fmt.Printf("      %-12s %s -> %s\n", b.Name, b.Path, b.Backend)
+			}
+			fmt.Printf("    Image:       %s\n", nc.ImageTag)
+			fmt.Printf("    Container:   %s\n", nc.ContainerName)
+		}
+	} else if len(cfg.Addons.Nginx) > 0 {
+		for _, name := range sortedAddonNames(cfg.Addons.Nginx) {
+			nc := cfg.Addons.Nginx[name]
+			hasNginx = true
+			fmt.Printf("  %s (name: %s)\n", "nginx", name)
+			fmt.Printf("    Status:      n/a (%v)\n", err)
+			fmt.Printf("    HTTP:        http://%s:%d/\n", nc.Listen, nc.HTTPPort)
+			fmt.Printf("    Container:   %s\n", nc.ContainerName)
+		}
+	}
+	if !hasNginx {
+		fmt.Println("  (none)")
+	}
+
 	return nil
 }
 
@@ -4510,10 +4583,12 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemovePostgrest(cmd)
 	case "pgadmin":
 		return runAddonRemovePgAdmin(cmd)
+	case "nginx":
+		return runAddonRemoveNginx(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, predixy, postgrest, pgadmin)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, predixy, postgrest, pgadmin, nginx)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -4812,8 +4887,10 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartPostgrest(cmd)
 	case "pgadmin":
 		return runAddonStartPgAdmin(cmd)
+	case "nginx":
+		return runAddonStartNginx(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, predixy, postgrest, pgadmin)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, predixy, postgrest, pgadmin, nginx)", addonName)
 	}
 }
 
@@ -4841,8 +4918,10 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopPostgrest(cmd)
 	case "pgadmin":
 		return runAddonStopPgAdmin(cmd)
+	case "nginx":
+		return runAddonStopNginx(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, predixy, postgrest, pgadmin)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, predixy, postgrest, pgadmin, nginx)", addonName)
 	}
 }
 
@@ -5088,6 +5167,339 @@ func runAddonStopHAProxy(cmd *cobra.Command) error {
 		return err
 	}
 	fmt.Printf("✓ haproxy %q stopped\n", name)
+	return nil
+}
+
+// parseNginxBackend parses a --backend spec into a NginxBackend. The format is
+// name=<upstream>,path=<location>,backend=<host:port> (all required). Used
+// repeatable for multiple upstreams.
+func parseNginxBackend(spec string) (config.NginxBackend, error) {
+	var b config.NginxBackend
+	for _, part := range strings.Split(spec, ",") {
+		k, v, ok := strings.Cut(part, "=")
+		if !ok {
+			return b, fmt.Errorf("backend spec %q: expected key=value pairs separated by commas", spec)
+		}
+		switch k {
+		case "name":
+			b.Name = v
+		case "path":
+			b.Path = v
+		case "backend":
+			b.Backend = v
+		default:
+			return b, fmt.Errorf("backend spec %q: unknown key %q (expected name, path, backend)", spec, k)
+		}
+	}
+	if b.Name == "" {
+		return b, fmt.Errorf("backend spec %q: name is required", spec)
+	}
+	if b.Path == "" {
+		return b, fmt.Errorf("backend spec %q: path is required", spec)
+	}
+	if b.Backend == "" {
+		return b, fmt.Errorf("backend spec %q: backend is required", spec)
+	}
+	return b, nil
+}
+
+// runAddonInstallNginx installs a standalone nginx reverse proxy container:
+// path-based HTTP routing in front of web services (pgAdmin, PostgREST, etc.).
+// The image is pull-only from the public docker.io/library repo. Config is
+// rendered to nginx.conf and bind-mounted read-only.
+//
+// Backends can be specified explicitly (--backend name=...,path=...,backend=...
+// repeatable) or via convenience flags that resolve from locally-managed
+// addons (--pgadmin-name, --postgrest-name).
+func runAddonInstallNginx(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "nginx"
+	}
+	imageTag, _ := cmd.Flags().GetString("image")
+	httpPort, _ := cmd.Flags().GetInt("http-port")
+	httpsPort, _ := cmd.Flags().GetInt("https-port")
+	backendSpecs, _ := cmd.Flags().GetStringArray("upstream")
+	pgadminName, _ := cmd.Flags().GetString("pgadmin-name")
+	postgrestName, _ := cmd.Flags().GetString("postgrest-name")
+	tls, _ := cmd.Flags().GetBool("tls")
+	tlsCert, _ := cmd.Flags().GetString("tls-cert")
+	tlsKey, _ := cmd.Flags().GetString("tls-key")
+
+	// TLS cert/key must come together
+	if tlsCert != "" && tlsKey == "" {
+		return fmt.Errorf("--tls-cert requires --tls-key")
+	}
+	if tlsKey != "" && tlsCert == "" {
+		return fmt.Errorf("--tls-key requires --tls-cert")
+	}
+	if tlsCert != "" {
+		tls = true // BYO cert implies TLS
+	}
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// Build backend list: explicit --backend specs + convenience flags
+	backends := make([]config.NginxBackend, 0, len(backendSpecs))
+	for _, s := range backendSpecs {
+		b, err := parseNginxBackend(s)
+		if err != nil {
+			return err
+		}
+		backends = append(backends, b)
+	}
+
+	// Convenience: --pgadmin-name resolves the pgAdmin addon's listen + port
+	if pgadminName != "" {
+		if cfg.Addons.PgAdmin == nil {
+			return fmt.Errorf("--pgadmin-name: no pgadmin addons configured")
+		}
+		pa, ok := cfg.Addons.PgAdmin[pgadminName]
+		if !ok {
+			return fmt.Errorf("--pgadmin-name: pgadmin %q not found", pgadminName)
+		}
+		backends = append(backends, config.NginxBackend{
+			Name:    "pgadmin",
+			Path:    "/admin",
+			Backend: pa.Listen + ":" + strconv.Itoa(pa.HostPort),
+		})
+	}
+
+	// Convenience: --postgrest-name resolves the PostgREST addon's listen + port
+	if postgrestName != "" {
+		if cfg.Addons.Postgrest == nil {
+			return fmt.Errorf("--postgrest-name: no postgrest addons configured")
+		}
+		pr, ok := cfg.Addons.Postgrest[postgrestName]
+		if !ok {
+			return fmt.Errorf("--postgrest-name: postgrest %q not found", postgrestName)
+		}
+		backends = append(backends, config.NginxBackend{
+			Name:    "postgrest",
+			Path:    "/api",
+			Backend: pr.Listen + ":" + strconv.Itoa(pr.HostPort),
+		})
+	}
+
+	if len(backends) == 0 {
+		return fmt.Errorf("no backends: pass --backend name=...,path=...,backend=... (repeatable), or --pgadmin-name/--postgrest-name")
+	}
+
+	if cfg.Addons.Nginx == nil {
+		cfg.Addons.Nginx = make(map[string]config.NginxConfig)
+	}
+	existing, ok := cfg.Addons.Nginx[name]
+	if !ok {
+		existing = config.NginxConfig{
+			ContainerName: "pgcli-nginx" + nsSuffixCLI(cfg.Namespace) + "-" + name,
+			Name:          name,
+		}
+	}
+	if imageTag != "" {
+		existing.ImageTag = imageTag
+	}
+	if httpPort != 0 {
+		existing.HTTPPort = httpPort
+	}
+	if httpsPort != 0 {
+		existing.HTTPSPort = httpsPort
+	}
+	if listenAddr, _ := cmd.Flags().GetString("listen"); listenAddr != "" {
+		existing.Listen = listenAddr
+	}
+	existing.TLS = tls
+	existing.TLSCert = tlsCert
+	existing.TLSKey = tlsKey
+	existing.Backends = backends
+	if existing.Name == "" {
+		existing.Name = name
+	}
+	cfg.Addons.Nginx[name] = existing
+
+	cfg.ApplyDefaults()
+	nc := cfg.Addons.Nginx[name]
+
+	nm, err := podman.NewNginxManager(cfg)
+	if err != nil {
+		return fmt.Errorf("nginx manager: %w", err)
+	}
+
+	fmt.Println("-> Pulling nginx image...")
+	if err := nm.EnsureImage(nc.ImageTag); err != nil {
+		return err
+	}
+
+	cfgPathOut, err := nm.WriteConfigs(&nc)
+	if err != nil {
+		return err
+	}
+
+	force, _ := cmd.Flags().GetBool("force")
+	if !force {
+		exists, err := nm.ContainerRunning(nc.ContainerName)
+		if err == nil && exists {
+			fmt.Println("  [OK] nginx container already running (pass --force to recreate with updated config)")
+			fmt.Println()
+			fmt.Printf("✓ nginx installed: %q\n", name)
+			fmt.Printf("  Container:    %s\n", nc.ContainerName)
+			fmt.Printf("  Image:        %s\n", nc.ImageTag)
+			fmt.Printf("  HTTP:         http://%s:%d/\n", nc.Listen, nc.HTTPPort)
+			if nc.TLS && nc.HTTPSPort > 0 {
+				fmt.Printf("  HTTPS:        https://%s:%d/\n", nc.Listen, nc.HTTPSPort)
+			}
+			fmt.Printf("  Backends:     %d\n", len(nc.Backends))
+			for _, b := range nc.Backends {
+				fmt.Printf("    %s -> %s%s\n", b.Path, b.Backend, " ("+b.Name+")")
+			}
+			fmt.Printf("  Config:       %s\n", cfgPathOut)
+			return nil
+		}
+	}
+
+	fmt.Println("-> Starting nginx container...")
+	if err := nm.EnsureContainer(&nc); err != nil {
+		return err
+	}
+
+	cfg.Addons.Nginx[name] = nc
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Printf("✓ nginx installed: %q\n", name)
+	fmt.Printf("  Container:    %s\n", nc.ContainerName)
+	fmt.Printf("  Image:        %s\n", nc.ImageTag)
+	fmt.Printf("  HTTP:         http://%s:%d/\n", nc.Listen, nc.HTTPPort)
+	if nc.TLS && nc.HTTPSPort > 0 {
+		fmt.Printf("  HTTPS:        https://%s:%d/\n", nc.Listen, nc.HTTPSPort)
+		if nc.TLSCert == "" {
+			fmt.Printf("  TLS cert:     self-signed (ca.crt under %s)\n", filepath.Dir(cfgPathOut)+"/tls")
+		} else {
+			fmt.Printf("  TLS cert:     BYO (%s)\n", nc.TLSCert)
+		}
+	}
+	fmt.Printf("  Backends:     %d\n", len(nc.Backends))
+	for _, b := range nc.Backends {
+		fmt.Printf("    %s -> %s%s\n", b.Path, b.Backend, " ("+b.Name+")")
+	}
+	fmt.Printf("  Config:       %s\n", cfgPathOut)
+	return nil
+}
+
+// runAddonRemoveNginx removes an nginx reverse proxy container and its config
+// directory (rendered nginx.conf + optional TLS certs).
+func runAddonRemoveNginx(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "nginx"
+	}
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.Nginx == nil {
+		return fmt.Errorf("no nginx add-ons configured")
+	}
+	nc, ok := cfg.Addons.Nginx[name]
+	if !ok {
+		return fmt.Errorf("nginx %q not found", name)
+	}
+
+	nm, err := podman.NewNginxManager(cfg)
+	if err != nil {
+		return fmt.Errorf("nginx manager: %w", err)
+	}
+
+	fmt.Printf("-> Removing nginx %q...\n", name)
+	if err := nm.Remove(&nc); err != nil {
+		return err
+	}
+
+	delete(cfg.Addons.Nginx, name)
+	if len(cfg.Addons.Nginx) == 0 {
+		cfg.Addons.Nginx = nil
+	}
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	fmt.Printf("✓ nginx %q removed\n", name)
+	return nil
+}
+
+// runAddonStartNginx starts a stopped nginx container without regenerating
+// config (autostart-on-boot path).
+func runAddonStartNginx(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "nginx"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	if cfg.Addons.Nginx == nil {
+		return fmt.Errorf("no nginx add-ons configured (run 'pg addon install nginx')")
+	}
+	nc, ok := cfg.Addons.Nginx[name]
+	if !ok {
+		return fmt.Errorf("nginx %q not found (run 'pg addon install nginx --name %s')", name, name)
+	}
+	nm, err := podman.NewNginxManager(cfg)
+	if err != nil {
+		return fmt.Errorf("nginx manager: %w", err)
+	}
+	fmt.Printf("-> Starting nginx %q...\n", name)
+	return nm.StartContainer(&nc)
+}
+
+// runAddonStopNginx stops a running nginx container.
+func runAddonStopNginx(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "nginx"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	nc, ok := cfg.Addons.Nginx[name]
+	if !ok {
+		return fmt.Errorf("nginx %q not found", name)
+	}
+	nm, err := podman.NewNginxManager(cfg)
+	if err != nil {
+		return fmt.Errorf("nginx manager: %w", err)
+	}
+	running, _ := nm.ContainerRunning(nc.ContainerName)
+	if !running {
+		fmt.Printf("nginx %q is not running\n", name)
+		return nil
+	}
+	fmt.Printf("-> Stopping nginx %q...\n", name)
+	if _, err := nm.Stop(nc.ContainerName); err != nil {
+		return err
+	}
+	fmt.Printf("✓ nginx %q stopped\n", name)
 	return nil
 }
 
