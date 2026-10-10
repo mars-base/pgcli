@@ -286,15 +286,87 @@ addons:
 模板模式无法满足时，使用 `--conf-file` 提供完整 `nginx.conf`。以下模式
 提取自实际 70+ server 的生产配置，覆盖最常见的场景。
 
+**完整 `http` 块骨架** —— 下面的模式展示的是单独的 `server` 块；用如下
+`http` 块包裹它们：
+
+```nginx
+worker_processes auto;
+error_log /var/log/nginx/error.log;
+pid /tmp/nginx.pid;
+
+events {
+    worker_connections 60000;
+    multi_accept on;
+}
+
+http {
+    ##
+    # 基础设置
+    ##
+
+    sendfile on;
+    tcp_nopush on;
+    types_hash_max_size 2048;
+
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    ##
+    # 日志
+    ##
+
+    log_format postdata '$remote_addr - $request_id [$time_local] "$request" '
+                        '$status $body_bytes_sent $server_name "$request_body" '
+                        '$request_length "$http_referer" "$http_user_agent" '
+                        '"$http_x_forwarded_for" $request_time $upstream_response_time';
+
+    access_log /var/log/nginx/access.log postdata;
+
+    ##
+    # SSL 设置
+    ##
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+
+    ##
+    # Gzip 设置
+    ##
+
+    gzip on;
+
+    ##
+    # 限速（在 http 层声明 zone，在 server/location 里应用）
+    ##
+
+    # limit_req_zone $uri zone=api_fast:10m rate=5000r/s;
+    # limit_req_zone $uri zone=api_slow:10m rate=100r/s;
+
+    ##
+    # 虚拟主机
+    ##
+
+    # server { ... }  # 见下方模式
+}
+```
+
 **动态 DNS 解析：`resolver` + 变量 `proxy_pass`** —— 避免 nginx 在启动时解析
 主机名并永久缓存。变量强制每次请求重新查询：
 
 ```nginx
-resolver 8.8.8.8 8.8.4.4 ipv6=off;
-set $backend "https://api.example.com";
+http {
+    server {
+        listen 127.0.0.1:9001;
+        access_log /var/log/nginx/access_dns.log;
+        error_log  /var/log/nginx/error_dns.log;
 
-location / {
-    proxy_pass $backend;
+        resolver 8.8.8.8 8.8.4.4 ipv6=off;
+        set $backend "https://api.example.com";
+
+        location / {
+            proxy_pass $backend;
+        }
+    }
 }
 ```
 
@@ -302,51 +374,71 @@ location / {
 不同速率使用不同 zone：
 
 ```nginx
-# http 块（文件顶部）
-limit_req_zone $uri zone=api_fast:10m rate=5000r/s;
-limit_req_zone $uri zone=api_slow:10m rate=100r/s;
+http {
+    limit_req_zone $uri zone=api_fast:10m rate=5000r/s;
+    limit_req_zone $uri zone=api_slow:10m rate=100r/s;
 
-# server 块
-location /fast-api/ {
-    limit_req zone=api_fast burst=10000 nodelay;
-    limit_req_status 429;
-    proxy_pass https://backend.example.com;
-}
-location /slow-api/ {
-    limit_req zone=api_slow burst=200 nodelay;
-    limit_req_status 429;
-    proxy_pass https://backend.example.com;
+    server {
+        listen 127.0.0.1:9001;
+        access_log /var/log/nginx/access_ratelimit.log;
+        error_log  /var/log/nginx/error_ratelimit.log;
+
+        location /fast-api/ {
+            limit_req zone=api_fast burst=10000 nodelay;
+            limit_req_status 429;
+            proxy_pass https://backend.example.com;
+        }
+        location /slow-api/ {
+            limit_req zone=api_slow burst=200 nodelay;
+            limit_req_status 429;
+            proxy_pass https://backend.example.com;
+        }
+    }
 }
 ```
 
 **WebSocket 代理** —— 需要 `Upgrade`、`Connection` 头以及 HTTP/1.1：
 
 ```nginx
-location / {
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_pass https://ws-backend.example.com;
-    proxy_http_version 1.1;
+http {
+    server {
+        listen 127.0.0.1:9001;
+        access_log /var/log/nginx/access_ws.log;
+        error_log  /var/log/nginx/error_ws.log;
+
+        location / {
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_pass https://ws-backend.example.com;
+            proxy_http_version 1.1;
+        }
+    }
 }
 ```
 
 **带 keepalive 的 upstream** —— 减少高吞吐 backend 的连接开销：
 
 ```nginx
-upstream backend-pool {
-    server 10.0.0.1:8080;
-    server 10.0.0.2:8080;
-    keepalive 10;
-}
+http {
+    upstream backend-pool {
+        server 10.0.0.1:8080;
+        server 10.0.0.2:8080;
+        keepalive 10;
+    }
 
-server {
-    location / {
-        proxy_pass http://backend-pool;
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
+    server {
+        listen 127.0.0.1:9001;
+        access_log /var/log/nginx/access_pool.log;
+        error_log  /var/log/nginx/error_pool.log;
+
+        location / {
+            proxy_pass http://backend-pool;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+        }
     }
 }
 ```
@@ -355,12 +447,20 @@ server {
 虚拟主机：
 
 ```nginx
-resolver 8.8.8.8 8.8.4.4 ipv6=off;
+http {
+    server {
+        listen 127.0.0.1:9001;
+        access_log /var/log/nginx/access_host.log;
+        error_log  /var/log/nginx/error_host.log;
 
-location / {
-    proxy_set_header Host api.internal.example.com;
-    proxy_pass http://10.0.0.100;
-    proxy_http_version 1.1;
+        resolver 8.8.8.8 8.8.4.4 ipv6=off;
+
+        location / {
+            proxy_set_header Host api.internal.example.com;
+            proxy_pass http://10.0.0.100;
+            proxy_http_version 1.1;
+        }
+    }
 }
 ```
 
@@ -369,12 +469,20 @@ location / {
 可能拒绝连接：
 
 ```nginx
-resolver 8.8.8.8 8.8.4.4 ipv6=off;
+http {
+    server {
+        listen 127.0.0.1:9001;
+        access_log /var/log/nginx/access_sni.log;
+        error_log  /var/log/nginx/error_sni.log;
 
-location / {
-    proxy_set_header Host api.example.com;
-    proxy_pass https://api.example.com;
-    proxy_ssl_server_name on;
+        resolver 8.8.8.8 8.8.4.4 ipv6=off;
+
+        location / {
+            proxy_set_header Host api.example.com;
+            proxy_pass https://api.example.com;
+            proxy_ssl_server_name on;
+        }
+    }
 }
 ```
 
@@ -383,22 +491,25 @@ location / {
 特定路径可覆盖为更紧或更松的限制：
 
 ```nginx
-# http 块
-limit_req_zone $uri zone=general:10m rate=5000r/s;
-limit_req_zone $uri zone=sensitive:10m rate=100r/s;
+http {
+    limit_req_zone $uri zone=general:10m rate=5000r/s;
+    limit_req_zone $uri zone=sensitive:10m rate=100r/s;
 
-server {
-    listen 127.0.0.1:9000;
+    server {
+        listen 127.0.0.1:9001;
+        access_log /var/log/nginx/access_backend.log;
+        error_log  /var/log/nginx/error_backend.log;
 
-    location / {
-        limit_req zone=general burst=5000 nodelay;
-        limit_req_status 429;
-        proxy_pass https://backend.example.com;
-    }
-    location /admin/ {
-        limit_req zone=sensitive burst=200 nodelay;
-        limit_req_status 429;
-        proxy_pass https://backend.example.com;
+        location / {
+            limit_req zone=general burst=5000 nodelay;
+            limit_req_status 429;
+            proxy_pass https://backend.example.com;
+        }
+        location /admin/ {
+            limit_req zone=sensitive burst=200 nodelay;
+            limit_req_status 429;
+            proxy_pass https://backend.example.com;
+        }
     }
 }
 ```
@@ -441,23 +552,27 @@ http {
 sendfile 优化和访问控制：
 
 ```nginx
-server {
-    listen 127.0.0.1:9000;
-    root /srv/static/;
+http {
+    server {
+        listen 127.0.0.1:9001;
+        access_log /var/log/nginx/access_static.log;
+        error_log  /var/log/nginx/error_static.log;
+        root /srv/static/;
 
-    location / {
-        sendfile on;
-        sendfile_max_chunk 2m;
-        autoindex on;
-        try_files $uri $uri/ =404;
-    }
-    location ~* \.(css|js|png|jpg|jpeg|gif|ico|svg)$ {
-        expires 1d;
-        add_header Cache-Control "public";
-        access_log off;
-    }
-    location ~ /\. {
-        deny all;
+        location / {
+            sendfile on;
+            sendfile_max_chunk 2m;
+            autoindex on;
+            try_files $uri $uri/ =404;
+        }
+        location ~* \.(css|js|png|jpg|jpeg|gif|ico|svg)$ {
+            expires 1d;
+            add_header Cache-Control "public";
+            access_log off;
+        }
+        location ~ /\. {
+            deny all;
+        }
     }
 }
 ```

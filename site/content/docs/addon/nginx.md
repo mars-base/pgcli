@@ -321,16 +321,88 @@ When the template mode is not enough, use `--conf-file` with a full
 `nginx.conf`. The following patterns are extracted from a real 70+ server
 production config and cover the most common cases.
 
+**Complete `http` block skeleton** — the patterns below show individual
+`server` blocks; wrap them in an `http` block like this:
+
+```nginx
+worker_processes auto;
+error_log /var/log/nginx/error.log;
+pid /tmp/nginx.pid;
+
+events {
+    worker_connections 60000;
+    multi_accept on;
+}
+
+http {
+    ##
+    # Basic Settings
+    ##
+
+    sendfile on;
+    tcp_nopush on;
+    types_hash_max_size 2048;
+
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    ##
+    # Logging
+    ##
+
+    log_format postdata '$remote_addr - $request_id [$time_local] "$request" '
+                        '$status $body_bytes_sent $server_name "$request_body" '
+                        '$request_length "$http_referer" "$http_user_agent" '
+                        '"$http_x_forwarded_for" $request_time $upstream_response_time';
+
+    access_log /var/log/nginx/access.log postdata;
+
+    ##
+    # SSL Settings
+    ##
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+
+    ##
+    # Gzip Settings
+    ##
+
+    gzip on;
+
+    ##
+    # Rate Limiting (declare zones at http level, apply in server/location)
+    ##
+
+    # limit_req_zone $uri zone=api_fast:10m rate=5000r/s;
+    # limit_req_zone $uri zone=api_slow:10m rate=100r/s;
+
+    ##
+    # Virtual Hosts
+    ##
+
+    # server { ... }  # see patterns below
+}
+```
+
 **Dynamic DNS resolution with `resolver` + variable `proxy_pass`** — avoids
 nginx resolving the hostname at startup and caching it forever. The variable
 forces a fresh lookup on every request:
 
 ```nginx
-resolver 8.8.8.8 8.8.4.4 ipv6=off;
-set $backend "https://api.example.com";
+http {
+    server {
+        listen 127.0.0.1:9001;
+        access_log /var/log/nginx/access_dns.log;
+        error_log  /var/log/nginx/error_dns.log;
 
-location / {
-    proxy_pass $backend;
+        resolver 8.8.8.8 8.8.4.4 ipv6=off;
+        set $backend "https://api.example.com";
+
+        location / {
+            proxy_pass $backend;
+        }
+    }
 }
 ```
 
@@ -338,20 +410,26 @@ location / {
 `location`. Use different zones for different rate tiers:
 
 ```nginx
-# http block (top of file)
-limit_req_zone $uri zone=api_fast:10m rate=5000r/s;
-limit_req_zone $uri zone=api_slow:10m rate=100r/s;
+http {
+    limit_req_zone $uri zone=api_fast:10m rate=5000r/s;
+    limit_req_zone $uri zone=api_slow:10m rate=100r/s;
 
-# server block
-location /fast-api/ {
-    limit_req zone=api_fast burst=10000 nodelay;
-    limit_req_status 429;
-    proxy_pass https://backend.example.com;
-}
-location /slow-api/ {
-    limit_req zone=api_slow burst=200 nodelay;
-    limit_req_status 429;
-    proxy_pass https://backend.example.com;
+    server {
+        listen 127.0.0.1:9001;
+        access_log /var/log/nginx/access_ratelimit.log;
+        error_log  /var/log/nginx/error_ratelimit.log;
+
+        location /fast-api/ {
+            limit_req zone=api_fast burst=10000 nodelay;
+            limit_req_status 429;
+            proxy_pass https://backend.example.com;
+        }
+        location /slow-api/ {
+            limit_req zone=api_slow burst=200 nodelay;
+            limit_req_status 429;
+            proxy_pass https://backend.example.com;
+        }
+    }
 }
 ```
 
@@ -359,14 +437,22 @@ location /slow-api/ {
 HTTP/1.1:
 
 ```nginx
-location / {
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_pass https://ws-backend.example.com;
-    proxy_http_version 1.1;
+http {
+    server {
+        listen 127.0.0.1:9001;
+        access_log /var/log/nginx/access_ws.log;
+        error_log  /var/log/nginx/error_ws.log;
+
+        location / {
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_pass https://ws-backend.example.com;
+            proxy_http_version 1.1;
+        }
+    }
 }
 ```
 
@@ -374,17 +460,23 @@ location / {
 backends:
 
 ```nginx
-upstream backend-pool {
-    server 10.0.0.1:8080;
-    server 10.0.0.2:8080;
-    keepalive 10;
-}
+http {
+    upstream backend-pool {
+        server 10.0.0.1:8080;
+        server 10.0.0.2:8080;
+        keepalive 10;
+    }
 
-server {
-    location / {
-        proxy_pass http://backend-pool;
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
+    server {
+        listen 127.0.0.1:9001;
+        access_log /var/log/nginx/access_pool.log;
+        error_log  /var/log/nginx/error_pool.log;
+
+        location / {
+            proxy_pass http://backend-pool;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+        }
     }
 }
 ```
@@ -393,12 +485,20 @@ server {
 by IP but set the correct virtual host:
 
 ```nginx
-resolver 8.8.8.8 8.8.4.4 ipv6=off;
+http {
+    server {
+        listen 127.0.0.1:9001;
+        access_log /var/log/nginx/access_host.log;
+        error_log  /var/log/nginx/error_host.log;
 
-location / {
-    proxy_set_header Host api.internal.example.com;
-    proxy_pass http://10.0.0.100;
-    proxy_http_version 1.1;
+        resolver 8.8.8.8 8.8.4.4 ipv6=off;
+
+        location / {
+            proxy_set_header Host api.internal.example.com;
+            proxy_pass http://10.0.0.100;
+            proxy_http_version 1.1;
+        }
+    }
 }
 ```
 
@@ -408,12 +508,20 @@ not send the `Host` header during the TLS handshake and the upstream may reject
 the connection:
 
 ```nginx
-resolver 8.8.8.8 8.8.4.4 ipv6=off;
+http {
+    server {
+        listen 127.0.0.1:9001;
+        access_log /var/log/nginx/access_sni.log;
+        error_log  /var/log/nginx/error_sni.log;
 
-location / {
-    proxy_set_header Host api.example.com;
-    proxy_pass https://api.example.com;
-    proxy_ssl_server_name on;
+        resolver 8.8.8.8 8.8.4.4 ipv6=off;
+
+        location / {
+            proxy_set_header Host api.example.com;
+            proxy_pass https://api.example.com;
+            proxy_ssl_server_name on;
+        }
+    }
 }
 ```
 
@@ -423,22 +531,25 @@ A catch-all `limit_req` at the `server` level provides a baseline; specific
 paths override with tighter or looser limits:
 
 ```nginx
-# http block
-limit_req_zone $uri zone=general:10m rate=5000r/s;
-limit_req_zone $uri zone=sensitive:10m rate=100r/s;
+http {
+    limit_req_zone $uri zone=general:10m rate=5000r/s;
+    limit_req_zone $uri zone=sensitive:10m rate=100r/s;
 
-server {
-    listen 127.0.0.1:9000;
+    server {
+        listen 127.0.0.1:9001;
+        access_log /var/log/nginx/access_backend.log;
+        error_log  /var/log/nginx/error_backend.log;
 
-    location / {
-        limit_req zone=general burst=5000 nodelay;
-        limit_req_status 429;
-        proxy_pass https://backend.example.com;
-    }
-    location /admin/ {
-        limit_req zone=sensitive burst=200 nodelay;
-        limit_req_status 429;
-        proxy_pass https://backend.example.com;
+        location / {
+            limit_req zone=general burst=5000 nodelay;
+            limit_req_status 429;
+            proxy_pass https://backend.example.com;
+        }
+        location /admin/ {
+            limit_req zone=sensitive burst=200 nodelay;
+            limit_req_status 429;
+            proxy_pass https://backend.example.com;
+        }
     }
 }
 ```
@@ -483,23 +594,27 @@ directory with browser caching headers, sendfile optimization, and access
 control:
 
 ```nginx
-server {
-    listen 127.0.0.1:9000;
-    root /srv/static/;
+http {
+    server {
+        listen 127.0.0.1:9001;
+        access_log /var/log/nginx/access_static.log;
+        error_log  /var/log/nginx/error_static.log;
+        root /srv/static/;
 
-    location / {
-        sendfile on;
-        sendfile_max_chunk 2m;
-        autoindex on;
-        try_files $uri $uri/ =404;
-    }
-    location ~* \.(css|js|png|jpg|jpeg|gif|ico|svg)$ {
-        expires 1d;
-        add_header Cache-Control "public";
-        access_log off;
-    }
-    location ~ /\. {
-        deny all;
+        location / {
+            sendfile on;
+            sendfile_max_chunk 2m;
+            autoindex on;
+            try_files $uri $uri/ =404;
+        }
+        location ~* \.(css|js|png|jpg|jpeg|gif|ico|svg)$ {
+            expires 1d;
+            add_header Cache-Control "public";
+            access_log off;
+        }
+        location ~ /\. {
+            deny all;
+        }
     }
 }
 ```
