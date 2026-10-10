@@ -82,6 +82,19 @@ Infra addons (shared, not tied to one instance):
           instance, PgBouncer, or a Patroni cluster behind its HAProxy
           listener). Stored under instances.<name>.addons.postgrest (local)
           or addons.postgrest.<name> (remote).
+  pg addon install pgadmin
+          Stored under top-level addons.pgadmin in config (Linux and macOS).
+          pgAdmin 4 — the official web administration UI for PostgreSQL —
+          run from the upstream docker.io/dpage/pgadmin4 image. It is NOT a
+          sidecar of any one instance (which servers it fronts is the UI's
+          own concern), so unlike postgrest/pgbouncer it is top-level only;
+          --dsn/--pg-name just pre-seed its server list once. A web login
+          email/password (PGADMIN_DEFAULT_*) is required at first launch;
+          the password is generated and printed once — retrieve it with
+          "pg addon password pgadmin". Its data dir holds pgAdmin's own
+          config/session DB and survives remove unless --clean-data. The
+          container's entrypoint chowns the mounted dir to its uid 5050 and
+          drops privileges itself, so pgcli never chowns on the host.
 
 Commands:
   pg addon install <addon>    install an add-on
@@ -112,6 +125,7 @@ Currently supported add-ons:
   redis       standalone KV store (cache/session/ranking/counters) from the plain upstream docker.io/library/redis image; --version 7|8 selects the major, requirepass auto-generated, RDB persistence, read replicas via --replica-of (no automatic failover), native cluster masters via --cluster (assemble once with "pg redis-cli -- --cluster create")
   predixy     Redis protocol proxy fronting a native redis cluster as one plain redis:// endpoint (clients need no -c / MOVED handling; --backend lists the full node set, --password reuses the cluster's requirepass; Linux only)
   postgrest   stateless REST API in front of a PostgreSQL schema (single container; Linux host network, macOS bridge)
+  pgadmin     pgAdmin 4 — the official web administration UI (single container from docker.io/dpage/pgadmin4; web login auto-generated; Linux host network, macOS bridge)
 
 Two modes (pgbouncer, postgrest):
   Local:  pg addon install pgbouncer -i <instance>
@@ -228,6 +242,32 @@ Linux and macOS):
   Re-running install reuses a live container; --force recreates it to apply a
   changed --dsn/--port/--listen/--db-pool/--schema/--anon-role/--jwt-secret.
 
+pgAdmin 4 (the official web administration UI; top-level addon, Linux and macOS):
+  pg addon install pgadmin [--name ui] [--email admin@pgcli.lan] [--password ...]
+                           [--port N] [--listen 127.0.0.1] [--data-dir ...]
+                           [--dsn <dsn> | --pg-name <instance>] [--image ...] [--force]
+  --email/--password are pgAdmin's WEB LOGIN credentials (PGADMIN_DEFAULT_*),
+  required at first launch; the password is generated when omitted, printed once,
+  and stored under addons.pgadmin.<name>.password — read it with
+  "pg addon password pgadmin". They are not a PostgreSQL password. The image
+  validates --email and rejects reserved TLDs (.local included), so the default
+  uses .lan.
+  Optionally seed one server into the UI's list: pass --dsn (any PG endpoint) or
+  --pg-name (resolve the DSN from a locally-managed instance — these two are
+  mutually exclusive here). pgAdmin cannot import a server password, so the
+  seeded entry prompts for it on first connect. --name is the addon key (defaults
+  to "pgadmin"); it has nothing to do with --pg-name.
+  Data is pgAdmin's own config/session DB (sqlite) under --data-dir (default
+  <base_dir>/addon/pgadmin/<name>/data), so remove/reinstall revives the saved
+  servers and settings; --clean-data deletes it (under rootless that goes through
+  "podman unshare rm" since the files land owned by the container's mapped
+  5050 uid). The image's entrypoint chowns the mounted dir to uid 5050 and drops
+  privileges itself — pgcli never chowns on the host, and no wrapper image is
+  needed. TLS is not wired up yet (plaintext http; put it behind a reverse proxy
+  if you need HTTPS).
+  Re-running install reuses a live container; --force recreates it to apply a
+  changed --port/--listen/--email/--password/--dsn/--pg-name.
+
 Re-running install is idempotent — it re-syncs all users and passwords from
 pg_shadow, regenerates config files and restarts the container.
 
@@ -253,7 +293,11 @@ Examples:
   pg addon install predixy --name proxy --backend 127.0.0.1:6379,127.0.0.1:6380,127.0.0.1:6381 --password "$(pg addon password redis --name n1)"
   pg addon install predixy --name proxy --backend 10.0.0.11:6379,10.0.0.12:6379,10.0.0.13:6379 --password <cluster-pw> --workers 4 --port 7617
   pg addon install postgrest -i proj01 --schema api --anon-role web_anon
-  pg addon install postgrest --dsn "postgres://api:pass@127.0.0.1:5000/appdb" --pg-name app-api --schema api`,
+  pg addon install postgrest --dsn "postgres://api:pass@127.0.0.1:5000/appdb" --pg-name app-api --schema api
+  pg addon install pgadmin
+  pg addon install pgadmin --name console --email me@example.com
+  pg addon install pgadmin --pg-name proj01
+  pg addon install pgadmin --dsn "postgres://readonly:pass@127.0.0.1:5000/appdb"`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonInstall(args[0], cmd)
@@ -285,12 +329,14 @@ pg.yaml.`,
 // shaped for $(...) capture in scripts.
 var addonPasswordCmd = &cobra.Command{
 	Use:   "password <addon>",
-	Short: "Print an add-on's stored password (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs root password)",
+	Short: "Print an add-on's stored password (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs root password, pgAdmin web login password)",
 	Long: `Print the password stored for one add-on instance: the Redis
 requirepass (generated by pgcli), the Predixy proxy password (the
-operator-supplied copy of the proxied cluster's requirepass), or the
+operator-supplied copy of the proxied cluster's requirepass), the
 MinIO/silo/rustfs root password (the access-key secret — pair it with the
-instance's Root user from "pg addon list").
+instance's Root user from "pg addon list"), or the pgAdmin web login
+password (the PGADMIN_DEFAULT_PASSWORD generated for the UI's sign-in form
+— not a PostgreSQL password).
 
 The single value goes to stdout with no decoration, so it composes into
 scripts and app config:
@@ -320,9 +366,9 @@ var addonRemoveCmd = &cobra.Command{
 For local add-ons, use -i to specify the instance.
 For remote add-ons, use --pg-name to specify the pooler name.
 
-Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/redis/predixy) use --name.
-Remove keeps the data directory; pass --clean-data for object-storage/KV data
-to go too.
+Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/redis/predixy/pgadmin) use --name.
+Remove keeps the data directory; pass --clean-data for object-storage/KV/pgAdmin
+data to go too.
 
 Examples:
   pg addon remove pgbouncer -i proj01
@@ -331,7 +377,9 @@ Examples:
   pg addon remove postgrest --pg-name app-api
   pg addon remove redis --name cache
   pg addon remove redis --name cache --clean-data
-  pg addon remove predixy --name proxy`,
+  pg addon remove predixy --name proxy
+  pg addon remove pgadmin
+  pg addon remove pgadmin --clean-data`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonRemove(args[0], cmd)
@@ -358,6 +406,7 @@ Supported add-ons:
   rustfs     pg addon start rustfs [--name store]
   redis      pg addon start redis [--name cache]
   predixy    pg addon start predixy [--name proxy]
+  pgadmin    pg addon start pgadmin [--name pgadmin]
   pgbouncer  pg addon start pgbouncer -i <instance>
              pg addon start pgbouncer --pg-name <remote-name>
   postgrest  pg addon start postgrest -i <instance>
@@ -372,6 +421,7 @@ Examples:
   pg addon start rustfs --name store
   pg addon start redis --name cache
   pg addon start predixy --name proxy
+  pg addon start pgadmin
   pg addon start pgbouncer -i proj01
   pg addon start postgrest --pg-name app-api`,
 	Args: cobra.ExactArgs(1),
@@ -395,6 +445,7 @@ Supported add-ons:
   rustfs     pg addon stop rustfs [--name store]
   redis      pg addon stop redis [--name cache]
   predixy    pg addon stop predixy [--name proxy]
+  pgadmin    pg addon stop pgadmin [--name pgadmin]
   pgbouncer  pg addon stop pgbouncer -i <instance>
              pg addon stop pgbouncer --pg-name <remote-name>
   postgrest  pg addon stop postgrest -i <instance>
@@ -409,6 +460,7 @@ Examples:
   pg addon stop rustfs --name store
   pg addon stop redis --name cache
   pg addon stop predixy --name proxy
+  pg addon stop pgadmin
   pg addon stop pgbouncer -i proj01
   pg addon stop postgrest --pg-name app-api`,
 	Args: cobra.ExactArgs(1),
@@ -426,8 +478,8 @@ func init() {
 	addonCmd.AddCommand(addonInstallCmd, addonListCmd, addonPasswordCmd, addonRemoveCmd, addonStartCmd, addonStopCmd)
 
 	// Basic flags
-	addonInstallCmd.Flags().String("dsn", "", "PG instance connection string for remote mode (postgres://user:pass@host:port/db)")
-	addonInstallCmd.Flags().String("pg-name", "", "name to identify a remote PgBouncer or PostgREST (required with --dsn)")
+	addonInstallCmd.Flags().String("dsn", "", "PG instance connection string for remote mode (postgres://user:pass@host:port/db) / pgadmin: a one-time server to pre-register in its UI (mutually exclusive with --pg-name there)")
+	addonInstallCmd.Flags().String("pg-name", "", "name to identify a remote PgBouncer or PostgREST (required with --dsn) / pgadmin: resolve the DSN from this locally-managed instance instead of passing --dsn (its own addon --name is unrelated to this)")
 	addonInstallCmd.Flags().Int("max-client-conn", 0, "maximum number of client connections allowed (default 100)")
 	addonInstallCmd.Flags().Int("default-pool-size", 0, "number of server connections per user/database pair (default 20)")
 
@@ -458,17 +510,17 @@ func init() {
 	addonRemoveCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to remove")
 
 	// etcd flags (top-level shared-infrastructure addon)
-	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo, rustfs, redis or predixy instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\"/\"redis\"/\"predixy\")")
+	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo, rustfs, redis, predixy or pgadmin instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\"/\"redis\"/\"predixy\"/\"pgadmin\")")
 	addonInstallCmd.Flags().Int("client-port", 0, "etcd client host port (0=auto-assign from etcd_start_port)")
 	addonInstallCmd.Flags().Int("peer-port", 0, "etcd peer host port (0=auto-assign, next free port after client)")
-	addonInstallCmd.Flags().String("image", "", "override the addon image tag verbatim (etcd default quay.io/coreos/etcd:v3.5.30; redis default resolved from --version, e.g. docker.io/library/redis:8.10.2; predixy default ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine)")
+	addonInstallCmd.Flags().String("image", "", "override the addon image tag verbatim (etcd default quay.io/coreos/etcd:v3.5.30; redis default resolved from --version, e.g. docker.io/library/redis:8.10.2; predixy default ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine; pgadmin default docker.io/dpage/pgadmin4:9.18)")
 	addonInstallCmd.Flags().String("cluster", "", "cluster grouping token: etcd --initial-cluster-token (default \"pgcli-etcd\"); redis native-cluster name (--cluster-enabled yes, members sharing it form one cluster you assemble once with `pg redis-cli -- --cluster create ...`)")
 	addonInstallCmd.Flags().Int("cluster-replicas", 0, "redis native-cluster only: per-master replica count for the --cluster create you will run (default 0 = masters-only). Only shapes the suggested assemble command and node-count guidance — which nodes become followers is decided by Redis at create time, not here; the whole group inherits the first member's value")
-	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs or redis instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data)")
+	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs, redis or pgAdmin instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data; pgadmin default <base_dir>/addon/pgadmin/<name>/data)")
 	addonInstallCmd.Flags().String("advertise-host", "", "peer-visible host: etcd member peer/client URLs, and redis native-cluster --cluster-announce-ip (empty=127.0.0.1 single-host; set a LAN IP or FQDN for cross-host clusters)")
 	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.0.0.12:2379 (implies --initial-cluster-state existing; requires --advertise-host)")
-	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, redis or predixy instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"redis\"/\"predixy\")")
-	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/redis data directory (object storage / backup repository / key-value data); no-op for predixy, which is stateless")
+	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, redis, predixy or pgadmin instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"redis\"/\"predixy\"/\"pgadmin\")")
+	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/redis/pgAdmin data directory (object storage / backup repository / key-value data / pgAdmin config+sessions DB); no-op for predixy, which is stateless")
 
 	// haproxy flags (top-level load balancer in front of a Patroni cluster)
 	addonInstallCmd.Flags().String("mode", "", "HAProxy routing mode: unified (default, all traffic to the leader) or split (separate read listener for replicas)")
@@ -482,7 +534,7 @@ func init() {
 	// minio flags (top-level single-node S3-compatible object storage)
 	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo/rustfs S3 API host port (0=auto-assign from the shared minio_start_port pool)")
 	addonInstallCmd.Flags().Int("console-port", 0, "MinIO/silo/rustfs web console host port (0=auto-assign, next free port)")
-	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo or rustfs server / PostgREST HTTP server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network) — Redis and Predixy default to \"0.0.0.0\" instead, since their password is always required; pass 127.0.0.1 to keep them loopback-only")
+	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo or rustfs server / PostgREST HTTP server / pgAdmin web server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network) — Redis and Predixy default to \"0.0.0.0\" instead, since their password is always required; pass 127.0.0.1 to keep them loopback-only")
 	addonInstallCmd.Flags().String("root-user", "", "MinIO/silo/rustfs root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config)")
 	addonInstallCmd.Flags().String("root-password", "", "MinIO/silo/rustfs root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand)")
 	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO/silo/rustfs distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (MinIO/silo: path is the in-container export dir — /data with a plain --data-dir node, or /data1../dataN on a --drive node (MNMD); repeat for every node's every drive. rustfs: one endpoint per node — scheme://host:port, no path; it has no multi-node single-drive mode so --drive is required, and it derives the /data/rustfs0../rustfsN suffix itself. The list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
@@ -490,11 +542,12 @@ func init() {
 	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo/rustfs: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo|rustfs>/<name>/; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Changing this needs --force to recreate")
 	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo/rustfs: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt for MinIO/silo, rustfs_cert.pem for rustfs). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
 	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo/rustfs: private key for --tls-cert (PEM; mounted read-only as private.key for MinIO/silo, rustfs_key.pem for rustfs). Must pair with the cert; both are required to enable BYO TLS")
-	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/redis/predixy/PostgREST container even if one already exists (to apply changed ports/listen/credentials, or a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend)")
+	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/redis/predixy/PostgREST/pgAdmin container even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, or a changed pgAdmin --email/--dsn/--pg-name seed)")
 
 	// redis flags (top-level standalone KV store — the first version-selectable addon)
 	addonInstallCmd.Flags().String("version", "", "Redis major version to install: 7 or 8 (default \"8\"); each maps to a pinned upstream docker.io/library/redis tag. Ignored for every other addon")
-	addonInstallCmd.Flags().String("password", "", "Redis requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls) / Predixy proxy password (REQUIRED, never generated: it must be the proxied cluster's requirepass — read it with `pg addon password redis --name <member>`)")
+	addonInstallCmd.Flags().String("password", "", "Redis requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls) / Predixy proxy password (REQUIRED, never generated: it must be the proxied cluster's requirepass — read it with `pg addon password redis --name <member>`) / pgAdmin WEB login password (generated on first install if omitted — not a PostgreSQL password; retrieve it with `pg addon password pgadmin`)")
+	addonInstallCmd.Flags().String("email", "", "pgAdmin WEB login email (PGADMIN_DEFAULT_EMAIL; default \"admin@pgcli.lan\") — the account you sign into the web UI with, unrelated to any PostgreSQL role; the image rejects reserved TLDs such as .local")
 	addonInstallCmd.Flags().String("maxmemory", "", "Redis memory cap, e.g. 256mb or 2gb — turns the instance into a real cache (allkeys-lru evicts keys at the cap); empty means no cap")
 	addonInstallCmd.Flags().String("maxmemory-policy", "", "Redis eviction policy to pair with --maxmemory (noeviction | allkeys-lru | allkeys-lfu | volatile-lru | volatile-lfu | volatile-ttl; default allkeys-lru; requires --maxmemory)")
 	addonInstallCmd.Flags().Bool("aof", false, "Redis: enable AOF (appendonly yes) — a write-ahead log on top of the RDB snapshot, for crash-safe no-eviction stores; off by default")
@@ -505,18 +558,18 @@ func init() {
 	addonInstallCmd.Flags().Int("replica-of-port", 0, "Redis: remote master's port, paired with --replica-of-host")
 
 	// start / stop flags
-	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, redis or predixy instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"redis\"/\"predixy\")")
+	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, redis, predixy or pgadmin instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"redis\"/\"predixy\"/\"pgadmin\")")
 	addonStartCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to start")
-	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, redis or predixy instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"redis\"/\"predixy\")")
+	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, redis, predixy or pgadmin instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"redis\"/\"predixy\"/\"pgadmin\")")
 	addonStopCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to stop")
 
 	// list / password flags
-	addonListCmd.Flags().Bool("show-password", false, "also print stored credentials (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs root password) — off by default so the listing stays paste-safe")
-	addonPasswordCmd.Flags().String("name", "", "instance to reveal (redis/predixy/minio/silo/rustfs; default \"redis\"/\"predixy\"/\"minio\"/\"silo\"/\"rustfs\")")
+	addonListCmd.Flags().Bool("show-password", false, "also print stored credentials (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs root password, pgAdmin web login password) — off by default so the listing stays paste-safe")
+	addonPasswordCmd.Flags().String("name", "", "instance to reveal (redis/predixy/minio/silo/rustfs/pgadmin; default \"redis\"/\"predixy\"/\"minio\"/\"silo\"/\"rustfs\"/\"pgadmin\")")
 	addonPasswordCmd.Flags().String("file", "", "write the password to this file (mode 0600) instead of stdout, keeping it out of shell history and scrollback")
 
 	// pgdog flags (top-level shared Postgres proxy addon)
-	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port) / PostgREST HTTP host port (0=auto-assign from postgrest_start_port) / Redis host port (0=auto-assign from redis_start_port, default 6379) / Predixy proxy host port (0=auto-assign from predixy_start_port, default 7617)")
+	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port) / PostgREST HTTP host port (0=auto-assign from postgrest_start_port) / Redis host port (0=auto-assign from redis_start_port, default 6379) / Predixy proxy host port (0=auto-assign from predixy_start_port, default 7617) / pgAdmin web host port (0=auto-assign from pgadmin_start_port, default 5050)")
 	addonInstallCmd.Flags().String("host", "", "PgDog listen address (default 127.0.0.1)")
 	addonInstallCmd.Flags().String("pool-mode", "", "PgDog pooler mode: transaction (default) or session")
 	addonInstallCmd.Flags().Int("workers", 0, "worker threads: PgDog (default 2) / Predixy proxy WorkerThreads (default 1)")
@@ -555,10 +608,12 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallPredixy(cmd)
 	case "postgrest":
 		return runAddonInstallPostgrest(cmd)
+	case "pgadmin":
+		return runAddonInstallPgAdmin(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, predixy, postgrest)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, predixy, postgrest, pgadmin)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -3509,6 +3564,222 @@ func postgrestPatroniMemberWarning(cfg *config.Config, dsn string) string {
 	return ""
 }
 
+// runAddonInstallPgAdmin installs a pgAdmin 4 container — the official web
+// administration UI for PostgreSQL, run from the upstream dpage/pgadmin4 image.
+// It is a top-level-only addon (addons.pgadmin.<name>, key defaults to "pgadmin")
+// unlike PostgREST's dual local/remote mode: which servers pgAdmin fronts is
+// the UI's own concern, not a per-instance attachment. --dsn/--pg-name are just
+// a one-time convenience to pre-seed servers.json so the browser opens with
+// that server already listed; they never gate anything at runtime.
+//
+// Email/Password are pgAdmin's WEB LOGIN credentials — not a PostgreSQL
+// password — and are required at first launch (the container refuses to
+// initialize without them). Password is generated here when empty, the same way
+// redis/minio generate theirs: never in ApplyDefaults, which runs on every
+// config load and must stay deterministic.
+func runAddonInstallPgAdmin(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "pgadmin"
+	}
+	imageTag, _ := cmd.Flags().GetString("image")
+	dataDir, _ := cmd.Flags().GetString("data-dir")
+	port, _ := cmd.Flags().GetInt("port")
+	listenAddr, _ := cmd.Flags().GetString("listen")
+	email, _ := cmd.Flags().GetString("email")
+	password, _ := cmd.Flags().GetString("password")
+	dsn, _ := cmd.Flags().GetString("dsn")
+	pgName, _ := cmd.Flags().GetString("pg-name")
+	force, _ := cmd.Flags().GetBool("force")
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// --dsn and --pg-name both mean "seed this server" and are mutually
+	// exclusive here (unlike pgbouncer/postgrest, where --pg-name is the map key
+	// and pairs with --dsn): --dsn supplies the URI directly, --pg-name resolves
+	// it from an instance pgcli already manages. Neither is required.
+	if dsn != "" && pgName != "" {
+		return fmt.Errorf("--dsn and --pg-name are mutually exclusive for pgadmin (--pg-name resolves the DSN itself from a local instance)")
+	}
+	if pgName != "" {
+		if _, ok := cfg.Instances[pgName]; !ok {
+			return fmt.Errorf("instance %q not found in config", pgName)
+		}
+		if err := cfg.SetInstance(pgName); err != nil {
+			return fmt.Errorf("resolving instance %q: %w", pgName, err)
+		}
+		dsn = cfg.GetPostgresURL()
+	}
+
+	if cfg.Addons.PgAdmin == nil {
+		cfg.Addons.PgAdmin = make(map[string]config.PgAdminConfig)
+	}
+	existing, ok := cfg.Addons.PgAdmin[name]
+	if !ok {
+		existing = config.PgAdminConfig{
+			ContainerName: "pgcli-pgadmin" + nsSuffixCLI(cfg.Namespace) + "-" + name,
+			Name:          name,
+		}
+	}
+	if dataDir != "" {
+		existing.DataDir = dataDir
+	}
+	if cmd.Flags().Changed("port") {
+		existing.HostPort = port
+	}
+	if listenAddr != "" {
+		existing.Listen = listenAddr
+	}
+	if email != "" {
+		existing.Email = email
+	}
+	if password != "" {
+		existing.Password = password
+	}
+	if imageTag != "" {
+		existing.ImageTag = imageTag
+	}
+	if dsn != "" {
+		existing.DSN = dsn
+		if pgName != "" {
+			existing.ServerName = pgName
+		}
+	}
+	cfg.Addons.PgAdmin[name] = existing
+
+	// ApplyDefaults fills ContainerName/Listen/Email and assigns HostPort from
+	// the pgadmin_start_port pool. Password is NOT managed there — it is a
+	// secret the install path owns, and the entrypoint requires it at first
+	// launch (an already-initialised data dir ignores it, so the generated value
+	// stays a real login only for a fresh install).
+	cfg.ApplyDefaults()
+	ac := cfg.Addons.PgAdmin[name]
+
+	if err := ensureProxyBridge(cfg); err != nil {
+		return err
+	}
+
+	pgm, err := podman.NewPgAdminManager(cfg)
+	if err != nil {
+		return fmt.Errorf("pgAdmin manager: %w", err)
+	}
+
+	// Reuse semantics identical to redis/the object stores: a live container is
+	// left alone (reinstall is a no-op), a stopped one is started, and only
+	// --force recreates it so changed port/listen/email take effect.
+	exists, err := pgm.ContainerExists(ac.ContainerName)
+	if err != nil {
+		return err
+	}
+	skipped := false
+	if exists && !force {
+		skipped = true
+		if running, _ := pgm.ContainerRunning(ac.ContainerName); running {
+			fmt.Printf("-> pgAdmin container %q already running; skipping creation\n", ac.ContainerName)
+		} else {
+			fmt.Printf("-> pgAdmin container %q exists but is stopped; starting it\n", ac.ContainerName)
+			if err := pgm.StartContainer(&ac); err != nil {
+				return err
+			}
+		}
+	} else {
+		// Fresh install, or a reinstall after a `remove` that kept the data dir.
+		// Generate the login password when none is stored. NOTE: pgAdmin only
+		// honours PGADMIN_DEFAULT_PASSWORD while initialising an EMPTY data dir —
+		// a revived pgadmin4.db keeps whatever account it was first created with,
+		// so a freshly generated password here would NOT be the working login. We
+		// detect that case below and say so rather than print a password that
+		// silently does nothing.
+		if ac.Password == "" {
+			pw, err := generatePassword(20)
+			if err != nil {
+				return fmt.Errorf("generating pgAdmin password: %w", err)
+			}
+			ac.Password = pw
+		}
+		revived := pgAdminStoreExists(pgm.DataDir(&ac))
+		fmt.Printf("-> Preparing pgAdmin image %s...\n", ac.ImageTag)
+		if err := pgm.EnsureImage(ac.ImageTag); err != nil {
+			return err
+		}
+		if pgName != "" {
+			fmt.Printf("-> NOTE: seeding servers.json from instance %q — its password is NOT carried (pgAdmin cannot import one); you will be prompted on first connect.\n", pgName)
+		}
+		if revived {
+			// Pin the login block to point out the printed password is inert.
+			fmt.Println("-> NOTE: reviving an existing pgAdmin data dir — its stored login account still applies; the password below only takes effect on a --clean-data reinstall.")
+		}
+		fmt.Println("-> Starting pgAdmin container...")
+		if err := pgm.EnsureContainer(&ac); err != nil {
+			return err
+		}
+	}
+
+	cfg.Addons.PgAdmin[name] = ac
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	fmt.Println()
+	if skipped {
+		fmt.Printf("✓ pgAdmin already present: %q\n", name)
+	} else {
+		fmt.Printf("✓ pgAdmin installed: %q\n", name)
+	}
+	fmt.Printf("  Container:  %s\n", ac.ContainerName)
+	fmt.Printf("  Image:      %s\n", ac.ImageTag)
+	fmt.Printf("  Data:       %s\n", pgm.DataDir(&ac))
+	fmt.Printf("  URL:        http://%s:%d/\n", ac.Listen, ac.HostPort)
+	if ac.DSN != "" {
+		fmt.Printf("  Seeded:     %s\n", pgadminSeededDisplay(ac))
+	}
+	fmt.Println()
+	fmt.Printf("  Login email:    %s\n", ac.Email)
+	fmt.Printf("  Login password: %s\n", ac.Password)
+	fmt.Println("  (Web login only — not a PostgreSQL password. Retrieve it later with `pg addon password pgadmin`.)")
+	fmt.Println()
+	fmt.Println("  Add servers to browse in the web UI itself, or reinstall with --dsn/--pg-name to pre-seed one.")
+	if ac.Listen == "0.0.0.0" {
+		fmt.Println("  NOTE: listening on every interface; the login above is the only gate.")
+		fmt.Printf("        loopback-only: pg addon install pgadmin --name %s --listen 127.0.0.1 --force\n", name)
+	}
+	return nil
+}
+
+// pgadminSeededDisplay renders the optional servers.json seed for the summary —
+// it shows the display name and host, never a DSN (which would carry a
+// password).
+func pgadminSeededDisplay(ac config.PgAdminConfig) string {
+	name := ac.ServerName
+	if name == "" {
+		name = "from --dsn"
+	}
+	return name
+}
+
+// pgAdminStoreExists reports whether a data dir already holds pgAdmin's
+// config/session DB (pgadmin4.db) — the signal that install is reviving a kept
+// store rather than initialising a fresh one. pgAdmin only reads
+// PGADMIN_DEFAULT_PASSWORD when that file is absent, so the login password the
+// install prints is inert on a revived store.
+func pgAdminStoreExists(dataDir string) bool {
+	if dataDir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dataDir, "pgadmin4.db"))
+	return err == nil
+}
+
 // ---------------------------------------------------------------------------
 // list logic
 // ---------------------------------------------------------------------------
@@ -4055,6 +4326,47 @@ func runAddonList(showPassword bool) error {
 		fmt.Println("  (none)")
 	}
 
+	// pgAdmin (web administration UI — top-level, one container, persistent data dir)
+	fmt.Println()
+	fmt.Println("Web add-ons (pgadmin):")
+	hasPgAdmin := false
+	if pgm, err := podman.NewPgAdminManager(cfg); err == nil {
+		for _, name := range sortedAddonNames(cfg.Addons.PgAdmin) {
+			ac := cfg.Addons.PgAdmin[name]
+			hasPgAdmin = true
+			status := "stopped"
+			if running, err := pgm.ContainerRunning(ac.ContainerName); err == nil && running {
+				status = "running"
+			}
+			fmt.Printf("  %s (name: %s)\n", "pgadmin", name)
+			fmt.Printf("    Status:      %s\n", status)
+			fmt.Printf("    URL:         http://%s:%d/\n", ac.Listen, ac.HostPort)
+			fmt.Printf("    Login email: %s\n", ac.Email)
+			if showPassword && ac.Password != "" {
+				fmt.Printf("    Login password: %s\n", ac.Password)
+			}
+			if ac.DSN != "" {
+				fmt.Printf("    Seeded:      %s\n", pgadminSeededDisplay(ac))
+			}
+			fmt.Printf("    Data:        %s\n", pgm.DataDir(&ac))
+			fmt.Printf("    Image:       %s\n", ac.ImageTag)
+			fmt.Printf("    Container:   %s\n", ac.ContainerName)
+		}
+	} else if len(cfg.Addons.PgAdmin) > 0 {
+		// Configured but the manager is unavailable (podman missing): still show them.
+		for _, name := range sortedAddonNames(cfg.Addons.PgAdmin) {
+			ac := cfg.Addons.PgAdmin[name]
+			hasPgAdmin = true
+			fmt.Printf("  %s (name: %s)\n", "pgadmin", name)
+			fmt.Printf("    Status:      n/a (%v)\n", err)
+			fmt.Printf("    URL:         http://%s:%d/\n", ac.Listen, ac.HostPort)
+			fmt.Printf("    Container:   %s\n", ac.ContainerName)
+		}
+	}
+	if !hasPgAdmin {
+		fmt.Println("  (none)")
+	}
+
 	return nil
 }
 
@@ -4074,7 +4386,7 @@ func sortedAddonNames[T any](m map[string]T) []string {
 // ---------------------------------------------------------------------------
 
 // addonPasswords indexes every instance that has a stored password, keyed
-// "<addon>:<name>". Only these five addons qualify: etcd and haproxy have no
+// "<addon>:<name>". Only these six addons qualify: etcd and haproxy have no
 // stored credential at all, and PG instance passwords are not auto-generated by
 // pgcli — neither belongs in a "print the stored password" surface that promises
 // to work. (The root *user* is not part of this: it is never secret, so
@@ -4084,6 +4396,11 @@ func sortedAddonNames[T any](m map[string]T) []string {
 // the proxied cluster's requirepass — but it is still the answer to "what
 // password does this addon listen for", so `pg addon password predixy` works the
 // same way and the two sides can be cross-checked in one command.
+//
+// pgAdmin's entry is its WEB login password (PGADMIN_DEFAULT_PASSWORD), not a
+// PostgreSQL password — but it is still pgcli-generated and the only credential
+// this addon has, so it belongs here for the same "retrieve what I printed at
+// install" reason as redis's requirepass.
 func addonPasswords(cfg *config.Config) map[string]string {
 	out := map[string]string{}
 	for name, rc := range cfg.Addons.Redis {
@@ -4100,6 +4417,9 @@ func addonPasswords(cfg *config.Config) map[string]string {
 	}
 	for name, rc := range cfg.Addons.Rustfs {
 		out["rustfs:"+name] = rc.RootPassword
+	}
+	for name, ac := range cfg.Addons.PgAdmin {
+		out["pgadmin:"+name] = ac.Password
 	}
 	return out
 }
@@ -4175,10 +4495,12 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemovePredixy(cmd)
 	case "postgrest":
 		return runAddonRemovePostgrest(cmd)
+	case "pgadmin":
+		return runAddonRemovePgAdmin(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, predixy, postgrest)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, predixy, postgrest, pgadmin)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -4475,8 +4797,10 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartPgBouncer(cmd)
 	case "postgrest":
 		return runAddonStartPostgrest(cmd)
+	case "pgadmin":
+		return runAddonStartPgAdmin(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, predixy, postgrest)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, predixy, postgrest, pgadmin)", addonName)
 	}
 }
 
@@ -4502,8 +4826,10 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopPgBouncer(cmd)
 	case "postgrest":
 		return runAddonStopPostgrest(cmd)
+	case "pgadmin":
+		return runAddonStopPgAdmin(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, predixy, postgrest)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, predixy, postgrest, pgadmin)", addonName)
 	}
 }
 
@@ -5268,6 +5594,118 @@ func runAddonStopRedis(cmd *cobra.Command) error {
 		return err
 	}
 	fmt.Printf("✓ redis %q stopped\n", name)
+	return nil
+}
+
+// runAddonRemovePgAdmin removes a pgAdmin container. The data dir (the
+// config/session DB) is kept by default so reinstalling under the same name
+// revives the saved servers; --clean-data deletes it through the manager's
+// removeHostDir path (the files are owned by the container's mapped 5050 uid).
+func runAddonRemovePgAdmin(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "pgadmin"
+	}
+	cleanData, _ := cmd.Flags().GetBool("clean-data")
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.PgAdmin == nil {
+		return fmt.Errorf("no pgAdmin add-ons configured")
+	}
+	ac, ok := cfg.Addons.PgAdmin[name]
+	if !ok {
+		return fmt.Errorf("pgAdmin %q not found", name)
+	}
+
+	pgm, err := podman.NewPgAdminManager(cfg)
+	if err != nil {
+		return fmt.Errorf("pgAdmin manager: %w", err)
+	}
+
+	fmt.Printf("-> Removing pgAdmin %q...\n", name)
+	if err := pgm.Remove(&ac, cleanData); err != nil {
+		return err
+	}
+
+	delete(cfg.Addons.PgAdmin, name)
+	if len(cfg.Addons.PgAdmin) == 0 {
+		cfg.Addons.PgAdmin = nil
+	}
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	fmt.Printf("✓ pgAdmin %q removed\n", name)
+	if !cleanData {
+		fmt.Printf("  (data dir kept — reinstall the same name revives the saved servers; --clean-data to delete it)\n")
+	}
+	return nil
+}
+
+func runAddonStartPgAdmin(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "pgadmin"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	if cfg.Addons.PgAdmin == nil {
+		return fmt.Errorf("no pgAdmin add-ons configured (run 'pg addon install pgadmin')")
+	}
+	ac, ok := cfg.Addons.PgAdmin[name]
+	if !ok {
+		return fmt.Errorf("pgAdmin %q not found (run 'pg addon install pgadmin --name %s')", name, name)
+	}
+	if err := ensureProxyBridge(cfg); err != nil {
+		return err
+	}
+	pgm, err := podman.NewPgAdminManager(cfg)
+	if err != nil {
+		return fmt.Errorf("pgAdmin manager: %w", err)
+	}
+	fmt.Printf("-> Starting pgAdmin %q...\n", name)
+	return pgm.StartContainer(&ac)
+}
+
+func runAddonStopPgAdmin(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "pgadmin"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	ac, ok := cfg.Addons.PgAdmin[name]
+	if !ok {
+		return fmt.Errorf("pgAdmin %q not found", name)
+	}
+	pgm, err := podman.NewPgAdminManager(cfg)
+	if err != nil {
+		return fmt.Errorf("pgAdmin manager: %w", err)
+	}
+	running, _ := pgm.ContainerRunning(ac.ContainerName)
+	if !running {
+		fmt.Printf("pgAdmin %q is not running\n", name)
+		return nil
+	}
+	fmt.Printf("-> Stopping pgAdmin %q...\n", name)
+	if _, err := pgm.Stop(ac.ContainerName); err != nil {
+		return err
+	}
+	fmt.Printf("✓ pgAdmin %q stopped\n", name)
 	return nil
 }
 

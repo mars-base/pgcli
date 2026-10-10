@@ -32,6 +32,7 @@ type Config struct {
 	PostgrestStartPort      int                       `yaml:"postgrest_start_port,omitempty"`       // starting PostgREST HTTP host port, default 3500
 	RedisStartPort          int                       `yaml:"redis_start_port,omitempty"`           // starting Redis host port, default 6379
 	PredixyStartPort        int                       `yaml:"predixy_start_port,omitempty"`         // starting Predixy proxy listener host port, default 7617
+	PgAdminStartPort        int                       `yaml:"pgadmin_start_port,omitempty"`         // starting pgAdmin 4 web host port, default 5050
 	Postgres                PostgresConfig            `yaml:"postgres"`
 	Podman                  PodmanConfig              `yaml:"podman"`
 	PITR                    PITRConfig                `yaml:"pitr"`
@@ -93,6 +94,7 @@ type TopAddonsConfig struct {
 	Rustfs    map[string]RustfsConfig         `yaml:"rustfs,omitempty"`
 	Redis     map[string]RedisConfig          `yaml:"redis,omitempty"`
 	Predixy   map[string]PredixyConfig        `yaml:"predixy,omitempty"`
+	PgAdmin   map[string]PgAdminConfig        `yaml:"pgadmin,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -423,6 +425,15 @@ const DefaultPgBouncerImageTag = "docker.io/edoburu/pgbouncer:v1.25.2-p0"
 // is the official multi-arch image on docker.io (pull-only — pgcli never builds
 // it). v16.3 is the current stable line; keep this in sync when bumping.
 const DefaultPostgrestImageTag = "docker.io/postgrest/postgrest:v16.3"
+
+// DefaultPgAdminImageTag pins the pgAdmin 4 image to a specific upstream
+// release rather than :latest, so installs are reproducible. dpage/pgadmin4 is
+// the official multi-arch image on docker.io (pull-only — pgcli never builds
+// it; unlike rustfs it needs no wrapper because its own entrypoint chowns
+// /var/lib/pgadmin to uid 5050 and drops privileges). 9.18 is the current
+// stable line (== latest at pinning time); the :snapshot tag is a nightly build
+// and is deliberately never used. Keep this in sync when bumping.
+const DefaultPgAdminImageTag = "docker.io/dpage/pgadmin4:9.18"
 
 // DefaultRedisMajor is the Redis major version installed when --version is not
 // given: "8", the current stable line upstream (docker.io/library/redis).
@@ -880,6 +891,46 @@ type PredixyConfig struct {
 	Autostart bool `yaml:"autostart,omitempty"`
 }
 
+// PgAdminConfig holds a pgAdmin 4 addon: the official web administration UI for
+// PostgreSQL, run as the upstream dpage/pgadmin4 container. Like PostgREST it
+// is a single stateless-config container driven entirely by PGADMIN_* env vars
+// and it is dual-network (Linux host networking / macOS bridge), but unlike
+// PostgREST it is NOT a sidecar of any one instance: it is stored top-level
+// only (addons.pgadmin.<name>) because which servers it fronts is pgAdmin's own
+// concern (its UI or an optional servers.json), not a per-instance attachment.
+//
+// It does hold state: /var/lib/pgadmin is its session/config database and must
+// be persisted on the host, which is why it has a DataDir (the one field
+// PostgREST lacks). The container's own entrypoint chowns that directory to its
+// uid 5050 and drops privileges itself, so pgcli never chowns on the host — the
+// same "image self-drops" class as MinIO/silo, not rustfs's fixed-uid wrapper.
+//
+// Email/Password are pgAdmin's WEB LOGIN credentials (PGADMIN_DEFAULT_*),
+// required at launch, and have nothing to do with any PostgreSQL password.
+// Password is generated when empty (see runAddonInstallPgAdmin) and is
+// retrievable via `pg addon password pgadmin`.
+//
+// DSN/ServerName are optional: when DSN is non-empty, install renders a
+// servers.json pre-registering that one server so the UI opens with it
+// present. They are a one-time convenience, not a runtime coupling — pgAdmin
+// runs fine with them unset (empty server list).
+type PgAdminConfig struct {
+	ContainerName string `yaml:"container_name"`      // pgcli-pgadmin<ns>-<name>
+	Name          string `yaml:"name,omitempty"`      // addon key, defaults to the map key
+	ImageTag      string `yaml:"image_tag,omitempty"` // docker.io/dpage/pgadmin4:9.18 (default)
+	HostPort      int    `yaml:"host_port,omitempty"` // web host port, 5050+ auto-assigned
+	Listen        string `yaml:"listen,omitempty"`    // bind address, default 127.0.0.1
+	Email         string `yaml:"email,omitempty"`     // PGADMIN_DEFAULT_EMAIL, default admin@pgcli.lan (reserved TLDs like .local are rejected by the image's validator)
+	Password      string `yaml:"password,omitempty"`  // PGADMIN_DEFAULT_PASSWORD; generated when empty. A secret — never defaulted to a literal.
+	DataDir       string `yaml:"data_dir,omitempty"`  // host dir mounted at /var/lib/pgadmin; default <base>/addon/pgadmin/<name>/data
+	DSN           string `yaml:"dsn,omitempty"`       // optional: when set, a servers.json entry is rendered from this URI
+	ServerName    string `yaml:"server_name,omitempty"` // display name of the pre-registered server (defaults to the DSN host)
+	// Autostart brings this container up on host boot via the boot service
+	// (pg autostart enable --pgadmin). Start-only: it starts the existing
+	// container, so install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
 // PostgresConfig holds PostgreSQL connection settings.
 type PostgresConfig struct {
 	URL      string `yaml:"url"`      // connection string (postgres://user:pass@host:port/db)
@@ -975,6 +1026,7 @@ func Default() *Config {
 		PostgrestStartPort:      3500,
 		RedisStartPort:          6379,
 		PredixyStartPort:        7617,
+		PgAdminStartPort:        5050,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -1175,6 +1227,7 @@ type displayConfig struct {
 	PostgrestStartPort      int                       `yaml:"postgrest_start_port,omitempty"`
 	RedisStartPort          int                       `yaml:"redis_start_port,omitempty"`
 	PredixyStartPort        int                       `yaml:"predixy_start_port,omitempty"`
+	PgAdminStartPort        int                       `yaml:"pgadmin_start_port,omitempty"`
 	Logging                 LoggingConfig             `yaml:"logging"`
 	Backup                  BackupConfig              `yaml:"backup"`
 	Pigsty                  PigstyConfig              `yaml:"pigsty"`
@@ -1200,6 +1253,7 @@ func (c *Config) Display() displayConfig {
 		PostgrestStartPort:      c.PostgrestStartPort,
 		RedisStartPort:          c.RedisStartPort,
 		PredixyStartPort:        c.PredixyStartPort,
+		PgAdminStartPort:        c.PgAdminStartPort,
 		Logging:                 c.Logging,
 		Backup:                  c.Backup,
 		Pigsty:                  c.Pigsty,
@@ -1294,6 +1348,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.PredixyStartPort == 0 {
 		c.PredixyStartPort = d.PredixyStartPort
+	}
+	if c.PgAdminStartPort == 0 {
+		c.PgAdminStartPort = d.PgAdminStartPort
 	}
 
 	// Postgres
@@ -1727,6 +1784,34 @@ func (c *Config) ApplyDefaults() {
 			addon.Workers = DefaultPredixyWorkers
 		}
 		c.Addons.Predixy[name] = addon
+	}
+
+	// Top-level addons defaults (pgAdmin 4). Password is deliberately NOT
+	// defaulted here — ApplyDefaults must stay deterministic and a login
+	// password must never be a hardcoded literal; the CLI install handler
+	// generates one when empty. DSN/ServerName stay empty by default (no
+	// pre-registered server). Listen defaults to loopback like PostgREST — a
+	// web admin UI should not bind 0.0.0.0 unless asked.
+	for name, addon := range c.Addons.PgAdmin {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-pgadmin" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultPgAdminImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "127.0.0.1"
+		}
+		if addon.Email == "" {
+			// The container's entrypoint validates this with email-validator and
+			// refuses reserved TLDs — `.local` included — so pgAdmin would
+			// crash-loop. `.lan` is accepted (and still non-routable).
+			addon.Email = "admin@pgcli.lan"
+		}
+		c.Addons.PgAdmin[name] = addon
 	}
 
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
@@ -2270,6 +2355,43 @@ func (c *Config) autoAssignPorts() {
 				next = addon.Port + 1
 			}
 			c.Addons.Predixy[name] = addon
+		}
+	}
+
+	// Allocate ports for pgAdmin addons from their own pool (pgadmin_start_port,
+	// default 5050 — pgAdmin's docs' example port). One port per instance: the
+	// web UI has a single listener, no console or stats port. Shape is identical
+	// to the Predixy block above (the newest, single-port precedent).
+	{
+		pgAdminBase := c.PgAdminStartPort
+		assignedPgAdmin := map[int]bool{}
+		for _, addon := range c.Addons.PgAdmin {
+			if addon.HostPort != 0 {
+				assignedPgAdmin[addon.HostPort] = true
+			}
+		}
+		next := pgAdminBase
+		nextFreePgAdmin := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedPgAdmin[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.PgAdmin))
+		for name := range c.Addons.PgAdmin {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.PgAdmin[name]
+			if addon.HostPort == 0 && pgAdminBase > 0 {
+				addon.HostPort = nextFreePgAdmin()
+			} else if addon.HostPort >= next {
+				next = addon.HostPort + 1
+			}
+			c.Addons.PgAdmin[name] = addon
 		}
 	}
 }

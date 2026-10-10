@@ -1,0 +1,118 @@
+package podman
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"os"
+	"strconv"
+)
+
+// servers.json pre-registration. pgAdmin's own entrypoint loads a file at
+// /pgadmin4/servers.json on first launch (setup.py load-servers); pgcli renders
+// a minimal one from a DSN when the operator installed with --dsn/--pg-name so
+// the web UI opens with that server already listed. This is a one-time
+// convenience, not a runtime coupling — pgAdmin manages its server list itself
+// thereafter.
+//
+// The schema (verified against the pgAdmin 9.18 Import/Export docs): a
+// top-level "Servers" object keyed by integer id, each entry needing
+// Name/Group/Port/Username/MaintenanceDB + Host, with sslmode canonically under
+// a ConnectionParameters object. Passwords CANNOT be carried in this file
+// ("Password fields cannot be imported or exported"), so a seeded server
+// prompts for its password on first connect — pgcli never writes a PostgreSQL
+// password here.
+
+type pgAdminServerEntry struct {
+	Name             string         `json:"Name"`
+	Group            string         `json:"Group"`
+	Host             string         `json:"Host"`
+	Port             int            `json:"Port"`
+	MaintenanceDB    string         `json:"MaintenanceDB"`
+	Username         string         `json:"Username"`
+	SSLMode          string         `json:"SSLMode"` // legacy top-level form; harmless if ignored
+	ConnectionParams map[string]any `json:"ConnectionParameters"`
+}
+
+type pgAdminServersFile struct {
+	Servers map[string]pgAdminServerEntry `json:"Servers"`
+}
+
+// RenderServersJSON turns a postgres:// DSN into pgAdmin's servers.json bytes,
+// registering one server. serverName is the UI display name; when empty the DSN
+// host is used. Pure function (no I/O) so it is unit-testable. The DSN's
+// password — present in a GetPostgresURL()-style URI — is deliberately parsed
+// and DISCARDED: pgAdmin cannot import passwords, and this file is mounted into
+// a container, so leaking one here would be both useless and a secret exposure.
+func RenderServersJSON(dsn, serverName string) ([]byte, error) {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("invalid DSN: %w", err)
+	}
+	if u.Scheme != "postgres" && u.Scheme != "postgresql" {
+		return nil, fmt.Errorf("invalid DSN: scheme must be postgres://, got %q", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return nil, fmt.Errorf("invalid DSN: missing host")
+	}
+	port := 5432
+	if p := u.Port(); p != "" {
+		if port, err = strconv.Atoi(p); err != nil {
+			return nil, fmt.Errorf("invalid DSN: bad port %q", p)
+		}
+	}
+	user := u.User.Username()
+	db := trimDSNPath(u.Path)
+	if db == "" {
+		db = "postgres" // pgAdmin needs a maintenance db; default the way its UI does
+	}
+	name := serverName
+	if name == "" {
+		name = host
+	}
+
+	doc := pgAdminServersFile{
+		Servers: map[string]pgAdminServerEntry{
+			"1": {
+				Name:          name,
+				Group:         "Servers",
+				Host:          host,
+				Port:          port,
+				MaintenanceDB: db,
+				Username:      user,
+				SSLMode:       "prefer",
+				ConnectionParams: map[string]any{
+					"sslmode": "prefer",
+				},
+			},
+		},
+	}
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshaling servers.json: %w", err)
+	}
+	return out, nil
+}
+
+// WriteServersJSON renders the DSN to JSON and writes it to path (mode 0644 so
+// the rootless container's mapped 5050 user can read the :ro bind mount). The
+// parent dir must already exist (createContainer mkdir's the data dir sibling).
+func WriteServersJSON(path, dsn, serverName string) error {
+	data, err := RenderServersJSON(dsn, serverName)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("writing servers.json: %w", err)
+	}
+	return nil
+}
+
+// trimDSNPath returns the database name from a URL path ("/db" → "db").
+func trimDSNPath(p string) string {
+	if len(p) > 0 && p[0] == '/' {
+		return p[1:]
+	}
+	return p
+}
