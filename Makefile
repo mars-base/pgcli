@@ -9,7 +9,7 @@ LDFLAGS = -s -w \
 
 PLATFORMS = linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
-.PHONY: build clean test lint install build-all gencert container-build container-push container-build-minio container-push-minio container-build-mc container-push-mc container-build-patroni container-push-patroni container-build-rustfs container-push-rustfs container-build-predixy container-push-predixy
+.PHONY: build clean test lint install build-all gencert container-build container-push container-build-minio container-push-minio container-build-mc container-push-mc container-build-patroni container-push-patroni container-build-rustfs container-push-rustfs container-build-predixy container-push-predixy container-images-export
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) .
@@ -182,3 +182,42 @@ container-build-predixy:
 
 container-push-predixy:
 	podman push $(PREDIXY_IMAGE) $(PREDIXY_IMAGE)
+
+# Offline image export for the docs/images.md catalog (see that doc's
+# "镜像导出" section for the manual equivalents and the rustfs/redis
+# manifest-list caveat). Always pulls --platform linux/amd64 FIRST so a
+# multi-arch manifest-list tag in the local store (e.g. pgcli-rustfs) is
+# normalized to a single-arch image before `podman save` — docker-archive
+# format refuses manifest lists. Tars land in ./images/ (gitignored) named
+# <repo>_<tag>.tar with canonical RepoTags, so `podman load` on the target
+# yields the exact reference pgcli expects — no retagging there. The ghcr.io
+# mars-base images are private: `podman login ghcr.io` must have happened
+# first (or pull is skipped when the image is already local).
+# Keep this list in sync with docs/images.md.
+IMAGES := \
+	ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 \
+	ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5 \
+	ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0 \
+	ghcr.io/mars-base/pgcli/pgcli-minio:20250422221226 \
+	ghcr.io/mars-base/pgcli/pgcli-mc:20250813083541 \
+	ghcr.io/mars-base/pgcli/pgcli-rustfs:1.0.0 \
+	ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine \
+	docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z \
+	docker.io/postgrest/postgrest:v16.3 \
+	docker.io/edoburu/pgbouncer:v1.25.2-p0 \
+	docker.io/library/haproxy:3.2.23-alpine \
+	quay.io/coreos/etcd:v3.5.30 \
+	ghcr.io/pgdogdev/pgdog:v0.1.57 \
+	docker.io/library/redis:7.4.11 \
+	docker.io/library/redis:8.10.2
+
+container-images-export:
+	@mkdir -p images
+	@for img in $(IMAGES); do \
+	  tar=images/$$(echo $${img##*/} | tr : _).tar; \
+	  podman pull --platform linux/amd64 $$img >/dev/null 2>&1 \
+	    || podman image exists $$img \
+	    || { echo "FAIL: cannot resolve $$img (pull --platform amd64 failed and not in local store; login ghcr.io if private)" >&2; exit 1; }; \
+	  podman save --format docker-archive -o $$tar $$img || exit 1; \
+	  echo "OK   $$tar  <- $$img"; \
+	done

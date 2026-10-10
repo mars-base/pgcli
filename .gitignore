@@ -60,3 +60,8 @@ embed/ca-certificates.crt
 embed/predixy
 embed/predixy-conf
 pg
+
+# Image export: `podman save` docker-archive tars written into images/ for
+# offline VM load (see docs/images.md, `make container-images-export`). These
+# are hundreds of MB each and are byproducts, never committed.
+images/
