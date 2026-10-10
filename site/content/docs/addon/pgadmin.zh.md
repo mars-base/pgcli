@@ -400,6 +400,10 @@ pg logs addon pgadmin --name console -f     # 跟踪
 - **无 TLS** —— 这里 pgAdmin 提供明文 HTTP。要 HTTPS 就在前面架反向代理（配合
   `PGADMIN_URL_SCHEME`/`PGADMIN_DISABLE_STATIC_FILE_SERVER` 调参）；pgcli 不接
   这条线。loopback 默认让常见场景留在 `127.0.0.1`。
+- **不适合大数据量导入导出** —— pgAdmin 的数据流经 HTTP（导出：查询 → 容器 →
+  浏览器；导入：上传 → 容器 → 数据库），大表容易超时或内存溢出。应改用专用工具：
+  pgcli 实例用 `pg export` / `pg import`；任意数据库用
+  `pg exec --dsn "..." -- pg_dump`；超大表用 `COPY` / `pg_copy`（二进制格式，最快）。
 - **预置密码以明文存于磁盘** —— `servers.json` 旁边的 pgpass 文件是 mode 0600
   但没有加密；移除实例时一并清理。没有办法预配置密码而不落盘文件（pgAdmin 没有
   KMS/keyring 集成）。
