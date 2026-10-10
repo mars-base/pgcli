@@ -459,7 +459,8 @@ pg logs addon pgadmin --name console -f     # follow
   HTTP (query → container → browser for export; upload → container → database
   for import), which times out or exhausts memory on large tables. Use
   `pg export` / `pg import` for pgcli instances, or
-  `pg exec --dsn "..." -- pg_dump` for arbitrary databases.
+  `pg exec --dsn "..." -- pg_dump` for arbitrary databases. See
+  [Data Import/Export](/docs/import-export/) for details.
 - **Seed password lives on disk as plaintext** — the pgpass file beside
   `servers.json` is mode 0600 but not encrypted; removing the instance cleans
   it up. There is no way to pre-configure the password without a file on disk
