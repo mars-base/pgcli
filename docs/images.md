@@ -27,6 +27,7 @@ pgcli 使用的容器镜像及其默认 tag。
 | `docker.io/library/redis` | `8.10.2` | Redis 大版本 8（默认，`--version 8`），纯上游镜像无 wrapper | `redisMajorImages["8"]` |
 | `ghcr.io/mars-base/pgcli/predixy` | `7.0.1-alpine` | Predixy（Redis 集群代理），建立在上游 free edition 二进制之上的 wrapper，单架构 amd64 | `DefaultPredixyImageTag` |
 | `docker.io/dpage/pgadmin4` | `9.18` | pgAdmin 4（PostgreSQL 官方 Web 管理界面），纯上游镜像无 wrapper，双架构 manifest list | `DefaultPgAdminImageTag` |
+| `docker.io/library/nginx` | `1.27-alpine` | nginx HTTP 反向代理，纯上游镜像无 wrapper，双架构 manifest list | `DefaultNginxImageTag` |
 
 ## 镜像导出
 
@@ -87,6 +88,10 @@ podman save -o "$TARGET/predixy_7.0.1-alpine.tar" \
 # pgAdmin 上游镜像与 redis 一样是双架构 manifest list，先按 amd64 pull 再 save
 podman pull --platform linux/amd64 docker.io/dpage/pgadmin4:9.18
 podman save -o "$TARGET/pgadmin4_9.18.tar" docker.io/dpage/pgadmin4:9.18
+
+# nginx 上游镜像与 redis 一样是双架构 manifest list，先按 amd64 pull 再 save
+podman pull --platform linux/amd64 docker.io/library/nginx:1.27-alpine
+podman save -o "$TARGET/nginx_1.27-alpine.tar" docker.io/library/nginx:1.27-alpine
 ```
 
 ### rustfs（双架构 manifest 不能直接 save）
@@ -147,8 +152,11 @@ done
   rustfs 那套属主机制）；pin 到发布时的 `latest`（当前 `9.18`，双架构 manifest
   list，amd64 + arm64——Apple Silicon 的 podman machine 可直接跑）；`9` 这个
   major tag 与 `snapshot`（nightly）都存在，pgcli 一律不用不稳定的滚动 tag
+- **nginx**：纯上游 `docker.io/library/nginx`，无 wrapper；基于 Alpine Linux 减小体积；
+  pin 到 `1.27-alpine`（双架构 manifest list，amd64 + arm64——Apple Silicon 的
+  podman machine 可直接跑）
 - **pgbouncer** / **postgrest** / **haproxy** / **etcd** / **pgdog**：上游官方或社区维护的稳定版本
 
 ---
 
-**最后更新**：2026-10-10（新增 pgAdmin 4 镜像与插件）
+**最后更新**：2026-10-10（新增 nginx 镜像与插件）

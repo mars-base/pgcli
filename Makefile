@@ -210,7 +210,8 @@ IMAGES := \
 	ghcr.io/pgdogdev/pgdog:v0.1.57 \
 	docker.io/library/redis:7.4.11 \
 	docker.io/library/redis:8.10.2 \
-	docker.io/dpage/pgadmin4:9.18
+	docker.io/dpage/pgadmin4:9.18 \
+	docker.io/library/nginx:1.27-alpine
 
 container-images-export:
 	@mkdir -p images
