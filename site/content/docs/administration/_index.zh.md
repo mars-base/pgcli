@@ -85,7 +85,13 @@ Init 生成默认配置；`--add` 在同一文件中创建命名实例，`-o` �
 ```bash
 pg config init --add default --base-dir /data/pg
 pg config init --add proj01 --base-dir /data/pg -o ./my-pg.yaml
+
+# 将数据和备份分离到不同磁盘
+pg config init --base-dir /data/pg --backup-dir /mnt/backup/pg --add default
 ```
+
+`--backup-dir` 将备份数据和日志放在与实例数据不同的路径上。这是典型的生产环境
+配置：PG 数据在一块磁盘，备份在另一块，防止数据盘故障连累备份丢失。
 
 在一个主机上运行多个配置的隔离参数（参见[快速开始](quickstart.md)进行规划）：
 
@@ -96,7 +102,9 @@ pg config init --namespace t1 --pg-start-port 38000 --pg-ssh-port 43000 --add pr
 | 参数 | 默认值 | 含义 |
 |------|--------|------|
 | `--namespace` | `default` | 容器名称前缀：`pgcli-pg-<namespace>-<instance>`，备份容器 `pgcli-backup-<namespace>`。传递 `--namespace ""` 保持旧式名称不带前缀 |
+| `--base-dir` | `~/.pgcli` | 所有数据路径的基础目录（实例数据、插件配置、备份） |
+| `--backup-dir` | *（在 `--base-dir` 下）* | 备份数据/日志的独立基础目录。覆盖 `--base-dir` 设置的备份路径 |
 | `--pg-start-port` | `35432` | 分配范围中的第一个 PG 主机端口 |
 | `--pg-ssh-port` | `42201` | 分配范围中的第一个 SSH 主机端口 |
 
-所有三个都保存到配置文件中（`namespace`、`pg_start_port`、`pg_ssh_port`）；跨配置使用不重叠的端口范围，这样分配永远不会冲突。
+所有都保存到配置文件中（`namespace`、`pg_start_port`、`pg_ssh_port`）；跨配置使用不重叠的端口范围，这样分配永远不会冲突。

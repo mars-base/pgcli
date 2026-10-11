@@ -92,7 +92,14 @@ Init generates a default config; `--add` creates a named instance in the same fi
 ```bash
 pg config init --add default --base-dir /data/pg
 pg config init --add proj01 --base-dir /data/pg -o ./my-pg.yaml
+
+# Separate data and backup onto different disks
+pg config init --base-dir /data/pg --backup-dir /mnt/backup/pg --add default
 ```
+
+`--backup-dir` puts backup data and logs on a different path from instance data.
+This is the typical production setup: PG data on one disk, backups on another,
+so a data-disk failure does not cascade into backup loss.
 
 Isolation parameters for running multiple configs on one host (see [Quick Start](quickstart.md) for planning):
 
@@ -103,7 +110,9 @@ pg config init --namespace t1 --pg-start-port 38000 --pg-ssh-port 43000 --add pr
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
 | `--namespace` | `default` | Prefix for container names: `pgcli-pg-<namespace>-<instance>`, backup container `pgcli-backup-<namespace>`. Pass `--namespace ""` to keep legacy names without a prefix |
+| `--base-dir` | `~/.pgcli` | Base directory for all data paths (instance data, addon config, backup) |
+| `--backup-dir` | *(under `--base-dir`)* | Separate base directory for backup data/log. Overrides the backup path set by `--base-dir` |
 | `--pg-start-port` | `35432` | First PG host port in the allocation range |
 | `--pg-ssh-port` | `42201` | First SSH host port in the allocation range |
 
-All three are saved into the config file (`namespace`, `pg_start_port`, `pg_ssh_port`); use disjoint port ranges across configs so allocations never collide.
+All saved into the config file (`namespace`, `pg_start_port`, `pg_ssh_port`); use disjoint port ranges across configs so allocations never collide.

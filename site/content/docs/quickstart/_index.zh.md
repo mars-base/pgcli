@@ -35,12 +35,18 @@ mkdir -p ~/pg
 
 # 初始化配置并创建默认实例
 pg config init --add default --base-dir ~/pg
+
+# 将数据和备份分离到不同磁盘（生产环境推荐）
+pg config init --base-dir /data/pg --backup-dir /mnt/backup/pg --add default
 ```
 
 这会在 `~/.pgcli/pg.yaml` 创建带有合理默认值的配置，包括：
 - 名为 `default` 的默认实例
 - 数据目录 `~/pg/default`
 - 从 35432 开始自动分配的端口
+
+`--backup-dir` 可选但生产环境推荐：它将备份数据和日志放在与实例数据不同的
+路径上，防止数据盘故障连累备份丢失。
 
 ## 启动实例
 
@@ -112,8 +118,8 @@ pg start --all
 # 环境 "t1"：容器前缀 pgcli-pg-t1-*，PG 端口从 38000 开始
 pg config init -o ~/.pgcli-t1/pg.yaml --namespace t1 --pg-start-port 38000 --pg-ssh-port 43000 --add proj1
 
-# 环境 "t2"：不同的命名空间和端口
-pg config init -o ~/.pgcli-t2/pg.yaml --namespace t2 --pg-start-port 38100 --pg-ssh-port 43100 --add proj2
+# 环境 "t2"：不同的命名空间、端口，以及独立的备份磁盘
+pg config init -o ~/.pgcli-t2/pg.yaml --namespace t2 --base-dir /data/t2 --backup-dir /mnt/backup/t2 --pg-start-port 38100 --pg-ssh-port 43100 --add proj2
 
 # 使用 -c 管理各环境
 pg -c ~/.pgcli-t1/pg.yaml start -i proj1
@@ -123,6 +129,8 @@ pg -c ~/.pgcli-t2/pg.yaml list
 | 参数 | 默认值 | 含义 |
 |------|--------|------|
 | `--namespace` | `default` | 容器名称前缀：`pgcli-pg-<namespace>-<instance>` |
+| `--base-dir` | `~/.pgcli` | 所有数据路径的基础目录 |
+| `--backup-dir` | *（在 `--base-dir` 下）* | 备份数据/日志的独立基础目录 |
 | `--pg-start-port` | `35432` | 第一个 PG 主机端口；实例按顺序分配 |
 | `--pg-ssh-port` | `42201` | 第一个 SSH 主机端口；按顺序分配 |
 

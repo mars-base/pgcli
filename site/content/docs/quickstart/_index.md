@@ -35,12 +35,19 @@ mkdir -p ~/pg
 
 # Initialize config with a default instance
 pg config init --add default --base-dir ~/pg
+
+# Separate data and backup onto different disks (production recommended)
+pg config init --base-dir /data/pg --backup-dir /mnt/backup/pg --add default
 ```
 
 This creates `~/.pgcli/pg.yaml` with sensible defaults including:
 - A default instance named `default`
 - Data directory at `~/pg/default`
 - Auto-assigned ports starting from 35432
+
+The `--backup-dir` flag is optional but recommended for production: it puts
+backup data and logs on a separate path from instance data, so a data-disk
+failure does not cascade into backup loss.
 
 ## Start Instance
 
@@ -113,8 +120,8 @@ and **disjoint port ranges**.
 # Environment "t1": containers prefixed pgcli-pg-t1-*, PG ports from 38000
 pg config init -o ~/.pgcli-t1/pg.yaml --namespace t1 --pg-start-port 38000 --pg-ssh-port 43000 --add proj1
 
-# Environment "t2": different namespace and disjoint ports
-pg config init -o ~/.pgcli-t2/pg.yaml --namespace t2 --pg-start-port 38100 --pg-ssh-port 43100 --add proj2
+# Environment "t2": different namespace and disjoint ports, with separate backup disk
+pg config init -o ~/.pgcli-t2/pg.yaml --namespace t2 --base-dir /data/t2 --backup-dir /mnt/backup/t2 --pg-start-port 38100 --pg-ssh-port 43100 --add proj2
 
 # Manage each environment with -c
 pg -c ~/.pgcli-t1/pg.yaml start -i proj1
@@ -124,6 +131,8 @@ pg -c ~/.pgcli-t2/pg.yaml list
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
 | `--namespace` | `default` | Container name prefix: `pgcli-pg-<namespace>-<instance>` |
+| `--base-dir` | `~/.pgcli` | Base directory for all data paths |
+| `--backup-dir` | *(under `--base-dir`)* | Separate base directory for backup data/log |
 | `--pg-start-port` | `35432` | First PG host port; instances get sequential ports |
 | `--pg-ssh-port` | `42201` | First SSH host port; sequential from here |
 

@@ -17,6 +17,7 @@ var (
 	configJSON        bool
 	configAdd         string
 	configBaseDir     string
+	configBackupDir   string
 	configNamespace   string
 	configPGStartPort int
 	configPGSSHPort   int
@@ -31,6 +32,7 @@ func init() {
 	configShowCmd.Flags().BoolVar(&configJSON, "json", false, "output in JSON format")
 	configInitCmd.Flags().StringVar(&configAdd, "add", "", "add an instance with this name during init (default: no instances)")
 	configInitCmd.Flags().StringVar(&configBaseDir, "base-dir", "", "base directory for all data paths (default ~/.pgcli)")
+	configInitCmd.Flags().StringVar(&configBackupDir, "backup-dir", "", "separate base directory for backup data/log (default: <base-dir>/backup)")
 	configInitCmd.Flags().StringVar(&configNamespace, "namespace", "default", "namespace prefix for container names (isolates configs sharing one host; pass \"\" to disable)")
 	configInitCmd.Flags().IntVar(&configPGStartPort, "pg-start-port", 35432, "starting port for PG host port allocation")
 	configInitCmd.Flags().IntVar(&configPGSSHPort, "pg-ssh-port", 42201, "starting port for SSH host port allocation")
@@ -83,6 +85,7 @@ var configInitCmd = &cobra.Command{
 By default, instances start empty. Use --add to include a named instance template.
 Use --output / -o to specify a custom output path.
 Use --base-dir to set a custom base directory for all data paths (backup and db data).
+Use --backup-dir to put backup data/log on a separate disk from instance data.
 
 --namespace prefixes every container name with <namespace>- so multiple config
 files on the same host can manage isolated instances without name clashes
@@ -96,6 +99,7 @@ Examples:
   pg config init -o ./my-pg.yaml          # custom output path
   pg config init --add default                # add a "default" instance
   pg config init --base-dir /data/pg        # all data under /data/pg
+  pg config init --base-dir /data/pg --backup-dir /mnt/backup/pg  # data on one disk, backups on another
   pg config init -o ./pg.yaml --add myproj --base-dir /mnt/storage/pg
   pg config init --namespace t1 --pg-start-port 38000 --pg-ssh-port 43000 --add proj1` ,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -139,6 +143,25 @@ Examples:
 			cfg.Backup.LogDir = filepath.Join(configBaseDir, "backup", "log")
 		}
 
+		// Override backup paths if --backup-dir is provided (takes precedence over --base-dir).
+		if configBackupDir != "" {
+			if info, err := os.Stat(configBackupDir); err == nil {
+				if !info.IsDir() {
+					return fmt.Errorf("backup-dir %s exists but is not a directory", configBackupDir)
+				}
+				entries, err := os.ReadDir(configBackupDir)
+				if err == nil && len(entries) > 0 {
+					fmt.Printf("Warning: backup-dir %s already exists and is not empty.\n", configBackupDir)
+					fmt.Printf("pg will create subdirectories (backup/) alongside existing content.\n")
+					if !confirmPrompt("Continue? [y/N]: ") {
+						return fmt.Errorf("aborted by user")
+					}
+				}
+			}
+			cfg.Backup.DataDir = filepath.Join(configBackupDir, "backup", "data")
+			cfg.Backup.LogDir = filepath.Join(configBackupDir, "backup", "log")
+		}
+
 		if configAdd != "" {
 			inst := cfg.InstanceDefaults(configAdd)
 			password, err := generatePassword(16)
@@ -158,6 +181,9 @@ Examples:
 		fmt.Printf("[OK] config file generated: %s\n", path)
 		if configBaseDir != "" {
 			fmt.Printf("  base-dir:    %s\n", configBaseDir)
+		}
+		if configBackupDir != "" {
+			fmt.Printf("  backup-dir:  %s\n", configBackupDir)
 		}
 		fmt.Printf("  namespace:   %s\n", cfg.Namespace)
 		fmt.Printf("  pg-start-port: %d\n", cfg.PGStartPort)
