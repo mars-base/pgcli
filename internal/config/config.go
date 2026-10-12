@@ -34,6 +34,7 @@ type Config struct {
 	PredixyStartPort        int                       `yaml:"predixy_start_port,omitempty"`         // starting Predixy proxy listener host port, default 7617
 	PgAdminStartPort        int                       `yaml:"pgadmin_start_port,omitempty"`         // starting pgAdmin 4 web host port, default 5050
 	NginxStartPort          int                       `yaml:"nginx_start_port,omitempty"`           // starting nginx HTTP host port, default 8080 (HTTPS takes the next free port)
+	GarageStartPort         int                       `yaml:"garage_start_port,omitempty"`          // starting Garage S3 API host port, default 3900 (RPC, web, admin take the next three free ports)
 	Postgres                PostgresConfig            `yaml:"postgres"`
 	Podman                  PodmanConfig              `yaml:"podman"`
 	PITR                    PITRConfig                `yaml:"pitr"`
@@ -93,6 +94,7 @@ type TopAddonsConfig struct {
 	Minio     map[string]MinioConfig          `yaml:"minio,omitempty"`
 	Silo      map[string]SiloConfig           `yaml:"silo,omitempty"`
 	Rustfs    map[string]RustfsConfig         `yaml:"rustfs,omitempty"`
+	Garage    map[string]GarageConfig         `yaml:"garage,omitempty"`
 	Redis     map[string]RedisConfig          `yaml:"redis,omitempty"`
 	Predixy   map[string]PredixyConfig        `yaml:"predixy,omitempty"`
 	PgAdmin   map[string]PgAdminConfig        `yaml:"pgadmin,omitempty"`
@@ -494,6 +496,18 @@ const DefaultSiloImageTag = "docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z"
 // single source of truth that ApplyDefaults and the podman manager agree on.
 const DefaultRustfsImageTag = "ghcr.io/mars-base/pgcli/pgcli-rustfs:1.0.0"
 
+// DefaultGarageImageTag pins the public Garage image
+// (https://garagehq.deuxfleurs.fr) — a Rust, AGPLv3 S3-compatible object store
+// designed for small self-hosted and geo-distributed clusters. Unlike rustfs
+// (which needs a pgcli wrapper image to solve its fixed uid-10001 ownership
+// problem), Garage runs as root in its own container, so pgcli pulls the
+// upstream image directly — no wrapper, pull-only. The image is FROM scratch:
+// no shell, but /garage is both the daemon (`garage server`) and the control
+// CLI (`/garage key/bucket/layout ...`), so pgcli execs it for admin operations.
+// v2.4.1 is the current stable line; its config is a TOML file, not env, and it
+// serves plaintext HTTP with no native TLS (front it with nginx for HTTPS).
+const DefaultGarageImageTag = "docker.io/dxflrs/garage:v2.4.1"
+
 // DefaultMCImageTag is the public pre-built MinIO client (mc) image: the
 // static upstream binary on scratch with a CA bundle. `pg mc` runs it in a
 // throwaway container. Not a yaml field — mc is a client, not an addon — so
@@ -816,6 +830,70 @@ type RustfsConfig struct {
 	Autostart bool `yaml:"autostart,omitempty"`
 }
 
+// GarageConfig holds a standalone Garage addon — the Deuxfleurs S3-compatible
+// object store (https://garagehq.deuxfleurs.fr, AGPLv3), a Rust-native
+// alternative to the archived MinIO. Like rustfs it is a sibling manager rather
+// than a flag on MinioManager, and shares none of MinIO's runtime contract.
+// Four things diverge from the rustfs/minio/silo surface (see
+// internal/podman.GarageManager):
+//
+//  1. Config is a rendered TOML file (/etc/garage.toml), not env. pgcli writes
+//     it under the instance dir and bind-mounts it read-only.
+//  2. Two on-disk dirs, not one: MetadataDir (LMDB metadata — the small
+//     frequently-touched store) and DataDir (the data blocks). rustfs/minio/
+//     silo use a single DataDir.
+//  3. Four ports, not the object stores' API+console pair: S3 API, node-to-node
+//     RPC, the s3_web static-site endpoint, and the admin/metrics endpoint. They
+//     come from Garage's OWN pool (garage_start_port, default 3900) as four
+//     consecutive ports, not the shared minio_start_port cursor.
+//  4. No native TLS — Garage serves plaintext HTTP only. pgBackRest's S3 repo
+//     requires HTTPS, so front Garage with the nginx addon for TLS. Consequently
+//     there are no TLS/CertFile/KeyFile fields here (install rejects --tls).
+//
+// v1 is single-node only: ReplicationFactor is fixed at 1 and the container runs
+// `garage server --single-node`. Multi-node / cross-zone clusters are out of
+// scope (Endpoints/Drives have no Garage meaning here).
+//
+// Credentials differ in kind from the other stores: Garage uses access/secret
+// keys seeded via GARAGE_DEFAULT_ACCESS_KEY / GARAGE_DEFAULT_SECRET_KEY env plus
+// a single default bucket (--default-bucket) whose name is the instance name.
+// RootUser/RootPassword keep the CLI-uniform names but map to those keys (the
+// access key carries Garage's "GK-" prefix).
+type GarageConfig struct {
+	ContainerName string `yaml:"container_name"`      // pgcli-garage<ns>-<name>
+	Name          string `yaml:"name,omitempty"`      // addon key, defaults to the map key
+	ImageTag      string `yaml:"image_tag,omitempty"` // docker.io/dxflrs/garage:... (default)
+
+	// MetadataDir and DataDir are the two host dirs Garage needs, bound to the
+	// config's metadata_dir/data_dir. Defaults: <base>/addon/garage/<name>/{meta,data}.
+	MetadataDir string `yaml:"metadata_dir,omitempty"`
+	DataDir     string `yaml:"data_dir,omitempty"`
+
+	ConfigFile string `yaml:"config_file,omitempty"` // host path of the rendered garage.toml; default <base>/addon/garage/<name>/garage.toml
+
+	Listen    string `yaml:"listen,omitempty"`  // bind address, default 127.0.0.1
+	APIPort   int    `yaml:"api_port,omitempty"`     // S3 API host port, from garage_start_pool
+	RPCPort   int    `yaml:"rpc_port,omitempty"`     // node-to-node RPC host port (loopback in single-node)
+	WebPort   int    `yaml:"web_port,omitempty"`     // s3_web static-site host port
+	AdminPort int    `yaml:"admin_port,omitempty"`   // admin API + metrics host port
+
+	RootUser     string `yaml:"root_user,omitempty"`     // → GARAGE_DEFAULT_ACCESS_KEY (GK-prefixed)
+	RootPassword string `yaml:"root_password,omitempty"` // → GARAGE_DEFAULT_SECRET_KEY, generated on first install
+
+	// RPCSecret is the 32-byte hex cluster secret (garage.toml rpc_secret).
+	// Fixed per instance and persisted so restarts keep the same identity;
+	// generated once at install (equivalent of `openssl rand -hex 32`).
+	RPCSecret string `yaml:"rpc_secret,omitempty"`
+
+	Region            string `yaml:"region,omitempty"`               // s3_region, default "garage"
+	ReplicationFactor int    `yaml:"replication_factor,omitempty"`   // v1 fixed 1 (single-node)
+
+	// Autostart brings this container up on host boot via the boot service
+	// (pg autostart enable --garage). Start-only: it starts the existing
+	// container, so install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
 // RedisConfig holds a standalone Redis addon: a KV store for cache, session,
 // ranking and atomic-counter data, run as its own container off the upstream
 // docker.io/library/redis image (no wrapper build — Redis runs fine as root
@@ -1115,6 +1193,7 @@ func Default() *Config {
 		PredixyStartPort:        7617,
 		PgAdminStartPort:        5050,
 		NginxStartPort:          8080,
+		GarageStartPort:         3900,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -1317,6 +1396,7 @@ type displayConfig struct {
 	PredixyStartPort        int                       `yaml:"predixy_start_port,omitempty"`
 	PgAdminStartPort        int                       `yaml:"pgadmin_start_port,omitempty"`
 	NginxStartPort          int                       `yaml:"nginx_start_port,omitempty"`
+	GarageStartPort         int                       `yaml:"garage_start_port,omitempty"`
 	Logging                 LoggingConfig             `yaml:"logging"`
 	Backup                  BackupConfig              `yaml:"backup"`
 	Pigsty                  PigstyConfig              `yaml:"pigsty"`
@@ -1344,6 +1424,7 @@ func (c *Config) Display() displayConfig {
 		PredixyStartPort:        c.PredixyStartPort,
 		PgAdminStartPort:        c.PgAdminStartPort,
 		NginxStartPort:          c.NginxStartPort,
+		GarageStartPort:         c.GarageStartPort,
 		Logging:                 c.Logging,
 		Backup:                  c.Backup,
 		Pigsty:                  c.Pigsty,
@@ -1444,6 +1525,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.NginxStartPort == 0 {
 		c.NginxStartPort = d.NginxStartPort
+	}
+	if c.GarageStartPort == 0 {
+		c.GarageStartPort = d.GarageStartPort
 	}
 
 	// Postgres
@@ -1842,6 +1926,36 @@ func (c *Config) ApplyDefaults() {
 			addon.RootUser = "admin"
 		}
 		c.Addons.Rustfs[name] = addon
+	}
+
+	// Top-level addons defaults (Garage). Same shape as the rustfs block; the
+	// two data dirs and the config file are left empty for the manager to
+	// resolve under the base dir at container-creation time. RootUser/
+	// RootPassword are NOT defaulted here: Garage access keys must carry the
+	// "GK-" prefix and the secret is generated once, so the install handler
+	// generates both (a hand-written config without them just means "generate
+	// on next install", same as rustfs's password). Region and
+	// ReplicationFactor carry Garage-specific defaults.
+	for name, addon := range c.Addons.Garage {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-garage" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultGarageImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "127.0.0.1"
+		}
+		if addon.Region == "" {
+			addon.Region = "garage"
+		}
+		if addon.ReplicationFactor == 0 {
+			addon.ReplicationFactor = 1
+		}
+		c.Addons.Garage[name] = addon
 	}
 
 	// Top-level addons defaults (Redis). Version is the source of truth for the
@@ -2548,6 +2662,57 @@ func (c *Config) autoAssignPorts() {
 				next = addon.HTTPSPort + 1
 			}
 			c.Addons.Nginx[name] = addon
+		}
+	}
+
+	// Allocate ports for Garage addons from their own pool (garage_start_port,
+	// default 3900 — Garage's upstream defaults). Unlike minio/silo/rustfs,
+	// which take an API+console pair from the shared minio_start_port cursor,
+	// each Garage instance takes FOUR consecutive ports: the S3 API, the node-
+	// to-node RPC, the s3_web static-site endpoint, and the admin/metrics
+	// endpoint. They are allocated together per instance so one instance's four
+	// never overlap another's or the cursor's. Garage is a distinct role (its own
+	// store on its own default base port), so it does not share the minio cursor.
+	{
+		garageBase := c.GarageStartPort
+		assignedGarage := map[int]bool{}
+		for _, addon := range c.Addons.Garage {
+			for _, p := range []int{addon.APIPort, addon.RPCPort, addon.WebPort, addon.AdminPort} {
+				if p != 0 {
+					assignedGarage[p] = true
+				}
+			}
+		}
+		next := garageBase
+		nextFreeGarage := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedGarage[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		assignGarage := func(port *int) {
+			if *port == 0 && garageBase > 0 {
+				*port = nextFreeGarage()
+			} else if *port >= next {
+				next = *port + 1
+			}
+		}
+		names := make([]string, 0, len(c.Addons.Garage))
+		for name := range c.Addons.Garage {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.Garage[name]
+			// API first, then RPC/Web/Admin, so an instance's four land
+			// consecutively from the cursor.
+			assignGarage(&addon.APIPort)
+			assignGarage(&addon.RPCPort)
+			assignGarage(&addon.WebPort)
+			assignGarage(&addon.AdminPort)
+			c.Addons.Garage[name] = addon
 		}
 	}
 }

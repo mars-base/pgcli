@@ -61,6 +61,17 @@ Infra addons (shared, not tied to one instance):
           ownership. Three topologies — SNSD / SNMD / MNMD — but
           no multi-node single-drive mode, and every drive must sit on its own
           physical device.
+  pg addon install garage
+          Stored under top-level addons.garage in config (Linux and macOS).
+          Garage (garagehq.deuxfleurs.fr) — a Rust, AGPLv3 S3-compatible object
+          store, run from the upstream docker.io/dxflrs/garage image (no wrapper;
+          it runs as root in the container). pgcli manages it single-node only
+          (replication_factor=1). It configures itself from a rendered
+          garage.toml (not env), needs two dirs (a data dir and a sibling
+          metadata dir), opens four ports from their own pool (API/RPC/Web/
+          Admin, default base 3900), and serves plaintext HTTP — no native TLS,
+          so front it with the nginx addon for an HTTPS S3 endpoint that
+          pgBackRest will accept.
   pg addon install redis
           Stored under top-level addons.redis in config (Linux and macOS).
           A standalone Redis (KV store for cache, session, ranking and
@@ -122,6 +133,7 @@ Currently supported add-ons:
   minio       single-node S3-compatible object storage (web console included; Linux host network, macOS bridge)
   silo        MinIO's Pigsty fork — same S3 object storage, from the public docker.io/pgsty/silo image (console + mcli client bundled; Linux host network, macOS bridge)
   rustfs      Rust S3-compatible object storage from pgcli's wrapper image, ghcr.io/mars-base/pgcli/pgcli-rustfs (console included; Linux only; the fixed upstream uid 10001 is handled inside the container, three topologies SNSD/SNMD/MNMD, each drive on its own physical device)
+  garage      Garage (garagehq.deuxfleurs.fr) — Rust S3-compatible object store from the upstream docker.io/dxflrs/garage image, single-node only in pgcli (v1); plaintext HTTP with no native TLS (front with the nginx addon for HTTPS/pgBackRest), four ports from garage_start_port (default 3900), one seeded access key + one default bucket
   redis       standalone KV store (cache/session/ranking/counters) from the plain upstream docker.io/library/redis image; --version 7|8 selects the major, requirepass auto-generated, RDB persistence, read replicas via --replica-of (no automatic failover), native cluster masters via --cluster (assemble once with "pg redis-cli -- --cluster create")
   predixy     Redis protocol proxy fronting a native redis cluster as one plain redis:// endpoint (clients need no -c / MOVED handling; --backend lists the full node set, --password reuses the cluster's requirepass; Linux only)
   postgrest   stateless REST API in front of a PostgreSQL schema (single container; Linux host network, macOS bridge)
@@ -151,13 +163,17 @@ Infra addon (haproxy — TCP load balancer in front of a Patroni cluster, Linux 
 
 Infra addon (minio — single-node S3-compatible object storage, Linux and macOS;
             silo — its Pigsty fork, identical flags, same shared port pool;
-            rustfs — a Rust S3 store, Linux only, same shared port pool):
+            rustfs — a Rust S3 store, Linux only, same shared port pool;
+            garage — a Rust S3 store (garagehq.deuxfleurs.fr), single-node, its
+            OWN port pool (garage_start_port, four ports) and NO native TLS):
   pg addon install minio [--name store] [--api-port N] [--console-port N]
                          [--listen 127.0.0.1] [--root-user admin] [--data-dir ...] [--force]
   pg addon install silo  [--name store] [--api-port N] [--console-port N]
                          [--listen 127.0.0.1] [--root-user admin] [--data-dir ...] [--force]
   pg addon install rustfs [--name store] [--api-port N] [--console-port N]
                          [--listen 127.0.0.1] [--root-user admin] [--data-dir ...] [--force]
+  pg addon install garage [--name store] [--api-port N]
+                         [--listen 127.0.0.1] [--data-dir ...] [--force]
   Root credentials are generated on first install, printed once for the record,
   and stored in the config (root_user / root_password under
   addons.minio.<name> / addons.silo.<name> / addons.rustfs.<name>);
@@ -171,6 +187,14 @@ Infra addon (minio — single-node S3-compatible object storage, Linux and macOS
   has NO multi-node single-drive mode. It runs as uid 10001, so pgcli chowns
   its data and TLS dirs for that user (directly as root, or via "podman
   unshare chown" under a rootless setup).
+
+  garage diverges from the other three stores: single-node only (v1), a rendered
+  garage.toml (not env), TWO dirs (data + a sibling metadata dir), FOUR ports from
+  its own garage_start_port pool (API/RPC/Web/Admin, default base 3900), and NO
+  native TLS — it serves plaintext HTTP and pgBackRest refuses that, so front it
+  with the nginx addon for HTTPS. Credentials are a seeded access key (auto GK-
+  prefixed) + secret key, plus one default bucket named after the instance. Pass
+  --tls to it and you get an error pointing at the nginx recipe.
 
 Infra addon (redis — standalone KV store for cache/session/ranking/counters,
 Linux and macOS; the first version-selectable addon):
@@ -302,6 +326,7 @@ Examples:
   pg addon install silo --name store --tls
   pg addon install rustfs --name store --tls
   pg addon install rustfs --name store --drive /mnt/rustfs/d0 --drive /mnt/rustfs/d1 --drive /mnt/rustfs/d2 --drive /mnt/rustfs/d3 --tls
+  pg addon install garage --name store            # single-node, plaintext HTTP; front with nginx for TLS
   pg addon install redis
   pg addon install redis --name cache --version 7 --maxmemory 256mb
   pg addon install redis --name session --listen 127.0.0.1
@@ -348,11 +373,11 @@ pg.yaml.`,
 // shaped for $(...) capture in scripts.
 var addonPasswordCmd = &cobra.Command{
 	Use:   "password <addon>",
-	Short: "Print an add-on's stored password (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs root password, pgAdmin web login password)",
+	Short: "Print an add-on's stored password (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage key secret, pgAdmin web login password)",
 	Long: `Print the password stored for one add-on instance: the Redis
 requirepass (generated by pgcli), the Predixy proxy password (the
 operator-supplied copy of the proxied cluster's requirepass), the
-MinIO/silo/rustfs root password (the access-key secret — pair it with the
+MinIO/silo/rustfs root password or garage secret key (the access-key secret — pair it with the
 instance's Root user from "pg addon list"), or the pgAdmin web login
 password (the PGADMIN_DEFAULT_PASSWORD generated for the UI's sign-in form
 — not a PostgreSQL password).
@@ -385,7 +410,7 @@ var addonRemoveCmd = &cobra.Command{
 For local add-ons, use -i to specify the instance.
 For remote add-ons, use --pg-name to specify the pooler name.
 
-Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/redis/predixy/pgadmin) use --name.
+Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/garage/redis/predixy/pgadmin) use --name.
 Remove keeps the data directory; pass --clean-data for object-storage/KV/pgAdmin
 data to go too.
 
@@ -423,6 +448,7 @@ Supported add-ons:
   minio      pg addon start minio [--name store]
   silo       pg addon start silo [--name store]
   rustfs     pg addon start rustfs [--name store]
+  garage     pg addon start garage [--name store]
   redis      pg addon start redis [--name cache]
   predixy    pg addon start predixy [--name proxy]
   pgadmin    pg addon start pgadmin [--name pgadmin]
@@ -439,6 +465,7 @@ Examples:
   pg addon start minio --name store
   pg addon start silo --name store
   pg addon start rustfs --name store
+  pg addon start garage --name store
   pg addon start redis --name cache
   pg addon start predixy --name proxy
   pg addon start pgadmin
@@ -464,6 +491,7 @@ Supported add-ons:
   minio      pg addon stop minio [--name store]
   silo       pg addon stop silo [--name store]
   rustfs     pg addon stop rustfs [--name store]
+  garage     pg addon stop garage [--name store]
   redis      pg addon stop redis [--name cache]
   predixy    pg addon stop predixy [--name proxy]
   pgadmin    pg addon stop pgadmin [--name pgadmin]
@@ -480,6 +508,7 @@ Examples:
   pg addon stop minio --name store
   pg addon stop silo --name store
   pg addon stop rustfs --name store
+  pg addon stop garage --name store
   pg addon stop redis --name cache
   pg addon stop predixy --name proxy
   pg addon stop pgadmin
@@ -540,17 +569,17 @@ func init() {
 	addonRemoveCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to remove")
 
 	// etcd flags (top-level shared-infrastructure addon)
-	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo, rustfs, redis, predixy or pgadmin instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\"/\"redis\"/\"predixy\"/\"pgadmin\")")
+	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo, rustfs, garage, redis, predixy or pgadmin instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"redis\"/\"predixy\"/\"pgadmin\")")
 	addonInstallCmd.Flags().Int("client-port", 0, "etcd client host port (0=auto-assign from etcd_start_port)")
 	addonInstallCmd.Flags().Int("peer-port", 0, "etcd peer host port (0=auto-assign, next free port after client)")
 	addonInstallCmd.Flags().String("image", "", "override the addon image tag verbatim (etcd default quay.io/coreos/etcd:v3.5.30; redis default resolved from --version, e.g. docker.io/library/redis:8.10.2; predixy default ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine; pgadmin default docker.io/dpage/pgadmin4:9.18)")
 	addonInstallCmd.Flags().String("cluster", "", "cluster grouping token: etcd --initial-cluster-token (default \"pgcli-etcd\"); redis native-cluster name (--cluster-enabled yes, members sharing it form one cluster you assemble once with `pg redis-cli -- --cluster create ...`)")
 	addonInstallCmd.Flags().Int("cluster-replicas", 0, "redis native-cluster only: per-master replica count for the --cluster create you will run (default 0 = masters-only). Only shapes the suggested assemble command and node-count guidance — which nodes become followers is decided by Redis at create time, not here; the whole group inherits the first member's value")
-	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs, redis or pgAdmin instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data; pgadmin default <base_dir>/addon/pgadmin/<name>/data)")
+	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs, garage, redis or pgAdmin instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; garage default <base_dir>/addon/garage/<name>/data (its metadata dir is a sibling .../meta); redis default <base_dir>/addon/redis/<name>/data; pgadmin default <base_dir>/addon/pgadmin/<name>/data)")
 	addonInstallCmd.Flags().String("advertise-host", "", "peer-visible host: etcd member peer/client URLs, and redis native-cluster --cluster-announce-ip (empty=127.0.0.1 single-host; set a LAN IP or FQDN for cross-host clusters)")
 	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.0.0.12:2379 (implies --initial-cluster-state existing; requires --advertise-host)")
-	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, redis, predixy or pgadmin instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"redis\"/\"predixy\"/\"pgadmin\")")
-	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/redis/pgAdmin data directory (object storage / backup repository / key-value data / pgAdmin config+sessions DB); no-op for predixy, which is stateless")
+	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, redis, predixy or pgadmin instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"redis\"/\"predixy\"/\"pgadmin\")")
+	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/garage/redis/pgAdmin data directory (object storage / backup repository / key-value data / pgAdmin config+sessions DB); no-op for predixy, which is stateless")
 
 	// haproxy flags (top-level load balancer in front of a Patroni cluster)
 	addonInstallCmd.Flags().String("mode", "", "HAProxy routing mode: unified (default, all traffic to the leader) or split (separate read listener for replicas)")
@@ -569,17 +598,17 @@ func init() {
 	addonInstallCmd.Flags().String("conf-file", "", "path to a custom nginx.conf file (mutually exclusive with --upstream; pgcli manages container lifecycle only, you control the full nginx config)")
 
 	// minio flags (top-level single-node S3-compatible object storage)
-	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo/rustfs S3 API host port (0=auto-assign from the shared minio_start_port pool)")
+	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo/rustfs S3 API host port (0=auto-assign from the shared minio_start_port pool); for garage, the S3 API port (0=auto from garage_start_port, default 3900 — garage takes four consecutive ports API/RPC/Web/Admin)")
 	addonInstallCmd.Flags().Int("console-port", 0, "MinIO/silo/rustfs web console host port (0=auto-assign, next free port)")
-	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo or rustfs server / PostgREST HTTP server / pgAdmin web server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network) — Redis and Predixy default to \"0.0.0.0\" instead, since their password is always required; pass 127.0.0.1 to keep them loopback-only")
-	addonInstallCmd.Flags().String("root-user", "", "MinIO/silo/rustfs root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config)")
-	addonInstallCmd.Flags().String("root-password", "", "MinIO/silo/rustfs root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand)")
+	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo, rustfs or garage server / PostgREST HTTP server / pgAdmin web server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network) — Redis and Predixy default to \"0.0.0.0\" instead, since their password is always required; pass 127.0.0.1 to keep them loopback-only")
+	addonInstallCmd.Flags().String("root-user", "", "MinIO/silo/rustfs root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config). For garage this is the seeded access key: omit it to auto-generate a GK-prefixed key (garage has no \"admin\" user)")
+	addonInstallCmd.Flags().String("root-password", "", "MinIO/silo/rustfs root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand). For garage this is the seeded secret key")
 	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO/silo/rustfs distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (MinIO/silo: path is the in-container export dir — /data with a plain --data-dir node, or /data1../dataN on a --drive node (MNMD); repeat for every node's every drive. rustfs: one endpoint per node — scheme://host:port, no path; it has no multi-node single-drive mode so --drive is required, and it derives the /data/rustfs0../rustfsN suffix itself. The list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
 	addonInstallCmd.Flags().StringSlice("drive", nil, "MinIO/silo/rustfs multi-drive host dir(s), each on its own disk — e.g. --drive /mnt/minio/disk1 --drive /mnt/minio/disk2 ... (repeat for each drive; alone this is single-node multi-drive (SNMD); combined with --endpoint it is one node of a multi-node multi-drive cluster (MNMD), and each endpoint addresses this node's drive slots (/data1../dataN for MinIO/silo, /data/rustfs0../rustfsN for rustfs). Mutually exclusive with --data-dir. MinIO/silo reject a drive sharing the root device; rustfs hard-requires every drive on its own physical device)")
-	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo/rustfs: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo|rustfs>/<name>/; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Changing this needs --force to recreate")
+	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo/rustfs: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo|rustfs>/<name>/; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Changing this needs --force to recreate. NOT for garage: it has no native TLS (rejects --tls); front it with the nginx addon")
 	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo/rustfs: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt for MinIO/silo, rustfs_cert.pem for rustfs). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
 	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo/rustfs: private key for --tls-cert (PEM; mounted read-only as private.key for MinIO/silo, rustfs_key.pem for rustfs). Must pair with the cert; both are required to enable BYO TLS")
-	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/redis/predixy/PostgREST/pgAdmin container even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, or a changed pgAdmin --email/--dsn/--pg-name seed)")
+	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/redis/predixy/PostgREST/pgAdmin container even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, or a changed pgAdmin --email/--dsn/--pg-name seed)")
 
 	// redis flags (top-level standalone KV store — the first version-selectable addon)
 	addonInstallCmd.Flags().String("version", "", "Redis major version to install: 7 or 8 (default \"8\"); each maps to a pinned upstream docker.io/library/redis tag. Ignored for every other addon")
@@ -595,14 +624,14 @@ func init() {
 	addonInstallCmd.Flags().Int("replica-of-port", 0, "Redis: remote master's port, paired with --replica-of-host")
 
 	// start / stop flags
-	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, redis, predixy or pgadmin instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"redis\"/\"predixy\"/\"pgadmin\")")
+	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, redis, predixy or pgadmin instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"redis\"/\"predixy\"/\"pgadmin\")")
 	addonStartCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to start")
-	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, redis, predixy or pgadmin instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"redis\"/\"predixy\"/\"pgadmin\")")
+	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, redis, predixy or pgadmin instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"redis\"/\"predixy\"/\"pgadmin\")")
 	addonStopCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to stop")
 
 	// list / password flags
-	addonListCmd.Flags().Bool("show-password", false, "also print stored credentials (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs root password, pgAdmin web login password) — off by default so the listing stays paste-safe")
-	addonPasswordCmd.Flags().String("name", "", "instance to reveal (redis/predixy/minio/silo/rustfs/pgadmin; default \"redis\"/\"predixy\"/\"minio\"/\"silo\"/\"rustfs\"/\"pgadmin\")")
+	addonListCmd.Flags().Bool("show-password", false, "also print stored credentials (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage key secret, pgAdmin web login password) — off by default so the listing stays paste-safe")
+	addonPasswordCmd.Flags().String("name", "", "instance to reveal (redis/predixy/minio/silo/rustfs/garage/pgadmin; default \"redis\"/\"predixy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"pgadmin\")")
 	addonPasswordCmd.Flags().String("file", "", "write the password to this file (mode 0600) instead of stdout, keeping it out of shell history and scrollback")
 
 	// pgdog flags (top-level shared Postgres proxy addon)
@@ -639,6 +668,8 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallSilo(cmd)
 	case "rustfs":
 		return runAddonInstallRustfs(cmd)
+	case "garage":
+		return runAddonInstallGarage(cmd)
 	case "redis":
 		return runAddonInstallRedis(cmd)
 	case "predixy":
@@ -652,7 +683,7 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, predixy, postgrest, pgadmin, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, redis, predixy, postgrest, pgadmin, nginx)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -4274,6 +4305,49 @@ func runAddonList(showPassword bool) error {
 		fmt.Println("  (none)")
 	}
 
+	// garage (S3-compatible object storage — fourth store addon; single-node)
+	fmt.Println()
+	fmt.Println("Infra add-ons (garage):")
+	hasGarage := false
+	if gm, err := podman.NewGarageManager(cfg); err == nil {
+		for name, gc := range cfg.Addons.Garage {
+			hasGarage = true
+			status := "stopped"
+			if running, err := gm.ContainerRunning(gc.ContainerName); err == nil && running {
+				status = "running"
+			}
+			fmt.Printf("  %s (name: %s)\n", "garage", name)
+			fmt.Printf("    Status:      %s\n", status)
+			fmt.Printf("    Listen:      %s\n", gc.Listen)
+			fmt.Printf("    API port:    %d\n", gc.APIPort)
+			fmt.Printf("    RPC/Web/Admin: %d/%d/%d\n", gc.RPCPort, gc.WebPort, gc.AdminPort)
+			fmt.Printf("    S3 URL:      http://%s:%d\n", gc.Listen, gc.APIPort)
+			fmt.Printf("    Data:        %s\n", gm.DataDir(&gc))
+			fmt.Printf("    Metadata:    %s\n", gm.MetadataDir(&gc))
+			fmt.Printf("    Access key:  %s\n", gc.RootUser)
+			if showPassword && gc.RootPassword != "" {
+				fmt.Printf("    Secret key:  %s\n", gc.RootPassword)
+			}
+			fmt.Printf("    Bucket:      %s\n", gc.Name)
+			fmt.Printf("    Image:       %s\n", gc.ImageTag)
+			fmt.Printf("    Container:   %s\n", gc.ContainerName)
+			fmt.Printf("    NOTE:        plaintext HTTP only — front with the nginx addon for TLS\n")
+		}
+	} else if len(cfg.Addons.Garage) > 0 {
+		// Configured but the manager is unavailable (macOS/arm): still show them.
+		for name, gc := range cfg.Addons.Garage {
+			hasGarage = true
+			fmt.Printf("  %s (name: %s)\n", "garage", name)
+			fmt.Printf("    Status:      n/a (%v)\n", err)
+			fmt.Printf("    Listen:      %s\n", gc.Listen)
+			fmt.Printf("    API port:    %d\n", gc.APIPort)
+			fmt.Printf("    Container:   %s\n", gc.ContainerName)
+		}
+	}
+	if !hasGarage {
+		fmt.Println("  (none)")
+	}
+
 	// redis (standalone KV store — cache/session/ranking/counters)
 	fmt.Println()
 	fmt.Println("Infra add-ons (redis):")
@@ -4509,6 +4583,9 @@ func addonPasswords(cfg *config.Config) map[string]string {
 	for name, rc := range cfg.Addons.Rustfs {
 		out["rustfs:"+name] = rc.RootPassword
 	}
+	for name, gc := range cfg.Addons.Garage {
+		out["garage:"+name] = gc.RootPassword
+	}
 	for name, ac := range cfg.Addons.PgAdmin {
 		out["pgadmin:"+name] = ac.Password
 	}
@@ -4580,6 +4657,8 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemoveSilo(cmd)
 	case "rustfs":
 		return runAddonRemoveRustfs(cmd)
+	case "garage":
+		return runAddonRemoveGarage(cmd)
 	case "redis":
 		return runAddonRemoveRedis(cmd)
 	case "predixy":
@@ -4593,7 +4672,7 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, predixy, postgrest, pgadmin, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, redis, predixy, postgrest, pgadmin, nginx)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -4882,6 +4961,8 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartSilo(cmd)
 	case "rustfs":
 		return runAddonStartRustfs(cmd)
+	case "garage":
+		return runAddonStartGarage(cmd)
 	case "redis":
 		return runAddonStartRedis(cmd)
 	case "predixy":
@@ -4895,7 +4976,7 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 	case "nginx":
 		return runAddonStartNginx(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, predixy, postgrest, pgadmin, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, redis, predixy, postgrest, pgadmin, nginx)", addonName)
 	}
 }
 
@@ -4913,6 +4994,8 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopSilo(cmd)
 	case "rustfs":
 		return runAddonStopRustfs(cmd)
+	case "garage":
+		return runAddonStopGarage(cmd)
 	case "redis":
 		return runAddonStopRedis(cmd)
 	case "predixy":
@@ -4926,7 +5009,7 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 	case "nginx":
 		return runAddonStopNginx(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, redis, predixy, postgrest, pgadmin, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, redis, predixy, postgrest, pgadmin, nginx)", addonName)
 	}
 }
 

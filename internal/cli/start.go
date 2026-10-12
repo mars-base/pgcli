@@ -75,8 +75,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartNginx(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --redis / --predixy / --pgadmin / --nginx)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartNginx(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --redis / --predixy / --pgadmin / --nginx)")
 		return nil
 	}
 
@@ -166,6 +166,12 @@ func startAutostart() error {
 	// rustfs instances (top-level infra addon, a Rust S3 store). Same position
 	// as minio/silo: independent of the PostgreSQL stack, a backup repo.
 	if err := startAutostartRustfs(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// garage instances (top-level infra addon, a Rust S3 store). Same position
+	// as minio/silo/rustfs: independent of the PostgreSQL stack, a backup repo.
+	if err := startAutostartGarage(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -594,6 +600,51 @@ func startAutostartRustfs(c *config.Config) error {
 		rc := c.Addons.Rustfs[name]
 		if err := rm.StartContainer(&rc); err != nil {
 			fmt.Printf("  [X] rustfs autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartGarage reports whether any garage instance is autostart-enabled.
+func hasAutostartGarage(c *config.Config) bool {
+	for _, gc := range c.Addons.Garage {
+		if gc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartGarage starts each autostart-enabled garage instance. Start-only
+// semantics like the other object-store autostarts: StartContainer recreates
+// from the config if the container was removed, re-rendering garage.toml; the
+// seeded access key and bucket live in metadata_dir and survive that. Garage
+// runs as root in the upstream image, so the boot-time start needs no special
+// host privileges beyond running podman itself.
+func startAutostartGarage(c *config.Config) error {
+	var names []string
+	for name, gc := range c.Addons.Garage {
+		if gc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	gm, err := podman.NewGarageManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		gc := c.Addons.Garage[name]
+		if err := gm.StartContainer(&gc); err != nil {
+			fmt.Printf("  [X] garage autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}

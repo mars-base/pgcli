@@ -6,11 +6,11 @@ import (
 	"github.com/mars-base/pgcli/internal/config"
 )
 
-// addonPasswords indexes the five addons that carry a stored password; the key
+// addonPasswords indexes the six addons that carry a stored password; the key
 // "<addon>:<name>" is what `pg addon password` resolves against, so a wrong key
-// shape is a silent not-found for the user. Four of the five are pgcli-generated
-// (redis/minio/silo/rustfs); predixy's is the operator-supplied copy of the
-// proxied cluster's requirepass, but it's still what the proxy authenticates
+// shape is a silent not-found for the user. Five of the six are pgcli-generated
+// (redis/minio/silo/rustfs/garage); predixy's is the operator-supplied copy of
+// the proxied cluster's requirepass, but it's still what the proxy authenticates
 // clients with, so it belongs in the same index.
 func passwordCfg() *config.Config {
 	cfg := config.Default()
@@ -29,6 +29,9 @@ func passwordCfg() *config.Config {
 	cfg.Addons.Rustfs = map[string]config.RustfsConfig{
 		"store": {Name: "store", RootUser: "admin", RootPassword: "pw-rustfs"},
 	}
+	cfg.Addons.Garage = map[string]config.GarageConfig{
+		"store": {Name: "store", RootUser: "GKabc", RootPassword: "pw-garage"},
+	}
 	return cfg
 }
 
@@ -40,6 +43,7 @@ func TestAddonPasswordsKeysAndSecrets(t *testing.T) {
 		"minio:store":   "pw-minio",
 		"silo:store":    "pw-silo",
 		"rustfs:store":  "pw-rustfs",
+		"garage:store":  "pw-garage",
 	}
 	for key, want := range cases {
 		got, ok := all[key]

@@ -25,13 +25,14 @@ func init() {
 		c.Flags().Bool("postgrest", false, "select the PostgREST addon (use with -i for a local one, --pg-name for a remote one)")
 		c.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST (top-level addons)")
 		c.Flags().Bool("etcd", false, "select an etcd member (top-level addons)")
-		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, redis, predixy or pgadmin instance, or Patroni member")
+		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage, redis, predixy or pgadmin instance, or Patroni member")
 		c.Flags().Bool("pgdog", false, "select a PgDog proxy (top-level addons)")
 		c.Flags().Bool("ha", false, "select Patroni HA members (top-level addons; requires --scope)")
 		c.Flags().Bool("haproxy", false, "select an HAProxy instance (top-level addons)")
 		c.Flags().Bool("minio", false, "select a MinIO instance (top-level addons)")
 		c.Flags().Bool("silo", false, "select a silo instance (top-level addons)")
 		c.Flags().Bool("rustfs", false, "select a rustfs instance (top-level addons)")
+		c.Flags().Bool("garage", false, "select a garage instance (top-level addons)")
 		c.Flags().Bool("redis", false, "select a redis instance (top-level addons)")
 		c.Flags().Bool("predixy", false, "select a predixy proxy instance (top-level addons)")
 		c.Flags().Bool("pgadmin", false, "select a pgAdmin instance (top-level addons)")
@@ -53,7 +54,7 @@ Use 'pg autostart disable' to opt out.`,
 
 var autostartEnableCmd = &cobra.Command{
 	Use:   "enable",
-	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/redis/predixy/pgadmin instance, or a Patroni member",
+	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/garage/redis/predixy/pgadmin instance, or a Patroni member",
 	Long: `Enable auto-start on boot for exactly one target:
 
   pg autostart enable -i myinst          # instance
@@ -68,6 +69,7 @@ var autostartEnableCmd = &cobra.Command{
   pg autostart enable --minio --name store       # MinIO instance (default name "minio")
   pg autostart enable --silo --name store         # silo instance (default name "silo")
   pg autostart enable --rustfs --name store       # rustfs instance (default name "rustfs")
+  pg autostart enable --garage --name store       # garage instance (default name "garage")
   pg autostart enable --redis --name cache       # redis instance (default name "redis")
   pg autostart enable --predixy --name proxy       # predixy proxy (default name "predixy")
   pg autostart enable --pgadmin --name ui            # pgAdmin (default name "pgadmin")
@@ -86,6 +88,9 @@ install minio). silo autostart behaves identically (pg addon install silo).
 rustfs autostart behaves identically (pg addon install rustfs). rustfs's fixed
 container uid is handled inside pgcli's wrapper image, so a boot-time start needs
 no special host privileges beyond running podman itself.
+garage autostart behaves identically (pg addon install garage): it re-renders
+garage.toml and starts the existing container; Garage runs as root in the
+upstream image, so no host privileges beyond podman are needed.
 Redis autostart likewise only starts the existing container (pg addon install
 redis); it replays the RDB snapshot from its data dir, so the dataset survives
 the reboot.
@@ -169,6 +174,7 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	minioSel, _ := cmd.Flags().GetBool("minio")
 	siloSel, _ := cmd.Flags().GetBool("silo")
 	rustfsSel, _ := cmd.Flags().GetBool("rustfs")
+	garageSel, _ := cmd.Flags().GetBool("garage")
 	redisSel, _ := cmd.Flags().GetBool("redis")
 	predixySel, _ := cmd.Flags().GetBool("predixy")
 	pgadminSel, _ := cmd.Flags().GetBool("pgadmin")
@@ -213,6 +219,9 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	if rustfsSel {
 		sel++
 	}
+	if garageSel {
+		sel++
+	}
 	if redisSel {
 		sel++
 	}
@@ -226,13 +235,13 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		sel++
 	}
 	if sel != 1 {
-		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --redis, --predixy, --pgadmin, or --nginx")
+		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --redis, --predixy, --pgadmin, or --nginx")
 	}
 	if pgName != "" && !pgbSel && !prSel {
 		return fmt.Errorf("--pg-name requires --pgbouncer or --postgrest")
 	}
-	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !redisSel && !predixySel && !pgadminSel && !nginxSel {
-		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --redis, --predixy, --pgadmin, or --nginx")
+	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !garageSel && !redisSel && !predixySel && !pgadminSel && !nginxSel {
+		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --redis, --predixy, --pgadmin, or --nginx")
 	}
 	if scope != "" && !haSel {
 		return fmt.Errorf("--scope requires --ha")
@@ -294,6 +303,18 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		rc.Autostart = enable
 		cfg.Addons.Rustfs[proxyName] = rc
 		targetDesc = fmt.Sprintf("rustfs instance %q", proxyName)
+	case garageSel:
+		proxyName := addonName
+		if proxyName == "" {
+			proxyName = "garage"
+		}
+		gc, ok := cfg.Addons.Garage[proxyName]
+		if !ok {
+			return fmt.Errorf("garage instance %q not found in config", proxyName)
+		}
+		gc.Autostart = enable
+		cfg.Addons.Garage[proxyName] = gc
+		targetDesc = fmt.Sprintf("garage instance %q", proxyName)
 	case redisSel:
 		proxyName := addonName
 		if proxyName == "" {
@@ -530,6 +551,11 @@ func countAutostartTargets(c *config.Config) int {
 			n++
 		}
 	}
+	for _, gc := range c.Addons.Garage {
+		if gc.Autostart {
+			n++
+		}
+	}
 	for _, rc := range c.Addons.Redis {
 		if rc.Autostart {
 			n++
@@ -600,6 +626,9 @@ func runAutostartStatus(cmd *cobra.Command, args []string) error {
 	}
 	for name, rc := range cfg.Addons.Rustfs {
 		fmt.Printf("  rustfs %-14s %s\n", name, onOff(rc.Autostart))
+	}
+	for name, gc := range cfg.Addons.Garage {
+		fmt.Printf("  garage %-14s %s\n", name, onOff(gc.Autostart))
 	}
 	for name, rc := range cfg.Addons.Redis {
 		fmt.Printf("  redis %-15s %s\n", name, onOff(rc.Autostart))

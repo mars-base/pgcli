@@ -38,7 +38,7 @@ func init() {
 	backupCmd.AddCommand(backupListStanzaCmd)
 
 	backupSetupCmd.Flags().StringVar(&backupBaseDir, "base-dir", "", "base directory for backup data and logs (overrides config base_dir)")
-	backupSetupCmd.Flags().StringVar(&s3Endpoint, "s3-endpoint", "", "S3 repository host:port (pgBackRest forces HTTPS - use a TLS-terminated endpoint, e.g. a MinIO/silo/rustfs installed with 'pg addon install minio|silo|rustfs --tls')")
+	backupSetupCmd.Flags().StringVar(&s3Endpoint, "s3-endpoint", "", "S3 repository host:port (pgBackRest forces HTTPS - use a TLS-terminated endpoint, e.g. a MinIO/silo/rustfs installed with 'pg addon install minio|silo|rustfs --tls'; a garage store has no native TLS - front it with the nginx addon)")
 	backupSetupCmd.Flags().StringVar(&s3Bucket, "s3-bucket", "", "S3 bucket (must already exist)")
 	backupSetupCmd.Flags().StringVar(&s3AccessKey, "s3-access-key", "", "S3 access key")
 	backupSetupCmd.Flags().StringVar(&s3SecretKey, "s3-secret-key", "", "S3 secret key (prefer editing backup.repo.s3.secret_key in pg.yaml so it stays out of shell history)")
@@ -98,8 +98,9 @@ var backupSetupCmd = &cobra.Command{
 
 The backup container is shared across all database instances. With
 --s3-endpoint/--s3-bucket/... the Patroni stanzas back up to an S3 repository
-(pgBackRest requires HTTPS — pair with ` + "`pg addon install minio|silo|rustfs --tls`" + ` or
-any TLS S3 endpoint; regular-instance backups stay on the local repo).`,
+(pgBackRest requires HTTPS — pair with ` + "`pg addon install minio|silo|rustfs --tls`" + `,
+any TLS S3 endpoint, or a plaintext garage fronted by the nginx addon; regular
+instances' backups stay on the local repo).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		path := cfgPath
 		if path == "" {

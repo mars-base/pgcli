@@ -97,7 +97,8 @@ Backup infrastructure (network, image, directories, config, container) is prepar
 ## S3 Object Storage Repository
 
 Patroni cluster backups and WAL archiving can push to any S3-compatible store
-(MinIO, AWS S3, ...). Configure it under `backup.repo.s3` in `pg.yaml`:
+(MinIO, silo, rustfs, garage, AWS S3, ...). Configure it under `backup.repo.s3`
+in `pg.yaml`:
 
 ```yaml
 backup:
@@ -119,9 +120,11 @@ pg backup setup
 - **HTTPS is mandatory.** pgBackRest refuses plaintext S3 (upstream won't
   implement it), so the endpoint must serve TLS. pgcli's own MinIO does via
   `pg addon install minio --tls` — pgcli generates a self-signed CA whose
-  `ca.crt` path you put in `ca_file` above. Publicly-caught endpoints (real
-  AWS S3) just omit `ca_file`; if you truly cannot supply a CA, `verify_tls:
-  false` is the escape hatch (no certificate verification).
+  `ca.crt` path you put in `ca_file` above. (silo and rustfs take `--tls` the
+  same way; garage has **no native TLS**, so front it with the nginx addon —
+  see [Garage](../addon/garage/#tls-by-fronting-with-nginx).) Publicly-caught
+  endpoints (real AWS S3) just omit `ca_file`; if you truly cannot supply a CA,
+  `verify_tls: false` is the escape hatch (no certificate verification).
 - **Fetching the CA from a remote store — no scp.** When the MinIO lives on
   another machine, get its trust anchor with one TLS handshake instead of
   copying files: `pg backup fetch-ca <store-host>:9002` pulls it out of the

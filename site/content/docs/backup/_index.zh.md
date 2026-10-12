@@ -84,8 +84,8 @@ pg backup stanza-upgrade pgcli_default pgcli_app-default
 
 ## S3 对象存储仓库
 
-Patroni 集群的备份与 WAL 归档可以推送到任意 S3 兼容存储（MinIO、AWS S3……）。
-配置写在 `pg.yaml` 的 `backup.repo.s3` 下：
+Patroni 集群的备份与 WAL 归档可以推送到任意 S3 兼容存储（MinIO、silo、rustfs、
+garage、AWS S3……）。配置写在 `pg.yaml` 的 `backup.repo.s3` 下：
 
 ```yaml
 backup:
