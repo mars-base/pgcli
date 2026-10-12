@@ -142,7 +142,7 @@ http {
     access_log /var/log/nginx/access.log;
     error_log  /var/log/nginx/error.log;
     server {
-        listen 127.0.0.1:8081 ssl;      # pgcli 分配给前置的 HTTPS 端口
+        listen 0.0.0.0:8081 ssl;          # 0.0.0.0 让远端客户端也能访问；pgcli 分配给前置的 HTTPS 端口
         ssl_certificate     /etc/nginx/certs/public.crt;
         ssl_certificate_key /etc/nginx/certs/private.key;
         client_max_body_size 0;          # PUT 不限大小
@@ -165,6 +165,13 @@ pg addon install nginx --name gtls --tls --conf-file front.conf --https-port 808
 `/etc/nginx/certs`），并起一个 HTTPS 监听器。把 S3 客户端指向
 `https://<host>:8081`，并把前置的 CA `<base-dir>/addon/nginx/gtls/tls/ca.crt`
 交给消费方。
+
+> **前置绑 `0.0.0.0`，Garage 留在回环。** 上面那条 `listen` 绑所有网卡，让远端
+> 主机（如要推归档的 Patroni 节点）能访问这个 TLS 端点——TLS 是在 *nginx 处*
+> 终结的，所以这样做是安全的，而直接暴露 Garage 的明文端口则不是。`proxy_pass`
+> 仍指向 `127.0.0.1:<garage-api-port>`：nginx 容器跑在 host 网络上，从它那里能达
+> 到 Garage 的回环绑定，明文那一跳从不出机器。若前置只想本机可用，改回
+> `listen 127.0.0.1:<port> ssl;`。
 
 > **为什么 `listen` 与 `proxy_pass` 两行要手写死。** `--conf-file` 模式下 pgcli
 > 原样挂载你的配置，所以里面的端口必须与两个插件被分配到的端口对上——garage 的
@@ -276,6 +283,40 @@ pg addon install minio  --name archive  # 9000 / 9001  （共享池）
 只有 S3 API 端口是旋钮（`--api-port`）；另外三个被分配其后的空闲端口。RPC 端口
 是节点间流量，对单节点实例会留在回环上；admin/metrics 端口（`3903`）服务 Garage
 的状态 API。
+
+### 没有 Web 控制台——用 CLI 与 admin API 管理
+
+与 MinIO（自带跑在第二个端口上的 Web Console）不同，**Garage 没有内置
+Web UI**。它的管理面是三样东西：
+
+- **`garage` CLI**——检视与改动状态的实际手段。它跑在容器内，通过 RPC 端口
+  （3901）通信：
+
+  ```bash
+  # 集群/节点状态、key、bucket
+  podman exec pgcli-garage-default-store /garage status
+  podman exec pgcli-garage-default-store /garage bucket list
+  podman exec pgcli-garage-default-store /garage key list
+  ```
+
+- **admin API**，在 admin 端口（`3903`）——一个 JSON API。从 Garage v2 起端点形如
+  `/v2/<Operation>`（如 `/v2/GetClusterHealth`），且**必须在 `Authorization` 头里
+  带 Bearer token**；裸 `curl` 会拿到 `403 AccessDenied`。只有少数端点无需 token：
+
+  ```bash
+  curl -s http://127.0.0.1:3903/health          # "Garage is fully operational"
+  curl -s http://127.0.0.1:3903/metrics         # Prometheus 指标
+  curl -s http://127.0.0.1:3903/v2/GetClusterHealth \
+    -H "Authorization: Bearer <admin-token>"   # 需要 token
+  ```
+
+- **`s3_web`**，在 web 端口（`3902`）——这**不是**控制台。它只为开启了网站托管的
+  bucket 提供静态站点内容（按 bucket 的 vhost）；访问根路径返回 `404`。
+
+社区有第三方 Web UI（基于 admin API 构建的看板等），但它们不属于 Garage、也不由
+pgcli 管理；接一个这样的界面意味着先签发一个 admin API token，再把它指向 admin
+端口。pgcli 分配的 `web_port`（`3902`）是留给 bucket 网站托管的，所以第三方控制台
+应该对接 `3903`（admin API）或进容器用 CLI——而不是 `3902`。
 
 ## 配置
 

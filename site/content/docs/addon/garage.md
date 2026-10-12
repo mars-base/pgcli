@@ -154,7 +154,7 @@ http {
     access_log /var/log/nginx/access.log;
     error_log  /var/log/nginx/error.log;
     server {
-        listen 127.0.0.1:8081 ssl;      # the HTTPS port pgcli assigned
+        listen 0.0.0.0:8081 ssl;          # 0.0.0.0 so remote clients can reach it; the HTTPS port pgcli assigned
         ssl_certificate     /etc/nginx/certs/public.crt;
         ssl_certificate_key /etc/nginx/certs/private.key;
         client_max_body_size 0;          # unlimited PUT
@@ -177,6 +177,15 @@ pg addon install nginx --name gtls --tls --conf-file front.conf --https-port 808
 `private.key`, mounted at `/etc/nginx/certs`) and stands up the HTTPS listener.
 Point S3 clients at `https://<host>:8081` and hand consumers the front's CA at
 `<base-dir>/addon/nginx/gtls/tls/ca.crt`.
+
+> **Bind the front `0.0.0.0`, leave Garage on loopback.** The `listen` line above
+> binds all interfaces so a remote host (e.g. a Patroni node pushing archives)
+> can reach the TLS endpoint — TLS is terminated *at nginx*, so this is safe in
+> a way that exposing Garage's plaintext port is not. The `proxy_pass` still
+> targets `127.0.0.1:<garage-api-port>`: the nginx container runs on the host
+> network, so the loopback Garage bind is reachable from it, and the plaintext
+> leg never leaves the machine. For a front that should stay local, bind
+> `listen 127.0.0.1:<port> ssl;` instead.
 
 > **Why the `listen` and `proxy_pass` lines are pinned by hand.** In `--conf-file`
 > mode pgcli mounts your config verbatim, so the ports in it must match the ones
@@ -295,6 +304,44 @@ Only the S3 API port is a knob (`--api-port`); the other three are assigned the
 next free ports after it. The RPC port is node-to-node traffic and, for a
 single-node instance, stays on loopback; the admin/metrics port (`3903`) serves
 Garage's status API.
+
+### No web console — administering via CLI and the admin API
+
+Unlike MinIO (which ships a bundled web Console on a second port), **Garage has
+no built-in web UI**. Its management surface is three things:
+
+- **The `garage` CLI** — the practical way to inspect and change state. It runs
+  inside the container and talks to the RPC port (3901):
+
+  ```bash
+  # cluster/node status, keys, buckets
+  podman exec pgcli-garage-default-store /garage status
+  podman exec pgcli-garage-default-store /garage bucket list
+  podman exec pgcli-garage-default-store /garage key list
+  ```
+
+- **The admin API** on the admin port (`3903`) — a JSON API. From Garage v2 the
+  endpoints are `/v2/<Operation>` (e.g. `/v2/GetClusterHealth`) and **require a
+  Bearer token** in the `Authorization` header; a bare `curl` gets `403
+  AccessDenied`. Only a few endpoints are open without a token:
+
+  ```bash
+  curl -s http://127.0.0.1:3903/health          # "Garage is fully operational"
+  curl -s http://127.0.0.1:3903/metrics         # Prometheus exposition
+  curl -s http://127.0.0.1:3903/v2/GetClusterHealth \
+    -H "Authorization: Bearer <admin-token>"   # needs a token
+  ```
+
+- **`s3_web`** on the web port (`3902`) — this is **not** a console. It only
+  serves static-website content for buckets that have website hosting enabled
+  (via per-bucket vhost); its root returns `404`.
+
+Community web UIs exist (e.g. dashboards built on the admin API), but they are
+not part of Garage and not managed by pgcli; wiring one up means minting an
+admin API token and pointing the third-party app at the admin port. The `web_port`
+(`3902`) that pgcli assigns is reserved for bucket website hosting, so a third-
+party console should talk to `3903` (admin API) or shell into the container for
+the CLI — not to `3902`.
 
 ## Configuration
 
