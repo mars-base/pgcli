@@ -1,6 +1,8 @@
 package podman
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -323,6 +325,39 @@ func TestSanitizeNginxName(t *testing.T) {
 		got := sanitizeNginxName(tc.input)
 		if got != tc.want {
 			t.Errorf("sanitizeNginxName(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+// WriteConfigs in --conf-file mode must still generate the self-signed TLS
+// cert: the container mounts the tls dir whenever TLS is on, so skipping
+// generation here makes a fresh conf-file+--tls install fail at podman run
+// with "statfs ... no such file or directory".
+func TestNginxWriteConfigsConfFileTLS(t *testing.T) {
+	dir := t.TempDir()
+	userConf := filepath.Join(dir, "front.conf")
+	if err := os.WriteFile(userConf, []byte("worker_processes 1;\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	m := &NginxManager{dataDir: dir}
+	nc := &config.NginxConfig{
+		Name:      "gtls",
+		TLS:       true,
+		ConfFile:  userConf,
+		Listen:    "127.0.0.1",
+		HTTPSPort: 8081,
+	}
+	confPath, err := m.WriteConfigs(nc)
+	if err != nil {
+		t.Fatalf("WriteConfigs: %v", err)
+	}
+	data, err := os.ReadFile(confPath)
+	if err != nil || string(data) != "worker_processes 1;\n" {
+		t.Errorf("user conf not copied verbatim: %q err=%v", data, err)
+	}
+	for _, f := range []string{"public.crt", "private.key", "ca.crt"} {
+		if _, err := os.Stat(filepath.Join(nginxTLSDir(dir, nc.Name), f)); err != nil {
+			t.Errorf("tls dir missing %s: %v", f, err)
 		}
 	}
 }

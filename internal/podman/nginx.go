@@ -243,6 +243,17 @@ func (m *NginxManager) WriteConfigs(nc *config.NginxConfig) (string, error) {
 
 	confPath := filepath.Join(dir, "nginx.conf")
 
+	// TLS: generate self-signed cert or validate BYO paths. This runs for
+	// ConfFile mode too — the container always mounts the tls dir when --tls
+	// is set, whether the config came from the template or the user's file.
+	if nc.TLS && nc.TLSCert == "" {
+		tlsDir := nginxTLSDir(m.dataDir, nc.Name)
+		hosts := tlsca.LocalHosts(nc.Listen)
+		if _, err := tlsca.Generate(tlsDir, hosts, 30*24*time.Hour); err != nil {
+			return "", fmt.Errorf("generating TLS certificates: %w", err)
+		}
+	}
+
 	// ConfFile mode: copy the user's file instead of rendering.
 	if nc.ConfFile != "" {
 		data, err := os.ReadFile(nc.ConfFile)
@@ -262,15 +273,6 @@ func (m *NginxManager) WriteConfigs(nc *config.NginxConfig) (string, error) {
 			return "", fmt.Errorf("writing nginx.conf: %w", err)
 		}
 		return confPath, nil
-	}
-
-	// TLS: generate self-signed cert or validate BYO paths
-	if nc.TLS && nc.TLSCert == "" {
-		tlsDir := nginxTLSDir(m.dataDir, nc.Name)
-		hosts := tlsca.LocalHosts(nc.Listen)
-		if _, err := tlsca.Generate(tlsDir, hosts, 30*24*time.Hour); err != nil {
-			return "", fmt.Errorf("generating TLS certificates: %w", err)
-		}
 	}
 
 	cfg, err := RenderNginxCfg(nc)
