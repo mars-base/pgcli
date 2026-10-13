@@ -617,7 +617,7 @@ break-glass（见[拿到集群的 AK/SK](#拿到集群的-aksk)）。
 pg garage --name store bucket create backups        # 全局 alias = "backups"
 pg garage --name store bucket allow backups --key GK... --read --write --owner
 pg garage --name store bucket list                  # 能看到新的 "backups" alias
-pg garage --name store bucket delete backups --yes  # 必须带 --yes（销毁数据）
+pg garage --name store bucket delete backups --yes  # 必须带 --yes；仅对空桶有效
 ```
 
 桶的**全局 alias** 就是它的 S3 名字，全集群唯一；问任意运行中的成员即可——

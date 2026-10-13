@@ -686,7 +686,7 @@ the instance; later buckets are yours to add here:
 pg garage --name store bucket create backups        # global alias = "backups"
 pg garage --name store bucket allow backups --key GK... --read --write --owner
 pg garage --name store bucket list                  # shows the new "backups" alias
-pg garage --name store bucket delete backups --yes  # --yes is required (destroys data)
+pg garage --name store bucket delete backups --yes  # --yes required; empty bucket only
 ```
 
 The bucket's **global alias** is its S3 name and is unique across the cluster;
