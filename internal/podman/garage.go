@@ -270,19 +270,21 @@ func (m *GarageManager) createContainer(gc *config.GarageConfig) error {
 	)
 	args = append(args, garageMountFlags(metaDir, dataDir, configPath)...)
 
-	args = append(args, gc.ImageTag)
 	if gc.Clustered() {
 		// Cluster member: start the daemon bare. Peering (node connect) and the
 		// layout (assign/apply) are driven afterwards via ExecCapture.
-		args = append(args, "/garage", "server")
+		args = append(args, gc.ImageTag, "/garage", "server")
 	} else {
 		// Single-node first-boot seeding (Garage >= v2.0): create this access
 		// key and this bucket, owned by that key, if they do not exist yet.
 		// The key/bucket land in metadata_dir, so they survive recreation.
+		// `-e` must precede the image: podman stops parsing container flags at
+		// the image name and would otherwise treat "-e" as the command.
 		args = append(args,
 			"-e", "GARAGE_DEFAULT_ACCESS_KEY="+gc.RootUser,
 			"-e", "GARAGE_DEFAULT_SECRET_KEY="+gc.RootPassword,
 			"-e", "GARAGE_DEFAULT_BUCKET="+gc.Name,
+			gc.ImageTag,
 			"/garage", "server", "--single-node", "--default-bucket",
 		)
 	}
