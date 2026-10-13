@@ -96,6 +96,7 @@ pg addon install garage --name store --api-port 3900
 pg addon install garage --name store --listen 0.0.0.0
 
 # supply your own access key / secret key instead of generating them
+#   Garage's own limits apply: access key >= 8 chars, secret key >= 16 chars
 pg addon install garage --name store --root-user GK<...> --root-password <secret>
 
 # join a cross-host cluster (see Multi-node cluster below)
@@ -103,6 +104,19 @@ pg addon install garage --name store --cluster c1 --advertise-host 10.241.20.147
   --zone z1 --capacity 15 --replication-factor 3 \
   [--peer <id@addr> --rpc-secret <64hex>]   # a joiner carries both
 ```
+
+> **Supplying your own keys:** these two flags only take effect on a
+> **single-node** install — a cluster member never reads them, because its key
+> comes from `garage key create` at the quorum-completing install. The values go
+> to Garage verbatim and **Garage** is what enforces them: an access key id
+> shorter than 8 characters, or a secret key shorter than 16, is rejected when
+> the container first boots (`Invalid default access key: … should be at least
+> N characters long`) — and because the container starts detached, `install`
+> itself reports success while the node crash-loops behind `--restart
+> unless-stopped`. Check `podman logs` (or just let `pg mc alias set` fail) if a
+> custom-key install comes up unable to serve. The generated shapes
+> (`GK` + 32 hex / 64 hex) clear both bounds with room; `mc` additionally
+> requires an access key of `[A-Za-z0-9]`, so stay alphanumeric.
 
 The output reports endpoints and the seeded credentials:
 

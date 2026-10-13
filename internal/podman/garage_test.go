@@ -148,6 +148,24 @@ func TestValidateGarageCluster(t *testing.T) {
 	if err := ValidateGarageCluster(&config.GarageConfig{Cluster: "c1", AdvertiseHost: "10.0.0.1", RPCSecret: "aa", ReplicationFactor: 3, Capacity: 10, Zone: "z1"}); err != nil {
 		t.Errorf("valid cluster config rejected: %v", err)
 	}
+	// Single-node supplied credentials: Garage's first-boot floors (id ≥ 8,
+	// secret ≥ 16), checked up front because the detached container would only
+	// crash-loop later. Boundary values pass; empty means "generate" and must
+	// never be gated.
+	if err := ValidateGarageCluster(&config.GarageConfig{RootUser: "ABCDEFGH", RootPassword: "0123456789abcdef"}); err != nil {
+		t.Errorf("boundary ak 8 / sk 16 must pass: %v", err)
+	}
+	if err := ValidateGarageCluster(&config.GarageConfig{RootUser: "abcdefg"}); err == nil {
+		t.Error("access key of 7 chars must be rejected")
+	}
+	if err := ValidateGarageCluster(&config.GarageConfig{RootPassword: "0123456789abcde"}); err == nil {
+		t.Error("secret key of 15 chars must be rejected")
+	}
+	// The cluster path ignores RootUser/RootPassword entirely (key create seeds
+	// there), so short supplied values must not trip it.
+	if err := ValidateGarageCluster(&config.GarageConfig{Cluster: "c1", AdvertiseHost: "10.0.0.1", RPCSecret: "aa", ReplicationFactor: 3, Capacity: 10, Zone: "z1", RootUser: "ab", RootPassword: "x"}); err != nil {
+		t.Errorf("cluster member must not be gated on credentials: %v", err)
+	}
 }
 
 // The three host paths resolve under the garage-namespaced layout, with the

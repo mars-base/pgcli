@@ -84,6 +84,7 @@ pg addon install garage --name store --api-port 3900
 pg addon install garage --name store --listen 0.0.0.0
 
 # 自带 access key / secret key，而不是自动生成
+#   受 Garage 自家限制：access key ≥ 8 字符，secret key ≥ 16 字符
 pg addon install garage --name store --root-user GK<...> --root-password <secret>
 
 # 加入一个跨主机集群（见下文"多节点集群"）
@@ -91,6 +92,17 @@ pg addon install garage --name store --cluster c1 --advertise-host 10.241.20.147
   --zone z1 --capacity 15 --replication-factor 3 \
   [--peer <id@addr> --rpc-secret <64hex>]   # joiner 两个都要带
 ```
+
+> **自带凭据：** 这两个 flag 只在**单节点**安装时生效——集群成员从不读它们，
+> 其 key 来自 quorum 达成那次安装的 `garage key create`。取值原样交给
+> Garage，由 **Garage** 执行限制：access key id 短于 8 字符、或 secret key 短于
+> 16 字符，会在容器首启时被拒（`Invalid default access key: … should be at
+> least N characters long`）——又因容器是后台起的，`install` 本身报成功、节点却
+> 在 `--restart unless-stopped` 下后台崩溃重启。若一次自带 key 的安装起来后无
+> 法服务，查 `podman logs`（或干脆让 `pg mc alias set` 报错）。生成出的形状
+> （`GK` + 32 hex / 64 hex）远远越过这两个下界；`mc` 另外要求 access key 为
+> `[A-Za-z0-9]`，所以保持字母数字。（pgcli 现在也会在安装前就按同样下界拦一道，
+> 见下。）
 
 输出会报告端点和播种的凭据：
 

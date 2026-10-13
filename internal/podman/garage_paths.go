@@ -100,18 +100,35 @@ func rpcBindHost(gc *config.GarageConfig, bind string) string {
 	return bind
 }
 
+// Garage's own first-boot seed (GARAGE_DEFAULT_ACCESS_KEY / _SECRET_KEY, the
+// single-node path) enforces these id/secret length floors; pgcli repeats them
+// up front so a too-short --root-user/--root-password fails the install loudly
+// instead of leaving a detached container crash-looping on `--restart
+// unless-stopped` behind a successful-looking install summary.
+const (
+	garageMinAccessKeyLen = 8
+	garageMinSecretKeyLen = 16
+)
+
 // ValidateGarageCluster gates a Garage install for either topology.
 // Single-node (Cluster empty): replication_factor must be ≤ 1 — that is the v1
-// contract, reworded. Cluster (Cluster set): the node must advertise a
-// peer-dialable address (AdvertiseHost); a joiner (any known Peers) must also
-// carry the shared RPCSecret — the bootstrap node has none yet because the
-// install generates it. A Capacity without a Zone is rejected because
-// `garage layout assign -c` requires `-z`. (pgcli v2 does not manage node
-// removal or layout revert.)
+// contract, reworded; a supplied --root-user/--root-password must clear
+// Garage's length floors (empty is fine — the install generates them). Cluster
+// (Cluster set): the node must advertise a peer-dialable address
+// (AdvertiseHost); a joiner (any known Peers) must also carry the shared
+// RPCSecret — the bootstrap node has none yet because the install generates
+// it. A Capacity without a Zone is rejected because `garage layout assign -c`
+// requires `-z`. (pgcli v2 does not manage node removal or layout revert.)
 func ValidateGarageCluster(gc *config.GarageConfig) error {
 	if !gc.Clustered() {
 		if gc.ReplicationFactor > 1 {
 			return fmt.Errorf("garage replication_factor > 1 requires a cluster (set cluster in pg.yaml / pass --cluster); single-node must be 1, got %d", gc.ReplicationFactor)
+		}
+		if gc.RootUser != "" && len(gc.RootUser) < garageMinAccessKeyLen {
+			return fmt.Errorf("garage access key (--root-user) must be at least %d characters (Garage rejects shorter ids on first boot): got %d", garageMinAccessKeyLen, len(gc.RootUser))
+		}
+		if gc.RootPassword != "" && len(gc.RootPassword) < garageMinSecretKeyLen {
+			return fmt.Errorf("garage secret key (--root-password) must be at least %d characters (Garage rejects shorter secrets on first boot): got %d", garageMinSecretKeyLen, len(gc.RootPassword))
 		}
 		return nil
 	}
