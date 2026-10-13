@@ -598,6 +598,20 @@ pg garage --name store key delete GK...            # 吊销一把应用 key
 先铸 key 再 allow，就是 day-2 凭据姿势：应用各用各的 key，播种那把留作
 break-glass（见[拿到集群的 AK/SK](#拿到集群的-aksk)）。
 
+**建桶**走的是同一条透传——`bucket create` 起名字，随后必须 `bucket allow`
+决定谁能用（新桶在授权之前任何 key 都够不着）。安装时播种只产出以实例命名的那
+一个桶；后续的桶在这里加：
+
+```bash
+pg garage --name store bucket create backups        # 全局 alias = "backups"
+pg garage --name store bucket allow backups --key GK... --read --write --owner
+pg garage --name store bucket list                  # 能看到新的 "backups" alias
+pg garage --name store bucket delete backups --yes  # 必须带 --yes（销毁数据）
+```
+
+桶的**全局 alias** 就是它的 S3 名字，全集群唯一；问任意运行中的成员即可
+（layout/bucket 状态是 CRDT 复制的，处处立刻可见）。
+
 ### layout 变更（集群）
 
 加节点走 `pg addon install`（assign/apply 自动完成）；裸 CLI 用于审计，以及

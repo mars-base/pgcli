@@ -662,6 +662,22 @@ Mint-then-allow is the day-2 credential pattern: applications get their own key,
 the seeded one stays break-glass (see
 [Getting the cluster's AK/SK](#getting-the-clusters-aksk)).
 
+**Creating a bucket** is the same passthrough — `bucket create` names it and
+`bucket allow` then decides who can use it (a fresh bucket is reachable by no
+key until granted). Install-time seeding only makes the one bucket named after
+the instance; later buckets are yours to add here:
+
+```bash
+pg garage --name store bucket create backups        # global alias = "backups"
+pg garage --name store bucket allow backups --key GK... --read --write --owner
+pg garage --name store bucket list                  # shows the new "backups" alias
+pg garage --name store bucket delete backups --yes  # --yes is required (destroys data)
+```
+
+The bucket's **global alias** is its S3 name and is unique across the cluster;
+ask any running member (layout/bucket state is CRDT-replicated, so it is
+immediately visible everywhere).
+
 ### Layout changes (cluster)
 
 Adding a node is `pg addon install` (it assigns and applies automatically); the
