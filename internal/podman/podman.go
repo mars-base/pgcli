@@ -5,6 +5,7 @@ package podman
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -68,6 +69,23 @@ func findPodman() (string, error) {
 // directly for all podman invocations.
 func podmanCommand(podmanPath string, args ...string) *exec.Cmd {
 	cmd := exec.Command(podmanPath, args...)
+	if runtime.GOOS == "linux" {
+		if cmd.Env == nil {
+			cmd.Env = os.Environ()
+		}
+		if os.Getenv("XDG_RUNTIME_DIR") == "" {
+			cmd.Env = append(cmd.Env, "XDG_RUNTIME_DIR=/run/user/"+fmt.Sprint(os.Getuid()))
+		}
+	}
+	return cmd
+}
+
+// podmanCommandContext is podmanCommand bound to a context: cancelling or
+// expiring the context kills the podman process. For calls that must not hang
+// the parent forever (garage's control-plane execs against a half-converged
+// cluster can wedge).
+func podmanCommandContext(ctx context.Context, podmanPath string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, podmanPath, args...)
 	if runtime.GOOS == "linux" {
 		if cmd.Env == nil {
 			cmd.Env = os.Environ()

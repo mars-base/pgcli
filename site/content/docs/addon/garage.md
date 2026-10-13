@@ -1,6 +1,6 @@
 ---
 title: "Garage"
-description: "Run Garage (the Rust S3-compatible object store from Deuxfleurs) as a pgcli addon — single-node, plaintext HTTP, TLS terminated by fronting it with the nginx addon"
+description: "Run Garage (the Rust S3-compatible object store from Deuxfleurs) as a pgcli addon — single-node or multi-node cross-host cluster, plaintext HTTP, TLS terminated by fronting it with the nginx addon"
 weight: 45
 ---
 
@@ -15,8 +15,11 @@ runtime model diverges from all three in four ways that shape this page:
 1. **A rendered TOML config file, not argv/env.** Garage reads
    `/etc/garage.toml`. pgcli renders it under the instance directory and
    bind-mounts it read-only; the MinIO/silo/rustfs addons pass argv or env.
-2. **Two data directories, not one.** `metadata_dir` (LMDB) and `data_dir`
-   (blocks) are separate bind mounts.
+2. **Two data directories, not one — and no drive pool behind them.**
+   `metadata_dir` (LMDB) and `data_dir` (blocks) are separate bind mounts; one
+   `data_dir` per node, with multi-disk aggregation left to host LVM/RAID
+   (MinIO and rustfs instead take a list of drives per node) — see [Capacity
+   and sizing](#capacity-and-sizing).
 3. **Four ports, from their own pool.** S3 API, node-to-node RPC, the `s3_web`
    static site, and the admin/metrics API — allocated together per instance
    from `garage_start_port` (default **3900**), a separate cursor from the
@@ -27,9 +30,10 @@ runtime model diverges from all three in four ways that shape this page:
    nginx](#tls-by-fronting-with-nginx).
 
 Like rustfs, Garage is a good successor route now that the open-source MinIO
-repository is archived. v1 is **single-node** (`replication_factor = 1`,
-`garage server --single-node`); multi-node and cross-zone layouts are not yet
-managed by pgcli.
+repository is archived. pgcli runs it **single-node** by default
+(`replication_factor = 1`, `garage server --single-node`) and, with a handful of
+cluster flags, as a **multi-node cross-host cluster** — see [Multi-node
+cluster](#multi-node-cluster).
 
 > **Platform support:** tested on Linux (host networking). The macOS bridge path
 > publishes all four ports and is code-complete, following the same shape as the
@@ -60,15 +64,21 @@ secret key pair** rather than a root user / password:
 - **`root_password`** is the secret key, **generated on first install**
   (64 hex chars), or supplied via `--root-password`.
 - A third secret, `rpc_secret` (the cluster's RPC signing key), is generated the
-  same way and stored alongside. It never surfaces in the CLI.
+  same way and stored alongside. On a single-node instance it never surfaces in
+  the CLI; on a cluster **bootstrap** it is printed once — together with the join
+  command — for the operator to carry to the next host (pgcli never executes
+  anything remotely).
 
 All three land in `pg.yaml` (`addons.garage.<name>.*`) so a recreate is stable.
-On first boot the container is passed `--single-node --default-bucket` plus the
-`GARAGE_DEFAULT_ACCESS_KEY` / `GARAGE_DEFAULT_SECRET_KEY` /
-`GARAGE_DEFAULT_BUCKET` env, so Garage itself creates the access key and one
-bucket (named after the instance, owned by that key) — no post-install exec
-needed. The key and bucket live in `metadata_dir`, so they survive container
-recreation.
+On a **single-node** first boot the container is passed `--single-node
+--default-bucket` plus the `GARAGE_DEFAULT_ACCESS_KEY` /
+`GARAGE_DEFAULT_SECRET_KEY` / `GARAGE_DEFAULT_BUCKET` env, so Garage itself
+creates the access key and one bucket (named after the instance, owned by that
+key) — no post-install exec needed. The key and bucket live in `metadata_dir`, so
+they survive container recreation. A **cluster** member starts bare (no
+`--single-node`/`--default-bucket`, no `GARAGE_DEFAULT_*` env); its key and bucket
+are seeded explicitly by the install that completes quorum — see [Multi-node
+cluster](#multi-node-cluster).
 
 ## Install
 
@@ -87,6 +97,11 @@ pg addon install garage --name store --listen 0.0.0.0
 
 # supply your own access key / secret key instead of generating them
 pg addon install garage --name store --root-user GK<...> --root-password <secret>
+
+# join a cross-host cluster (see Multi-node cluster below)
+pg addon install garage --name store --cluster c1 --advertise-host 10.241.20.147 \
+  --zone z1 --capacity 15 --replication-factor 3 \
+  [--peer <id@addr> --rpc-secret <64hex>]   # a joiner carries both
 ```
 
 The output reports endpoints and the seeded credentials:
@@ -209,6 +224,60 @@ pg backup setup --s3-ca-file ~/.pgcli/backup/repo-ca/ca-<front-host>-<https-port
 The fetch is trust-on-first-use — compare the printed SHA-256 against the front
 host's `sha256sum ~/.pgcli/addon/nginx/gtls/tls/ca.crt` before trusting it.
 
+#### Fronting a cluster: one node, or the local nodes
+
+A cluster does **not** need all members behind the front. S3 replication is the
+data layer's job: a request to *any* member is complete, and that member
+replicates it to `replication_factor` nodes itself. So the single-node front
+above works for a cluster too — point `proxy_pass` at one member's S3 port.
+
+Front more members only to remove that member from the **access** single point of
+failure. Keep the upstream to the nodes reachable on the front's host (typically
+the local site — see [Geo-distributed
+topology](#geo-distributed-topology)), and let each site run its own front:
+
+```nginx
+http {
+    upstream garage_s3 {
+        server 10.241.20.147:3904;   # member A, this site
+        server 10.241.20.148:3900;   # member B, this site
+        # no remote member: it stays a data replica, off the request path
+    }
+    server {
+        listen 0.0.0.0:8081 ssl;
+        ssl_certificate     /etc/nginx/certs/public.crt;
+        ssl_certificate_key /etc/nginx/certs/private.key;
+        client_max_body_size 0;
+        proxy_read_timeout   3600s;
+        proxy_send_timeout   3600s;
+        location / {
+            proxy_pass http://garage_s3;
+            proxy_set_header Host $http_host;   # keep the port — SigV4
+            proxy_request_buffering off;
+            proxy_http_version 1.1;
+        }
+    }
+}
+```
+
+Two constraints this raises that the single-backend example does not:
+
+- **The members' S3 API must leave loopback.** Cluster mode only widens the RPC
+  bind automatically; `--listen` still defaults to `127.0.0.1`, so a remote
+  front cannot reach another host's member. Install the fronted members with
+  `--listen 0.0.0.0` (behind a firewall — the front is what speaks TLS), or
+  accept that only same-host members are valid upstream entries.
+- **Ports differ per host** — same gotcha as the RPC port: each member's S3 API
+  port comes from its own install output / `pg addon list` (`S3 URL:`), not
+  necessarily 3900.
+
+This stays a `--conf-file` config: the `--upstream` template's fault for S3 is
+unchanged — `Host $host` without the port breaks every SigV4 write, and there is
+no `client_max_body_size 0` (see the note above). With several upstream servers
+the default round-robin is fine; add `max_fails`/`fail_timeout` to taste.
+(Verified on a 3-node cluster: `pg mc` round-trips through such a front, and
+stopping one upstream member leaves the front serving through the other.)
+
 ### Wiring pgBackRest to a fronted Garage store
 
 Once you have a TLS endpoint, a Garage-backed S3 repository is the same as a
@@ -226,6 +295,257 @@ pg backup setup \
 See [Backup → S3 object storage
 repository](../../backup/#s3-object-storage-repository) for the full flow.
 `pg addon password garage --name store` prints the secret key for scripting.
+
+## Multi-node cluster
+
+Garage's real strength is the cross-host cluster: nodes in different zones,
+CRDT-replicated layout, quorum reads/writes. pgcli drives this with the **same
+`pg addon install garage`** command — no new entry point — adding a handful of
+cluster flags. A cluster is assembled **one host at a time** (the Patroni model):
+pgcli never executes anything on a remote host. The first host *bootstraps*,
+prints a ready-made join command carrying the shared `rpc_secret` and this node's
+`id@addr`, and you run that command (edited for the next host) yourself.
+
+### Roles
+
+`garageInstallRole` picks the role from the flags you pass:
+
+| Role | When | What install does |
+|------|------|-------------------|
+| **single** | no `--cluster` | the v1 path, byte-for-byte (`--single-node --default-bucket`) |
+| **bootstrap** | `--cluster` set, no `--peer` | generates `rpc_secret`, starts a bare `garage server`, stages its own layout role, prints the join command |
+| **join** | `--cluster` + `--peer <id@addr>` | carries `--rpc-secret`, connects to that peer, stages its own role, applies when it completes quorum |
+
+### Three-host walkthrough
+
+**Host 1 — bootstrap.** Give it a `--zone`, a `--capacity`, and the eventual
+`--replication-factor`. Because only one node exists so far, Garage refuses to
+*apply* the layout (it needs `replication_factor` nodes with positive capacity),
+and pgcli turns that into a warning, not an error — the staged role is
+cluster-replicated and survives until the last host applies it:
+
+```bash
+# on 10.241.20.147
+pg addon install garage --name store --cluster c1 \
+  --advertise-host 10.241.20.147 --zone z1 --capacity 15 --replication-factor 3
+```
+
+The summary prints the secret and a copy-paste join template:
+
+```
+  Cluster:       c1 (role: bootstrapping cluster, replication factor 3)
+  Advertise:     10.241.20.147:3905
+  Zone/Capacity: z1 / 15 GiB
+  Node ID:       1c0597cc…200aeb@10.241.20.147:3905
+  [i] layout staged but not applied yet — Garage needs replication-factor assigned nodes to commit (later joins will).
+
+  To add ANOTHER member, run on the next host (carrying --rpc-secret yourself;
+  pgcli never executes remotely). --advertise-host is that host's own peer-
+  reachable IP; pick a --zone per failure domain and keep --replication-factor:
+    pg addon install garage --name store --cluster c1 \
+      --advertise-host <next-host-ip> --rpc-secret <64hex> \
+      --peer 1c0597cc…200aeb@10.241.20.147:3905 --zone <zone> --capacity <GiB> --replication-factor 3
+```
+
+**Host 2 — join.** Copy the printed command, change `--advertise-host` to this
+host's IP and `--zone` to a distinct zone:
+
+```bash
+# on 10.241.20.148
+pg addon install garage --name store --cluster c1 \
+  --advertise-host 10.241.20.148 --rpc-secret <64hex> \
+  --peer 1c0597cc…200aeb@10.241.20.147:3905 --zone z2 --capacity 15 --replication-factor 3
+```
+
+Two nodes are assigned now, still fewer than `rf = 3`, so it warns again. Peering
+is **transitive**: host 2 only needs one `--peer` (host 1); host 3 can point at
+either existing node.
+
+**Host 3 — the install that completes quorum.** The third host sees the full
+staged role set (assign is cluster-replicated), so its `layout apply` commits
+version 1 — and **this** is the install that seeds the access key and bucket:
+
+```bash
+# on 10.241.20.153
+pg addon install garage --name store --cluster c1 \
+  --advertise-host 10.241.20.153 --rpc-secret <64hex> \
+  --peer 5b370435…1c1c9187@10.241.20.148:3901 --zone z3 --capacity 15 --replication-factor 3
+```
+
+```
+  Access key:    GKc57063…6147b0
+  Secret key:    <printed once, here>
+  Bucket:        store (cluster key + bucket seeded on this install)
+```
+
+Every install runs the seeding step idempotently, so the **last** host to join
+is naturally the one that seeds — no back-fill on host 1 needed. The key name is
+the instance name (`store`), the bucket too, and the key is granted read/write/
+owner on it.
+
+### Seeding and the secret
+
+In a cluster the single-node `--default-bucket` / `GARAGE_DEFAULT_*` fast path is
+unavailable, so pgcli seeds explicitly with `key create` + `bucket create` +
+`bucket allow`. Two consequences:
+
+- **`garage key create` prints the secret exactly once** and is *not* idempotent
+  (a re-run mints a *second* key with the same name). pgcli checks `key list`
+  first and only creates when absent. Whichever host performs the seeding writes
+  the access/secret pair into **its own** `pg.yaml`; the other hosts hold only the
+  public key id.
+- **`pg addon password garage` on a non-seeding host** has no secret to print and
+  says so — the secret lives in the `pg.yaml` of the host whose install completed
+  quorum. Reveal it there, or run `garage key create` yourself to mint a fresh
+  key on any node.
+
+### Version conflicts and re-runs
+
+`layout apply --version N` requires exactly `current + 1` — Garage's optimistic
+lock. If two hosts install concurrently, one apply fails; pgcli reports it as
+"layout changed concurrently — re-run the same install command". `assign` is
+idempotent and re-staging is harmless, so the retry just re-reads the version and
+applies. A re-run against a live member is otherwise a no-op (container already
+running → `skipping creation`; peering already done → treated as success).
+
+### Zone and replication-factor advice
+
+- `--replication-factor` must be ≤ the number of nodes you will join; a cluster
+  cannot seed until `rf` nodes hold a positive-capacity role.
+- Give each host a **distinct `--zone`** to survive whole-failure-domain loss;
+  Garage keeps replica copies in different zones when it can.
+- `--capacity` is GiB and is what Garage carves out for blocks; a node with
+  capacity 0 is treated as not-yet-data-bearing.
+- `--advertise-host` is required for every member — it becomes `rpc_public_addr`,
+  the address peers dial. Without it a cluster member is unreachable. (A cluster
+  member whose `--listen` is loopback still widens its **RPC** bind to
+  `0.0.0.0`; only the S3/web/admin ports stay on loopback.)
+
+### Capacity and sizing
+
+**Garage has no drive pool.** MinIO and rustfs both take a list of drives: a
+node declares N block devices, stripes data across them, and survives individual
+drive loss on its own. Garage's unit of redundancy is the **node**, not the
+drive — each member gets exactly one `data_dir` (plus a separate LMDB
+`metadata_dir`), and every block of a replicated object is placed on a
+*different node* (preferring a different *zone*). If you want multi-disk
+aggregation, do it below Garage: LVM or host RAID presents one big filesystem
+and Garage's `data_dir` sits on it. Disk failure is thus the host layer's
+problem; node failure is Garage's. **MinIO/rustfs manage drives; Garage manages
+nodes.**
+
+`--capacity` is the number you hand that model: GiB this node may store
+(`layout assign -c <N>GiB`). Two properties worth internalising:
+
+- It is a **placement weight, not a quota**. Garage never refuses a write
+  because capacity was reached — the real free space is what `garage status`
+  reports as `DataAvail`. Setting `--capacity 100` on a 20 GiB filesystem
+  would just let Garage fill (and then break) the disk. Keep it at (or under)
+  the usable size of the backing filesystem.
+- Changing it is a **layout change**: re-run the same `pg addon install` line
+  with the new `--capacity` (assign is idempotent, the apply bumps the layout
+  version), and Garage rebalances blocks onto the enlarged space. Growing the
+  backing filesystem first is what actually buys room.
+
+**Usable capacity** is the sum of all node capacities divided by the
+replication factor — every object is kept in `rf` copies:
+
+| Nodes | Per node (`--capacity`) | rf | Raw total | Usable |
+|-------|------------------------|----|-----------|--------|
+| 3 | 15 GiB | 3 | 45 GiB | **15 GiB** |
+| 4 | 15 GiB | 3 | 60 GiB | **20 GiB** |
+| 5 | 15 GiB | 3 | 75 GiB | **25 GiB** |
+
+General rule: `usable = Σ capacity ÷ rf`. The same math is why `rf = 2` halves
+the storage overhead at the cost of surviving only one node loss; `rf = 3`
+costs 3× but a write commits once **2 of 3** copies are acked, so a 3-node
+`rf = 3` cluster tolerates 1 node down for writes, a 5-node one tolerates
+2 (any 2 of the remaining members can ack). Adding a 4th or 5th node therefore
+buys both fault tolerance *and* usable space, unlike simply mirroring.
+
+### Quorum behaviour on a stopped node
+
+Stop any one member and the other two keep serving reads and writes (2/3 quorum
+with `rf = 3`):
+
+```bash
+# on host 3
+pg addon stop garage --name store
+# on host 1 — still reads and writes
+pg mc cat c1/store/v.txt
+```
+
+`pg addon start` rejoins the node under the **same** `Node ID` (the keypair lives
+in `metadata_dir`, not the container), and `garage status` shows it healthy
+again. Start/stop/remove/autostart/logs always manage only the **local**
+container — the Patroni semantic; there is no remote orchestration.
+
+### Geo-distributed topology: 2 local + 1 remote
+
+The production shape Garage was designed for: two members in your own site (one
+per rack/zone, `z1` + `z2`) and a third member in a **remote site** (`z3`). It
+fits the write-latency maths well: an `rf = 3` write commits on a **2/3
+quorum**, so the two local replicas acknowledging is enough — the remote copy
+follows asynchronously and a slow (or briefly down) WAN link never slows a
+write. The nginx TLS front points at the two local members only (see [Fronting a
+cluster](#fronting-a-cluster-one-node-or-the-local-nodes)); the remote member
+carries data, not request traffic, and typically runs its own front for local
+read repair / disaster use.
+
+Two honest caveats about what the remote member **is not**:
+
+- **It is a replica, not a backup.** CRDT replication syncs everything,
+  *including deletions* — a mistaken `mc rb --force` or a pgBackRest
+  `expire` propagates to the remote site. For delete-immune copies you need
+  Garage's own bucket replication between *separate* clusters (a Garage CLI
+  feature, manual here: `garage bucket replication`); the 2+1 cluster gives you
+  node- and site-level survivability plus a manual rescue copy, nothing more.
+- **A whole-site outage does not fail over automatically.** If both local members
+  die together, the lone remote node is below quorum (1 < 2) and the cluster is
+  unwritable. The data is intact on it, and Garage documents a manual
+  recovery (re-committing a reduced layout from surviving nodes), but pgcli does
+  not orchestrate that — it is a `garage layout` operation for an operator who
+  has decided the site is really gone.
+
+So the accurate framing is: **2 local + 1 remote = HA with site-failure rescue**,
+writes stay local-speed, and "backup" in the delete-immune sense remains
+pgBackRest's (or replication's) job.
+
+### Getting the cluster's AK/SK
+
+The seeded access key is cluster-wide (any member validates it), but its
+**secret exists on exactly one host** — whichever install completed quorum
+printed it once and stored it in that host's `pg.yaml`:
+
+```bash
+# on the seeding host only:
+pg addon password garage --name store              # print the secret key
+pg addon password garage --name store --file ./ak  # mode 0600, for shipping
+pg addon list --show-password                      # access key + secret together
+```
+
+- Any host can show the **public id** (`pg addon list` → `Access key:`); on
+  non-seeding hosts `pg addon password` errors and names the host that holds the
+  secret — the message is precise, the secret is simply not there to give.
+- Lost secret, or want credentials of your own? Mint a fresh key on **any**
+  member and grant it the bucket — keys are CRDT state, so the new pair works
+  cluster-wide immediately:
+
+  ```bash
+  pg garage --name store key create app-key
+  pg garage --name store bucket allow store \
+    --key GK<new-id> --read --write --owner
+  ```
+
+  This is the recommended day-2 practice: applications and pgBackRest get their
+  own keys (independent rotation/revocation), the seeded one stays the break-glass
+  admin credential. `pg garage` is the general passthrough for Garage's own
+  control CLI — see [Administering via `pg garage`](#administering-via-pg-garage).
+
+> **v2.0 does not** remove a node from the layout (`layout remove` + data
+> migration), revert a committed layout, or orchestrate multi-zone failover.
+> Those stay manual garage CLI operations — run them via
+> [`pg garage`](#administering-via-pg-garage).
 
 ## Using the mc Client
 
@@ -286,6 +606,72 @@ pg mc rb store/scratch -- --force
 The same access/secret key pair works for any S3 SDK — including pgBackRest
 against a `repo1-type=s3` repository (through the nginx TLS front).
 
+## Administering via `pg garage`
+
+`pg garage` forwards any Garage control-CLI subcommand into the instance's
+running container — the replacement for hand-written
+`podman exec pgcli-garage-<ns>-<name> /garage …`. `--name` selects the instance
+(default: the first by name); everything after the subcommand word reaches
+`/garage` verbatim, so Garage's own flags need no `--` separator. It works the
+same on a single-node instance and on any cluster member; on a cluster, ask any
+**running** member — status, layout and keys are cluster-replicated CRDT state.
+
+### Health and status
+
+```bash
+pg garage --name store health            # exit code 0 iff the cluster is healthy
+pg garage --name store status            # per node: zone, capacity, DataAvail, version
+pg garage --name store layout show       # committed roles + staged changes + layout version
+pg garage --name store stats             # per-partition replication detail
+curl -s http://127.0.0.1:3903/health     # the admin-port liveness line
+```
+
+`health` is the monitoring-friendly one: it prints a short summary (known /
+connected / storage nodes, partition quorum) and **sets the exit code**, so a
+cron or check script can use `pg garage --name store health > /dev/null`
+directly. `status` is the wide table — watch the `DataAvail` column, that is the
+real free space (see [Capacity and sizing](#capacity-and-sizing)).
+
+### Keys and buckets
+
+```bash
+pg garage --name store key list                    # who can access the store
+pg garage --name store key create app-key          # secret printed once
+pg garage --name store bucket allow store --key GK... --read --write
+pg garage --name store bucket deny  store --key GK... --write
+pg garage --name store bucket list
+pg garage --name store bucket info store           # size, object count, per-key grants
+pg garage --name store key delete GK...            # revoke an app key
+```
+
+Mint-then-allow is the day-2 credential pattern: applications get their own key,
+the seeded one stays break-glass (see
+[Getting the cluster's AK/SK](#getting-the-clusters-aksk)).
+
+### Layout changes (cluster)
+
+Adding a node is `pg addon install` (it assigns and applies automatically); the
+raw CLI is for auditing and the manual edge cases pgcli deliberately does not
+orchestrate:
+
+```bash
+pg garage --name store layout history              # which version when, by which node
+pg garage --name store layout show                 # any STAGED ROLE CHANGES pending?
+pg garage --name store node connect <id@addr>      # (re-)peer a node
+```
+
+`layout remove`, `layout revert` and multi-zone failover remain manual garage
+operations — the v2.0 limits blockquote at the end of
+[Getting the cluster's AK/SK](#getting-the-clusters-aksk) lists them.
+
+### Maintenance
+
+```bash
+pg garage --name store bucket cleanup-incomplete-uploads   # abort stale multipart uploads
+pg garage --name store key delete-expired                  # sweep expired keys
+pg garage --name store bucket inspect-object store/key    # which nodes hold this object's blocks
+```
+
 ## Ports
 
 Each instance takes **four consecutive ports** from Garage's own pool, starting
@@ -303,22 +689,38 @@ pg addon install minio  --name archive  # 9000 / 9001  (shared pool)
 Only the S3 API port is a knob (`--api-port`); the other three are assigned the
 next free ports after it. The RPC port is node-to-node traffic and, for a
 single-node instance, stays on loopback; the admin/metrics port (`3903`) serves
-Garage's status API.
+Garage's status API. A **cluster** member's RPC port is what peers dial
+(`rpc_public_addr`), so pgcli widens its RPC bind to `0.0.0.0` even when
+`--listen` is loopback — the channel is signed with `rpc_secret`. Note the port
+number also rides inside `--advertise-host`/`--peer`, so on a host that already
+runs another garage instance the cluster's RPC may land on a different port than
+3901 (e.g. `10.241.20.147:3905`).
 
 ### No web console — administering via CLI and the admin API
 
 Unlike MinIO (which ships a bundled web Console on a second port), **Garage has
 no built-in web UI**. Its management surface is three things:
 
-- **The `garage` CLI** — the practical way to inspect and change state. It runs
-  inside the container and talks to the RPC port (3901):
+- **The `garage` CLI, via `pg garage`** — the practical way to inspect and change
+  state. `pg garage` runs Garage's own control CLI inside the instance's running
+  container (it talks to the local RPC port), so you never `podman exec` by hand:
 
   ```bash
-  # cluster/node status, keys, buckets
-  podman exec pgcli-garage-default-store /garage status
-  podman exec pgcli-garage-default-store /garage bucket list
-  podman exec pgcli-garage-default-store /garage key list
+  pg garage --name store status         # nodes, zones, capacity, DataAvail
+  pg garage --name store layout show    # committed layout + version
+  pg garage --name store bucket list
+  pg garage --name store key list
   ```
+
+  Everything after `--name` is forwarded to `/garage` verbatim, so Garage's own
+  flags (`--read --write`, `-z`, `-c`) need no `--` separator — and they go
+  **after** the subcommand word, since pgcli only reads its own flags before it.
+  With a single instance installed, `--name` can be dropped; with several, omitting
+  it targets the first by name (announced on stderr). This needs a **running**
+  member — unlike `pg mc`/`pg etcdctl`, which spin up a throwaway client container,
+  `pg garage` execs the node's own CLI. See
+  [Administering via `pg garage`](#administering-via-pg-garage) for the full
+  operations menu.
 
 - **The admin API** on the admin port (`3903`) — a JSON API. From Garage v2 the
   endpoints are `/v2/<Operation>` (e.g. `/v2/GetClusterHealth`) and **require a
@@ -340,8 +742,8 @@ Community web UIs exist (e.g. dashboards built on the admin API), but they are
 not part of Garage and not managed by pgcli; wiring one up means minting an
 admin API token and pointing the third-party app at the admin port. The `web_port`
 (`3902`) that pgcli assigns is reserved for bucket website hosting, so a third-
-party console should talk to `3903` (admin API) or shell into the container for
-the CLI — not to `3902`.
+party console should talk to `3903` (admin API) or use [`pg garage`](#administering-via-pg-garage)
+for the CLI — not to `3902`.
 
 ## Configuration
 
@@ -368,14 +770,27 @@ addons:
       root_password: <generated>      # secret key, written on first install
       rpc_secret: <generated>         # cluster RPC signing key, written on first install
       region: garage                  # s3_region
-      replication_factor: 1           # v1 is single-node only; >1 is rejected
+      replication_factor: 1           # single-node must be 1; a cluster sets it >1
       autostart: false                # pg autostart enable --garage --name store
+      # --- multi-node cluster keys (omit for single-node) ---
+      # cluster: c1                   # non-empty ⇒ cluster mode; groups members
+      # advertise_host: 10.241.20.147 # rpc_public_addr host; required in cluster
+      # zone: z1                      # layout assign -z (failure domain)
+      # capacity: 15                  # layout assign -c, GiB; 0 ⇒ no auto-assign
+      # peers:                        # known id@addr, each `garage node connect`ed
+      #   - 1c0597cc…200aeb@10.241.20.147:3905
+      # node_id: 1c0597cc…200aeb@10.241.20.147:3905  # read back after first boot
 ```
+
+`replication_factor` defaults to 1. Setting it `> 1` **without** a `cluster` is
+rejected at install — a lone node cannot meet a multi-node quorum. The cluster
+keys above are written by the cluster install path; you can also set them by hand
+and re-install. Zone and capacity are layout state, not TOML, so they appear only
+here.
 
 Edits to `listen`, ports, `root_user`, `root_password`, `image_tag`, `data_dir`,
 or `config_file` take effect after the next `pg addon install garage --name
-store --force`. A hand-set `replication_factor: 2` is rejected at install —
-multi-node is out of scope for v1.
+store --force`.
 
 ### List
 
@@ -387,10 +802,15 @@ pg addon list
 Infra add-ons (garage):
   garage (name: store)
     Status:      running
+    Cluster:     c1 (rf 3)
+    Advertise:   10.241.20.147:3905
+    Zone/Cap:    z1 / 15 GiB
+    Node ID:     1c0597cc…200aeb@10.241.20.147:3905
+    Nodes:       3 assigned (healthy)
     Listen:      127.0.0.1
-    API port:    3900
-    RPC/Web/Admin: 3901/3902/3903
-    S3 URL:      http://127.0.0.1:3900
+    API port:    3904
+    RPC/Web/Admin: 3905/3906/3907
+    S3 URL:      http://127.0.0.1:3904
     Data:        ~/pg/addon/garage/store/data
     Metadata:    ~/pg/addon/garage/store/meta
     Access key:  GK<generated>
@@ -399,6 +819,12 @@ Infra add-ons (garage):
     Container:   pgcli-garage-default-store
     NOTE:        plaintext HTTP only — front with the nginx addon for TLS
 ```
+
+Cluster members gain the `Cluster` / `Advertise` / `Zone/Cap` / `Node ID` /
+`Nodes` lines; `Nodes:` is a live `garage status` read (best-effort — it is
+omitted when the member is unreachable). On a cluster the `Access key` on the
+hosts that did **not** perform the seeding is the public id only (no secret); see
+[Seeding and the secret](#seeding-and-the-secret).
 
 `pg addon list` never prints the secret key. Reveal it deliberately with
 `pg addon list --show-password` (appends a `Secret key:` line), or print just the
@@ -471,6 +897,7 @@ pg logs addon garage --name store -f   # follow
 - **pgBackRest refuses the endpoint (HTTP / cert).** pgBackRest forces HTTPS for
   S3 repos. Front Garage with the nginx addon (`--tls`) and point
   `backup.repo.s3.ca_file` at the front's `ca.crt`.
-- **`replication_factor` must be 1.** v1 is single-node; a hand-edited
-  `replication_factor: 2` is rejected at install. Multi-node Garage is not yet
-  managed by pgcli.
+- **`replication_factor` must be 1 on a single-node instance.** A hand-edited
+  `replication_factor: 2` without a `cluster` is rejected at install — a lone
+  node cannot meet a multi-node quorum. For multi-node, set `cluster` (or install
+  with `--cluster`); see [Multi-node cluster](#multi-node-cluster).

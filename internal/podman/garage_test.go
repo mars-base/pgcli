@@ -80,6 +80,34 @@ func TestRenderGarageTOML(t *testing.T) {
 	}
 }
 
+func TestRenderGarageTOMLCluster(t *testing.T) {
+	gc := &config.GarageConfig{
+		Name: "store", Cluster: "c1", AdvertiseHost: "10.241.20.147",
+		ReplicationFactor: 3, RPCSecret: "aa", Region: "garage",
+		APIPort: 3900, RPCPort: 3901, WebPort: 3902, AdminPort: 3903,
+	}
+	out := renderGarageTOML(gc, "0.0.0.0")
+	// rpc_public_addr is the peer-dialable address — between bind and secret.
+	if !strings.Contains(out, `rpc_public_addr = "10.241.20.147:3901"`) {
+		t.Errorf("cluster render missing rpc_public_addr:\n%s", out)
+	}
+	if !strings.Contains(out, "replication_factor = 3") {
+		t.Errorf("cluster render missing rf 3:\n%s", out)
+	}
+	// An IPv6 advertise host is bracketed (same rule as the bind addrs).
+	gc6 := *gc
+	gc6.AdvertiseHost = "fd00::1"
+	if !strings.Contains(renderGarageTOML(&gc6, "::"), `rpc_public_addr = "[fd00::1]:3901"`) {
+		t.Error("IPv6 advertise host must be bracketed")
+	}
+	// Single-node (AdvertiseHost empty): no rpc_public_addr line at all.
+	gc1 := *gc
+	gc1.AdvertiseHost = ""
+	if strings.Contains(renderGarageTOML(&gc1, "127.0.0.1"), "rpc_public_addr") {
+		t.Error("single-node render must not carry rpc_public_addr")
+	}
+}
+
 func TestGarageMountFlags(t *testing.T) {
 	flags := garageMountFlags("/base/meta", "/base/data", "/base/garage.toml")
 	want := []string{
@@ -92,15 +120,33 @@ func TestGarageMountFlags(t *testing.T) {
 	}
 }
 
-func TestValidateGarageSingle(t *testing.T) {
-	if err := ValidateGarageSingle(0); err != nil {
-		t.Errorf("unset factor: %v", err)
+func TestValidateGarageCluster(t *testing.T) {
+	// Single-node: replication_factor > 1 rejected (v1 contract).
+	if err := ValidateGarageCluster(&config.GarageConfig{}); err != nil {
+		t.Errorf("unset: %v", err)
 	}
-	if err := ValidateGarageSingle(1); err != nil {
-		t.Errorf("factor 1: %v", err)
+	if err := ValidateGarageCluster(&config.GarageConfig{ReplicationFactor: 1}); err != nil {
+		t.Errorf("rf 1: %v", err)
 	}
-	if err := ValidateGarageSingle(3); err == nil {
-		t.Error("factor 3 must be rejected in v1 (single-node only)")
+	if err := ValidateGarageCluster(&config.GarageConfig{ReplicationFactor: 3}); err == nil {
+		t.Error("rf 3 without cluster must be rejected")
+	}
+	// Cluster: advertise-host required; rpc_secret required only of a joiner
+	// (Peers non-empty) — the bootstrap generates it during install.
+	if err := ValidateGarageCluster(&config.GarageConfig{Cluster: "c1", RPCSecret: "aa", ReplicationFactor: 3}); err == nil {
+		t.Error("cluster without advertise-host must be rejected")
+	}
+	if err := ValidateGarageCluster(&config.GarageConfig{Cluster: "c1", AdvertiseHost: "10.0.0.1", ReplicationFactor: 3}); err != nil {
+		t.Errorf("bootstrap (no peers, no secret yet) must pass: %v", err)
+	}
+	if err := ValidateGarageCluster(&config.GarageConfig{Cluster: "c1", AdvertiseHost: "10.0.0.1", ReplicationFactor: 3, Peers: []string{"abcd1234@10.0.0.1:3901"}}); err == nil {
+		t.Error("joiner without rpc_secret must be rejected")
+	}
+	if err := ValidateGarageCluster(&config.GarageConfig{Cluster: "c1", AdvertiseHost: "10.0.0.1", RPCSecret: "aa", ReplicationFactor: 3, Capacity: 10}); err == nil {
+		t.Error("capacity without zone must be rejected")
+	}
+	if err := ValidateGarageCluster(&config.GarageConfig{Cluster: "c1", AdvertiseHost: "10.0.0.1", RPCSecret: "aa", ReplicationFactor: 3, Capacity: 10, Zone: "z1"}); err != nil {
+		t.Errorf("valid cluster config rejected: %v", err)
 	}
 }
 

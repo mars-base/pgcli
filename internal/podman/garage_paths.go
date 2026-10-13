@@ -43,7 +43,13 @@ func renderGarageTOML(gc *config.GarageConfig, bind string) string {
 	b.WriteString("db_engine = \"lmdb\"\n")
 	fmt.Fprintf(&b, "replication_factor = %d\n", gc.ReplicationFactor)
 	b.WriteString("\n")
-	fmt.Fprintf(&b, "rpc_bind_addr = %q\n", garageBindAddr(bind, gc.RPCPort))
+	fmt.Fprintf(&b, "rpc_bind_addr = %q\n", garageBindAddr(rpcBindHost(gc, bind), gc.RPCPort))
+	// rpc_public_addr is the address peers dial — required for a cluster (each
+	// node advertises its reachable host), omitted for single-node (loopback
+	// only, no peers). Empty when AdvertiseHost is unset.
+	if pub := gc.RPCPublicAddr(); pub != "" {
+		fmt.Fprintf(&b, "rpc_public_addr = %q\n", pub)
+	}
 	fmt.Fprintf(&b, "rpc_secret = %q\n", gc.RPCSecret)
 	b.WriteString("\n")
 	b.WriteString("[s3_api]\n")
@@ -73,12 +79,50 @@ func garageMountFlags(hostMetaDir, hostDataDir, hostConfigFile string) []string 
 	}
 }
 
-// ValidateGarageSingle gates a Garage install: v1 manages single-node only, so
-// a hand-edited replication_factor != 1 (no --endpoint/cluster flags exist) is
-// rejected here rather than producing a silently broken cluster.
-func ValidateGarageSingle(replicationFactor int) error {
-	if replicationFactor > 1 {
-		return fmt.Errorf("pgcli manages Garage single-node only (replication_factor must be 1 or unset); got %d", replicationFactor)
+// rpcBindHost picks the rpc_bind_addr host. A cluster member's RPC port is
+// what peers dial (rpc_public_addr advertises it), so a loopback Listen must
+// NOT pin RPC to loopback — widening only the bind, not the advertised addr,
+// keeps the S3 API/web/admin ports exactly where the operator set them. The
+// RPC channel is signed with rpc_secret, so opening it on the network is
+// garage's own recommended cluster posture. IPv6 advertise hosts widen to the
+// dual-stack wildcard instead of the IPv4 one.
+func rpcBindHost(gc *config.GarageConfig, bind string) string {
+	if !gc.Clustered() {
+		return bind
+	}
+	switch bind {
+	case "", "127.0.0.1", "localhost", "::1":
+		if strings.Contains(gc.AdvertiseHost, ":") {
+			return "::"
+		}
+		return "0.0.0.0"
+	}
+	return bind
+}
+
+// ValidateGarageCluster gates a Garage install for either topology.
+// Single-node (Cluster empty): replication_factor must be ≤ 1 — that is the v1
+// contract, reworded. Cluster (Cluster set): the node must advertise a
+// peer-dialable address (AdvertiseHost); a joiner (any known Peers) must also
+// carry the shared RPCSecret — the bootstrap node has none yet because the
+// install generates it. A Capacity without a Zone is rejected because
+// `garage layout assign -c` requires `-z`. (pgcli v2 does not manage node
+// removal or layout revert.)
+func ValidateGarageCluster(gc *config.GarageConfig) error {
+	if !gc.Clustered() {
+		if gc.ReplicationFactor > 1 {
+			return fmt.Errorf("garage replication_factor > 1 requires a cluster (set cluster in pg.yaml / pass --cluster); single-node must be 1, got %d", gc.ReplicationFactor)
+		}
+		return nil
+	}
+	if gc.AdvertiseHost == "" {
+		return fmt.Errorf("garage cluster %q requires --advertise-host <this node's peer-reachable IP> (rpc_public_addr)", gc.Cluster)
+	}
+	if gc.RPCSecret == "" && len(gc.Peers) > 0 {
+		return fmt.Errorf("garage cluster %q: joining a known peer requires the cluster's shared --rpc-secret <64hex> (printed once by the bootstrap node's install summary)", gc.Cluster)
+	}
+	if gc.Capacity > 0 && gc.Zone == "" {
+		return fmt.Errorf("garage cluster %q: --capacity requires --zone (garage layout assign refuses -c without -z)", gc.Cluster)
 	}
 	return nil
 }

@@ -850,13 +850,20 @@ type RustfsConfig struct {
 //     requires HTTPS, so front Garage with the nginx addon for TLS. Consequently
 //     there are no TLS/CertFile/KeyFile fields here (install rejects --tls).
 //
-// v1 is single-node only: ReplicationFactor is fixed at 1 and the container runs
-// `garage server --single-node`. Multi-node / cross-zone clusters are out of
-// scope (Endpoints/Drives have no Garage meaning here).
+// Two topologies: single-node (v1 — ReplicationFactor 1, the container runs
+// `garage server --single-node --default-bucket` and seeds credentials from
+// env) and multi-node cluster (v2 — Cluster set; each host installs its own
+// member, joins via known Peers, and the CLI drives `garage node connect` +
+// `layout assign/apply` — see internal/cli.addon_garage.go). Peers are
+// `id@addr` strings only; remote members never appear as pg.yaml entries, so
+// ApplyDefaults and the port pool treat every Garage entry as local.
 //
 // Credentials differ in kind from the other stores: Garage uses access/secret
-// keys seeded via GARAGE_DEFAULT_ACCESS_KEY / GARAGE_DEFAULT_SECRET_KEY env plus
-// a single default bucket (--default-bucket) whose name is the instance name.
+// keys. Single-node seeds them via GARAGE_DEFAULT_ACCESS_KEY /
+// GARAGE_DEFAULT_SECRET_KEY env plus one default bucket (--default-bucket,
+// named after the instance). A cluster cannot use that env path — the CLI
+// creates the key (`garage key create`, Garage-manned GK+hex/64hex shape) and
+// bucket once quorum forms, storing the results back into RootUser/RootPassword.
 // RootUser/RootPassword keep the CLI-uniform names but map to those keys (the
 // access key carries Garage's "GK-" prefix).
 type GarageConfig struct {
@@ -873,25 +880,62 @@ type GarageConfig struct {
 
 	Listen    string `yaml:"listen,omitempty"`  // bind address, default 127.0.0.1
 	APIPort   int    `yaml:"api_port,omitempty"`     // S3 API host port, from garage_start_pool
-	RPCPort   int    `yaml:"rpc_port,omitempty"`     // node-to-node RPC host port (loopback in single-node)
+	RPCPort   int    `yaml:"rpc_port,omitempty"`     // node-to-node RPC host port
 	WebPort   int    `yaml:"web_port,omitempty"`     // s3_web static-site host port
 	AdminPort int    `yaml:"admin_port,omitempty"`   // admin API + metrics host port
 
-	RootUser     string `yaml:"root_user,omitempty"`     // → GARAGE_DEFAULT_ACCESS_KEY (GK-prefixed)
-	RootPassword string `yaml:"root_password,omitempty"` // → GARAGE_DEFAULT_SECRET_KEY, generated on first install
+	RootUser     string `yaml:"root_user,omitempty"`     // access key id (GK-prefixed): env-seeded single-node, `key create`-seeded clustered
+	RootPassword string `yaml:"root_password,omitempty"` // secret key, paired with RootUser
 
 	// RPCSecret is the 32-byte hex cluster secret (garage.toml rpc_secret).
-	// Fixed per instance and persisted so restarts keep the same identity;
-	// generated once at install (equivalent of `openssl rand -hex 32`).
+	// MUST be identical on every member of a cluster — generated on the
+	// bootstrap node and carried to joiners via --rpc-secret (operator-
+	// transported; pgcli never executes on a remote host). Persisted so
+	// restarts keep the same identity.
 	RPCSecret string `yaml:"rpc_secret,omitempty"`
 
 	Region            string `yaml:"region,omitempty"`               // s3_region, default "garage"
-	ReplicationFactor int    `yaml:"replication_factor,omitempty"`   // v1 fixed 1 (single-node)
+	ReplicationFactor int    `yaml:"replication_factor,omitempty"`   // default 1; >1 requires Cluster
+
+	// --- Multi-node (v2). Cluster non-empty switches the container off
+	// --single-node and onto the cluster lifecycle (connect/assign/apply). ---
+	Cluster string `yaml:"cluster,omitempty"` // cluster group name; non-empty = cluster mode
+	// AdvertiseHost is this node's rpc_public_addr host (the LAN IP peers
+	// dial). Required in cluster mode; empty in single-node (loopback only).
+	AdvertiseHost string `yaml:"advertise_host,omitempty"`
+	// Zone and Capacity(GiB) drive `garage layout assign -z/-c` for this node.
+	// Capacity 0 means "start the node but don't auto-assign a role".
+	Zone     string `yaml:"zone,omitempty"`
+	Capacity int    `yaml:"capacity,omitempty"`
+	// Peers are `id@addr` strings this node connects to on install. Remote
+	// members exist ONLY here — never as map entries (no RemoteHost pattern).
+	Peers []string `yaml:"peers,omitempty"`
+	// NodeID is this node's `<64hex>@<addr>` identity, read back from
+	// `garage node id` after first boot and cached for display/re-join. The
+	// node keypair itself lives in MetadataDir.
+	NodeID string `yaml:"node_id,omitempty"`
 
 	// Autostart brings this container up on host boot via the boot service
 	// (pg autostart enable --garage). Start-only: it starts the existing
 	// container, so install first.
 	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// Clustered reports whether this Garage entry runs in multi-node cluster mode.
+func (g GarageConfig) Clustered() bool { return g.Cluster != "" }
+
+// RPCPublicAddr renders the garage.toml rpc_public_addr value (this node's
+// peer-dialable address). Bracket-safe for IPv6. Meaningful only when
+// AdvertiseHost is set (cluster mode).
+func (g GarageConfig) RPCPublicAddr() string {
+	if g.AdvertiseHost == "" {
+		return ""
+	}
+	host := g.AdvertiseHost
+	if strings.Contains(host, ":") { // IPv6 literal / dual-stack wildcard
+		host = "[" + host + "]"
+	}
+	return fmt.Sprintf("%s:%d", host, g.RPCPort)
 }
 
 // RedisConfig holds a standalone Redis addon: a KV store for cache, session,
