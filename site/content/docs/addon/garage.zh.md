@@ -568,6 +568,17 @@ pgBackRest（经 nginx TLS 前置）。
 自家的 flag 不需要 `--` 分隔。单节点实例和集群成员上用法完全一致；集群里问任意
 **运行中**的成员即可——status、layout、key 都是 CRDT 复制状态，全集群一致。
 
+> **任意成员都能应答任意 `pg garage` 命令——读和写都一样。** 每台主机都跑着
+> 自己的 garage 节点，而 bucket、key、layout 是不属于任何单机的 CRDT 状态，所
+> 以 `bucket create`、`key create`、`bucket allow`、`layout show`——以及对应
+> 的 delete/deny——指向哪个运行中的成员结果都一样，改动在其余成员上立即可见。
+> （三节点集群实测：在主机 2 上建的桶，主机 1、3 的 `bucket list` 都能马上看
+> 到；从主机 1 发起的删除，在主机 2 的列表里立刻消失。）唯一跟成员挂钩的是
+> **取 secret**：播种 key 的 secret 只存在于铸出它那台主机的 `pg.yaml` 里，
+> `pg addon password` 只在那台好用、在别处会报错点名它（见[拿到集群的
+> AK/SK](#拿到集群的-aksk)）——这是 pgcli 的本地配置边界，不是 garage 的限
+> 制，也不妨碍你从任意成员铸新 key。
+
 ### 健康与状态
 
 ```bash
@@ -609,8 +620,8 @@ pg garage --name store bucket list                  # 能看到新的 "backups" 
 pg garage --name store bucket delete backups --yes  # 必须带 --yes（销毁数据）
 ```
 
-桶的**全局 alias** 就是它的 S3 名字，全集群唯一；问任意运行中的成员即可
-（layout/bucket 状态是 CRDT 复制的，处处立刻可见）。
+桶的**全局 alias** 就是它的 S3 名字，全集群唯一；问任意运行中的成员即可——
+从哪个成员建/删都一样（见本节开头的"任意成员"说明）。
 
 ### layout 变更（集群）
 

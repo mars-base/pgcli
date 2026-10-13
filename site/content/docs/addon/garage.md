@@ -630,6 +630,21 @@ running container — the replacement for hand-written
 same on a single-node instance and on any cluster member; on a cluster, ask any
 **running** member — status, layout and keys are cluster-replicated CRDT state.
 
+> **Any member answers any `pg garage` command — reads *and* writes.** Every
+> host runs its own garage node, and buckets, keys and the layout are CRDT state
+> that does not belong to any one of them, so `bucket create`, `key create`,
+> `bucket allow`, `layout show` — and their delete/deny counterparts —
+> produce the same result whichever running member you point at, and the change
+> is visible on all the others immediately. (Verified on a 3-node cluster: a
+> bucket created on host 2 showed up in `bucket list` on hosts 1 and 3, and a
+> delete issued from host 1 was gone from host 2's list.) The one
+> member-specific thing is **secret retrieval**: a seeded key's secret exists
+> only in the `pg.yaml` of the host that minted it, so `pg addon password` works
+> there and errors elsewhere (see
+> [Getting the cluster's AK/SK](#getting-the-clusters-aksk)) — that is pgcli's
+> local-config boundary, not a garage limitation, and it does not stop you from
+> minting new keys from any member.
+
 ### Health and status
 
 ```bash
@@ -675,8 +690,8 @@ pg garage --name store bucket delete backups --yes  # --yes is required (destroy
 ```
 
 The bucket's **global alias** is its S3 name and is unique across the cluster;
-ask any running member (layout/bucket state is CRDT-replicated, so it is
-immediately visible everywhere).
+ask any running member — the create/delete works from any of them just the same
+(the any-member note at the top of this section).
 
 ### Layout changes (cluster)
 
