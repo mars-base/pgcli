@@ -15,11 +15,16 @@ runtime model diverges from all three in four ways that shape this page:
 1. **A rendered TOML config file, not argv/env.** Garage reads
    `/etc/garage.toml`. pgcli renders it under the instance directory and
    bind-mounts it read-only; the MinIO/silo/rustfs addons pass argv or env.
-2. **Two data directories, not one — and no drive pool behind them.**
-   `metadata_dir` (LMDB) and `data_dir` (blocks) are separate bind mounts; one
-   `data_dir` per node, with multi-disk aggregation left to host LVM/RAID
-   (MinIO and rustfs instead take a list of drives per node) — see [Capacity
-   and sizing](#capacity-and-sizing).
+2. **Two kinds of directory — and multi-disk is native since Garage v0.9.0.**
+   `metadata_dir` (LMDB) and `data_dir` (blocks) are separate bind mounts, and
+   `metadata_dir` is always exactly one. `data_dir` takes either a single path
+   or, natively upstream, a list of `{ path = …, capacity = … }` entries — one
+   per disk, so a node spreads its blocks across several drives itself rather
+   than needing host LVM/RAID under one big filesystem. pgcli exposes that list
+   as `--drive` (repeatable); MinIO, silo, rustfs, seaweedfs and garage all
+   take a per-node drive list now — see [Multi-disk data
+   dirs](#multi-disk-data-dirs) and [Capacity and
+   sizing](#capacity-and-sizing).
 3. **Four ports, from their own pool.** S3 API, node-to-node RPC, the `s3_web`
    static site, and the admin/metrics API — allocated together per instance
    from `garage_start_port` (default **3900**), a separate cursor from the
@@ -46,13 +51,17 @@ One container per instance. pgcli pulls the **upstream**
 wrapper image to build, because Garage runs as root inside its own container and
 ships no uid-drop, so there is no host-side ownership dance to absorb.
 
-The data lives in two bind-mounted host directories that outlive the container:
+The data lives in bind-mounted host directories that outlive the container:
 
 - `<base-dir>/addon/garage/<name>/data` → `/var/lib/garage/data` (blocks),
 - `<base-dir>/addon/garage/<name>/meta` → `/var/lib/garage/meta` (LMDB),
 
 plus the rendered `<base-dir>/addon/garage/<name>/garage.toml` →
 `/etc/garage.toml`, mounted **read-only** (Garage never rewrites its own config).
+With `--drive` (multi-disk), the single data dir is replaced by one host dir per
+drive, each mounted at its own numbered container slot `/var/lib/garage/data1..N`
+— the meta dir and the rendered config stay exactly one apiece; see [Multi-disk
+data dirs](#multi-disk-data-dirs).
 
 Credentials are handled like the other stores, but Garage's are an **access key /
 secret key pair** rather than a root user / password:
@@ -88,6 +97,9 @@ pg addon install garage
 
 # a named instance with an explicit data directory
 pg addon install garage --name store --data-dir /srv/garage
+
+# spread this node's blocks over several disks (see Multi-disk data dirs below)
+pg addon install garage --name store --drive /mnt/d1/garage --drive /mnt/d2/garage
 
 # a fixed S3 API port (RPC/web/admin take the next three free ports)
 pg addon install garage --name store --api-port 3900
@@ -145,7 +157,7 @@ Re-running install against a **live** instance is a no-op: the container is not
 recreated (a stopped one is simply started, with a notice), the flags are merged
 into the stored config, and the existing credentials are kept. Pass `--force` to
 recreate the container so changed ports, listen address, or credentials take
-effect — without losing the two data directories.
+effect — without losing the data directories.
 
 > **Bind address:** the default `127.0.0.1` keeps the store local. `--listen
 > 0.0.0.0` (or the `listen` key in `pg.yaml`) exposes it on the network. Because
@@ -310,6 +322,65 @@ See [Backup → S3 object storage
 repository](../../backup/#s3-object-storage-repository) for the full flow.
 `pg addon password garage --name store` prints the secret key for scripting.
 
+## Multi-disk data dirs
+
+A Garage node does not need one big filesystem under it. Since v0.9.0 Garage
+accepts a **list** of data directories and balances blocks across them itself;
+pgcli exposes that as a repeatable `--drive`:
+
+```bash
+pg addon install garage --name store \
+  --drive /mnt/d1/garage --drive /mnt/d2/garage --drive /mnt/d3/garage
+```
+
+What that produces, verified on real disks (a 3-node cluster whose members each
+took two drives):
+
+- Each drive is bind-mounted at its own container slot — `/var/lib/garage/data1`,
+  `data2`, … in `--drive` order — and the rendered `garage.toml` lists them as
+  Garage's array form:
+
+  ```toml
+  data_dir = [
+    { path = "/var/lib/garage/data1", capacity = "4G" },
+    { path = "/var/lib/garage/data2", capacity = "4G" },
+  ]
+  ```
+
+- The per-entry `capacity` is **mandatory** — v2.4 refuses to boot an entry that
+  carries neither a capacity nor `read_only = true` (`invalid data_dir config:
+  data directories in data_dir should have a capacity value or be marked
+  read_only`). pgcli has no knob for it, so it fills in each drive's own
+  **filesystem usable size in GiB** (rounded down, floor 1) — which is what a
+  "one dir per separately-mounted disk" layout wants, and is what makes Garage
+  weight the spread toward the bigger disk. `--capacity` stays the *node-level*
+  number, unchanged by this.
+- `metadata_dir` never joins the set — it stays the single `meta` dir beside the
+  instance's data path (LMDB is one directory by upstream design).
+- **`--drive` and `--data-dir` are mutually exclusive**: drives fully replace
+  the resolved data dir. Re-running install without `--drive` on a multi-drive
+  instance keeps the stored drives (they merge, like every other key).
+- A drive sitting on the host's root device only **warns** and is used anyway
+  (as with seaweedfs; MinIO/silo refuse and rustfs hard-requires a separate
+  device) — multi-drive only buys something on separately-mounted disks.
+- `pg addon list` reports it as `Drives: N (multi-disk data_dir)` with one
+  `container-slot <- host-dir` line each; the install summary prints the same
+  mapping as `Drive 1: … -> /var/lib/garage/data1` lines.
+- `remove --clean-data` goes through **every** drive dir (plus meta and the
+  rendered config), each still refusing to delete a live mount point.
+- Blocks genuinely land on both dirs: a 48 MiB upload to a 2-drive node left
+  data in both host directories, and a 64 MiB object round-tripped
+  (`sha256sum` identical) through a 3-node `rf = 3` cluster read from all three
+  hosts. Stop/start preserves the objects; a recreated container reads the same
+  drives.
+
+The one thing this does **not** get you is drive-level redundancy on a lone
+node — see [Capacity and sizing](#capacity-and-sizing). Garage's own rebalancing
+rules when you *add* a drive later (existing blocks are not reshuffled; a
+read-only entry drains opportunistically or via an explicit repair) are upstream
+[Multi-HDD support](https://garagehq.deuxfleurs.fr/documentation/operations/multi-hdd/)
+territory: pgcli writes the config, Garage does the moving.
+
 ## Multi-node cluster
 
 Garage's real strength is the cross-host cluster: nodes in different zones,
@@ -343,6 +414,11 @@ cluster-replicated and survives until the last host applies it:
 pg addon install garage --name store --cluster c1 \
   --advertise-host 10.0.0.11 --zone z1 --capacity 15 --replication-factor 3
 ```
+
+A cluster member is a Garage node like any other, so it can also take
+`--drive` for its own disks (see [Multi-disk data
+dirs](#multi-disk-data-dirs)) — verified on a 3-host cluster where each member
+carried two drives.
 
 The summary prints the secret and a copy-paste join template:
 
@@ -437,16 +513,20 @@ running → `skipping creation`; peering already done → treated as success).
 
 ### Capacity and sizing
 
-**Garage has no drive pool.** MinIO and rustfs both take a list of drives: a
-node declares N block devices, stripes data across them, and survives individual
-drive loss on its own. Garage's unit of redundancy is the **node**, not the
-drive — each member gets exactly one `data_dir` (plus a separate LMDB
-`metadata_dir`), and every block of a replicated object is placed on a
-*different node* (preferring a different *zone*). If you want multi-disk
-aggregation, do it below Garage: LVM or host RAID presents one big filesystem
-and Garage's `data_dir` sits on it. Disk failure is thus the host layer's
-problem; node failure is Garage's. **MinIO/rustfs manage drives; Garage manages
-nodes.**
+**Garage's unit of redundancy is the node, not the drive** — every block of a
+replicated object is placed on a *different node* (preferring a different
+*zone*), so no drive or node failure loses data as long as `replication_factor`
+copies survive. What a node does with its *own* disks is a separate axis, and
+Garage handles that natively: since v0.9.0 a node can be given several data
+directories and spreads its blocks across them proportionally to their declared
+capacities (see [Multi-disk data dirs](#multi-disk-data-dirs)). MinIO and rustfs
+aggregate drives with erasure-coding *inside* a node and survive drive loss that
+way; Garage's multi-drive mode is **aggregation without redundancy** — losing one
+of a node's drives loses that node's share of the blocks, and the object is then
+repaired from its copies on *other nodes*. If a store must survive a drive loss on
+a single node with no other nodes to repair from, put LVM/RAID under
+`data_dir` instead. **MinIO/rustfs manage drives as a pool; Garage manages nodes,
+and uses drives only for spread.**
 
 `--capacity` is the number you hand that model: GiB this node may store
 (`layout assign -c <N>GiB`). Two properties worth internalising:
@@ -455,11 +535,19 @@ nodes.**
   because capacity was reached — the real free space is what `garage status`
   reports as `DataAvail`. Setting `--capacity 100` on a 20 GiB filesystem
   would just let Garage fill (and then break) the disk. Keep it at (or under)
-  the usable size of the backing filesystem.
+  the usable size of the backing filesystem — in multi-drive mode, at the
+  **sum** of the drives' usable sizes.
 - Changing it is a **layout change**: re-run the same `pg addon install` line
   with the new `--capacity` (assign is idempotent, the apply bumps the layout
   version), and Garage rebalances blocks onto the enlarged space. Growing the
   backing filesystem first is what actually buys room.
+
+Note there are **two capacity numbers** in a multi-drive node and they are not
+the same knob: `--capacity` is the *node's* role in the cluster layout (how much
+this node is trusted to hold, shared across all its drives), while each
+`data_dir` entry's `capacity` tells Garage how much *that drive* holds so it can
+weight the spread. pgcli fills the per-drive numbers automatically (see below);
+only the node-level `--capacity` is yours to choose.
 
 **Usable capacity** is the sum of all node capacities divided by the
 replication factor — every object is kept in `rf` copies:
@@ -805,6 +893,9 @@ addons:
       image_tag: docker.io/dxflrs/garage:v2.4.1
       # data_dir: /srv/garage      # omit for <base-dir>/addon/garage/store/data
       #                             # (meta dir and garage.toml live beside it)
+      # drives:                   # multi-disk: replaces data_dir, one dir per disk
+      #   - /mnt/d1/garage        # (mutually exclusive with data_dir; each drive
+      #   - /mnt/d2/garage        #  is mounted at /var/lib/garage/data<N>)
       # config_file: /etc/garage.toml   # BYO config: mounted verbatim, never rewritten
       listen: 127.0.0.1
       api_port: 3900
@@ -834,8 +925,8 @@ and re-install. Zone and capacity are layout state, not TOML, so they appear onl
 here.
 
 Edits to `listen`, ports, `root_user`, `root_password`, `image_tag`, `data_dir`,
-or `config_file` take effect after the next `pg addon install garage --name
-store --force`.
+`drives`, or `config_file` take effect after the next `pg addon install garage
+--name store --force`.
 
 ### List
 
@@ -867,9 +958,11 @@ Infra add-ons (garage):
 
 Cluster members gain the `Cluster` / `Advertise` / `Zone/Cap` / `Node ID` /
 `Nodes` lines; `Nodes:` is a live `garage status` read (best-effort — it is
-omitted when the member is unreachable). On a cluster the `Access key` on the
-hosts that did **not** perform the seeding is the public id only (no secret); see
-[Seeding and the secret](#seeding-and-the-secret).
+omitted when the member is unreachable). A multi-drive instance replaces the
+`Data:` line with `Drives:` plus one indented container-slot/host-dir line per
+drive (see [Multi-disk data dirs](#multi-disk-data-dirs)). On a cluster the
+`Access key` on the hosts that did **not** perform the seeding is the public id
+only (no secret); see [Seeding and the secret](#seeding-and-the-secret).
 
 `pg addon list` never prints the secret key. Reveal it deliberately with
 `pg addon list --show-password` (appends a `Secret key:` line), or print just the
@@ -906,16 +999,17 @@ stores.
 
 ```bash
 pg addon remove garage --name store            # container gone, data kept
-pg addon remove garage --name store --clean-data   # also delete the two dirs + config
+pg addon remove garage --name store --clean-data   # also delete every data dir + meta dir + config
 ```
 
 The data directories **are the object storage** — losing them means losing every
 bucket in them — so `remove` keeps them by default. `--clean-data` deletes the
-data dir, the meta dir, and the pgcli-rendered `garage.toml` (a `config_file` you
-supplied yourself is never touched), and prunes the now-empty default-layout
-parent directory. Unlike rustfs, Garage writes as root and pgcli runs podman as
-root on the managed hosts, so plain removal suffices — no `podman unshare`
-fallback.
+data dir(s) (in multi-drive mode, every drive dir), the meta dir, and the
+pgcli-rendered `garage.toml` (a `config_file` you supplied yourself is never
+touched), and prunes the now-empty default-layout parent directory. Each dir is
+skipped — with a refusal, not a silent pass — while it is still a live mount
+point. Unlike rustfs, Garage writes as root and pgcli runs podman as root on the
+managed hosts, so plain removal suffices — no `podman unshare` fallback.
 
 ## Logs
 

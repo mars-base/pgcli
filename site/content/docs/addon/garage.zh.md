@@ -14,10 +14,14 @@ weight: 45
 1. **渲染 TOML 配置文件，而不是 argv/env。** Garage 从 `/etc/garage.toml` 读
    配置。pgcli 在实例目录下渲染该文件并以只读方式 bind 挂载；minio/silo/rustfs
    插件则传 argv 或 env。
-2. **两个数据目录，而不是一个——且背后没有磁盘池。** `metadata_dir`（LMDB）与
-   `data_dir`（数据块）是各自独立的 bind 挂载；每个节点只有一个 `data_dir`，多
-   盘聚合交给主机 LVM/RAID（MinIO 与 rustfs 则是每节点声明一串盘）——见[容量与
-   尺寸计算](#容量与尺寸计算)。
+2. **两类目录——且自 Garage v0.9.0 起多盘是原生支持的。**
+   `metadata_dir`（LMDB）与 `data_dir`（数据块）是各自独立的 bind 挂载，且
+   `metadata_dir` 永远只有一个。`data_dir` 既可以是一个路径，也可以（上游原生
+   地）是 `{ path = …, capacity = … }` 的列表——一块盘一项，节点因此自己就能把
+   数据块铺在多块盘上，而不必在底下垫主机 LVM/RAID 拼一个大文件系统。pgcli 用
+   可重复的 `--drive` 暴露这个列表；如今 minio、silo、rustfs、seaweedfs、
+   garage 全都接受每节点一串盘——见[多盘数据目录](#多盘数据目录)与[容量与尺寸
+   计算](#容量与尺寸计算)。
 3. **四个端口，来自自己的池。** S3 API、节点间 RPC、`s3_web` 静态站点、
    admin/metrics API——每实例一起从 `garage_start_port`（默认 **3900**）分配，
    与共享的 minio/silo/rustfs 池是两条独立游标。
@@ -40,13 +44,16 @@ weight: 45
 （仅 pull）——不像 rustfs 需要自建 wrapper 镜像，因为 Garage 在自己的容器里以
 root 运行、且不带 uid-drop，所以不存在主机侧属主处理要消化。
 
-数据存放在两个长于容器生命周期的 bind 挂载主机目录里：
+数据存放在长于容器生命周期的 bind 挂载主机目录里：
 
 - `<base-dir>/addon/garage/<name>/data` → `/var/lib/garage/data`（数据块），
 - `<base-dir>/addon/garage/<name>/meta` → `/var/lib/garage/meta`（LMDB），
 
 外加渲染出的 `<base-dir>/addon/garage/<name>/garage.toml` →
-`/etc/garage.toml`，以**只读**方式挂载（Garage 从不改写自身配置）。
+`/etc/garage.toml`，以**只读**方式挂载（Garage 从不改写自身配置）。用
+`--drive`（多盘）时，那个单一数据目录被"每盘一个主机目录"取代，各自挂在编号的
+容器槽位 `/var/lib/garage/data1..N` 上——meta 目录与渲染出的配置仍然各只有一个；
+见[多盘数据目录](#多盘数据目录)。
 
 凭据的处理与其它存储类似，但 Garage 用的是 **access key / secret key 对**，而不
 是 root user / password：
@@ -76,6 +83,9 @@ pg addon install garage
 
 # 指定名字与显式数据目录的实例
 pg addon install garage --name store --data-dir /srv/garage
+
+# 把本节点的数据块铺在多块盘上（见下文"多盘数据目录"）
+pg addon install garage --name store --drive /mnt/d1/garage --drive /mnt/d2/garage
 
 # 固定 S3 API 端口（rpc/web/admin 取随后三个空闲端口）
 pg addon install garage --name store --api-port 3900
@@ -129,7 +139,7 @@ pg addon install garage --name store --cluster c1 --advertise-host 10.0.0.11 \
 
 对**存活**实例重跑 install 是 no-op：容器不会被重建（处于停止的会被启动，并给出
 提示），flag 会合并进已存配置，已有凭据保持不变。传 `--force` 会重建容器，从而让
-改动过的端口、监听地址或凭据生效——但不丢两个数据目录。
+改动过的端口、监听地址或凭据生效——但不丢数据目录。
 
 > **监听地址：** 默认 `127.0.0.1` 让存储留在本地。`--listen 0.0.0.0`（或
 > `pg.yaml` 里的 `listen` 键）把它暴露到网络。由于 Garage 服务的是**明文
@@ -282,6 +292,56 @@ pg backup setup \
 库](../../backup/#s3-对象存储仓库)。`pg addon password garage --name store` 会
 为脚本打印 secret key。
 
+## 多盘数据目录
+
+Garage 节点不必在自己底下垫一个大文件系统。从 v0.9.0 起 Garage 原生接受一组
+数据目录，并自己在其中均衡数据块；pgcli 用一个可重复的 `--drive` 暴露它：
+
+```bash
+pg addon install garage --name store \
+  --drive /mnt/d1/garage --drive /mnt/d2/garage --drive /mnt/d3/garage
+```
+
+产出的结果（在真盘上验证过：一个 3 节点集群，每台各带两块盘）：
+
+- 每块盘 bind 挂载到自己独立的容器槽位——按 `--drive` 顺序为
+  `/var/lib/garage/data1`、`data2`……——渲染出的 `garage.toml` 用 Garage 的数组
+  形态列出它们：
+
+  ```toml
+  data_dir = [
+    { path = "/var/lib/garage/data1", capacity = "4G" },
+    { path = "/var/lib/garage/data2", capacity = "4G" },
+  ]
+  ```
+
+- 每项的 `capacity` 是**必填**的——v2.4 会拒绝一个既不带 capacity 也不带
+  `read_only = true` 的项（`invalid data_dir config: data directories in
+  data_dir should have a capacity value or be marked read_only`）。pgcli 不为它
+  设旋钮，而是填入每块盘**自己文件系统的可用容量（GiB，向下取整、下限 1）**——
+  这正是"每块独立挂载的盘给一个目录"这种布局想要的，也正是让 Garage 把铺开权重
+  倾向更大那块盘的机制。`--capacity` 仍是*节点级*的那个数，不受此影响。
+- `metadata_dir` 从不加入这个集合——它仍是与实例数据路径同级的那一个 `meta` 目
+  录（LMDB 按上游设计就是一个目录）。
+- **`--drive` 与 `--data-dir` 互斥**：盘列表整体取代解析出的数据目录。对一个多
+  盘实例不带 `--drive` 重跑 install，已存的盘会保留（和其它键一样是合并语义）。
+- 落在主机根设备上的盘只**警告**、照样使用（与 seaweedfs 一致；MinIO/silo 直接
+  拒绝，rustfs 硬性要求独立设备）——多盘只有在独立挂载的盘上才买得到东西。
+- `pg addon list` 会显示成 `Drives: N (multi-disk data_dir)`，下面每盘一行
+  `容器槽位 <- 主机目录`；安装摘要打印同样的映射，形如
+  `Drive 1: … -> /var/lib/garage/data1`。
+- `remove --clean-data` 会逐个处理**每一块**盘目录（外加 meta 目录与渲染出的配
+  置），每个仍然拒绝删除处于挂载状态的点。
+- 数据块确实落在两块盘上：往一个两盘节点上传一个 48 MiB 对象后，两个主机目录里
+  都有数据；一个 64 MiB 对象经 3 节点 `rf = 3` 集群从三台主机分别读取
+  往返，`sha256sum` 一致。stop/start 保留对象；重建的容器读到的是同样的盘。
+
+这套做法**给不了**你的是：单个孤立节点上的盘级冗余——见[容量与尺寸计算](#容量与尺寸计算)。
+日后*新增*一块盘时 Garage 自己的均衡规则（已有数据块不会被重排；只读项会被机会
+式地、或经显式 repair 主动地排空）属于上游
+[Multi-HDD support](https://garagehq.deuxfleurs.fr/documentation/operations/multi-hdd/)
+的范畴：pgcli 负责写配置，搬运由 Garage 完成。
+
 ## 多节点集群
 
 Garage 的真正价值在于跨主机集群：不同 zone 的节点、CRDT 复制的 layout、quorum
@@ -313,6 +373,9 @@ Garage 的真正价值在于跨主机集群：不同 zone 的节点、CRDT 复�
 pg addon install garage --name store --cluster c1 \
   --advertise-host 10.0.0.11 --zone z1 --capacity 15 --replication-factor 3
 ```
+
+集群成员和其它 Garage 节点一样，也可以带 `--drive` 用它自己的盘（见[多盘数据目
+录](#多盘数据目录)）——已在一个 3 主机集群上验证，每台各带两块盘。
 
 摘要会打印 secret 和一份可复制的加入模板：
 
@@ -398,13 +461,16 @@ re-run the same install command"。assign 幂等、重新 stage 无害，所以�
 
 ### 容量与尺寸计算
 
-**Garage 没有磁盘池的概念。** MinIO 和 rustfs 都是接收一串盘：一个节点声明 N 块
-设备、把数据条带化铺在这些盘上、并自行承受单盘损坏。Garage 的冗余单位是**节点**
-而不是盘——每个成员恰好只有一个 `data_dir`（外加独立的 LMDB `metadata_dir`），
-同一对象的每一块副本都会被放到*不同节点*上（尽量放到不同 *zone*）。要多盘聚合，
-就在 Garage 之下做：用 LVM 或主机 RAID 呈现一个大文件系统，Garage 的
-`data_dir` 落在它上面。于是磁盘故障是主机那一层的事，节点故障才是 Garage 的
-事。**MinIO/rustfs 管盘，Garage 管节点。**
+**Garage 的冗余单位是节点，不是盘**——一个复制对象的每一块都会被放到*不同节点*
+上（尽量放到不同 *zone*），所以只要还有 `replication_factor` 份副本活着，单块盘
+或单台节点的故障都不会丢数据。一个节点如何处置*自己*的盘是另一个维度的事，而
+Garage 从 v0.9.0 起原生处理它：一个节点可以给定好几个数据目录，按各自声明的容
+量比例把数据块均衡在这些目录里（见[多盘数据目录](#多盘数据目录)）。MinIO 与
+rustfs 是靠**节点内**纠删码把盘聚成一个池、以此扛单盘损坏；Garage 的多盘模式是
+**聚合但没有冗余**——丢一块盘就丢了该节点持有的那部分数据块，对象转而从*其它
+节点*上的副本修复回来。若你要让一个孤零零的单节点也扛得住丢盘、又没有别的节点可
+用来修复，那就该在 `data_dir` 底下垫 LVM/RAID。**MinIO/rustfs 把盘管成一个池；
+Garage 管的是节点，盘只用来铺。**
 
 `--capacity` 就是交给这个模型的那个数：本节点可存放的 GiB 数
 （`layout assign -c <N>GiB`）。有两个性质必须内化：
@@ -412,10 +478,15 @@ re-run the same install command"。assign 幂等、重新 stage 无害，所以�
 - 它是**放置权重，不是配额**。容量用满时 Garage 也从不拒写——真正的剩余空间是
   `garage status` 里 `DataAvail` 报的值。在一块 20 GiB 的文件系统上设
   `--capacity 100`，只会让 Garage 把盘填满（然后写坏）。把它保持在后端文件系统
-  可用大小以内（或更低）。
+  可用大小以内（或更低）——多盘模式下，是各盘可用大小的**总和**。
 - 改它是一次 **layout 变更**：用新的 `--capacity` 重跑同一条
   `pg addon install`（assign 幂等，apply 会把 layout 版本加一），Garage 就把
   数据块重新均衡到扩出来的空间上。先把后端文件系统扩开，才是真正买到容量。
+
+注意一个多盘节点上有**两个容量数**，它们不是同一个旋钮：`--capacity` 是本节点在
+集群 layout 里的角色（这个节点被信任存放多少，跨它所有盘共享），而每个
+`data_dir` 项的 `capacity` 告诉 Garage *那块盘*有多大、以便按它加权地铺。pgcli
+自动填每盘的数字（见下文）；只有节点级的 `--capacity` 归你选。
 
 **可用容量**是所有节点容量之和除以副本因子——每个对象都保留 `rf` 份：
 
@@ -723,6 +794,9 @@ addons:
       image_tag: docker.io/dxflrs/garage:v2.4.1
       # data_dir: /srv/garage      # 省略则为 <base-dir>/addon/garage/store/data
       #                             # （meta 目录和 garage.toml 与它同级）
+      # drives:                    # 多盘：取代 data_dir，每块盘一个目录
+      #   - /mnt/d1/garage         # （与 data_dir 互斥；每块盘挂在
+      #   - /mnt/d2/garage         #  /var/lib/garage/data<N> 上）
       # config_file: /etc/garage.toml   # 自带配置：原样挂载，永不改写
       listen: 127.0.0.1
       api_port: 3900
@@ -749,9 +823,9 @@ addons:
 ——单节点凑不出多节点 quorum。上面的集群键由集群安装路径写入；也可手写后重装。
 zone 与 capacity 是 layout 状态、不进 TOML，所以只出现在这里。
 
-对 `listen`、端口、`root_user`、`root_password`、`image_tag`、`data_dir` 或
-`config_file` 的修改，在下一次 `pg addon install garage --name store --force` 后
-生效。
+对 `listen`、端口、`root_user`、`root_password`、`image_tag`、`data_dir`、
+`drives` 或 `config_file` 的修改，在下一次 `pg addon install garage --name
+store --force` 后生效。
 
 ### 列表
 
@@ -782,9 +856,10 @@ Infra add-ons (garage):
 ```
 
 集群成员多出 `Cluster` / `Advertise` / `Zone/Cap` / `Node ID` / `Nodes` 几行；
-`Nodes:` 是一次实时的 `garage status` 读取（尽力而为——成员不可达时省略）。集群
-里，未执行播种的那几台主机上 `Access key` 只有公开 id（没有 secret）；见[播种与
-secret](#播种与-secret)。
+`Nodes:` 是一次实时的 `garage status` 读取（尽力而为——成员不可达时省略）。多盘
+实例把 `Data:` 行换成 `Drives:`，其下每盘一行缩进的"容器槽位/主机目录"（见[多
+盘数据目录](#多盘数据目录)）。集群里，未执行播种的那几台主机上 `Access key` 只
+有公开 id（没有 secret）；见[播种与 secret](#播种与-secret)。
 
 `pg addon list` 从不打印 secret key。要刻意揭示它用
 `pg addon list --show-password`（追加一行 `Secret key:`），或为脚本只打印这个秘
@@ -819,14 +894,15 @@ root 运行，所以开机启动除运行 podman 本身外不需要特殊主机�
 
 ```bash
 pg addon remove garage --name store            # 容器消失，数据保留
-pg addon remove garage --name store --clean-data   # 同时删除两个目录 + 配置
+pg addon remove garage --name store --clean-data   # 同时删除所有数据目录 + meta 目录 + 配置
 ```
 
-两个数据目录**就是对象存储**——丢了它们等于丢了里面每个桶——所以 `remove` 默认
-保留。`--clean-data` 删除数据目录、meta 目录和 pgcli 渲染的 `garage.toml`（你自
-带 `config_file` 指向的文件从不被碰），并清理已空的默认布局父目录。与 rustfs 不
-同，Garage 以 root 写、pgcli 在受管主机上以 root 跑 podman，所以普通删除即可——
-没有 `podman unshare` 兜底。
+这些数据目录**就是对象存储**——丢了它们等于丢了里面每个桶——所以 `remove` 默认
+保留。`--clean-data` 删除数据目录（多盘模式下是每一块盘的目录）、meta 目录和
+pgcli 渲染的 `garage.toml`（你自带 `config_file` 指向的文件从不被碰），并清理已空
+的默认布局父目录。每个目录在仍是活动挂载点时都会被跳过——以一句拒绝、而不是悄悄
+放过。与 rustfs 不同，Garage 以 root 写、pgcli 在受管主机上以 root 跑 podman，所以
+普通删除即可——没有 `podman unshare` 兜底。
 
 ## 日志
 
