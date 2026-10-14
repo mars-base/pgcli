@@ -33,6 +33,7 @@ type Config struct {
 	RedisStartPort          int                       `yaml:"redis_start_port,omitempty"`           // starting Redis host port, default 6379
 	PredixyStartPort        int                       `yaml:"predixy_start_port,omitempty"`         // starting Predixy proxy listener host port, default 7617
 	PgAdminStartPort        int                       `yaml:"pgadmin_start_port,omitempty"`         // starting pgAdmin 4 web host port, default 5050
+	GrafanaStartPort        int                       `yaml:"grafana_start_port,omitempty"`         // starting Grafana web host port, default 3000
 	NginxStartPort          int                       `yaml:"nginx_start_port,omitempty"`           // starting nginx HTTP host port, default 8080 (HTTPS takes the next free port)
 	GarageStartPort         int                       `yaml:"garage_start_port,omitempty"`          // starting Garage S3 API host port, default 3900 (RPC, web, admin take the next three free ports)
 	SeaweedfsStartPort      int                       `yaml:"seaweedfs_start_port,omitempty"`       // starting SeaweedFS master host port, default 8400 (volume, filer, s3 take the next three free ports; gRPC twins at +10000 are reserved)
@@ -100,6 +101,7 @@ type TopAddonsConfig struct {
 	Redis     map[string]RedisConfig          `yaml:"redis,omitempty"`
 	Predixy   map[string]PredixyConfig        `yaml:"predixy,omitempty"`
 	PgAdmin   map[string]PgAdminConfig        `yaml:"pgadmin,omitempty"`
+	Grafana   map[string]GrafanaConfig        `yaml:"grafana,omitempty"`
 	Nginx     map[string]NginxConfig          `yaml:"nginx,omitempty"`
 }
 
@@ -440,11 +442,11 @@ func (nb *NginxBackend) UnmarshalYAML(unmarshal func(any) error) error {
 // when enabled, pgcli generates a self-signed cert via tlsca (or accepts a BYO
 // cert+key pair) and adds an HTTPS server block alongside the HTTP one.
 type NginxConfig struct {
-	ContainerName string `yaml:"container_name"`      // pgcli-nginx<ns>-<name>
-	Name          string `yaml:"name,omitempty"`      // addon key, defaults to the map key
-	ImageTag      string `yaml:"image_tag,omitempty"` // docker.io/library/nginx:1.27-alpine (default)
-	Listen        string `yaml:"listen,omitempty"`    // bind address, default 127.0.0.1
-	HTTPPort      int    `yaml:"http_port,omitempty"` // HTTP listener port, 8080+ auto-assigned
+	ContainerName string `yaml:"container_name"`       // pgcli-nginx<ns>-<name>
+	Name          string `yaml:"name,omitempty"`       // addon key, defaults to the map key
+	ImageTag      string `yaml:"image_tag,omitempty"`  // docker.io/library/nginx:1.27-alpine (default)
+	Listen        string `yaml:"listen,omitempty"`     // bind address, default 127.0.0.1
+	HTTPPort      int    `yaml:"http_port,omitempty"`  // HTTP listener port, 8080+ auto-assigned
 	HTTPSPort     int    `yaml:"https_port,omitempty"` // HTTPS listener port (TLS only), next free port after HTTP
 
 	// WorkerConnections sets the maximum number of simultaneous connections per
@@ -559,6 +561,17 @@ const DefaultPostgrestImageTag = "docker.io/postgrest/postgrest:v16.3"
 // stable line (== latest at pinning time); the :snapshot tag is a nightly build
 // and is deliberately never used. Keep this in sync when bumping.
 const DefaultPgAdminImageTag = "docker.io/dpage/pgadmin4:9.18"
+
+// DefaultGrafanaImageTag pins the Grafana image. Note: since release 12.4.0 the
+// grafana/grafana-oss Docker Hub repo is FROZEN — the OSS build is published as
+// grafana/grafana (identical content), so that is what pgcli pulls. The default
+// tag has no suffix, i.e. the Alpine base variant (Grafana's recommended image);
+// -ubuntu / -distroless / -slim variants exist but pgcli never selects them.
+// 13.2.4 is a fixed stable release (verified on Docker Hub 2026-10-13). The
+// image runs as the fixed uid 472 (group root, gid 0) and its /run.sh does NOT
+// chown or drop privileges — see internal/podman.GrafanaManager for how pgcli
+// makes a bind-mounted /var/lib/grafana writable by 472.
+const DefaultGrafanaImageTag = "docker.io/grafana/grafana:13.2.4"
 
 // DefaultRedisMajor is the Redis major version installed when --version is not
 // given: "8", the current stable line upstream (docker.io/library/redis).
@@ -910,11 +923,11 @@ type GarageConfig struct {
 
 	ConfigFile string `yaml:"config_file,omitempty"` // host path of the rendered garage.toml; default <base>/addon/garage/<name>/garage.toml
 
-	Listen    string `yaml:"listen,omitempty"`  // bind address, default 127.0.0.1
-	APIPort   int    `yaml:"api_port,omitempty"`     // S3 API host port, from garage_start_pool
-	RPCPort   int    `yaml:"rpc_port,omitempty"`     // node-to-node RPC host port
-	WebPort   int    `yaml:"web_port,omitempty"`     // s3_web static-site host port
-	AdminPort int    `yaml:"admin_port,omitempty"`   // admin API + metrics host port
+	Listen    string `yaml:"listen,omitempty"`     // bind address, default 127.0.0.1
+	APIPort   int    `yaml:"api_port,omitempty"`   // S3 API host port, from garage_start_pool
+	RPCPort   int    `yaml:"rpc_port,omitempty"`   // node-to-node RPC host port
+	WebPort   int    `yaml:"web_port,omitempty"`   // s3_web static-site host port
+	AdminPort int    `yaml:"admin_port,omitempty"` // admin API + metrics host port
 
 	RootUser     string `yaml:"root_user,omitempty"`     // access key id (GK-prefixed): env-seeded single-node, `key create`-seeded clustered
 	RootPassword string `yaml:"root_password,omitempty"` // secret key, paired with RootUser
@@ -926,8 +939,8 @@ type GarageConfig struct {
 	// restarts keep the same identity.
 	RPCSecret string `yaml:"rpc_secret,omitempty"`
 
-	Region            string `yaml:"region,omitempty"`               // s3_region, default "garage"
-	ReplicationFactor int    `yaml:"replication_factor,omitempty"`   // default 1; >1 requires Cluster
+	Region            string `yaml:"region,omitempty"`             // s3_region, default "garage"
+	ReplicationFactor int    `yaml:"replication_factor,omitempty"` // default 1; >1 requires Cluster
 
 	// --- Multi-node (v2). Cluster non-empty switches the container off
 	// --single-node and onto the cluster lifecycle (connect/assign/apply). ---
@@ -1279,18 +1292,47 @@ type PredixyConfig struct {
 // present. They are a one-time convenience, not a runtime coupling — pgAdmin
 // runs fine with them unset (empty server list).
 type PgAdminConfig struct {
-	ContainerName string `yaml:"container_name"`      // pgcli-pgadmin<ns>-<name>
-	Name          string `yaml:"name,omitempty"`      // addon key, defaults to the map key
-	ImageTag      string `yaml:"image_tag,omitempty"` // docker.io/dpage/pgadmin4:9.18 (default)
-	HostPort      int    `yaml:"host_port,omitempty"` // web host port, 5050+ auto-assigned
-	Listen        string `yaml:"listen,omitempty"`    // bind address, default 127.0.0.1
-	Email         string `yaml:"email,omitempty"`     // PGADMIN_DEFAULT_EMAIL, default admin@pgcli.lan (reserved TLDs like .local are rejected by the image's validator)
-	Password      string `yaml:"password,omitempty"`  // PGADMIN_DEFAULT_PASSWORD; generated when empty. A secret — never defaulted to a literal.
-	DataDir       string `yaml:"data_dir,omitempty"`  // host dir mounted at /var/lib/pgadmin; default <base>/addon/pgadmin/<name>/data
-	DSN           string `yaml:"dsn,omitempty"`       // optional: when set, a servers.json entry is rendered from this URI
+	ContainerName string `yaml:"container_name"`        // pgcli-pgadmin<ns>-<name>
+	Name          string `yaml:"name,omitempty"`        // addon key, defaults to the map key
+	ImageTag      string `yaml:"image_tag,omitempty"`   // docker.io/dpage/pgadmin4:9.18 (default)
+	HostPort      int    `yaml:"host_port,omitempty"`   // web host port, 5050+ auto-assigned
+	Listen        string `yaml:"listen,omitempty"`      // bind address, default 127.0.0.1
+	Email         string `yaml:"email,omitempty"`       // PGADMIN_DEFAULT_EMAIL, default admin@pgcli.lan (reserved TLDs like .local are rejected by the image's validator)
+	Password      string `yaml:"password,omitempty"`    // PGADMIN_DEFAULT_PASSWORD; generated when empty. A secret — never defaulted to a literal.
+	DataDir       string `yaml:"data_dir,omitempty"`    // host dir mounted at /var/lib/pgadmin; default <base>/addon/pgadmin/<name>/data
+	DSN           string `yaml:"dsn,omitempty"`         // optional: when set, a servers.json entry is rendered from this URI
 	ServerName    string `yaml:"server_name,omitempty"` // display name of the pre-registered server (defaults to the DSN host)
 	// Autostart brings this container up on host boot via the boot service
 	// (pg autostart enable --pgadmin). Start-only: it starts the existing
+	// container, so install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// GrafanaConfig holds a standalone Grafana addon — the open-source
+// observability dashboard (https://grafana.com/oss/grafana/). Shape mirrors
+// PgAdminConfig: a web UI, one host port, env-only config (GF_*), an
+// auto-generated login, and a persistent data dir outliving the container.
+// Unlike pgAdmin there is no server-seeding concept (v1 is a pure web UI; no
+// datasource/dashboard provisioning is mounted — see internal/podman.GrafanaManager).
+//
+// Ownership differs from pgAdmin in a load-bearing way: the image is USER 472
+// (group root, gid 0) and its entrypoint does NOT chown or su-exec down — so
+// pgAdmin's `--user 0` trick has no meaning here. pgcli instead pre-chowns the
+// host data dir to 472:0 via `podman unshare chown` before starting the
+// container, which only works on a rootless podman host (rootful hosts see the
+// directory as the real fs and permission-fail; the manager surfaces a
+// diagnostic there — see podman.GrafanaManager.createContainer).
+type GrafanaConfig struct {
+	ContainerName string `yaml:"container_name"`       // pgcli-grafana<ns>-<name>
+	Name          string `yaml:"name,omitempty"`       // addon key, defaults to the map key
+	ImageTag      string `yaml:"image_tag,omitempty"`  // docker.io/grafana/grafana:13.2.4 (default)
+	HostPort      int    `yaml:"host_port,omitempty"`  // web host port, 3000+ auto-assigned
+	Listen        string `yaml:"listen,omitempty"`     // bind address, default 0.0.0.0 (see ApplyDefaults walk below for rationale)
+	AdminUser     string `yaml:"admin_user,omitempty"` // GF_SECURITY_ADMIN_USER, default admin
+	Password      string `yaml:"password,omitempty"`   // GF_SECURITY_ADMIN_PASSWORD; generated when empty. A secret — never defaulted to a literal. Only takes effect on first startup against an empty grafana.db; a revived store keeps its own login (see podman.GrafanaStoreExists).
+	DataDir       string `yaml:"data_dir,omitempty"`   // host dir mounted at /var/lib/grafana; default <base>/addon/grafana/<name>/data
+	// Autostart brings this container up on host boot via the boot service
+	// (pg autostart enable --grafana). Start-only: it starts the existing
 	// container, so install first.
 	Autostart bool `yaml:"autostart,omitempty"`
 }
@@ -1391,6 +1433,7 @@ func Default() *Config {
 		RedisStartPort:          6379,
 		PredixyStartPort:        7617,
 		PgAdminStartPort:        5050,
+		GrafanaStartPort:        3000,
 		NginxStartPort:          8080,
 		GarageStartPort:         3900,
 		SeaweedfsStartPort:      8400,
@@ -1595,6 +1638,7 @@ type displayConfig struct {
 	RedisStartPort          int                       `yaml:"redis_start_port,omitempty"`
 	PredixyStartPort        int                       `yaml:"predixy_start_port,omitempty"`
 	PgAdminStartPort        int                       `yaml:"pgadmin_start_port,omitempty"`
+	GrafanaStartPort        int                       `yaml:"grafana_start_port,omitempty"`
 	NginxStartPort          int                       `yaml:"nginx_start_port,omitempty"`
 	GarageStartPort         int                       `yaml:"garage_start_port,omitempty"`
 	SeaweedfsStartPort      int                       `yaml:"seaweedfs_start_port,omitempty"`
@@ -1624,6 +1668,7 @@ func (c *Config) Display() displayConfig {
 		RedisStartPort:          c.RedisStartPort,
 		PredixyStartPort:        c.PredixyStartPort,
 		PgAdminStartPort:        c.PgAdminStartPort,
+		GrafanaStartPort:        c.GrafanaStartPort,
 		NginxStartPort:          c.NginxStartPort,
 		GarageStartPort:         c.GarageStartPort,
 		SeaweedfsStartPort:      c.SeaweedfsStartPort,
@@ -1724,6 +1769,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.PgAdminStartPort == 0 {
 		c.PgAdminStartPort = d.PgAdminStartPort
+	}
+	if c.GrafanaStartPort == 0 {
+		c.GrafanaStartPort = d.GrafanaStartPort
 	}
 	if c.NginxStartPort == 0 {
 		c.NginxStartPort = d.NginxStartPort
@@ -2275,6 +2323,36 @@ func (c *Config) ApplyDefaults() {
 			addon.Email = "admin@pgcli.lan"
 		}
 		c.Addons.PgAdmin[name] = addon
+	}
+
+	// Top-level addons defaults (Grafana). Same shape as pgAdmin above and the
+	// same determinism constraint: Password is deliberately NOT defaulted here
+	// (ApplyDefaults must stay deterministic and a login password must never be
+	// a hardcoded literal; the CLI install handler generates one when empty).
+	// Listen defaults to 0.0.0.0 — unlike pgAdmin — on purpose: a monitoring
+	// dashboard is meant to be viewed from other machines, containers run on
+	// the host network (netFlags → --network host on Linux), so a loopback bind
+	// would make the panel unreachable remotely. The exposure is guarded by the
+	// auto-generated admin password plus GF_USERS_ALLOW_SIGN_UP=false at
+	// launch (see podman.grafanaArgsAndEnv); `--listen 127.0.0.1` opts back
+	// into local-only.
+	for name, addon := range c.Addons.Grafana {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-grafana" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultGrafanaImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "0.0.0.0"
+		}
+		if addon.AdminUser == "" {
+			addon.AdminUser = "admin"
+		}
+		c.Addons.Grafana[name] = addon
 	}
 
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
@@ -2863,6 +2941,47 @@ func (c *Config) autoAssignPorts() {
 				next = addon.HostPort + 1
 			}
 			c.Addons.PgAdmin[name] = addon
+		}
+	}
+
+	// Allocate ports for Grafana addons from their own pool
+	// (grafana_start_port, default 3000 — Grafana's default web port). One
+	// port per instance, same shape as the pgAdmin block above: a web UI
+	// listener and nothing else. 3000 does not collide with any other pool's
+	// base port on this host (see the *StartPort fields block near the top of
+	// this file for the current bases) — so a Grafana instance and a pgAdmin
+	// instance always end up on distinct ports even before the nextFree cursor
+	// logic gets a chance to skip.
+	{
+		grafanaBase := c.GrafanaStartPort
+		assignedGrafana := map[int]bool{}
+		for _, addon := range c.Addons.Grafana {
+			if addon.HostPort != 0 {
+				assignedGrafana[addon.HostPort] = true
+			}
+		}
+		next := grafanaBase
+		nextFreeGrafana := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedGrafana[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.Grafana))
+		for name := range c.Addons.Grafana {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.Grafana[name]
+			if addon.HostPort == 0 && grafanaBase > 0 {
+				addon.HostPort = nextFreeGrafana()
+			} else if addon.HostPort >= next {
+				next = addon.HostPort + 1
+			}
+			c.Addons.Grafana[name] = addon
 		}
 	}
 

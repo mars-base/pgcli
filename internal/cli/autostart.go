@@ -25,7 +25,7 @@ func init() {
 		c.Flags().Bool("postgrest", false, "select the PostgREST addon (use with -i for a local one, --pg-name for a remote one)")
 		c.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST (top-level addons)")
 		c.Flags().Bool("etcd", false, "select an etcd member (top-level addons)")
-		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage, seaweedfs, redis, predixy or pgadmin instance, or Patroni member")
+		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin or grafana instance, or Patroni member")
 		c.Flags().Bool("pgdog", false, "select a PgDog proxy (top-level addons)")
 		c.Flags().Bool("ha", false, "select Patroni HA members (top-level addons; requires --scope)")
 		c.Flags().Bool("haproxy", false, "select an HAProxy instance (top-level addons)")
@@ -37,6 +37,7 @@ func init() {
 		c.Flags().Bool("redis", false, "select a redis instance (top-level addons)")
 		c.Flags().Bool("predixy", false, "select a predixy proxy instance (top-level addons)")
 		c.Flags().Bool("pgadmin", false, "select a pgAdmin instance (top-level addons)")
+		c.Flags().Bool("grafana", false, "select a Grafana instance (top-level addons)")
 		c.Flags().Bool("nginx", false, "select an nginx instance (top-level addons)")
 		c.Flags().String("scope", "", "Patroni cluster scope (required only with --ha)")
 	}
@@ -55,7 +56,7 @@ Use 'pg autostart disable' to opt out.`,
 
 var autostartEnableCmd = &cobra.Command{
 	Use:   "enable",
-	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin instance, or a Patroni member",
+	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana instance, or a Patroni member",
 	Long: `Enable auto-start on boot for exactly one target:
 
   pg autostart enable -i myinst          # instance
@@ -75,6 +76,7 @@ var autostartEnableCmd = &cobra.Command{
   pg autostart enable --redis --name cache       # redis instance (default name "redis")
   pg autostart enable --predixy --name proxy       # predixy proxy (default name "predixy")
   pg autostart enable --pgadmin --name ui            # pgAdmin (default name "pgadmin")
+  pg autostart enable --grafana --name ui            # Grafana (default name "grafana")
   pg autostart enable --ha --scope app --name node1  # Patroni member (one at a time)
 
 Etcd autostart only starts the member's existing container at boot; it never
@@ -110,6 +112,10 @@ pgAdmin autostart behaves the same way (pg addon install pgadmin). It starts its
 container, whose entrypoint re-chowns the data dir to its own uid and drops
 privileges, so a boot-time start needs no special host privileges; pgAdmin's
 config/session DB persists in that dir across reboots.
+Grafana autostart likewise only starts the existing container (pg addon install
+grafana). Its data dir was already pre-chowned to the image's uid 472 at install
+time (the image itself does no ownership work), so a boot-time start needs no
+special host privileges either; dashboards and settings persist in grafana.db.
 Patroni member autostart only brings that member's existing container up,
 reading the patroni.yml already on disk — create the member first (pg ha
 create). Start order relative to the DCS doesn't matter: Patroni retries until
@@ -185,6 +191,7 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	redisSel, _ := cmd.Flags().GetBool("redis")
 	predixySel, _ := cmd.Flags().GetBool("predixy")
 	pgadminSel, _ := cmd.Flags().GetBool("pgadmin")
+	grafanaSel, _ := cmd.Flags().GetBool("grafana")
 	nginxSel, _ := cmd.Flags().GetBool("nginx")
 	pgName, _ := cmd.Flags().GetString("pg-name")
 	addonName, _ := cmd.Flags().GetString("name")
@@ -241,17 +248,20 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	if pgadminSel {
 		sel++
 	}
+	if grafanaSel {
+		sel++
+	}
 	if nginxSel {
 		sel++
 	}
 	if sel != 1 {
-		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, or --nginx")
+		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, or --nginx")
 	}
 	if pgName != "" && !pgbSel && !prSel {
 		return fmt.Errorf("--pg-name requires --pgbouncer or --postgrest")
 	}
-	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !garageSel && !seaweedfsSel && !redisSel && !predixySel && !pgadminSel && !nginxSel {
-		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, or --nginx")
+	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !garageSel && !seaweedfsSel && !redisSel && !predixySel && !pgadminSel && !grafanaSel && !nginxSel {
+		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, or --nginx")
 	}
 	if scope != "" && !haSel {
 		return fmt.Errorf("--scope requires --ha")
@@ -373,6 +383,18 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		ac.Autostart = enable
 		cfg.Addons.PgAdmin[proxyName] = ac
 		targetDesc = fmt.Sprintf("pgadmin instance %q", proxyName)
+	case grafanaSel:
+		proxyName := addonName
+		if proxyName == "" {
+			proxyName = "grafana"
+		}
+		gc, ok := cfg.Addons.Grafana[proxyName]
+		if !ok {
+			return fmt.Errorf("grafana instance %q not found in config", proxyName)
+		}
+		gc.Autostart = enable
+		cfg.Addons.Grafana[proxyName] = gc
+		targetDesc = fmt.Sprintf("grafana instance %q", proxyName)
 	case nginxSel:
 		proxyName := addonName
 		if proxyName == "" {
@@ -593,6 +615,11 @@ func countAutostartTargets(c *config.Config) int {
 			n++
 		}
 	}
+	for _, gc := range c.Addons.Grafana {
+		if gc.Autostart {
+			n++
+		}
+	}
 	for _, nc := range c.Addons.Nginx {
 		if nc.Autostart {
 			n++
@@ -663,6 +690,9 @@ func runAutostartStatus(cmd *cobra.Command, args []string) error {
 	}
 	for name, ac := range cfg.Addons.PgAdmin {
 		fmt.Printf("  pgadmin %-13s %s\n", name, onOff(ac.Autostart))
+	}
+	for name, gc := range cfg.Addons.Grafana {
+		fmt.Printf("  grafana %-12s %s\n", name, onOff(gc.Autostart))
 	}
 	for name, nc := range cfg.Addons.Nginx {
 		fmt.Printf("  nginx %-15s %s\n", name, onOff(nc.Autostart))

@@ -75,8 +75,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartNginx(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --redis / --predixy / --pgadmin / --nginx)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartNginx(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --redis / --predixy / --pgadmin / --grafana / --nginx)")
 		return nil
 	}
 
@@ -200,6 +200,13 @@ func startAutostart() error {
 	// stack like the other non-database addons — it is a browser UI that dials
 	// its servers itself, so there is no ordering constraint at all.
 	if err := startAutostartPgAdmin(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// Grafana instances (top-level web addon). Same as pgAdmin: a browser UI
+	// with no dependency on the PostgreSQL stack, but still ahead of nginx below
+	// since a dashboard is a plausible reverse-proxy backend.
+	if err := startAutostartGrafana(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -831,6 +838,53 @@ func startAutostartPgAdmin(c *config.Config) error {
 		ac := c.Addons.PgAdmin[name]
 		if err := am.StartContainer(&ac); err != nil {
 			fmt.Printf("  [X] pgadmin autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartGrafana reports whether any Grafana instance is autostart-enabled.
+func hasAutostartGrafana(c *config.Config) bool {
+	for _, gc := range c.Addons.Grafana {
+		if gc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartGrafana starts each autostart-enabled Grafana instance.
+// Start-only like pgAdmin's: the container comes up with the port/login
+// credentials already in the config, recreating it if the container was removed.
+// Unlike pgAdmin the image's entrypoint does no ownership work — the data dir
+// was pre-chowned to uid 472 at create time (a plain `podman start` of an
+// existing container needs none), so the boot-time start needs the same podman
+// access as install. Order is sorted by instance name for deterministic,
+// readable boot logs.
+func startAutostartGrafana(c *config.Config) error {
+	var names []string
+	for name, gc := range c.Addons.Grafana {
+		if gc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	gm, err := podman.NewGrafanaManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		gc := c.Addons.Grafana[name]
+		if err := gm.StartContainer(&gc); err != nil {
+			fmt.Printf("  [X] grafana autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}

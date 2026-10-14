@@ -123,6 +123,21 @@ Infra addons (shared, not tied to one instance):
           config/session DB and survives remove unless --clean-data. The
           container's entrypoint chowns the mounted dir to its uid 5050 and
           drops privileges itself, so pgcli never chowns on the host.
+  pg addon install grafana
+          Stored under top-level addons.grafana in config (Linux and macOS).
+          Grafana — the open-source observability dashboard — run from the
+          official docker.io/grafana image (NOT grafana-oss: that repo is
+          frozen since 12.4.0; grafana/grafana carries the OSS build). A web
+          login user/password (GF_SECURITY_ADMIN_*) is required at first
+          launch; the password is generated and printed once — retrieve it
+          with "pg addon password grafana". Listen defaults to 0.0.0.0 (a
+          dashboard is meant to be viewed from other machines; containers run
+          on the host network), guarded by the generated password and
+          self-signup being off. Its data dir holds Grafana's own sqlite meta
+          DB (grafana.db) and survives remove unless --clean-data. The image
+          runs as a fixed uid 472 and its entrypoint does NO ownership work,
+          so pgcli pre-chowns the data dir on the host via "podman unshare
+          chown" (rootless only; a rootful host gets a manual-chown hint).
 
 Commands:
   pg addon install <addon>    install an add-on
@@ -156,6 +171,7 @@ Currently supported add-ons:
   predixy     Redis protocol proxy fronting a native redis cluster as one plain redis:// endpoint (clients need no -c / MOVED handling; --backend lists the full node set, --password reuses the cluster's requirepass; Linux only)
   postgrest   stateless REST API in front of a PostgreSQL schema (single container; Linux host network, macOS bridge)
   pgadmin     pgAdmin 4 — the official web administration UI (single container from docker.io/dpage/pgadmin4; web login auto-generated; Linux host network, macOS bridge)
+  grafana     Grafana — the open-source observability dashboard (single container from docker.io/grafana; web login auto-generated; defaults to 0.0.0.0 since a dashboard is meant to be viewed remotely; Linux host network, macOS bridge)
   nginx       HTTP reverse proxy in front of web services (path-based routing, optional TLS termination; single container from docker.io/library/nginx; Linux host network, macOS bridge)
 
 Two modes (pgbouncer, postgrest):
@@ -343,6 +359,34 @@ pgAdmin 4 (the official web administration UI; top-level addon, Linux and macOS)
   Re-running install reuses a live container; --force recreates it to apply a
   changed --port/--listen/--email/--password/--dsn/--pg-name.
 
+Grafana (the open-source observability dashboard; top-level addon, Linux and macOS):
+  pg addon install grafana [--name ui] [--admin-user admin] [--password ...]
+                           [--port N] [--listen 0.0.0.0] [--data-dir ...] [--image ...] [--force]
+  --admin-user/--password are Grafana's WEB LOGIN credentials (GF_SECURITY_ADMIN_*),
+  required at first launch; the password is generated when omitted, printed once,
+  and stored under addons.grafana.<name>.password — read it with
+  "pg addon password grafana". They are not a PostgreSQL password.
+  --listen defaults to 0.0.0.0: unlike pgAdmin (which defaults to loopback), a
+  monitoring dashboard is meant to be viewed from other machines, and on Linux the
+  container runs on the host network — so 0.0.0.0 is what makes it reachable. The
+  exposure is guarded by the generated strong password and self-signup being off
+  (GF_USERS_ALLOW_SIGN_UP=false); pass --listen 127.0.0.1 to keep it loopback-only.
+  Config is env-only (GF_*); v1 provisions no datasource or dashboard — add them in
+  the browser. Data is Grafana's own sqlite meta DB (grafana.db) under --data-dir
+  (default <base_dir>/addon/grafana/<name>/data), so remove/reinstall revives saved
+  dashboards and settings; --clean-data deletes it (under rootless that goes through
+  "podman unshare rm" since the files land owned by the container's mapped 472 uid).
+  Unlike pgAdmin, the image's entrypoint does NOT chown or drop privileges — it runs
+  as a baked uid 472 (group root, gid 0) and only warns if the dir is unwritable. So
+  pgcli pre-chowns the data dir on the host via "podman unshare chown 472:0", which
+  works under rootless podman; a rootful host gets an explicit manual-chown hint
+  (see Known limitations). GF_SECURITY_ADMIN_* applies only while grafana.db is
+  absent, so on a revived store the printed password is inert — reset it inside the
+  container with "grafana-cli admin reset-admin-password" if needed. TLS is not
+  wired up yet (plaintext http; front it with the nginx addon for HTTPS).
+  Re-running install reuses a live container; --force recreates it to apply a
+  changed --port/--listen/--admin-user/--password.
+
 nginx (HTTP reverse proxy in front of web services; top-level addon, Linux and macOS):
   pg addon install nginx [--name proxy]
                          [--upstream name=<n>,path=<p>,backend=<h:p>] (repeatable)
@@ -395,6 +439,9 @@ Examples:
   pg addon install pgadmin --name console --email me@example.com
   pg addon install pgadmin --pg-name proj01
   pg addon install pgadmin --dsn "postgres://readonly:pass@127.0.0.1:5000/appdb"
+  pg addon install grafana
+  pg addon install grafana --name dash --admin-user ops
+  pg addon install grafana --name local --listen 127.0.0.1   # loopback-only instead of the 0.0.0.0 default
   pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050
   pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050 --upstream name=postgrest,path=/api,backend=127.0.0.1:3000 --tls`,
 	Args: cobra.ExactArgs(1),
@@ -428,14 +475,14 @@ pg.yaml.`,
 // shaped for $(...) capture in scripts.
 var addonPasswordCmd = &cobra.Command{
 	Use:   "password <addon>",
-	Short: "Print an add-on's stored password (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin web login password)",
+	Short: "Print an add-on's stored password (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin/Grafana web login password)",
 	Long: `Print the password stored for one add-on instance: the Redis
 requirepass (generated by pgcli), the Predixy proxy password (the
 operator-supplied copy of the proxied cluster's requirepass), the
 MinIO/silo/rustfs root password or garage secret key (the access-key secret — pair it with the
-instance's Root user from "pg addon list"), or the pgAdmin web login
-password (the PGADMIN_DEFAULT_PASSWORD generated for the UI's sign-in form
-— not a PostgreSQL password).
+instance's Root user from "pg addon list"), or the pgAdmin or Grafana web login
+password (the PGADMIN_DEFAULT_PASSWORD / GF_SECURITY_ADMIN_PASSWORD generated for
+the UI's sign-in form — not a PostgreSQL password).
 
 The single value goes to stdout with no decoration, so it composes into
 scripts and app config:
@@ -465,8 +512,8 @@ var addonRemoveCmd = &cobra.Command{
 For local add-ons, use -i to specify the instance.
 For remote add-ons, use --pg-name to specify the pooler name.
 
-Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin) use --name.
-Remove keeps the data directory; pass --clean-data for object-storage/KV/pgAdmin
+Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana) use --name.
+Remove keeps the data directory; pass --clean-data for object-storage/KV/pgAdmin/Grafana
 data to go too.
 
 Examples:
@@ -478,7 +525,9 @@ Examples:
   pg addon remove redis --name cache --clean-data
   pg addon remove predixy --name proxy
   pg addon remove pgadmin
-  pg addon remove pgadmin --clean-data`,
+  pg addon remove pgadmin --clean-data
+  pg addon remove grafana
+  pg addon remove grafana --clean-data`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonRemove(args[0], cmd)
@@ -508,6 +557,7 @@ Supported add-ons:
   redis      pg addon start redis [--name cache]
   predixy    pg addon start predixy [--name proxy]
   pgadmin    pg addon start pgadmin [--name pgadmin]
+  grafana    pg addon start grafana [--name grafana]
   nginx      pg addon start nginx [--name proxy]
   pgbouncer  pg addon start pgbouncer -i <instance>
              pg addon start pgbouncer --pg-name <remote-name>
@@ -525,6 +575,7 @@ Examples:
   pg addon start redis --name cache
   pg addon start predixy --name proxy
   pg addon start pgadmin
+  pg addon start grafana
   pg addon start nginx --name proxy
   pg addon start pgbouncer -i proj01
   pg addon start postgrest --pg-name app-api`,
@@ -552,6 +603,7 @@ Supported add-ons:
   redis      pg addon stop redis [--name cache]
   predixy    pg addon stop predixy [--name proxy]
   pgadmin    pg addon stop pgadmin [--name pgadmin]
+  grafana    pg addon stop grafana [--name grafana]
   nginx      pg addon stop nginx [--name proxy]
   pgbouncer  pg addon stop pgbouncer -i <instance>
              pg addon stop pgbouncer --pg-name <remote-name>
@@ -569,6 +621,7 @@ Examples:
   pg addon stop redis --name cache
   pg addon stop predixy --name proxy
   pg addon stop pgadmin
+  pg addon stop grafana
   pg addon stop nginx --name proxy
   pg addon stop pgbouncer -i proj01
   pg addon stop postgrest --pg-name app-api`,
@@ -628,10 +681,10 @@ func init() {
 	addonRemoveCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to remove")
 
 	// etcd flags (top-level shared-infrastructure addon)
-	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy or pgadmin instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\")")
+	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin or grafana instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\")")
 	addonInstallCmd.Flags().Int("client-port", 0, "etcd client host port (0=auto-assign from etcd_start_port)")
 	addonInstallCmd.Flags().Int("peer-port", 0, "etcd peer host port (0=auto-assign, next free port after client)")
-	addonInstallCmd.Flags().String("image", "", "override the addon image tag verbatim (etcd default quay.io/coreos/etcd:v3.5.30; redis default resolved from --version, e.g. docker.io/library/redis:8.10.2; predixy default ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine; pgadmin default docker.io/dpage/pgadmin4:9.18)")
+	addonInstallCmd.Flags().String("image", "", "override the addon image tag verbatim (etcd default quay.io/coreos/etcd:v3.5.30; redis default resolved from --version, e.g. docker.io/library/redis:8.10.2; predixy default ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine; pgadmin default docker.io/dpage/pgadmin4:9.18; grafana default docker.io/grafana/grafana:13.2.4)")
 	addonInstallCmd.Flags().String("cluster", "", "cluster grouping token: etcd --initial-cluster-token (default \"pgcli-etcd\"); redis native-cluster name (--cluster-enabled yes, members sharing it form one cluster you assemble once with `pg redis-cli -- --cluster create ...`); garage — switch on multi-node mode (members sharing the name join one Garage cluster; requires --advertise-host); seaweedfs — switch on multi-node mode (members sharing the name join one Raft cluster via the full --peer list; requires --advertise-host, a shared --dsn metadata database, and the SAME --root-user/--root-password on every node)")
 	addonInstallCmd.Flags().StringArray("peer", nil, "cluster peer list (repeat one per peer): garage — an existing member's <id>@<addr> to connect to (a joiner usually needs just one — peering is transitive; printed by the bootstrap node's install summary). seaweedfs — a member's <ip>:<master_port> Raft address; pass the FULL list on EVERY node (weed requires the complete membership, MNMD-style, no bootstrap/join distinction), your own entry optional")
 	addonInstallCmd.Flags().String("replication", "", "seaweedfs cluster only: placement code XYZ (X=remote copies, Y=distinct racks, Z=distinct data centers; each digit 0-3), e.g. 001 = one remote copy. Default \"000\" (single-node — no peers to copy to). Immutable once set in a cluster")
@@ -642,11 +695,11 @@ func init() {
 	addonInstallCmd.Flags().Int("replication-factor", 0, "garage cluster only: object replication factor (garage.toml replication_factor; must be <= node count — a 3-node cluster with rf 3 tolerates losing 2; set it on EVERY member, the value is per-node config). Empty for garage = default 1 (single-node); etcd/redis ignore it")
 	addonInstallCmd.Flags().String("rpc-secret", "", "garage cluster only: the shared 64-hex cluster RPC secret (garage.toml rpc_secret) — generated by the bootstrap node and printed once; every joiner MUST pass the same value (pgcli never executes remotely, so you carry it). Invalid on a single-node install")
 	addonInstallCmd.Flags().Int("cluster-replicas", 0, "redis native-cluster only: per-master replica count for the --cluster create you will run (default 0 = masters-only). Only shapes the suggested assemble command and node-count guidance — which nodes become followers is decided by Redis at create time, not here; the whole group inherits the first member's value")
-	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs, garage, redis or pgAdmin instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; garage default <base_dir>/addon/garage/<name>/data (its metadata dir is a sibling .../meta); seaweedfs default <base_dir>/addon/seaweedfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data; pgadmin default <base_dir>/addon/pgadmin/<name>/data)")
+	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs, garage, redis, pgAdmin or Grafana instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; garage default <base_dir>/addon/garage/<name>/data (its metadata dir is a sibling .../meta); seaweedfs default <base_dir>/addon/seaweedfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data; pgadmin default <base_dir>/addon/pgadmin/<name>/data; grafana default <base_dir>/addon/grafana/<name>/data)")
 	addonInstallCmd.Flags().String("advertise-host", "", "peer-visible host: etcd member peer/client URLs, redis native-cluster --cluster-announce-ip, , garage cluster rpc_public_addr, and seaweedfs cluster weed -ip that peers dial (empty=127.0.0.1 single-host; set a LAN IP or FQDN for cross-host clusters — required on every garage or seaweedfs --cluster member)")
 	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.0.0.12:2379 (implies --initial-cluster-state existing; requires --advertise-host)")
-	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy or pgadmin instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\")")
-	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/garage/seaweedfs/redis/pgAdmin data directory (object storage / backup repository / key-value data / pgAdmin config+sessions DB) and pgcli-rendered files beside it; no-op for predixy, which is stateless. Never drops a seaweedfs filer metadata database")
+	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin or grafana instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\")")
+	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/garage/seaweedfs/redis/pgAdmin/Grafana data directory (object storage / backup repository / key-value data / pgAdmin config+sessions or Grafana dashboards sqlite DB) and pgcli-rendered files beside it; no-op for predixy, which is stateless. Never drops a seaweedfs filer metadata database")
 
 	// haproxy flags (top-level load balancer in front of a Patroni cluster)
 	addonInstallCmd.Flags().String("mode", "", "HAProxy routing mode: unified (default, all traffic to the leader) or split (separate read listener for replicas)")
@@ -668,7 +721,7 @@ func init() {
 	// minio flags (top-level single-node S3-compatible object storage)
 	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo/rustfs S3 API host port (0=auto-assign from the shared minio_start_port pool); for garage, the S3 API port (0=auto from garage_start_port, default 3900 — garage takes four consecutive ports API/RPC/Web/Admin)")
 	addonInstallCmd.Flags().Int("console-port", 0, "MinIO/silo/rustfs web console host port (0=auto-assign, next free port)")
-	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo, rustfs, garage or seaweedfs server / PostgREST HTTP server / pgAdmin web server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network) — Redis and Predixy default to \"0.0.0.0\" instead, since their password is always required; pass 127.0.0.1 to keep them loopback-only")
+	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo, rustfs, garage or seaweedfs server / PostgREST HTTP server / pgAdmin web server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network) — Redis, Predixy and Grafana default to \"0.0.0.0\" instead, since their password is always required (and a dashboard is meant to be viewed remotely); pass 127.0.0.1 to keep them loopback-only")
 	addonInstallCmd.Flags().String("root-user", "", "MinIO/silo/rustfs root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config). For garage this is the seeded access key: omit it to auto-generate a GK-prefixed key (garage has no \"admin\" user). For seaweedfs it is the s3.json identity access key: omit it to auto-generate an SW-prefixed key on a SINGLE-NODE install only — under --cluster both it and --root-password are REQUIRED, since each node reads only its own s3.json and must present the identical identity")
 	addonInstallCmd.Flags().String("root-password", "", "MinIO/silo/rustfs root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand). For garage this is the seeded secret key; for seaweedfs the s3.json identity secret key — required (with --root-user) on every node of a --cluster install")
 	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO/silo/rustfs distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (MinIO/silo: path is the in-container export dir — /data with a plain --data-dir node, or /data1../dataN on a --drive node (MNMD); repeat for every node's every drive. rustfs: one endpoint per node — scheme://host:port, no path; it has no multi-node single-drive mode so --drive is required, and it derives the /data/rustfs0../rustfsN suffix itself. The list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
@@ -676,11 +729,12 @@ func init() {
 	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo/rustfs/seaweedfs: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo|rustfs>/<name>/, or the addon dir for seaweedfs; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Seaweedfs serves TLS natively: the S3 port becomes HTTPS-only (cleartext listener off). Changing this needs --force to recreate. NOT for garage: it has no native TLS (rejects --tls); front it with the nginx addon")
 	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo/rustfs: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt for MinIO/silo, rustfs_cert.pem for rustfs, cert.pem for seaweedfs). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
 	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo/rustfs: private key for --tls-cert (PEM; mounted read-only as private.key for MinIO/silo, rustfs_key.pem for rustfs, key.pem for seaweedfs). Must pair with the cert; both are required to enable BYO TLS")
-	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/PostgREST/pgAdmin container even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, or a changed pgAdmin --email/--dsn/--pg-name seed)")
+	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/PostgREST/pgAdmin/Grafana container even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, or a changed pgAdmin --email/--dsn/--pg-name or Grafana --admin-user seed)")
 
 	// redis flags (top-level standalone KV store — the first version-selectable addon)
 	addonInstallCmd.Flags().String("version", "", "Redis major version to install: 7 or 8 (default \"8\"); each maps to a pinned upstream docker.io/library/redis tag. Ignored for every other addon")
-	addonInstallCmd.Flags().String("password", "", "Redis requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls) / Predixy proxy password (REQUIRED, never generated: it must be the proxied cluster's requirepass — read it with `pg addon password redis --name <member>`) / pgAdmin WEB login password (generated on first install if omitted — not a PostgreSQL password; retrieve it with `pg addon password pgadmin`)")
+	addonInstallCmd.Flags().String("password", "", "Redis requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls) / Predixy proxy password (REQUIRED, never generated: it must be the proxied cluster's requirepass — read it with `pg addon password redis --name <member>`) / pgAdmin or Grafana WEB login password (generated on first install if omitted — not a PostgreSQL password; retrieve it with `pg addon password pgadmin` or `pg addon password grafana`; for Grafana it only takes effect while grafana.db is absent)")
+	addonInstallCmd.Flags().String("admin-user", "", "Grafana WEB login user (GF_SECURITY_ADMIN_USER; default \"admin\") — the account you sign into the dashboard with, unrelated to any PostgreSQL role")
 	addonInstallCmd.Flags().String("email", "", "pgAdmin WEB login email (PGADMIN_DEFAULT_EMAIL; default \"admin@pgcli.lan\") — the account you sign into the web UI with, unrelated to any PostgreSQL role; the image rejects reserved TLDs such as .local")
 	addonInstallCmd.Flags().String("maxmemory", "", "Redis memory cap, e.g. 256mb or 2gb — turns the instance into a real cache (allkeys-lru evicts keys at the cap); empty means no cap")
 	addonInstallCmd.Flags().String("maxmemory-policy", "", "Redis eviction policy to pair with --maxmemory (noeviction | allkeys-lru | allkeys-lfu | volatile-lru | volatile-lfu | volatile-ttl; default allkeys-lru; requires --maxmemory)")
@@ -692,18 +746,18 @@ func init() {
 	addonInstallCmd.Flags().Int("replica-of-port", 0, "Redis: remote master's port, paired with --replica-of-host")
 
 	// start / stop flags
-	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy or pgadmin instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\")")
+	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin or grafana instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\")")
 	addonStartCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to start")
-	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy or pgadmin instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\")")
+	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin or grafana instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\")")
 	addonStopCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to stop")
 
 	// list / password flags
-	addonListCmd.Flags().Bool("show-password", false, "also print stored credentials (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin web login password) — off by default so the listing stays paste-safe")
-	addonPasswordCmd.Flags().String("name", "", "instance to reveal (redis/predixy/minio/silo/rustfs/garage/seaweedfs/pgadmin; default \"redis\"/\"predixy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"pgadmin\")")
+	addonListCmd.Flags().Bool("show-password", false, "also print stored credentials (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin/Grafana web login password) — off by default so the listing stays paste-safe")
+	addonPasswordCmd.Flags().String("name", "", "instance to reveal (redis/predixy/minio/silo/rustfs/garage/seaweedfs/pgadmin/grafana; default \"redis\"/\"predixy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"pgadmin\"/\"grafana\")")
 	addonPasswordCmd.Flags().String("file", "", "write the password to this file (mode 0600) instead of stdout, keeping it out of shell history and scrollback")
 
 	// pgdog flags (top-level shared Postgres proxy addon)
-	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port) / PostgREST HTTP host port (0=auto-assign from postgrest_start_port) / Redis host port (0=auto-assign from redis_start_port, default 6379) / Predixy proxy host port (0=auto-assign from predixy_start_port, default 7617) / pgAdmin web host port (0=auto-assign from pgadmin_start_port, default 5050)")
+	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port) / PostgREST HTTP host port (0=auto-assign from postgrest_start_port) / Redis host port (0=auto-assign from redis_start_port, default 6379) / Predixy proxy host port (0=auto-assign from predixy_start_port, default 7617) / pgAdmin web host port (0=auto-assign from pgadmin_start_port, default 5050) / Grafana web host port (0=auto-assign from grafana_start_port, default 3000)")
 	addonInstallCmd.Flags().String("host", "", "PgDog listen address (default 127.0.0.1)")
 	addonInstallCmd.Flags().String("pool-mode", "", "PgDog pooler mode: transaction (default) or session")
 	addonInstallCmd.Flags().Int("workers", 0, "worker threads: PgDog (default 2) / Predixy proxy WorkerThreads (default 1)")
@@ -748,12 +802,14 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallPostgrest(cmd)
 	case "pgadmin":
 		return runAddonInstallPgAdmin(cmd)
+	case "grafana":
+		return runAddonInstallGrafana(cmd)
 	case "nginx":
 		return runAddonInstallNginx(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, nginx)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -4032,6 +4088,164 @@ func pgAdminStoreExists(dataDir string) bool {
 	return err == nil
 }
 
+// runAddonInstallGrafana installs a Grafana container — the open-source
+// observability dashboard — from the official docker.io/grafana image. Like
+// pgAdmin it is a top-level-only addon (addons.grafana.<name>, key defaults to
+// "grafana"): it fronts no single instance, so there is no --dsn/--pg-name seed
+// (v1 provisions no datasource or dashboard — configure those in the browser).
+//
+// AdminUser/Password are Grafana's WEB LOGIN credentials (GF_SECURITY_ADMIN_*),
+// required at first launch. Password is generated here when empty, the same way
+// pgAdmin/redis generate theirs: never in ApplyDefaults, which runs on every
+// config load and must stay deterministic.
+func runAddonInstallGrafana(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "grafana"
+	}
+	imageTag, _ := cmd.Flags().GetString("image")
+	dataDir, _ := cmd.Flags().GetString("data-dir")
+	port, _ := cmd.Flags().GetInt("port")
+	listenAddr, _ := cmd.Flags().GetString("listen")
+	adminUser, _ := cmd.Flags().GetString("admin-user")
+	password, _ := cmd.Flags().GetString("password")
+	force, _ := cmd.Flags().GetBool("force")
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.Grafana == nil {
+		cfg.Addons.Grafana = make(map[string]config.GrafanaConfig)
+	}
+	existing, ok := cfg.Addons.Grafana[name]
+	if !ok {
+		existing = config.GrafanaConfig{
+			ContainerName: "pgcli-grafana" + nsSuffixCLI(cfg.Namespace) + "-" + name,
+			Name:          name,
+		}
+	}
+	if dataDir != "" {
+		existing.DataDir = dataDir
+	}
+	if cmd.Flags().Changed("port") {
+		existing.HostPort = port
+	}
+	if listenAddr != "" {
+		existing.Listen = listenAddr
+	}
+	if adminUser != "" {
+		existing.AdminUser = adminUser
+	}
+	if password != "" {
+		existing.Password = password
+	}
+	if imageTag != "" {
+		existing.ImageTag = imageTag
+	}
+	cfg.Addons.Grafana[name] = existing
+
+	// ApplyDefaults fills ContainerName/Listen/AdminUser and assigns HostPort
+	// from the grafana_start_port pool. Password is NOT managed there — it is a
+	// secret the install path owns, and Grafana requires it at first launch (an
+	// already-initialised grafana.db ignores it, so the generated value stays a
+	// real login only for a fresh install).
+	cfg.ApplyDefaults()
+	gc := cfg.Addons.Grafana[name]
+
+	if err := ensureProxyBridge(cfg); err != nil {
+		return err
+	}
+
+	gm, err := podman.NewGrafanaManager(cfg)
+	if err != nil {
+		return fmt.Errorf("Grafana manager: %w", err)
+	}
+
+	// Reuse semantics identical to pgAdmin/redis: a live container is left alone
+	// (reinstall is a no-op), a stopped one is started, and only --force
+	// recreates it so changed port/listen/admin-user take effect.
+	exists, err := gm.ContainerExists(gc.ContainerName)
+	if err != nil {
+		return err
+	}
+	skipped := false
+	if exists && !force {
+		skipped = true
+		if running, _ := gm.ContainerRunning(gc.ContainerName); running {
+			fmt.Printf("-> Grafana container %q already running; skipping creation\n", gc.ContainerName)
+		} else {
+			fmt.Printf("-> Grafana container %q exists but is stopped; starting it\n", gc.ContainerName)
+			if err := gm.StartContainer(&gc); err != nil {
+				return err
+			}
+		}
+	} else {
+		// Fresh install, or a reinstall after a `remove` that kept the data dir.
+		// Generate the login password when none is stored. NOTE: Grafana only
+		// honours GF_SECURITY_ADMIN_PASSWORD while grafana.db is ABSENT — a
+		// revived store keeps whatever login was set on its first startup, so a
+		// freshly generated password here would NOT be the working login. We
+		// detect that case below and say so rather than print a password that
+		// silently does nothing.
+		if gc.Password == "" {
+			pw, err := generatePassword(20)
+			if err != nil {
+				return fmt.Errorf("generating Grafana password: %w", err)
+			}
+			gc.Password = pw
+		}
+		revived := podman.GrafanaStoreExists(gm.DataDir(&gc))
+		fmt.Printf("-> Preparing Grafana image %s...\n", gc.ImageTag)
+		if err := gm.EnsureImage(gc.ImageTag); err != nil {
+			return err
+		}
+		if revived {
+			// Pin the login block to point out the printed password is inert.
+			fmt.Println("-> NOTE: reviving an existing Grafana data dir — its stored login still applies; the password below only takes effect on a --clean-data reinstall (or reset it inside the container with `grafana-cli admin reset-admin-password`).")
+		}
+		fmt.Println("-> Starting Grafana container...")
+		if err := gm.EnsureContainer(&gc); err != nil {
+			return err
+		}
+	}
+
+	cfg.Addons.Grafana[name] = gc
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	fmt.Println()
+	if skipped {
+		fmt.Printf("✓ Grafana already present: %q\n", name)
+	} else {
+		fmt.Printf("✓ Grafana installed: %q\n", name)
+	}
+	fmt.Printf("  Container:  %s\n", gc.ContainerName)
+	fmt.Printf("  Image:      %s\n", gc.ImageTag)
+	fmt.Printf("  Data:       %s\n", gm.DataDir(&gc))
+	fmt.Printf("  URL:        http://%s:%d/\n", gc.Listen, gc.HostPort)
+	fmt.Println()
+	fmt.Printf("  Login user:     %s\n", gc.AdminUser)
+	fmt.Printf("  Login password: %s\n", gc.Password)
+	fmt.Println("  (Web login only — not a PostgreSQL password. Retrieve it later with `pg addon password grafana`.)")
+	fmt.Println()
+	fmt.Println("  Add datasources and dashboards in the web UI itself; v1 provisions none.")
+	if gc.Listen == "0.0.0.0" {
+		fmt.Println("  NOTE: listening on every interface (the dashboard is meant to be viewed remotely); the login above and closed self-signup are the only gate.")
+		fmt.Printf("        loopback-only: pg addon install grafana --name %s --listen 127.0.0.1 --force\n", name)
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // list logic
 // ---------------------------------------------------------------------------
@@ -4783,6 +4997,44 @@ func runAddonList(showPassword bool) error {
 		fmt.Println("  (none)")
 	}
 
+	// Grafana (observability dashboard — top-level, one container, persistent data dir)
+	fmt.Println()
+	fmt.Println("Web add-ons (grafana):")
+	hasGrafana := false
+	if gm, err := podman.NewGrafanaManager(cfg); err == nil {
+		for _, name := range sortedAddonNames(cfg.Addons.Grafana) {
+			gc := cfg.Addons.Grafana[name]
+			hasGrafana = true
+			status := "stopped"
+			if running, err := gm.ContainerRunning(gc.ContainerName); err == nil && running {
+				status = "running"
+			}
+			fmt.Printf("  %s (name: %s)\n", "grafana", name)
+			fmt.Printf("    Status:      %s\n", status)
+			fmt.Printf("    URL:         http://%s:%d/\n", gc.Listen, gc.HostPort)
+			fmt.Printf("    Login user:  %s\n", gc.AdminUser)
+			if showPassword && gc.Password != "" {
+				fmt.Printf("    Login password: %s\n", gc.Password)
+			}
+			fmt.Printf("    Data:        %s\n", gm.DataDir(&gc))
+			fmt.Printf("    Image:       %s\n", gc.ImageTag)
+			fmt.Printf("    Container:   %s\n", gc.ContainerName)
+		}
+	} else if len(cfg.Addons.Grafana) > 0 {
+		// Configured but the manager is unavailable (podman missing): still show them.
+		for _, name := range sortedAddonNames(cfg.Addons.Grafana) {
+			gc := cfg.Addons.Grafana[name]
+			hasGrafana = true
+			fmt.Printf("  %s (name: %s)\n", "grafana", name)
+			fmt.Printf("    Status:      n/a (%v)\n", err)
+			fmt.Printf("    URL:         http://%s:%d/\n", gc.Listen, gc.HostPort)
+			fmt.Printf("    Container:   %s\n", gc.ContainerName)
+		}
+	}
+	if !hasGrafana {
+		fmt.Println("  (none)")
+	}
+
 	// nginx (HTTP reverse proxy, top-level addon; Linux + macOS)
 	fmt.Println()
 	fmt.Println("Web add-ons (nginx):")
@@ -4856,6 +5108,9 @@ func sortedAddonNames[T any](m map[string]T) []string {
 // PostgreSQL password — but it is still pgcli-generated and the only credential
 // this addon has, so it belongs here for the same "retrieve what I printed at
 // install" reason as redis's requirepass.
+//
+// Grafana's entry is exactly the same story with GF_SECURITY_ADMIN_PASSWORD
+// (which, like pgAdmin's, only takes effect while grafana.db is absent).
 func addonPasswords(cfg *config.Config) map[string]string {
 	out := map[string]string{}
 	for name, rc := range cfg.Addons.Redis {
@@ -4881,6 +5136,9 @@ func addonPasswords(cfg *config.Config) map[string]string {
 	}
 	for name, ac := range cfg.Addons.PgAdmin {
 		out["pgadmin:"+name] = ac.Password
+	}
+	for name, gc := range cfg.Addons.Grafana {
+		out["grafana:"+name] = gc.Password
 	}
 	return out
 }
@@ -4968,12 +5226,14 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemovePostgrest(cmd)
 	case "pgadmin":
 		return runAddonRemovePgAdmin(cmd)
+	case "grafana":
+		return runAddonRemoveGrafana(cmd)
 	case "nginx":
 		return runAddonRemoveNginx(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, nginx)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -5276,10 +5536,12 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartPostgrest(cmd)
 	case "pgadmin":
 		return runAddonStartPgAdmin(cmd)
+	case "grafana":
+		return runAddonStartGrafana(cmd)
 	case "nginx":
 		return runAddonStartNginx(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, nginx)", addonName)
 	}
 }
 
@@ -5311,10 +5573,12 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopPostgrest(cmd)
 	case "pgadmin":
 		return runAddonStopPgAdmin(cmd)
+	case "grafana":
+		return runAddonStopGrafana(cmd)
 	case "nginx":
 		return runAddonStopNginx(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, nginx)", addonName)
 	}
 }
 
@@ -6569,6 +6833,117 @@ func runAddonStopPgAdmin(cmd *cobra.Command) error {
 		return err
 	}
 	fmt.Printf("✓ pgAdmin %q stopped\n", name)
+	return nil
+}
+
+// runAddonRemoveGrafana removes a Grafana container. The data dir (grafana.db)
+// is kept unless --clean-data, so remove+reinstall revives saved dashboards and
+// the original web login.
+func runAddonRemoveGrafana(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "grafana"
+	}
+	cleanData, _ := cmd.Flags().GetBool("clean-data")
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.Grafana == nil {
+		return fmt.Errorf("no Grafana add-ons configured")
+	}
+	gc, ok := cfg.Addons.Grafana[name]
+	if !ok {
+		return fmt.Errorf("Grafana %q not found", name)
+	}
+
+	gm, err := podman.NewGrafanaManager(cfg)
+	if err != nil {
+		return fmt.Errorf("Grafana manager: %w", err)
+	}
+
+	fmt.Printf("-> Removing Grafana %q...\n", name)
+	if err := gm.Remove(&gc, cleanData); err != nil {
+		return err
+	}
+
+	delete(cfg.Addons.Grafana, name)
+	if len(cfg.Addons.Grafana) == 0 {
+		cfg.Addons.Grafana = nil
+	}
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	fmt.Printf("✓ Grafana %q removed\n", name)
+	if !cleanData {
+		fmt.Printf("  (data dir kept — reinstall the same name revives the saved dashboards and login; --clean-data to delete it)\n")
+	}
+	return nil
+}
+
+func runAddonStartGrafana(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "grafana"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	if cfg.Addons.Grafana == nil {
+		return fmt.Errorf("no Grafana add-ons configured (run 'pg addon install grafana')")
+	}
+	gc, ok := cfg.Addons.Grafana[name]
+	if !ok {
+		return fmt.Errorf("Grafana %q not found (run 'pg addon install grafana --name %s')", name, name)
+	}
+	if err := ensureProxyBridge(cfg); err != nil {
+		return err
+	}
+	gm, err := podman.NewGrafanaManager(cfg)
+	if err != nil {
+		return fmt.Errorf("Grafana manager: %w", err)
+	}
+	fmt.Printf("-> Starting Grafana %q...\n", name)
+	return gm.StartContainer(&gc)
+}
+
+func runAddonStopGrafana(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "grafana"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	gc, ok := cfg.Addons.Grafana[name]
+	if !ok {
+		return fmt.Errorf("Grafana %q not found", name)
+	}
+	gm, err := podman.NewGrafanaManager(cfg)
+	if err != nil {
+		return fmt.Errorf("Grafana manager: %w", err)
+	}
+	running, _ := gm.ContainerRunning(gc.ContainerName)
+	if !running {
+		fmt.Printf("Grafana %q is not running\n", name)
+		return nil
+	}
+	fmt.Printf("-> Stopping Grafana %q...\n", name)
+	if _, err := gm.Stop(gc.ContainerName); err != nil {
+		return err
+	}
+	fmt.Printf("✓ Grafana %q stopped\n", name)
 	return nil
 }
 

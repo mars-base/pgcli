@@ -36,6 +36,8 @@ The following addons are currently supported:
 | [`redis`](./redis/) | Standalone key-value store for cache, session, ranking and counter data — selectable majors 7/8, auto-generated `requirepass`, RDB persistence, read replicas, native cluster sharding via `--cluster`, own port pool (Linux; macOS code-complete, untested) |
 | [`predixy`](./predixy/) | Redis protocol proxy — turns a native cluster into one plain `redis://` endpoint, so clients need no cluster awareness at all; own port pool (Linux only) |
 | [`pgadmin`](./pgadmin/) | pgAdmin 4 — the official PostgreSQL web administration UI, one container from the upstream image; web login auto-generated, optional one-time server seed via `--dsn`/`--pg-name`, persistent session store; own port pool (Linux; macOS code-complete, untested) |
+| [`nginx`](./nginx/) | HTTP reverse proxy fronting multiple web services — path-based routing to declared backends, optional TLS termination, rendered `nginx.conf` or your own `--conf-file`, `pg addon nginx reload` on config change; own port pool (Linux and macOS) |
+| [`grafana`](./grafana/) | Grafana — the open-source observability dashboard, one container from the official upstream image; web login auto-generated, `Listen` defaults to `0.0.0.0` (signup closed), env-only (`GF_*`) config with no provisioning in v1; own port pool (Linux; macOS code-complete, untested) |
 
 Each addon has its own page with commands, parameters, and troubleshooting.
 
@@ -64,4 +66,4 @@ pg addon remove <addon> [flags]     # remove the addon, container, and data
 ```
 
 See each addon's page for its specific flags and examples:
-[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [PostgREST](./postgrest/) · [HAProxy](./haproxy/) · [MinIO](./minio/) · [Silo](./silo/) · [rustfs](./rustfs/) · [Garage](./garage/) · [SeaweedFS](./seaweedfs/) · [Redis](./redis/) · [Predixy](./predixy/) · [pgAdmin 4](./pgadmin/). Patroni pages live in [HA Cluster](../ha-cluster/).
+[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [PostgREST](./postgrest/) · [HAProxy](./haproxy/) · [MinIO](./minio/) · [Silo](./silo/) · [rustfs](./rustfs/) · [Garage](./garage/) · [SeaweedFS](./seaweedfs/) · [Redis](./redis/) · [Predixy](./predixy/) · [pgAdmin 4](./pgadmin/) · [nginx](./nginx/) · [Grafana](./grafana/). Patroni pages live in [HA Cluster](../ha-cluster/).

@@ -55,7 +55,11 @@ across machines, or that depend on Linux-only container internals, stay
 | Addon — **rustfs** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
 | Addon — **Redis** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
 | Addon — **Predixy** | ✅ host network (single- and cross-host clusters) | ❌ Linux only |
+| Addon — **Garage** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
+| Addon — **SeaweedFS** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
 | Addon — **pgAdmin 4** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
+| Addon — **Grafana** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
+| Addon — **nginx** | ✅ host network | ✅ bridge, published ports (lightly tested) |
 | Client — **`pg mc`** (MinIO client) | ✅ host network | ✅ bridge (see below) |
 | HA — **Patroni** (`pg ha`) | ✅ incl. cross-host | ❌ Linux only |
 
@@ -142,6 +146,20 @@ Addon networking differs per component:
   on macOS it joins `pgcli-net` with the port published and its `listen` widened
   to `0.0.0.0` — the same bridge path redis/the object stores use, code-complete
   but not yet exercised on a Mac, so the e2e coverage is Linux-only for now.
+- **[Grafana](/docs/addon/grafana/)** — **Linux, tested; macOS expected.** A
+  plain upstream `docker.io/grafana/grafana` image with no wrapper. The image
+  bakes `USER 472` and its entrypoint does no ownership work at all, so pgcli
+  chowns the host data dir to `472:0` itself before creating the container —
+  via `podman unshare chown` under rootless podman, or a direct recursive
+  `chown` when pgcli runs as root on a rootful host. On Linux it serves
+  over host networking on `grafana_start_port` (on every interface by default);
+  on macOS it joins `pgcli-net` with the port published and its `listen` widened
+  to `0.0.0.0` — the same bridge path pgAdmin/redis use, code-complete but not
+  yet exercised on a Mac, so the e2e coverage is Linux-only for now.
+- **[nginx](/docs/addon/nginx/)** — **both platforms (macOS lightly
+  tested).** The HTTP reverse proxy joins `pgcli-net` on macOS with its ports
+  published — the same bridge path the object stores use; it has been exercised
+  there but not under load. The upstream image is multi-arch (amd64 + arm64).
 - **[`pg mc`](/docs/addon/minio/#using-the-mc-client)** (MinIO client) — **both
   platforms.** It runs the `mc` binary from a throwaway container, with your
   `~/.mc/config.json` mounted as its own default config path and local file

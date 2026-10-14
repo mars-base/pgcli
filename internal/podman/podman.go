@@ -1410,6 +1410,22 @@ func podmanUnshareRm(podmanPath, path string) error {
 	return podmanUnshareRun(podmanPath, "rm", "-rf", path)
 }
 
+// podmanUnshareChown chowns a HOST path to a container-side uid:gid (e.g.
+// Grafana's 472:0) by running `chown` inside the rootless podman user
+// namespace, where the caller is mapped root and the uid/gid are taken as the
+// container's own ids — podman translates them to the host's subordinate
+// allocation (uid 472 → subuid-base+472, e.g. 100472). A host `os.Chown(472,0)`
+// would instead set literal host uid 472, which the container does NOT map to
+// its 472, so the bind mount would come up unreadable; this is the only clean
+// way to hand a bind-mounted dir to a fixed-uid container without running the
+// container as root. Works only on a rootless host — a rootful podman maps
+// container uid N to host uid N directly, so the caller there is already root
+// and chown succeeds against the real ids (the caller surfaces a diagnostic on
+// failure either way).
+func podmanUnshareChown(podmanPath string, uid, gid int, path string) error {
+	return podmanUnshareRun(podmanPath, "chown", fmt.Sprintf("%d:%d", uid, gid), path)
+}
+
 // podmanUnshareRun runs an arbitrary command inside the rootless podman user
 // namespace, where subordinate-UID files (those a fixed non-root container user
 // like rustfs's uid 10001 leaves on bind mounts) are accessible to the host

@@ -51,7 +51,11 @@ pgcli 在 Linux 和 macOS 上都是驱动 [Podman](https://podman.io) 容器运�
 | 插件 —— **rustfs** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
 | 插件 —— **Redis** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
 | 插件 —— **Predixy** | ✅ host 网络（单机与跨机集群皆已验证） | ❌ 仅 Linux |
+| 插件 —— **Garage** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
+| 插件 —— **SeaweedFS** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
 | 插件 —— **pgAdmin 4** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
+| 插件 —— **Grafana** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
+| 插件 —— **nginx** | ✅ host 网络 | ✅ bridge，发布端口（轻度实测） |
 | 客户端 —— **`pg mc`**（MinIO 客户端） | ✅ host 网络 | ✅ bridge（见下） |
 | 高可用 —— **Patroni**（`pg ha`） | ✅ 含跨主机 | ❌ 仅 Linux |
 
@@ -125,6 +129,18 @@ macOS 上这些都是**单主机**：跨主机副本、跨多机的连接池属�
   `pgadmin_start_port`（默认仅回环）；macOS 上加入 `pgcli-net` 并发布端口、
   `listen` 放宽到 `0.0.0.0` —— 与 redis/对象存储相同的 bridge 路径，代码完备但
   尚未在 Mac 上跑过，e2e 覆盖目前仅限 Linux。
+- **[Grafana](/docs/addon/grafana/)** —— **Linux 已实测；macOS 预期可用**。纯上
+  游 `docker.io/grafana/grafana` 镜像，没有 wrapper。镜像固化 `USER 472`，且
+  entrypoint 完全不做任何属主管理，所以 pgcli 在创建容器前自己把宿主数据目录
+  chown 成 `472:0` —— rootless podman 下经 `podman unshare chown`，pgcli 以
+  root 跑在 rootful 宿主上则直接递归 `chown`。Linux 上走 host 网络，端口取自 `grafana_start_port`（默认开放全部网
+  卡）；macOS 上加入 `pgcli-net` 并发布端口、`listen` 放宽到 `0.0.0.0` —— 与
+  pgAdmin/redis 相同的 bridge 路径，代码完备但尚未在 Mac 上跑过，e2e 覆盖目前
+  仅限 Linux。
+- **[nginx](/docs/addon/nginx/)** —— **两个平台都支持（macOS 轻度实测）**。HTTP
+  反向代理，Linux 上走 host 网络；macOS 上加入 `pgcli-net` 并发布端口，与对象
+  存储同一条 bridge 路径 —— 已跑通过但未经负载考验。上游镜像多架构
+  （amd64 + arm64）。
 - **[`pg mc`](/docs/addon/minio/#使用-mc-客户端)**（MinIO 客户端）——
   **两个平台都支持**。它在一次性容器里运行 `mc`：宿主的 `~/.mc/config.json`
   按其原生默认路径挂载，`cp`/`mirror`/`diff` 的本地文件参数也会按真实路径动态
