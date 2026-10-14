@@ -290,7 +290,7 @@ pg addon install pgadmin --listen 0.0.0.0 --pg-name demo --force
 # seed a server on ANOTHER host instead — the host must be reachable from the
 # pgAdmin container, since it is the container that connects
 pg addon install pgadmin --listen 0.0.0.0 \
-    --dsn "postgres://app@10.241.20.148:35432/appdb" --force
+    --dsn "postgres://app@10.0.0.12:35432/appdb" --force
 ```
 
 The converse pitfall: seed a *remote* host with `--dsn` and point a browser at

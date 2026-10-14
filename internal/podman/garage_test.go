@@ -82,13 +82,13 @@ func TestRenderGarageTOML(t *testing.T) {
 
 func TestRenderGarageTOMLCluster(t *testing.T) {
 	gc := &config.GarageConfig{
-		Name: "store", Cluster: "c1", AdvertiseHost: "10.241.20.147",
+		Name: "store", Cluster: "c1", AdvertiseHost: "10.0.0.11",
 		ReplicationFactor: 3, RPCSecret: "aa", Region: "garage",
 		APIPort: 3900, RPCPort: 3901, WebPort: 3902, AdminPort: 3903,
 	}
 	out := renderGarageTOML(gc, "0.0.0.0")
 	// rpc_public_addr is the peer-dialable address — between bind and secret.
-	if !strings.Contains(out, `rpc_public_addr = "10.241.20.147:3901"`) {
+	if !strings.Contains(out, `rpc_public_addr = "10.0.0.11:3901"`) {
 		t.Errorf("cluster render missing rpc_public_addr:\n%s", out)
 	}
 	if !strings.Contains(out, "replication_factor = 3") {

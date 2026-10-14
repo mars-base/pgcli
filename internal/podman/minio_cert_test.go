@@ -175,7 +175,7 @@ func TestValidateBYOCert(t *testing.T) {
 func TestCertCoversHost(t *testing.T) {
 	ci := &CertInfo{
 		DNSNames: []string{"minio.test", "*.hi.163.com"},
-		IPs:      []string{"127.0.0.1", "10.241.21.97"},
+		IPs:      []string{"127.0.0.1", "10.0.0.2"},
 	}
 	cases := []struct {
 		host string
@@ -189,7 +189,7 @@ func TestCertCoversHost(t *testing.T) {
 		{"a.b.hi.163.com", false},   // wildcard is one label only
 		{"hi.163.com", false},       // bare parent doesn't match *.child
 		{"127.0.0.1", true},         // IP SAN
-		{"10.241.21.97:9000", true}, // IP SAN with port
+		{"10.0.0.2:9000", true}, // IP SAN with port
 		{"8.8.8.8", false},          // IP not in SANs
 	}
 	for _, tc := range cases {

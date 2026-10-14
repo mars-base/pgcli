@@ -88,7 +88,7 @@ pg addon install garage --name store --listen 0.0.0.0
 pg addon install garage --name store --root-user GK<...> --root-password <secret>
 
 # 加入一个跨主机集群（见下文"多节点集群"）
-pg addon install garage --name store --cluster c1 --advertise-host 10.241.20.147 \
+pg addon install garage --name store --cluster c1 --advertise-host 10.0.0.11 \
   --zone z1 --capacity 15 --replication-factor 3 \
   [--peer <id@addr> --rpc-secret <64hex>]   # joiner 两个都要带
 ```
@@ -228,8 +228,8 @@ pg backup setup --s3-ca-file ~/.pgcli/backup/repo-ca/ca-<front-host>-<https-port
 ```nginx
 http {
     upstream garage_s3 {
-        server 10.241.20.147:3904;   # 成员 A，本机房
-        server 10.241.20.148:3900;   # 成员 B，本机房
+        server 10.0.0.11:3904;   # 成员 A，本机房
+        server 10.0.0.12:3900;   # 成员 B，本机房
         # 不放远端成员：它是数据副本，不进请求路径
     }
     server {
@@ -309,35 +309,35 @@ Garage 的真正价值在于跨主机集群：不同 zone 的节点、CRDT 复�
 ——staged 角色是集群复制的，会一直等到最后一台提交：
 
 ```bash
-# 在 10.241.20.147 上
+# 在 10.0.0.11 上
 pg addon install garage --name store --cluster c1 \
-  --advertise-host 10.241.20.147 --zone z1 --capacity 15 --replication-factor 3
+  --advertise-host 10.0.0.11 --zone z1 --capacity 15 --replication-factor 3
 ```
 
 摘要会打印 secret 和一份可复制的加入模板：
 
 ```
   Cluster:       c1 (role: bootstrapping cluster, replication factor 3)
-  Advertise:     10.241.20.147:3905
+  Advertise:     10.0.0.11:3905
   Zone/Capacity: z1 / 15 GiB
-  Node ID:       1c0597cc…200aeb@10.241.20.147:3905
+  Node ID:       1c0597cc…200aeb@10.0.0.11:3905
   [i] layout staged but not applied yet — Garage needs replication-factor assigned nodes to commit (later joins will).
 
   To add ANOTHER member, run on the next host (carrying --rpc-secret yourself;
   pgcli never executes remotely). ...
     pg addon install garage --name store --cluster c1 \
       --advertise-host <next-host-ip> --rpc-secret <64hex> \
-      --peer 1c0597cc…200aeb@10.241.20.147:3905 --zone <zone> --capacity <GiB> --replication-factor 3
+      --peer 1c0597cc…200aeb@10.0.0.11:3905 --zone <zone> --capacity <GiB> --replication-factor 3
 ```
 
 **主机 2——join。** 复制打印出的命令，把 `--advertise-host` 改成本机 IP、
 `--zone` 换一个：
 
 ```bash
-# 在 10.241.20.148 上
+# 在 10.0.0.12 上
 pg addon install garage --name store --cluster c1 \
-  --advertise-host 10.241.20.148 --rpc-secret <64hex> \
-  --peer 1c0597cc…200aeb@10.241.20.147:3905 --zone z2 --capacity 15 --replication-factor 3
+  --advertise-host 10.0.0.12 --rpc-secret <64hex> \
+  --peer 1c0597cc…200aeb@10.0.0.11:3905 --zone z2 --capacity 15 --replication-factor 3
 ```
 
 现在有两个节点 assigned，仍少于 `rf = 3`，所以再次警告。peer 连接是**可传递**
@@ -348,10 +348,10 @@ pg addon install garage --name store --cluster c1 \
 完成 access key 和 bucket 的播种：
 
 ```bash
-# 在 10.241.20.153 上
+# 在 10.0.0.14 上
 pg addon install garage --name store --cluster c1 \
-  --advertise-host 10.241.20.153 --rpc-secret <64hex> \
-  --peer 5b370435…1c1c9187@10.241.20.148:3901 --zone z3 --capacity 15 --replication-factor 3
+  --advertise-host 10.0.0.14 --rpc-secret <64hex> \
+  --peer 5b370435…1c1c9187@10.0.0.12:3901 --zone z3 --capacity 15 --replication-factor 3
 ```
 
 ```
@@ -664,7 +664,7 @@ pg addon install minio  --name archive  # 9000 / 9001  （共享池）
 即便 `--listen` 为回环，pgcli 也会把它的 RPC bind 放宽到 `0.0.0.0`——这条通道由
 `rpc_secret` 签名。注意端口号也随 `--advertise-host`/`--peer` 一起走，所以在一台
 已跑着另一个 garage 实例的主机上，集群的 RPC 可能落在不同于 3901 的端口（例如
-`10.241.20.147:3905`）。
+`10.0.0.11:3905`）。
 
 ### 没有 Web 控制台——用 CLI 与 admin API 管理
 
@@ -737,12 +737,12 @@ addons:
       autostart: false                # pg autostart enable --garage --name store
       # --- 多节点集群键（单节点请全部省略）---
       # cluster: c1                   # 非空即集群模式；把成员归到一组
-      # advertise_host: 10.241.20.147 # rpc_public_addr 主机；集群模式必填
+      # advertise_host: 10.0.0.11 # rpc_public_addr 主机；集群模式必填
       # zone: z1                      # layout assign -z（故障域）
       # capacity: 15                  # layout assign -c，单位 GiB；0 表示不自动 assign
       # peers:                        # 已知 id@addr，逐个 `garage node connect`
-      #   - 1c0597cc…200aeb@10.241.20.147:3905
-      # node_id: 1c0597cc…200aeb@10.241.20.147:3905  # 首启后读回并缓存
+      #   - 1c0597cc…200aeb@10.0.0.11:3905
+      # node_id: 1c0597cc…200aeb@10.0.0.11:3905  # 首启后读回并缓存
 ```
 
 `replication_factor` 默认 1。**没有** `cluster` 却把它设 `> 1` 会在安装时被拒绝
@@ -764,9 +764,9 @@ Infra add-ons (garage):
   garage (name: store)
     Status:      running
     Cluster:     c1 (rf 3)
-    Advertise:   10.241.20.147:3905
+    Advertise:   10.0.0.11:3905
     Zone/Cap:    z1 / 15 GiB
-    Node ID:     1c0597cc…200aeb@10.241.20.147:3905
+    Node ID:     1c0597cc…200aeb@10.0.0.11:3905
     Nodes:       3 assigned (healthy)
     Listen:      127.0.0.1
     API port:    3904

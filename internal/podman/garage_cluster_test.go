@@ -11,23 +11,23 @@ import (
 
 const sampleStatus = `==== HEALTHY NODES ====
 ID                Hostname     Address             Tags       Zone  Capacity  DataAvail         Version
-39b983bc9147da7f  debian12-01  10.241.20.147:3901  [default]  dc1   19.5 GiB  11.9 GiB (61.3%)  v2.4.1
+39b983bc9147da7f  debian12-01  10.0.0.11:3901  [default]  dc1   19.5 GiB  11.9 GiB (61.3%)  v2.4.1
 `
 
 const sampleStatusThree = `==== HEALTHY NODES ====
 ID                Hostname     Address             Tags       Zone  Capacity  DataAvail         Version
-39b983bc9147da7f  debian12-01  10.241.20.147:3901  [default]  z1    15 GiB    11.9 GiB (61.3%)  v2.4.1
-41c2f7a01b3e9d55  debian12-02  10.241.20.148:3901  [default]  z2    15 GiB    11.8 GiB (60.9%)  v2.4.1
-7a55e0b2c9d13f68  debian12-03  10.241.20.153:3901  [default]  z3    15 GiB    12.1 GiB (62.4%)  v2.4.1
+39b983bc9147da7f  debian12-01  10.0.0.11:3901  [default]  z1    15 GiB    11.9 GiB (61.3%)  v2.4.1
+41c2f7a01b3e9d55  debian12-02  10.0.0.12:3901  [default]  z2    15 GiB    11.8 GiB (60.9%)  v2.4.1
+7a55e0b2c9d13f68  debian12-03  10.0.0.14:3901  [default]  z3    15 GiB    12.1 GiB (62.4%)  v2.4.1
 `
 
 const sampleStatusUnassigned = `==== HEALTHY NODES ====
 ID                Hostname     Address             Tags       Zone  Capacity  DataAvail   Version
-39b983bc9147da7f  debian12-01  10.241.20.147:3901  [default]  --    NO ROLE ASSIGNED      v2.4.1
-41c2f7a01b3e9d55  debian12-02  10.241.20.148:3901  [default]  z2    15 GiB    11.8 GiB   v2.4.1
+39b983bc9147da7f  debian12-01  10.0.0.11:3901  [default]  --    NO ROLE ASSIGNED      v2.4.1
+41c2f7a01b3e9d55  debian12-02  10.0.0.12:3901  [default]  z2    15 GiB    11.8 GiB   v2.4.1
 
 ==== UNHEALTHY NODES ====
-7a55e0b2c9d13f68  debian12-03  10.241.20.153:3901  [default]  z3    15 GiB                v2.4.1
+7a55e0b2c9d13f68  debian12-03  10.0.0.14:3901  [default]  z3    15 GiB                v2.4.1
 `
 
 const sampleLayoutShow = `==== CURRENT CLUSTER LAYOUT ====
@@ -106,14 +106,14 @@ func TestParseNodeID(t *testing.T) {
 		t.Errorf("bare id: %q %v", id, err)
 	}
 	// Cluster member with rpc_public_addr: `<64hex>@<addr>`.
-	const withAddr = sampleNodeID + "@10.241.20.147:3901\n"
+	const withAddr = sampleNodeID + "@10.0.0.11:3901\n"
 	id, err := parseNodeID(withAddr)
-	if err != nil || id != sampleNodeID+"@10.241.20.147:3901" {
+	if err != nil || id != sampleNodeID+"@10.0.0.11:3901" {
 		t.Errorf("id@addr: %q %v", id, err)
 	}
 	// Cluster mode appends a connect-hint block after the id (vm02, v2.4.1) —
 	// anchoring on the last line would return its prose.
-	const hintID = "5b370435a60739ed7ac1994a39e97329d509b7a6d7bb8d7206d598561c1c9187@10.241.20.148:3901"
+	const hintID = "5b370435a60739ed7ac1994a39e97329d509b7a6d7bb8d7206d598561c1c9187@10.0.0.12:3901"
 	id, err = parseNodeID(sampleNodeIDWithHint)
 	if err != nil || id != hintID {
 		t.Errorf("id with hint block: %q %v", id, err)
@@ -127,14 +127,14 @@ const sampleNodeID = "39b983bc9147da7f34c4c445e894806d3263547a3d600c5a121756bb54
 
 // sampleNodeIDWithHint is vm02's real `garage node id` output once the node is
 // part of a cluster (INFO handshake lines already stripped, as ExecCapture does).
-const sampleNodeIDWithHint = `5b370435a60739ed7ac1994a39e97329d509b7a6d7bb8d7206d598561c1c9187@10.241.20.148:3901
+const sampleNodeIDWithHint = `5b370435a60739ed7ac1994a39e97329d509b7a6d7bb8d7206d598561c1c9187@10.0.0.12:3901
 
 To instruct a node to connect to this node, run the following command on that node:
-    garage [-c <config file path>] node connect 5b370435a60739ed7ac1994a39e97329d509b7a6d7bb8d7206d598561c1c9187@10.241.20.148:3901
+    garage [-c <config file path>] node connect 5b370435a60739ed7ac1994a39e97329d509b7a6d7bb8d7206d598561c1c9187@10.0.0.12:3901
 
 This node identifier can also be added as a bootstrap node in other node's garage.toml files:
     bootstrap_peers = [
-        "5b370435a60739ed7ac1994a39e97329d509b7a6d7bb8d7206d598561c1c9187@10.241.20.148:3901",
+        "5b370435a60739ed7ac1994a39e97329d509b7a6d7bb8d7206d598561c1c9187@10.0.0.12:3901",
         ...
     ]
 

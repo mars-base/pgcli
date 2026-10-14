@@ -117,11 +117,11 @@ func TestGarageSaveLoadRoundTrip(t *testing.T) {
 			Region:            "garage",
 			ReplicationFactor: 1,
 			Cluster:           "c1",
-			AdvertiseHost:     "10.241.20.147",
+			AdvertiseHost:     "10.0.0.11",
 			Zone:              "z1",
 			Capacity:          15,
-			Peers:             []string{"abcd@10.241.20.148:3901", "ef01@10.241.20.153:3901"},
-			NodeID:            "39b9@10.241.20.147:3901",
+			Peers:             []string{"abcd@10.0.0.12:3901", "ef01@10.0.0.14:3901"},
+			NodeID:            "39b9@10.0.0.11:3901",
 			Autostart:         true,
 		},
 	}
@@ -144,21 +144,21 @@ func TestGarageSaveLoadRoundTrip(t *testing.T) {
 		t.Error("autostart lost in round-trip")
 	}
 	// Multi-node (v2) fields.
-	if !gc.Clustered() || gc.Cluster != "c1" || gc.AdvertiseHost != "10.241.20.147" {
+	if !gc.Clustered() || gc.Cluster != "c1" || gc.AdvertiseHost != "10.0.0.11" {
 		t.Errorf("cluster fields lost: %+v", gc)
 	}
 	if gc.Zone != "z1" || gc.Capacity != 15 {
 		t.Errorf("zone/capacity lost: %q/%d", gc.Zone, gc.Capacity)
 	}
-	if len(gc.Peers) != 2 || gc.Peers[0] != "abcd@10.241.20.148:3901" {
+	if len(gc.Peers) != 2 || gc.Peers[0] != "abcd@10.0.0.12:3901" {
 		t.Errorf("peers lost: %v", gc.Peers)
 	}
-	if gc.NodeID != "39b9@10.241.20.147:3901" {
+	if gc.NodeID != "39b9@10.0.0.11:3901" {
 		t.Errorf("node id lost: %q", gc.NodeID)
 	}
 	// rpc_public_addr brackets IPv6 and combines with the RPC port.
 	gc.RPCPort = 3901
-	if got := gc.RPCPublicAddr(); got != "10.241.20.147:3901" {
+	if got := gc.RPCPublicAddr(); got != "10.0.0.11:3901" {
 		t.Errorf("RPCPublicAddr = %q", got)
 	}
 	gc6 := gc

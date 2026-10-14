@@ -100,7 +100,7 @@ pg addon install garage --name store --listen 0.0.0.0
 pg addon install garage --name store --root-user GK<...> --root-password <secret>
 
 # join a cross-host cluster (see Multi-node cluster below)
-pg addon install garage --name store --cluster c1 --advertise-host 10.241.20.147 \
+pg addon install garage --name store --cluster c1 --advertise-host 10.0.0.11 \
   --zone z1 --capacity 15 --replication-factor 3 \
   [--peer <id@addr> --rpc-secret <64hex>]   # a joiner carries both
 ```
@@ -253,8 +253,8 @@ topology](#geo-distributed-topology)), and let each site run its own front:
 ```nginx
 http {
     upstream garage_s3 {
-        server 10.241.20.147:3904;   # member A, this site
-        server 10.241.20.148:3900;   # member B, this site
+        server 10.0.0.11:3904;   # member A, this site
+        server 10.0.0.12:3900;   # member B, this site
         # no remote member: it stays a data replica, off the request path
     }
     server {
@@ -339,18 +339,18 @@ and pgcli turns that into a warning, not an error — the staged role is
 cluster-replicated and survives until the last host applies it:
 
 ```bash
-# on 10.241.20.147
+# on 10.0.0.11
 pg addon install garage --name store --cluster c1 \
-  --advertise-host 10.241.20.147 --zone z1 --capacity 15 --replication-factor 3
+  --advertise-host 10.0.0.11 --zone z1 --capacity 15 --replication-factor 3
 ```
 
 The summary prints the secret and a copy-paste join template:
 
 ```
   Cluster:       c1 (role: bootstrapping cluster, replication factor 3)
-  Advertise:     10.241.20.147:3905
+  Advertise:     10.0.0.11:3905
   Zone/Capacity: z1 / 15 GiB
-  Node ID:       1c0597cc…200aeb@10.241.20.147:3905
+  Node ID:       1c0597cc…200aeb@10.0.0.11:3905
   [i] layout staged but not applied yet — Garage needs replication-factor assigned nodes to commit (later joins will).
 
   To add ANOTHER member, run on the next host (carrying --rpc-secret yourself;
@@ -358,17 +358,17 @@ The summary prints the secret and a copy-paste join template:
   reachable IP; pick a --zone per failure domain and keep --replication-factor:
     pg addon install garage --name store --cluster c1 \
       --advertise-host <next-host-ip> --rpc-secret <64hex> \
-      --peer 1c0597cc…200aeb@10.241.20.147:3905 --zone <zone> --capacity <GiB> --replication-factor 3
+      --peer 1c0597cc…200aeb@10.0.0.11:3905 --zone <zone> --capacity <GiB> --replication-factor 3
 ```
 
 **Host 2 — join.** Copy the printed command, change `--advertise-host` to this
 host's IP and `--zone` to a distinct zone:
 
 ```bash
-# on 10.241.20.148
+# on 10.0.0.12
 pg addon install garage --name store --cluster c1 \
-  --advertise-host 10.241.20.148 --rpc-secret <64hex> \
-  --peer 1c0597cc…200aeb@10.241.20.147:3905 --zone z2 --capacity 15 --replication-factor 3
+  --advertise-host 10.0.0.12 --rpc-secret <64hex> \
+  --peer 1c0597cc…200aeb@10.0.0.11:3905 --zone z2 --capacity 15 --replication-factor 3
 ```
 
 Two nodes are assigned now, still fewer than `rf = 3`, so it warns again. Peering
@@ -380,10 +380,10 @@ staged role set (assign is cluster-replicated), so its `layout apply` commits
 version 1 — and **this** is the install that seeds the access key and bucket:
 
 ```bash
-# on 10.241.20.153
+# on 10.0.0.14
 pg addon install garage --name store --cluster c1 \
-  --advertise-host 10.241.20.153 --rpc-secret <64hex> \
-  --peer 5b370435…1c1c9187@10.241.20.148:3901 --zone z3 --capacity 15 --replication-factor 3
+  --advertise-host 10.0.0.14 --rpc-secret <64hex> \
+  --peer 5b370435…1c1c9187@10.0.0.12:3901 --zone z3 --capacity 15 --replication-factor 3
 ```
 
 ```
@@ -739,7 +739,7 @@ Garage's status API. A **cluster** member's RPC port is what peers dial
 `--listen` is loopback — the channel is signed with `rpc_secret`. Note the port
 number also rides inside `--advertise-host`/`--peer`, so on a host that already
 runs another garage instance the cluster's RPC may land on a different port than
-3901 (e.g. `10.241.20.147:3905`).
+3901 (e.g. `10.0.0.11:3905`).
 
 ### No web console — administering via CLI and the admin API
 
@@ -819,12 +819,12 @@ addons:
       autostart: false                # pg autostart enable --garage --name store
       # --- multi-node cluster keys (omit for single-node) ---
       # cluster: c1                   # non-empty ⇒ cluster mode; groups members
-      # advertise_host: 10.241.20.147 # rpc_public_addr host; required in cluster
+      # advertise_host: 10.0.0.11 # rpc_public_addr host; required in cluster
       # zone: z1                      # layout assign -z (failure domain)
       # capacity: 15                  # layout assign -c, GiB; 0 ⇒ no auto-assign
       # peers:                        # known id@addr, each `garage node connect`ed
-      #   - 1c0597cc…200aeb@10.241.20.147:3905
-      # node_id: 1c0597cc…200aeb@10.241.20.147:3905  # read back after first boot
+      #   - 1c0597cc…200aeb@10.0.0.11:3905
+      # node_id: 1c0597cc…200aeb@10.0.0.11:3905  # read back after first boot
 ```
 
 `replication_factor` defaults to 1. Setting it `> 1` **without** a `cluster` is
@@ -848,9 +848,9 @@ Infra add-ons (garage):
   garage (name: store)
     Status:      running
     Cluster:     c1 (rf 3)
-    Advertise:   10.241.20.147:3905
+    Advertise:   10.0.0.11:3905
     Zone/Cap:    z1 / 15 GiB
-    Node ID:     1c0597cc…200aeb@10.241.20.147:3905
+    Node ID:     1c0597cc…200aeb@10.0.0.11:3905
     Nodes:       3 assigned (healthy)
     Listen:      127.0.0.1
     API port:    3904

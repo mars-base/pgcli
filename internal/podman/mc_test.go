@@ -226,7 +226,7 @@ func TestMCIsLoopbackHTTPS(t *testing.T) {
 		{"https://localhost", true},
 		{"http://127.0.0.1:9000", false},
 		{"https://s3.amazonaws.com", false},
-		{"https://10.241.21.97:9002", false},
+		{"https://10.0.0.2:9002", false},
 	}
 	for _, tt := range tests {
 		if got := mcIsLoopbackHTTPS(tt.url); got != tt.want {

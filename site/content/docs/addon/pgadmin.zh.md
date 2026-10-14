@@ -252,7 +252,7 @@ pg addon install pgadmin --listen 0.0.0.0 --pg-name demo --force
 # 改为预置另一台主机上的服务器——该 host 必须从 pgAdmin 容器可达，
 # 因为发起连接的是容器
 pg addon install pgadmin --listen 0.0.0.0 \
-    --dsn "postgres://app@10.241.20.148:35432/appdb" --force
+    --dsn "postgres://app@10.0.0.12:35432/appdb" --force
 ```
 
 反过来的坑：用 `--dsn` 预置一个*远程* host，再从别处用浏览器访问那个

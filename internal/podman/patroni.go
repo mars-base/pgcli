@@ -171,7 +171,7 @@ func (m *PatroniManager) renderPatroniYML(cluster *config.PatroniClusterConfig, 
 			"pgpass":          pgPassPath,
 			// Patroni reaches its OWN postmaster over a unix socket, not TCP.
 			// Rootless podman's pasta rewrites a loopback-originated TCP
-			// connection so it arrives from the host IP (10.241.21.97), not
+			// connection so it arrives from the host IP (10.0.0.2), not
 			// 127.0.0.1 — and during a custom bootstrap Patroni's generated
 			// pg_hba only trusts the resolved loopback addresses (see
 			// ConfigHandler.replace_pg_hba), so that rewritten source is
