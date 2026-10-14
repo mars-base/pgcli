@@ -888,8 +888,16 @@ type GarageConfig struct {
 
 	// MetadataDir and DataDir are the two host dirs Garage needs, bound to the
 	// config's metadata_dir/data_dir. Defaults: <base>/addon/garage/<name>/{meta,data}.
-	MetadataDir string `yaml:"metadata_dir,omitempty"`
-	DataDir     string `yaml:"data_dir,omitempty"`
+	// Drives (multi-disk) replaces DataDir when set — the two are mutually
+	// exclusive. Garage's data_dir accepts an array of { path, capacity }
+	// tables since v0.9.0 (blocks spread across the dirs, balanced by per-dir
+	// capacity). v2.4 REQUIRES a capacity on every entry, so pgcli fills each
+	// with its filesystem's whole usable size — there is no per-drive capacity
+	// knob. metadata_dir never joins the set: it is a single small LMDB dir by
+	// upstream design.
+	MetadataDir string   `yaml:"metadata_dir,omitempty"`
+	DataDir     string   `yaml:"data_dir,omitempty"`
+	Drives      []string `yaml:"drives,omitempty"`
 
 	ConfigFile string `yaml:"config_file,omitempty"` // host path of the rendered garage.toml; default <base>/addon/garage/<name>/garage.toml
 

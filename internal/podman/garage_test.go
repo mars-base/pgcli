@@ -2,6 +2,7 @@ package podman
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -33,7 +34,7 @@ func TestRenderGarageTOML(t *testing.T) {
 		WebPort:           3902,
 		AdminPort:         3903,
 	}
-	out := renderGarageTOML(gc, "127.0.0.1")
+	out := renderGarageTOML(gc, "127.0.0.1", nil)
 
 	wants := []string{
 		`metadata_dir = "/var/lib/garage/meta"`,
@@ -68,7 +69,7 @@ func TestRenderGarageTOML(t *testing.T) {
 	}
 
 	// A bridge/IPv6 bind reaches every line bracketed consistently.
-	out6 := renderGarageTOML(gc, "::")
+	out6 := renderGarageTOML(gc, "::", nil)
 	for _, w := range []string{
 		`rpc_bind_addr = "[::]:3901"`,
 		`api_bind_addr = "[::]:3900"`,
@@ -86,7 +87,7 @@ func TestRenderGarageTOMLCluster(t *testing.T) {
 		ReplicationFactor: 3, RPCSecret: "aa", Region: "garage",
 		APIPort: 3900, RPCPort: 3901, WebPort: 3902, AdminPort: 3903,
 	}
-	out := renderGarageTOML(gc, "0.0.0.0")
+	out := renderGarageTOML(gc, "0.0.0.0", nil)
 	// rpc_public_addr is the peer-dialable address — between bind and secret.
 	if !strings.Contains(out, `rpc_public_addr = "10.0.0.11:3901"`) {
 		t.Errorf("cluster render missing rpc_public_addr:\n%s", out)
@@ -97,19 +98,19 @@ func TestRenderGarageTOMLCluster(t *testing.T) {
 	// An IPv6 advertise host is bracketed (same rule as the bind addrs).
 	gc6 := *gc
 	gc6.AdvertiseHost = "fd00::1"
-	if !strings.Contains(renderGarageTOML(&gc6, "::"), `rpc_public_addr = "[fd00::1]:3901"`) {
+	if !strings.Contains(renderGarageTOML(&gc6, "::", nil), `rpc_public_addr = "[fd00::1]:3901"`) {
 		t.Error("IPv6 advertise host must be bracketed")
 	}
 	// Single-node (AdvertiseHost empty): no rpc_public_addr line at all.
 	gc1 := *gc
 	gc1.AdvertiseHost = ""
-	if strings.Contains(renderGarageTOML(&gc1, "127.0.0.1"), "rpc_public_addr") {
+	if strings.Contains(renderGarageTOML(&gc1, "127.0.0.1", nil), "rpc_public_addr") {
 		t.Error("single-node render must not carry rpc_public_addr")
 	}
 }
 
 func TestGarageMountFlags(t *testing.T) {
-	flags := garageMountFlags("/base/meta", "/base/data", "/base/garage.toml")
+	flags := garageMountFlags("/base/meta", []string{"/base/data"}, "/base/garage.toml")
 	want := []string{
 		"-v", "/base/meta:/var/lib/garage/meta:z",
 		"-v", "/base/data:/var/lib/garage/data:z",
@@ -117,6 +118,112 @@ func TestGarageMountFlags(t *testing.T) {
 	}
 	if strings.Join(flags, " ") != strings.Join(want, " ") {
 		t.Errorf("mount flags =\n%v\nwant\n%v", flags, want)
+	}
+	// Multi-disk: drive i lands at its own numbered slot, meta and config stay
+	// one apiece (metadata_dir is never part of the drive set).
+	multi := garageMountFlags("/base/meta", []string{"/mnt/d1", "/mnt/d2", "/mnt/d3"}, "/base/garage.toml")
+	wantMulti := []string{
+		"-v", "/base/meta:/var/lib/garage/meta:z",
+		"-v", "/mnt/d1:/var/lib/garage/data1:z",
+		"-v", "/mnt/d2:/var/lib/garage/data2:z",
+		"-v", "/mnt/d3:/var/lib/garage/data3:z",
+		"-v", "/base/garage.toml:/etc/garage.toml:ro,z",
+	}
+	if strings.Join(multi, " ") != strings.Join(wantMulti, " ") {
+		t.Errorf("multi-drive mount flags =\n%v\nwant\n%v", multi, wantMulti)
+	}
+}
+
+// containerGarageDataDirs is the slot contract shared by the TOML render and
+// the mount loop: count 0/1 keeps the bare constant, N>1 numbers each slot.
+func TestContainerGarageDataDirs(t *testing.T) {
+	if got := containerGarageDataDirs(0); len(got) != 1 || got[0] != "/var/lib/garage/data" {
+		t.Errorf("count 0 = %v, want [/var/lib/garage/data]", got)
+	}
+	if got := containerGarageDataDirs(1); len(got) != 1 || got[0] != "/var/lib/garage/data" {
+		t.Errorf("count 1 = %v, want [/var/lib/garage/data]", got)
+	}
+	got := containerGarageDataDirs(3)
+	want := []string{"/var/lib/garage/data1", "/var/lib/garage/data2", "/var/lib/garage/data3"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("count 3 = %v, want %v", got, want)
+	}
+}
+
+// Multi-disk renders data_dir as Garage's array-of-tables form (native since
+// v0.9.0), with a REQUIRED per-entry capacity — v2.4 refuses an entry without
+// one (verified on vm01). pgcli charges each drive its whole filesystem. A
+// single-dir config must keep rendering the exact same single-line string as
+// before (byte-compatibility).
+func TestRenderGarageTOMLMultiDrive(t *testing.T) {
+	gc := &config.GarageConfig{
+		Name: "store", ReplicationFactor: 1, RPCSecret: "aa", Region: "garage",
+		APIPort: 3900, RPCPort: 3901, WebPort: 3902, AdminPort: 3903,
+		Drives: []string{"/mnt/garage/d1", "/mnt/garage/d2"},
+	}
+	out := renderGarageTOML(gc, "127.0.0.1", []uint64{4, 8})
+	for _, want := range []string{
+		"data_dir = [",
+		`{ path = "/var/lib/garage/data1", capacity = "4G" },`,
+		`{ path = "/var/lib/garage/data2", capacity = "8G" },`,
+		`metadata_dir = "/var/lib/garage/meta"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("multi-drive render missing %q:\n%s", want, out)
+		}
+	}
+	// Never the old single-line form once drives are set.
+	if strings.Contains(out, `data_dir = "/var/lib/garage/data"`) {
+		t.Errorf("single-dir data_dir leaked into a multi-drive render:\n%s", out)
+	}
+	// The array must sit between the two scalar lines it belongs beside, and
+	// metadata_dir must stay a plain string (never part of the array).
+	iMeta := strings.Index(out, `metadata_dir = "/var/lib/garage/meta"`)
+	iArr := strings.Index(out, "data_dir = [")
+	iDB := strings.Index(out, `db_engine`)
+	if !(iMeta < iArr && iArr < iDB) {
+		t.Errorf("dir lines out of order: meta=%d data_dir=%d db_engine=%d", iMeta, iArr, iDB)
+	}
+
+	// Single-dir (no drives) is byte-identical to the legacy rendering: no
+	// capacity appears (the scalar form takes none).
+	single := *gc
+	single.Drives = nil
+	outSingle := renderGarageTOML(&single, "127.0.0.1", nil)
+	if !strings.Contains(outSingle, "\ndata_dir = \"/var/lib/garage/data\"\n") {
+		t.Error("single-dir render must keep the plain string form")
+	}
+	if strings.Contains(outSingle, "capacity") {
+		t.Errorf("single-dir render must not carry a capacity:\n%s", outSingle)
+	}
+	// Exactly one drive is still the single-dir case, not a one-element array.
+	one := *gc
+	one.Drives = []string{"/mnt/garage/d1"}
+	outOne := renderGarageTOML(&one, "127.0.0.1", []uint64{4})
+	if strings.Contains(outOne, "data_dir = [") {
+		t.Errorf("one drive must render as a string, not an array:\n%s", outOne)
+	}
+}
+
+// driveCapacityGiB sizes a drive's filesystem in GiB (floor) and falls back to
+// the nearest existing parent for a not-yet-created dir, so the render never
+// statfs-fails on a dir createContainer is about to mkdir.
+func TestDriveCapacityGiB(t *testing.T) {
+	dir := t.TempDir()
+	gib, err := driveCapacityGiB(dir)
+	if err != nil {
+		t.Fatalf("statfs tempdir: %v", err)
+	}
+	if gib < 1 {
+		t.Errorf("capacity of %q = %d, want >= 1", dir, gib)
+	}
+	// A deep nonexistent path under an existing fs resolves to that fs's size.
+	deeper, err := driveCapacityGiB(filepath.Join(dir, "a", "b", "c"))
+	if err != nil {
+		t.Fatalf("statfs nonexistent-under-existing: %v", err)
+	}
+	if deeper != gib {
+		t.Errorf("missing-dir capacity = %d, want the parent fs size %d", deeper, gib)
 	}
 }
 

@@ -208,6 +208,7 @@ func runAddonInstallGarage(cmd *cobra.Command) error {
 	}
 	imageTag, _ := cmd.Flags().GetString("image")
 	dataDir, _ := cmd.Flags().GetString("data-dir")
+	drives, _ := cmd.Flags().GetStringSlice("drive")
 	apiPort, _ := cmd.Flags().GetInt("api-port")
 	listenAddr, _ := cmd.Flags().GetString("listen")
 	rootUser, _ := cmd.Flags().GetString("root-user")
@@ -271,6 +272,15 @@ func runAddonInstallGarage(cmd *cobra.Command) error {
 	}
 	if dataDir != "" {
 		existing.DataDir = dataDir
+	}
+	if len(drives) > 0 {
+		existing.Drives = drives
+	}
+	// Multi-disk mode takes its data locations from --drive only; there is no
+	// merge semantics with a lone --data-dir. Checked post-merge so a stale
+	// `drives:` key in pg.yaml conflicts like a flag.
+	if len(existing.Drives) > 0 && existing.DataDir != "" {
+		return fmt.Errorf("--drive and --data-dir cannot be combined — multi-drive mode takes its data locations from --drive only")
 	}
 	if apiPort != 0 {
 		// Only the API port is a knob; ApplyDefaults' garage pool walk takes
@@ -390,6 +400,11 @@ func runAddonInstallGarage(cmd *cobra.Command) error {
 		if err := gm.EnsureImage(gc.ImageTag); err != nil {
 			return err
 		}
+		if len(gc.Drives) > 0 {
+			for _, d := range gm.DrivesSharingRootDevice(&gc) {
+				fmt.Printf("-> WARNING: drive %q is on the same device as the host root filesystem; Garage will still use it, but multi-drive only pays off on separately-mounted disks.\n", d)
+			}
+		}
 		fmt.Printf("-> Starting garage container (%s)... \n", role)
 		if err := gm.EnsureContainer(&gc); err != nil {
 			return err
@@ -424,7 +439,14 @@ func runAddonInstallGarage(cmd *cobra.Command) error {
 	}
 	fmt.Printf("  Container:     %s\n", gc.ContainerName)
 	fmt.Printf("  Image:         %s\n", gc.ImageTag)
-	fmt.Printf("  Data:          %s\n", gm.DataDir(&gc))
+	if len(gc.Drives) > 0 {
+		slots := podman.GarageContainerDataDirs(len(gc.Drives))
+		for i, d := range gc.Drives {
+			fmt.Printf("  Drive %d:       %s -> %s\n", i+1, d, slots[i])
+		}
+	} else {
+		fmt.Printf("  Data:          %s\n", gm.DataDir(&gc))
+	}
 	fmt.Printf("  Metadata:      %s\n", gm.MetadataDir(&gc))
 	fmt.Printf("  Config:        %s\n", filepath.Join(filepath.Dir(gm.DataDir(&gc)), "garage.toml"))
 	fmt.Printf("  S3 API:        http://%s:%d\n", gc.Listen, gc.APIPort)

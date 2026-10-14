@@ -67,11 +67,11 @@ Infra addons (shared, not tied to one instance):
           store, run from the upstream docker.io/dxflrs/garage image (no wrapper;
           it runs as root in the container). pgcli manages it single-node only
           (replication_factor=1). It configures itself from a rendered
-          garage.toml (not env), needs two dirs (a data dir and a sibling
-          metadata dir), opens four ports from their own pool (API/RPC/Web/
-          Admin, default base 3900), and serves plaintext HTTP — no native TLS,
-          so front it with the nginx addon for an HTTPS S3 endpoint that
-          pgBackRest will accept.
+          garage.toml (not env), needs a metadata dir plus its data dir(s) — one
+          per disk via --drive, or a single data dir — opens four ports from
+          their own pool (API/RPC/Web/Admin, default base 3900), and serves
+          plaintext HTTP — no native TLS, so front it with the nginx addon for an
+          HTTPS S3 endpoint that pgBackRest will accept.
   pg addon install seaweedfs
           Stored under top-level addons.seaweedfs in config (Linux and macOS).
           SeaweedFS (seaweedfs.io) — a Go, Apache-2.0 S3-compatible object store
@@ -211,11 +211,11 @@ Infra addon (minio — single-node S3-compatible object storage, Linux and macOS
   its data and TLS dirs for that user (directly as root, or via "podman
   unshare chown" under a rootless setup).
 
-  garage diverges from the other three stores: single-node only (v1), a rendered
-  garage.toml (not env), TWO dirs (data + a sibling metadata dir), FOUR ports from
-  its own garage_start_port pool (API/RPC/Web/Admin, default base 3900), and NO
-  native TLS — it serves plaintext HTTP and pgBackRest refuses that, so front it
-  with the nginx addon for HTTPS. Credentials are a seeded access key (auto GK-
+  garage diverges from the other stores: a rendered garage.toml (not env), a
+  metadata dir plus its data dir(s) (one per disk via --drive, or a single data
+  dir), FOUR ports from its own garage_start_port pool (API/RPC/Web/Admin,
+  default base 3900), and NO native TLS — it serves plaintext HTTP and
+  pgBackRest refuses that, so front it with the nginx addon for HTTPS. Credentials are a seeded access key (auto GK-
   prefixed) + secret key, plus one default bucket named after the instance. Pass
   --tls to it and you get an error pointing at the nginx recipe.
 
@@ -659,7 +659,7 @@ func init() {
 	addonInstallCmd.Flags().String("root-user", "", "MinIO/silo/rustfs root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config). For garage this is the seeded access key: omit it to auto-generate a GK-prefixed key (garage has no \"admin\" user). For seaweedfs it is the s3.json identity access key: omit it to auto-generate an SW-prefixed key on a SINGLE-NODE install only — under --cluster both it and --root-password are REQUIRED, since each node reads only its own s3.json and must present the identical identity")
 	addonInstallCmd.Flags().String("root-password", "", "MinIO/silo/rustfs root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand). For garage this is the seeded secret key; for seaweedfs the s3.json identity secret key — required (with --root-user) on every node of a --cluster install")
 	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO/silo/rustfs distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (MinIO/silo: path is the in-container export dir — /data with a plain --data-dir node, or /data1../dataN on a --drive node (MNMD); repeat for every node's every drive. rustfs: one endpoint per node — scheme://host:port, no path; it has no multi-node single-drive mode so --drive is required, and it derives the /data/rustfs0../rustfsN suffix itself. The list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
-	addonInstallCmd.Flags().StringSlice("drive", nil, "MinIO/silo/rustfs/seaweedfs multi-drive host dir(s), each on its own disk — e.g. --drive /mnt/minio/disk1 --drive /mnt/minio/disk2 ... (repeat for each drive; for MinIO/silo alone this is single-node multi-drive (SNMD), combined with --endpoint it is one node of a multi-node multi-drive cluster (MNMD), and each endpoint addresses this node's drive slots (/data1../dataN for MinIO/silo, /data/rustfs0../rustfsN for rustfs). For seaweedfs it turns one node's volume server into a multi-disk one: each drive is bind-mounted at /data1../dataN and weed's -dir lists them all comma-joined (volumes spread across the disks, no erasure-coding between them); works on a single node and per-node in a --cluster. Mutually exclusive with --data-dir. MinIO/silo reject a drive sharing the root device; rustfs hard-requires every drive on its own physical device; seaweedfs only warns)")
+	addonInstallCmd.Flags().StringSlice("drive", nil, "MinIO/silo/rustfs/seaweedfs/garage multi-drive host dir(s), each on its own disk — e.g. --drive /mnt/minio/disk1 --drive /mnt/minio/disk2 ... (repeat for each drive; for MinIO/silo alone this is single-node multi-drive (SNMD), combined with --endpoint it is one node of a multi-node multi-drive cluster (MNMD), and each endpoint addresses this node's drive slots (/data1../dataN for MinIO/silo, /data/rustfs0../rustfsN for rustfs). For seaweedfs it turns one node's volume server into a multi-disk one: each drive is bind-mounted at /data1../dataN and weed's -dir lists them all comma-joined (volumes spread across the disks, no erasure-coding between them); works on a single node and per-node in a --cluster. For garage it feeds the rendered garage.toml's data_dir array (Garage spreads blocks across the dirs, balancing by per-dir capacity; metadata_dir stays a single dir); works single-node and per-node in a --cluster. Mutually exclusive with --data-dir. MinIO/silo reject a drive sharing the root device; rustfs hard-requires every drive on its own physical device; seaweedfs and garage only warn)")
 	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo/rustfs/seaweedfs: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo|rustfs>/<name>/, or the addon dir for seaweedfs; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Seaweedfs serves TLS natively: the S3 port becomes HTTPS-only (cleartext listener off). Changing this needs --force to recreate. NOT for garage: it has no native TLS (rejects --tls); front it with the nginx addon")
 	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo/rustfs: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt for MinIO/silo, rustfs_cert.pem for rustfs, cert.pem for seaweedfs). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
 	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo/rustfs: private key for --tls-cert (PEM; mounted read-only as private.key for MinIO/silo, rustfs_key.pem for rustfs, key.pem for seaweedfs). Must pair with the cert; both are required to enable BYO TLS")
@@ -4399,7 +4399,15 @@ func runAddonList(showPassword bool) error {
 			fmt.Printf("    API port:    %d\n", gc.APIPort)
 			fmt.Printf("    RPC/Web/Admin: %d/%d/%d\n", gc.RPCPort, gc.WebPort, gc.AdminPort)
 			fmt.Printf("    S3 URL:      http://%s:%d\n", gc.Listen, gc.APIPort)
-			fmt.Printf("    Data:        %s\n", gm.DataDir(&gc))
+			if len(gc.Drives) > 0 {
+				fmt.Printf("    Drives:      %d (multi-disk data_dir)\n", len(gc.Drives))
+				slots := podman.GarageContainerDataDirs(len(gc.Drives))
+				for i, d := range gc.Drives {
+					fmt.Printf("      - %s <- %s\n", slots[i], d)
+				}
+			} else {
+				fmt.Printf("    Data:        %s\n", gm.DataDir(&gc))
+			}
 			fmt.Printf("    Metadata:    %s\n", gm.MetadataDir(&gc))
 			fmt.Printf("    Access key:  %s\n", gc.RootUser)
 			if showPassword && gc.RootPassword != "" {

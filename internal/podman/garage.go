@@ -23,8 +23,11 @@ import (
 //  1. Config is a rendered TOML file. pgcli writes garage.toml under the
 //     instance dir and bind-mounts it at /etc/garage.toml (read-only — Garage
 //     never rewrites its own config). MinIO/silo/rustfs pass argv or env.
-//  2. Two dirs, not one: metadata_dir (LMDB) and data_dir (blocks), each its
-//     own bind mount at the container paths in garage_paths.go.
+//  2. Two kinds of dir: metadata_dir (LMDB, always one) and data_dir (blocks),
+//     each its own bind mount at the container paths in garage_paths.go. Since
+//     Garage v0.9.0 data_dir also accepts an array of { path = … } tables — one
+//     per disk — so a node can spread its blocks across several drives
+//     (Drives); the mount and render adapt, metadata_dir never joins the set.
 //  3. Four ports from their own pool (garage_start_port, default 3900): S3 API,
 //     RPC, s3_web, admin/metrics — published together per instance.
 //  4. No native TLS — Garage serves plaintext HTTP only. pgBackRest's S3 repo
@@ -68,12 +71,38 @@ func NewGarageManager(cfg *config.Config) (*GarageManager, error) {
 }
 
 // resolveDataDir returns the instance's host data dir: the explicit DataDir
-// override when set, otherwise <base>/addon/garage/<name>/data.
+// override when set, otherwise <base>/addon/garage/<name>/data. In multi-drive
+// mode Drives replaces it entirely (resolveDriveDirs); this function still
+// answers for the metadata dir's parent anchor.
 func (m *GarageManager) resolveDataDir(gc *config.GarageConfig) string {
 	if gc.DataDir != "" {
 		return gc.DataDir
 	}
 	return filepath.Join(m.dataDir, "addon", "garage", gc.Name, "data")
+}
+
+// resolveDriveDirs returns the host dirs backing this node's data_dir: the
+// explicit Drives list when set (multi-disk — one dir per disk), else the
+// single resolved DataDir. Mirrors SeaweedfsManager.resolveDriveDirs.
+func (m *GarageManager) resolveDriveDirs(gc *config.GarageConfig) []string {
+	if len(gc.Drives) > 0 {
+		return gc.Drives
+	}
+	return []string{m.resolveDataDir(gc)}
+}
+
+// DrivesSharingRootDevice returns the subset of this instance's drive dirs that
+// sit on the host's root device — advisory, same posture as seaweedfs: Garage
+// happily uses such a dir, but multi-disk only pays off on separately-mounted
+// disks, so the install warns per drive and never refuses.
+func (m *GarageManager) DrivesSharingRootDevice(gc *config.GarageConfig) []string {
+	var bad []string
+	for _, d := range m.resolveDriveDirs(gc) {
+		if shared, err := sharesRootDevice(d); err == nil && shared {
+			bad = append(bad, d)
+		}
+	}
+	return bad
 }
 
 // resolveMetadataDir returns the host dir backing metadata_dir:
@@ -100,6 +129,12 @@ func (m *GarageManager) DataDir(gc *config.GarageConfig) string {
 	return m.resolveDataDir(gc)
 }
 
+// Drives returns the resolved host drive dirs (for display; includes the
+// single-data-dir case, so it is the general accessor callers print).
+func (m *GarageManager) Drives(gc *config.GarageConfig) []string {
+	return m.resolveDriveDirs(gc)
+}
+
 // MetadataDir returns the resolved host metadata directory (for display).
 func (m *GarageManager) MetadataDir(gc *config.GarageConfig) string {
 	return m.resolveMetadataDir(gc)
@@ -124,7 +159,20 @@ func (m *GarageManager) WriteConfig(gc *config.GarageConfig) (string, error) {
 		return "", fmt.Errorf("creating garage config dir: %w", err)
 	}
 	bind := proxyBindHost(m.bridge, gc.Listen)
-	if err := os.WriteFile(path, []byte(renderGarageTOML(gc, bind)), 0600); err != nil {
+	var capacities []uint64
+	if len(gc.Drives) > 1 {
+		// Garage requires a capacity per data_dir entry; each drive gets its
+		// whole filesystem (see driveCapacityGiB). createContainer mkdirs the
+		// dirs before calling here, so the statfs resolves the real target.
+		for _, d := range m.resolveDriveDirs(gc) {
+			c, err := driveCapacityGiB(d)
+			if err != nil {
+				return "", err
+			}
+			capacities = append(capacities, c)
+		}
+	}
+	if err := os.WriteFile(path, []byte(renderGarageTOML(gc, bind, capacities)), 0600); err != nil {
 		return "", fmt.Errorf("writing garage.toml: %w", err)
 	}
 	return path, nil
@@ -242,11 +290,14 @@ func (m *GarageManager) StartContainer(gc *config.GarageConfig) error {
 //     forms (see internal/cli.runAddonInstallGarage).
 func (m *GarageManager) createContainer(gc *config.GarageConfig) error {
 	metaDir := m.resolveMetadataDir(gc)
-	dataDir := m.resolveDataDir(gc)
-	for _, d := range []string{metaDir, dataDir} {
+	driveDirs := m.resolveDriveDirs(gc)
+	for _, d := range driveDirs {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			return fmt.Errorf("creating garage dir %s: %w", d, err)
 		}
+	}
+	if err := os.MkdirAll(metaDir, 0755); err != nil {
+		return fmt.Errorf("creating garage dir %s: %w", metaDir, err)
 	}
 
 	configPath, err := m.WriteConfig(gc)
@@ -264,7 +315,7 @@ func (m *GarageManager) createContainer(gc *config.GarageConfig) error {
 		"--restart", "unless-stopped",
 		"--stop-timeout", "60",
 	)
-	args = append(args, garageMountFlags(metaDir, dataDir, configPath)...)
+	args = append(args, garageMountFlags(metaDir, driveDirs, configPath)...)
 
 	if gc.Clustered() {
 		// Cluster member: start the daemon bare. Peering (node connect) and the
@@ -309,8 +360,9 @@ func (m *GarageManager) Exec(gc *config.GarageConfig, args []string) error {
 	return m.runInteractive(execArgs...)
 }
 
-// Remove stops and removes the garage container. The two data dirs are kept by
-// default; cleanData also deletes them — each refusing any still mounted.
+// Remove stops and removes the garage container. The metadata dir and every
+// data drive are kept by default; cleanData also deletes them — each refusing
+// any still mounted.
 // Garage writes as root and pgcli runs podman as root on the managed hosts, so
 // plain removal suffices — no rustfs-style `podman unshare` fallback.
 func (m *GarageManager) Remove(gc *config.GarageConfig, cleanData bool) error {
@@ -322,7 +374,8 @@ func (m *GarageManager) Remove(gc *config.GarageConfig, cleanData bool) error {
 	}
 	fmt.Println("  [OK] garage container removed")
 
-	dirs := []string{m.resolveMetadataDir(gc), m.resolveDataDir(gc)}
+	dirs := []string{m.resolveMetadataDir(gc)}
+	dirs = append(dirs, m.resolveDriveDirs(gc)...)
 	if cfgFile := gc.ConfigFile; cfgFile == "" {
 		// pgcli-rendered config: it lives beside the dirs and goes with them.
 		dirs = append(dirs, m.resolveConfigFile(gc))

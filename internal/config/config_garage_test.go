@@ -102,10 +102,14 @@ func TestGarageSaveLoadRoundTrip(t *testing.T) {
 	cfg.Instances = map[string]InstanceConfig{"a": {}}
 	cfg.Addons.Garage = map[string]GarageConfig{
 		"g1": {
-			ContainerName:     "pgcli-garage-g1",
-			Name:              "g1",
-			ImageTag:          DefaultGarageImageTag,
-			DataDir:           "/srv/garage/data",
+			ContainerName: "pgcli-garage-g1",
+			Name:          "g1",
+			ImageTag:      DefaultGarageImageTag,
+			DataDir:       "/srv/garage/data",
+			// Drives is set here only to prove the list persists; the two are
+			// mutually exclusive at install (CLI-enforced), not at the config
+			// layer, so a round-trip can still carry both.
+			Drives:            []string{"/mnt/garage/d1", "/mnt/garage/d2"},
 			Listen:            "127.0.0.1",
 			APIPort:           3900,
 			RPCPort:           3901,
@@ -149,6 +153,12 @@ func TestGarageSaveLoadRoundTrip(t *testing.T) {
 	}
 	if gc.Zone != "z1" || gc.Capacity != 15 {
 		t.Errorf("zone/capacity lost: %q/%d", gc.Zone, gc.Capacity)
+	}
+	if gc.DataDir != "/srv/garage/data" {
+		t.Errorf("data dir lost: %q", gc.DataDir)
+	}
+	if d := gc.Drives; len(d) != 2 || d[0] != "/mnt/garage/d1" || d[1] != "/mnt/garage/d2" {
+		t.Errorf("drives lost in round-trip: %v", gc.Drives)
 	}
 	if len(gc.Peers) != 2 || gc.Peers[0] != "abcd@10.0.0.12:3901" {
 		t.Errorf("peers lost: %v", gc.Peers)
