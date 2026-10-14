@@ -210,9 +210,16 @@ Two semantics worth knowing:
   startup), weed happily uses them, so pgcli warns and continues. Format and
   mount each disk first; pgcli never partitions or formats anything.
 
-Drives are a per-node knob: `--drive` works exactly the same on a cluster
-member (`weed server`), giving each node its own local multi-disk volume
-server. Stop/start and `--force` recreate handle the drive set like any other
+Drives are a **per-node knob**, and they compose with the cluster: pass
+`--drive` on each member's install command and every node runs its own
+multi-disk volume server behind the shared cluster (verified on a 3-host
+`weed server` cluster where each member mounted two drives — every member's
+process showed `-dir=/data1,/data2` with two independent `DiskStatuses`
+entries, and the 001 replica of one 8 MB volume landed on the real disk of one
+node and on the other drive of the replica node, i.e. each node's volume
+server picked among its own dirs while placement chose across nodes). The
+nodes do not need the same drive count; each account only sees its own `-dir`
+list. Stop/start and `--force` recreate handle the drive set like any other
 config change — the mounts and `-dir` are rebuilt from `pg.yaml`.
 
 ## Multi-node cluster
@@ -269,6 +276,11 @@ pg addon install seaweedfs --name store --cluster c1 \
 # on 10.0.0.12 — identical except --advertise-host
 # on 10.0.0.14 — identical except --advertise-host
 ```
+
+Add `--drive` to that same command to give each member its own multi-disk
+volume server (`--drive /mnt/sw-disk1 --drive /mnt/sw-disk2` — see
+[Multi-disk](#multi-disk)); it is a per-node flag, so hosts may carry
+different drive sets. Verified on a 3-host cluster.
 
 The summary ends with a copy-paste block for the remaining hosts with exactly
 that shape (credentials and DSN filled in from this node's config).

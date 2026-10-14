@@ -186,9 +186,14 @@ pg addon install seaweedfs --name store \
   盘）不同，weed 照样会用它们，所以 pgcli 只警告、不阻断。请先自行格式化并挂
   载每块盘；pgcli 从不做分区或格式化。
 
-drives 是**逐节点**的开关：`--drive` 在集群成员（`weed server`）上用法完全相
-同，给每个节点配上自己的本地多盘 volume 服务器。stop/start 与 `--force` 重建
-会像处理其它配置变更一样处理 drive 集合——挂载与 `-dir` 都从 `pg.yaml` 重建。
+drives 是**逐节点**的开关，并且与集群正交组合：在每台成员的 install 命令上照常
+传 `--drive`，每个节点就在共享集群背后跑自己的多盘 volume 服务器（已在三主机
+`weed server` 集群上实测——每台各挂两个 drive：每台进程都显示 `-dir=/data1,/data2`
+且各报两个独立 `DiskStatuses` 条目；同一个 8MB volume 的 001 副本一份落在某台的
+实体盘上、另一份落在副本台的**另一块** drive 上，即各节点的 volume 服务器在自己的
+目录之间选择，而放置决策在节点之间进行）。各节点不需要相同的 drive 数量；每台只
+看得到自己 `-dir` 列表里的目录。stop/start 与 `--force` 重建会像处理其它配置变更
+一样处理 drive 集合——挂载与 `-dir` 都从 `pg.yaml` 重建。
 
 ## 多节点集群
 
@@ -239,6 +244,10 @@ pg addon install seaweedfs --name store --cluster c1 \
 # on 10.0.0.12 — 除 --advertise-host 外完全相同
 # on 10.0.0.14 — 除 --advertise-host 外完全相同
 ```
+
+想让每台成员跑自己的多盘 volume 服务器，就往同一条命令上再加 `--drive`
+（`--drive /mnt/sw-disk1 --drive /mnt/sw-disk2`——见[多盘](#多盘)）；它是逐节
+点的 flag，各台可以带不同的 drive 集合。已在三主机集群上实测。
 
 摘要末尾会带一段可复制的、正好是这个形态的块，用于其余主机（凭据和 DSN 从本
 节点配置里填好）。
