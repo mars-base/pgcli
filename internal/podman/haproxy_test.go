@@ -1,11 +1,59 @@
 package podman
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/mars-base/pgcli/internal/config"
 )
+
+// Conf-file mode: the user's haproxy.cfg is copied verbatim into the config
+// dir (that copy is what the container mounts), never rendered. An empty file
+// is refused so the -c gate is not reached with nothing to check.
+func TestHAProxyWriteConfigsConfFile(t *testing.T) {
+	dir := t.TempDir()
+	user := filepath.Join(dir, "custom.cfg")
+	const body = "global\n    maxconn 10\n\ndefaults\n    mode tcp\n\nfrontend fe\n    bind :6000\n    default_backend be\n\nbackend be\n    server s1 127.0.0.1:5432\n"
+	if err := os.WriteFile(user, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &HAProxyManager{dataDir: dir}
+	h := &config.HAProxyConfig{Name: "lb", ConfFile: user}
+	path, err := m.WriteConfigs(h)
+	if err != nil {
+		t.Fatalf("WriteConfigs: %v", err)
+	}
+	if want := filepath.Join(dir, "addon", "haproxy", "lb", "haproxy.cfg"); path != want {
+		t.Errorf("path = %q, want %q", path, want)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != body {
+		t.Errorf("copied config differs from the user's file:\n%s", data)
+	}
+
+	// Empty user file → refused.
+	empty := filepath.Join(dir, "empty.cfg")
+	if err := os.WriteFile(empty, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.WriteConfigs(&config.HAProxyConfig{Name: "e", ConfFile: empty}); err == nil {
+		t.Error("empty conf file must be refused")
+	}
+	// Missing user file → refused.
+	if _, err := m.WriteConfigs(&config.HAProxyConfig{Name: "m", ConfFile: filepath.Join(dir, "nope.cfg")}); err == nil {
+		t.Error("missing conf file must be refused")
+	}
+	// Rendered mode is unaffected: no ConfFile and no targets still errors.
+	if _, err := m.WriteConfigs(&config.HAProxyConfig{Name: "r"}); err == nil {
+		t.Error("render mode without targets must still error")
+	}
+}
 
 func TestRenderHAProxyCfgUnified(t *testing.T) {
 	h := &config.HAProxyConfig{

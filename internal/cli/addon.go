@@ -146,7 +146,7 @@ Currently supported add-ons:
   pgbouncer   connection pooler (transaction mode)
   etcd        standalone key-value store (HA cluster DCS)
   pgdog       Postgres proxy (pooling, load balancing, sharding)
-  haproxy     TCP load balancer in front of a Patroni cluster (unified or read/write split)
+  haproxy     TCP load balancer in front of a Patroni cluster (unified or read/write split), or a custom haproxy.cfg via --conf-file for any native proxying
   minio       single-node S3-compatible object storage (web console included; Linux host network, macOS bridge)
   silo        MinIO's Pigsty fork — same S3 object storage, from the public docker.io/pgsty/silo image (console + mcli client bundled; Linux host network, macOS bridge)
   rustfs      Rust S3-compatible object storage from pgcli's wrapper image, ghcr.io/mars-base/pgcli/pgcli-rustfs (console included; Linux only; the fixed upstream uid 10001 is handled inside the container, three topologies SNSD/SNMD/MNMD, each drive on its own physical device)
@@ -175,9 +175,18 @@ Infra addon (haproxy — TCP load balancer in front of a Patroni cluster, Linux 
   pg addon install haproxy [--name lb] [--ha <scope>] [--node NAME=HOST:PGPORT:RESTPORT]
                            [--mode unified|split] [--rw-port N] [--ro-port N] [--stats-port N]
                            [--max-lag 1MB]
+  pg addon install haproxy [--name lb] --conf-file /path/haproxy.cfg
+  pg addon install haproxy [--name lb] --conf-file /path/haproxy.cfg --reload
   Members are injected once via --node, or auto-derived from a Patroni scope via
   --ha. After adding or removing a member ("pg ha create" / "pg ha remove"),
   re-run install to re-sync the backend list.
+  With --conf-file, pgcli instead runs your haproxy.cfg verbatim (mutually
+  exclusive with --node/--ha) for any native HAProxy proxying — the file is
+  validated with "haproxy -c" before the container starts, mounted read-only,
+  and never rewritten; you own all listeners. Add --reload to an install of an
+  already-running conf-file instance to apply an edited file by hot-reloading
+  the master (SIGUSR2) instead of recreating the container, so no in-flight
+  connections are dropped (same as "pg addon haproxy reload").
 
 Infra addon (minio — single-node S3-compatible object storage, Linux and macOS;
             silo — its Pigsty fork, identical flags, same shared port pool;
@@ -363,6 +372,7 @@ Examples:
   pg addon install haproxy --ha app
   pg addon install haproxy --name lb --mode split --ha app --max-lag 1MB
   pg addon install haproxy --node node1=10.0.0.11:35532:8008 --node node2=10.0.0.11:35533:8009
+  pg addon install haproxy --name lb --conf-file /etc/haproxy/lb.cfg   # run a custom haproxy.cfg verbatim (any native proxying)
   pg addon install minio --name store --data-dir /srv/minio
   pg addon install silo --name store --tls
   pg addon install rustfs --name store --tls
@@ -575,8 +585,10 @@ Examples:
 func init() {
 	rootCmd.AddCommand(addonCmd)
 	addonCmd.AddCommand(addonInstallCmd, addonListCmd, addonPasswordCmd, addonRemoveCmd, addonStartCmd, addonStopCmd)
-	addonCmd.AddCommand(addonNginxCmd)
+	addonCmd.AddCommand(addonNginxCmd, addonHAProxyCmd)
 	addonNginxCmd.AddCommand(addonNginxReloadCmd, addonNginxTestCmd, addonNginxExecCmd)
+	addonHAProxyCmd.AddCommand(addonHAProxyReloadCmd)
+	addonHAProxyReloadCmd.Flags().String("name", "", "haproxy instance name")
 	addonNginxReloadCmd.Flags().String("name", "", "nginx instance name (default \"nginx\")")
 	addonNginxTestCmd.Flags().String("name", "", "nginx instance name (default \"nginx\")")
 	addonNginxTestCmd.Flags().String("conf-file", "", "path to an nginx.conf file to test directly (no installed instance required; overrides --name)")
@@ -650,7 +662,8 @@ func init() {
 	addonInstallCmd.Flags().Int("https-port", 0, "nginx HTTPS listener host port, TLS only (0=auto-assign, next free port)")
 	addonInstallCmd.Flags().Int("worker-connections", 0, "nginx worker_connections (max simultaneous connections per worker; default 1024)")
 	addonInstallCmd.Flags().StringArray("upstream", nil, "nginx upstream target name=<upstream>,path=<location>,backend=<host:port> (repeatable; e.g. --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050, or backends=h1:p1,h2:p2 for multiple servers)")
-	addonInstallCmd.Flags().String("conf-file", "", "path to a custom nginx.conf file (mutually exclusive with --upstream; pgcli manages container lifecycle only, you control the full nginx config)")
+	addonInstallCmd.Flags().String("conf-file", "", "path to a full custom config file (nginx: nginx.conf, mutually exclusive with --upstream; haproxy: haproxy.cfg, mutually exclusive with --node/--ha) — pgcli manages the container lifecycle only, you control the whole config, validated with nginx -t / haproxy -c at install")
+	addonInstallCmd.Flags().Bool("reload", false, "haproxy --conf-file only: hot-reload the running instance (validate with haproxy -c, then SIGUSR2) instead of recreating the container — no dropped connections; ignored otherwise")
 
 	// minio flags (top-level single-node S3-compatible object storage)
 	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo/rustfs S3 API host port (0=auto-assign from the shared minio_start_port pool); for garage, the S3 API port (0=auto from garage_start_port, default 3900 — garage takes four consecutive ports API/RPC/Web/Admin)")
@@ -1639,6 +1652,10 @@ func haScopeTargets(cfg *config.Config, scope string) ([]config.HAProxyTarget, e
 // explicit) or are auto-derived from a --ha scope. Re-running install re-derives
 // / re-renders everything (clean re-render), which is also how members added
 // later to the Patroni cluster join the load balancer.
+//
+// With --conf-file the addon instead runs the operator's haproxy.cfg verbatim,
+// for arbitrary native proxying (see the nginx addon's --conf-file mode). The
+// file is validated with `haproxy -c` before the container is (re)created.
 func runAddonInstallHAProxy(cmd *cobra.Command) error {
 	name, _ := cmd.Flags().GetString("name")
 	if name == "" {
@@ -1648,10 +1665,28 @@ func runAddonInstallHAProxy(cmd *cobra.Command) error {
 	mode, _ := cmd.Flags().GetString("mode")
 	haScope, _ := cmd.Flags().GetString("ha")
 	nodeSpecs, _ := cmd.Flags().GetStringArray("node")
+	confFile, _ := cmd.Flags().GetString("conf-file")
 	rwPort, _ := cmd.Flags().GetInt("rw-port")
 	roPort, _ := cmd.Flags().GetInt("ro-port")
 	statsPort, _ := cmd.Flags().GetInt("stats-port")
 	maxLag, _ := cmd.Flags().GetString("max-lag")
+	doReload, _ := cmd.Flags().GetBool("reload")
+
+	if confFile != "" {
+		if len(nodeSpecs) > 0 || haScope != "" {
+			return fmt.Errorf("--conf-file is mutually exclusive with --node/--ha: the file defines the whole config, pgcli derives no backends")
+		}
+		info, err := os.Stat(confFile)
+		if os.IsNotExist(err) {
+			return fmt.Errorf("--conf-file: %s not found", confFile)
+		}
+		if err != nil {
+			return fmt.Errorf("--conf-file: %w", err)
+		}
+		if info.Size() == 0 {
+			return fmt.Errorf("--conf-file: %s is empty", confFile)
+		}
+	}
 
 	if mode == "" {
 		mode = "unified"
@@ -1659,11 +1694,13 @@ func runAddonInstallHAProxy(cmd *cobra.Command) error {
 	if mode != "unified" && mode != "split" {
 		return fmt.Errorf("--mode must be \"unified\" (read-write through the leader) or \"split\" (separate read listener), got %q", mode)
 	}
-	if len(nodeSpecs) == 0 && haScope == "" {
-		return fmt.Errorf("either --node NAME=HOST:PGPORT:RESTPORT (repeatable) or --ha <scope> is required to define the backend members")
-	}
-	if len(nodeSpecs) > 0 && haScope != "" {
-		return fmt.Errorf("--node and --ha are mutually exclusive: --ha auto-derives every local member of the scope, --node lists them explicitly")
+	if confFile == "" {
+		if len(nodeSpecs) == 0 && haScope == "" {
+			return fmt.Errorf("either --node NAME=HOST:PGPORT:RESTPORT (repeatable) or --ha <scope> is required to define the backend members (or --conf-file for a custom haproxy.cfg)")
+		}
+		if len(nodeSpecs) > 0 && haScope != "" {
+			return fmt.Errorf("--node and --ha are mutually exclusive: --ha auto-derives every local member of the scope, --node lists them explicitly")
+		}
 	}
 
 	path := cfgPath
@@ -1679,19 +1716,21 @@ func runAddonInstallHAProxy(cmd *cobra.Command) error {
 	}
 
 	targets := make([]config.HAProxyTarget, 0, len(nodeSpecs))
-	if haScope != "" {
-		derived, err := haScopeTargets(cfg, haScope)
-		if err != nil {
-			return err
-		}
-		targets = derived
-	} else {
-		for _, s := range nodeSpecs {
-			t, err := parseHAProxyNode(s)
+	if confFile == "" {
+		if haScope != "" {
+			derived, err := haScopeTargets(cfg, haScope)
 			if err != nil {
 				return err
 			}
-			targets = append(targets, t)
+			targets = derived
+		} else {
+			for _, s := range nodeSpecs {
+				t, err := parseHAProxyNode(s)
+				if err != nil {
+					return err
+				}
+				targets = append(targets, t)
+			}
 		}
 	}
 
@@ -1730,7 +1769,11 @@ func runAddonInstallHAProxy(cmd *cobra.Command) error {
 	// The target list is fully replaced by this command's inputs, so
 	// re-running install is a clean re-render (and picks up members that a
 	// later `pg ha create` added to the scope — or `pg ha remove` dropped).
+	// Conf-file mode is likewise set or cleared wholesale: passing --conf-file
+	// switches an existing rendered instance to it (targets dropped), omitting
+	// it switches back.
 	existing.Targets = targets
+	existing.ConfFile = confFile
 	if existing.Name == "" {
 		existing.Name = name
 	}
@@ -1744,9 +1787,68 @@ func runAddonInstallHAProxy(cmd *cobra.Command) error {
 		return fmt.Errorf("haproxy manager: %w", err)
 	}
 
-	cfgPathOut, err := hm.WriteConfigs(&hc)
-	if err != nil {
+	cfgPathOut := hm.ConfigPath(&hc)
+
+	// Snapshot the on-disk copy before overwriting it: if the new config fails
+	// `haproxy -c` below, restore it, so a stopped/rebooted container never
+	// recreates from a config that was rejected at install.
+	oldCfg, hadOld := func() ([]byte, bool) {
+		if b, err := os.ReadFile(cfgPathOut); err == nil {
+			return b, true
+		}
+		return nil, false
+	}()
+
+	if _, err := hm.WriteConfigs(&hc); err != nil {
 		return err
+	}
+
+	// Check-only gate (`haproxy -c` in a throwaway container): the config that
+	// is now on disk is what the container will start with, so an invalid one —
+	// almost always the operator's, in conf-file mode — fails here instead of
+	// crash-looping a detached container behind --restart unless-stopped. On
+	// failure the previous good copy is put back.
+	fmt.Println("-> Validating HAProxy config...")
+	if err := hm.ValidateConfig(&hc, cfgPathOut); err != nil {
+		if hadOld {
+			if rbErr := os.WriteFile(cfgPathOut, oldCfg, 0644); rbErr != nil {
+				fmt.Printf("  [!] could not restore previous haproxy.cfg (%v) — the container may be left with a broken config on disk\n", rbErr)
+			} else {
+				fmt.Println("  [!] restored the previous haproxy.cfg; the running container (if any) is untouched")
+			}
+		}
+		return err
+	}
+
+
+	// --reload is conf-file-only and meaningful only for an already-running
+	// instance: rather than recreating the container (which cuts in-flight
+	// connections), signal the master to hot-swap the worker from the config
+	// that WriteConfigs + ValidateConfig just put on disk.
+	if doReload && hc.ConfFile != "" {
+		running, _ := hm.ContainerRunning(hc.ContainerName)
+		if running {
+			cfg.Addons.HAProxy[name] = hc
+			if err := cfg.Save(path); err != nil {
+				return fmt.Errorf("failed to save config: %w", err)
+			}
+			if err := hm.SignalReload(&hc); err != nil {
+				return err
+			}
+			fmt.Println()
+			fmt.Printf("✓ haproxy reloaded: %q\n", name)
+			fmt.Printf("  Container:    %s (unchanged)\n", hc.ContainerName)
+			fmt.Printf("  Mode:         custom (user config)\n")
+			fmt.Printf("  Config:       %s (from %s)\n", cfgPathOut, hc.ConfFile)
+			fmt.Println()
+			fmt.Printf("  Applied without recreating the container — no dropped connections.\n")
+			fmt.Printf("  'pg logs %s' shows HAProxy's own output.\n", name)
+			return nil
+		}
+		fmt.Println("  [!] --reload requested but the instance is not running; creating it normally")
+	}
+	if doReload && hc.ConfFile == "" {
+		fmt.Println("  [!] --reload is only meaningful for --conf-file instances; a rendered instance is recreated")
 	}
 
 	fmt.Println("-> Starting HAProxy container...")
@@ -1763,6 +1865,16 @@ func runAddonInstallHAProxy(cmd *cobra.Command) error {
 	fmt.Printf("✓ haproxy installed: %q\n", name)
 	fmt.Printf("  Container:    %s\n", hc.ContainerName)
 	fmt.Printf("  Image:        %s\n", hc.ImageTag)
+	if hc.ConfFile != "" {
+		fmt.Printf("  Mode:         custom (user config — all listeners come from the file)\n")
+		fmt.Printf("  Config:       %s (from %s)\n", cfgPathOut, hc.ConfFile)
+		fmt.Println()
+		fmt.Printf("  pgcli manages the container only; to change the proxies edit %s\n", hc.ConfFile)
+		fmt.Printf("  and hot-reload it with 'pg addon haproxy reload --name %s' (validates\n", name)
+		fmt.Printf("  with `haproxy -c` first, then reloads without dropping connections).\n")
+		fmt.Printf("  'pg logs %s' shows HAProxy's own output, including the bound frontends.\n", name)
+		return nil
+	}
 	fmt.Printf("  Mode:         %s\n", hc.EffectiveMode())
 	if hc.HAScope != "" {
 		fmt.Printf("  Patroni:      %s\n", hc.HAScope)
@@ -4100,6 +4212,13 @@ func runAddonList(showPassword bool) error {
 			}
 			fmt.Printf("  %s (name: %s)\n", "haproxy", name)
 			fmt.Printf("    Status:      %s\n", status)
+			if hc.ConfFile != "" {
+				fmt.Printf("    Mode:        custom (user config)\n")
+				fmt.Printf("    Config:      %s\n", hc.ConfFile)
+				fmt.Printf("    Image:       %s\n", hc.ImageTag)
+				fmt.Printf("    Container:   %s\n", hc.ContainerName)
+				continue
+			}
 			fmt.Printf("    Mode:        %s\n", hc.EffectiveMode())
 			if hc.HAScope != "" {
 				fmt.Printf("    Patroni:     %s\n", hc.HAScope)
@@ -6746,4 +6865,73 @@ func runAddonNginxExec(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("nginx manager: %w", err)
 	}
 	return mgr.Exec(nc, args[dashIdx:])
+}
+
+// ---------------------------------------------------------------------------
+// haproxy-specific subcommands: reload
+// ---------------------------------------------------------------------------
+
+var addonHAProxyCmd = &cobra.Command{
+	Use:   "haproxy",
+	Short: "Manage HAProxy addon instances",
+	Long: `Manage HAProxy addon instances with dedicated subcommands.
+
+Subcommands:
+  reload   Hot-reload a --conf-file instance without recreating the container
+
+Examples:
+  pg addon haproxy reload --name custom   # apply an edited haproxy.cfg seamlessly`,
+}
+
+var addonHAProxyReloadCmd = &cobra.Command{
+	Use:   "reload",
+	Short: "Hot-reload a conf-file haproxy instance (no container restart)",
+	Long: `Apply config changes to a running --conf-file HAProxy instance without
+recreating the container — the HAProxy equivalent of 'pg addon nginx reload'.
+The official image runs HAProxy in master-worker mode, so this sends SIGUSR2 to
+the master: a fresh worker is started, listeners are handed over, and in-flight
+connections drain gracefully on the old worker (no dropped connections), unlike
+the lossy container recreate that 'pg addon install' performs.
+
+It first re-copies the operator's file to the mounted haproxy.cfg and validates
+it with 'haproxy -c' in a throwaway container. A config that fails the check is
+rejected: the previous good copy is restored on disk and nothing is reloaded —
+so a broken file can never be picked up by a later restart.
+
+Only --conf-file instances are supported. A rendered instance rebuilds its
+config from --node/--ha on every install, so its update path stays
+'pg addon install haproxy'.
+
+The instance must already be running ('pg addon start haproxy --name <name>').
+
+Examples:
+  pg addon haproxy reload --name custom`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runAddonHAProxyReload(cmd)
+	},
+}
+
+func runAddonHAProxyReload(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "haproxy"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	if cfg.Addons.HAProxy == nil {
+		return fmt.Errorf("no haproxy add-ons configured (run 'pg addon install haproxy')")
+	}
+	hc, ok := cfg.Addons.HAProxy[name]
+	if !ok {
+		return fmt.Errorf("haproxy %q not found (run 'pg addon install haproxy --name %s')", name, name)
+	}
+	hm, err := podman.NewHAProxyManager(cfg)
+	if err != nil {
+		return fmt.Errorf("haproxy manager: %w", err)
+	}
+	fmt.Printf("-> Reloading haproxy %q...\n", name)
+	return hm.Reload(&hc)
 }

@@ -371,6 +371,15 @@ type HAProxyConfig struct {
 	// container reading the haproxy.cfg already on disk — install first.
 	Autostart bool            `yaml:"autostart,omitempty"`
 	Targets   []HAProxyTarget `yaml:"targets,omitempty"` // backend Patroni members
+
+	// ConfFile switches the addon from "render a Patroni read/write proxy" to
+	// "run the operator's haproxy.cfg verbatim": pgcli binds the file into the
+	// container read-only (haproxy validates it with -c at install), manages
+	// the container lifecycle around it, and never rewrites or deletes the
+	// file. All listeners are whatever the file declares — arbitrary native
+	// proxies, not just Patroni. Mutually exclusive with --node/--ha; mode,
+	// ports and max-lag are ignored because the file owns them.
+	ConfFile string `yaml:"conf_file,omitempty"`
 }
 
 // EffectiveMode returns the routing mode, defaulting to "unified".
@@ -2594,10 +2603,15 @@ func (c *Config) autoAssignPorts() {
 	// default 5000): the rw listener, the ro listener (split mode only), and
 	// the stats page. They are allocated together so one instance's ports never
 	// overlap another's or any other service's. Names are sorted for a
-	// deterministic, map-order-independent assignment.
+	// deterministic, map-order-independent assignment. Conf-file instances are
+	// skipped: their listeners live in the user's haproxy.cfg, so pgcli has no
+	// port to name.
 	haBase := c.HaProxyStartPort
 	assignedHA := map[int]bool{}
 	for _, addon := range c.Addons.HAProxy {
+		if addon.ConfFile != "" {
+			continue
+		}
 		for _, p := range []int{addon.WritePort, addon.ReadPort, addon.StatsPort} {
 			if p != 0 {
 				assignedHA[p] = true
@@ -2623,6 +2637,9 @@ func (c *Config) autoAssignPorts() {
 		}
 		for _, name := range names {
 			addon := c.Addons.HAProxy[name]
+			if addon.ConfFile != "" {
+				continue
+			}
 			if addon.WritePort == 0 && haBase > 0 {
 				addon.WritePort = nextFree()
 			} else if addon.WritePort >= next {

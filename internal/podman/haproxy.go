@@ -138,24 +138,146 @@ func RenderHAProxyCfg(h *config.HAProxyConfig) (string, error) {
 	return b.String(), nil
 }
 
+// ConfigPath returns the path of the haproxy.cfg copy pgcli mounts for
+// instance h (rendered or copied from the operator's file — same path either
+// way). Callers snapshot it before WriteConfigs overwrites it.
+func (m *HAProxyManager) ConfigPath(h *config.HAProxyConfig) string {
+	return filepath.Join(haProxyConfigDir(m.dataDir, h.Name), "haproxy.cfg")
+}
+
 // WriteConfigs renders haproxy.cfg for the given instance into
-// <baseDir>/addon/haproxy/<name>/. The file carries no secrets (only hosts,
-// ports and health-check URIs), so it is world-readable — required, in fact,
-// because the official image drops to its non-root "haproxy" user.
+// <baseDir>/addon/haproxy/<name>/. In conf-file mode (h.ConfFile set) the
+// user's file is copied verbatim instead of rendered — pgcli never rewrites
+// it, and Remove keeps it (it is the operator's file, living wherever they
+// put it; only pgcli's copy under the config dir goes away with the
+// container). The file carries no secrets (only hosts, ports and
+// health-check URIs), so it is world-readable — required, in fact, because
+// the official image drops to its non-root "haproxy" user.
 func (m *HAProxyManager) WriteConfigs(h *config.HAProxyConfig) (string, error) {
-	cfg, err := RenderHAProxyCfg(h)
-	if err != nil {
-		return "", err
-	}
 	dir := haProxyConfigDir(m.dataDir, h.Name)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", fmt.Errorf("creating haproxy config dir: %w", err)
 	}
 	path := filepath.Join(dir, "haproxy.cfg")
+
+	if h.ConfFile != "" {
+		data, err := os.ReadFile(h.ConfFile)
+		if err != nil {
+			return "", fmt.Errorf("reading user conf file %s: %w", h.ConfFile, err)
+		}
+		if len(data) == 0 {
+			return "", fmt.Errorf("user conf file %s is empty", h.ConfFile)
+		}
+		if err := os.WriteFile(path, data, 0644); err != nil {
+			return "", fmt.Errorf("writing haproxy.cfg: %w", err)
+		}
+		return path, nil
+	}
+
+	cfg, err := RenderHAProxyCfg(h)
+	if err != nil {
+		return "", err
+	}
 	if err := os.WriteFile(path, []byte(cfg), 0644); err != nil {
 		return "", fmt.Errorf("writing haproxy.cfg: %w", err)
 	}
 	return path, nil
+}
+
+// ValidateConfig checks a rendered/copied haproxy.cfg with the image's own
+// `haproxy -c` (check-only) in a throwaway container — the HAProxy equivalent
+// of nginx -t. It is the only gate that catches a broken conf-file, since
+// haproxy's own config errors otherwise surface late (a crash-looping
+// detached container behind --restart unless-stopped). Returns HAProxy's
+// stderr-derived error on failure.
+func (m *HAProxyManager) ValidateConfig(h *config.HAProxyConfig, cfgPath string) error {
+	args := []string{
+		"run", "--rm",
+		"-v", fmt.Sprintf("%s:/usr/local/etc/haproxy:ro,z", hostMountPath(filepath.Dir(cfgPath))),
+		h.ImageTag,
+		"haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg",
+	}
+	if _, err := m.run(args...); err != nil {
+		return fmt.Errorf("haproxy config check failed: %w", err)
+	}
+	return nil
+}
+
+// Reload applies config changes to a running conf-file instance without
+// recreating the container — the HAProxy equivalent of `nginx -s reload`. It
+// is only meaningful for --conf-file instances: a rendered instance's config is
+// regenerated from --node/--ha on every install, so its update path stays
+// "re-run install". The official image's entrypoint already runs haproxy in
+// master-worker mode (`-W`), so signalling the container's pid 1 with SIGUSR2
+// makes the master start a fresh worker and hand listeners over gracefully —
+// in-flight connections drain on the old worker instead of being cut, unlike
+// the lossy recreate that install performs.
+//
+// The same `haproxy -c` gate as install runs first: the operator's file is
+// copied to the mounted path, checked in a throwaway container, and only if it
+// validates is the reload signalled. A bad file restores the previous good
+// copy on disk and returns an error, so a failed reload can never leave a
+// broken config that a later restart would resurrect.
+func (m *HAProxyManager) Reload(h *config.HAProxyConfig) error {
+	if h.ConfFile == "" {
+		return fmt.Errorf("reload is only supported for --conf-file instances; a rendered instance regenerates its config from --node/--ha, so re-run 'pg addon install haproxy --name %s' instead", h.Name)
+	}
+
+	running, err := m.containerRunning(h.ContainerName)
+	if err != nil {
+		return err
+	}
+	if !running {
+		return fmt.Errorf("haproxy container %s is not running — run 'pg addon start haproxy --name %s' first", h.ContainerName, h.Name)
+	}
+
+	cfgPath := m.ConfigPath(h)
+	var oldCfg []byte
+	hadOld := false
+	if data, err := os.ReadFile(cfgPath); err == nil {
+		oldCfg, hadOld = data, true
+	}
+
+	// Re-copy the operator's file to the mounted path (verbatim), then validate
+	// it before touching the running process.
+	if _, err := m.WriteConfigs(h); err != nil {
+		return err
+	}
+	fmt.Println("-> Validating HAProxy config...")
+	if err := m.ValidateConfig(h, cfgPath); err != nil {
+		if hadOld {
+			if rbErr := os.WriteFile(cfgPath, oldCfg, 0644); rbErr != nil {
+				fmt.Printf("  [!] could not restore previous haproxy.cfg (%v) — the config on disk may now be invalid\n", rbErr)
+			} else {
+				fmt.Println("  [!] restored the previous haproxy.cfg; the running container is untouched (no reload performed)")
+			}
+		}
+		return err
+	}
+
+	// Config is on disk and validated; the reload itself is just the signal.
+	return m.SignalReload(h)
+}
+
+// SignalReload sends SIGUSR2 to a running instance's master, which starts a new
+// worker from the haproxy.cfg already on disk (assumed validated) and hands the
+// listeners over — in-flight connections drain on the old worker. Assumes the
+// config file is in place and correct; Reload and the install --reload path both
+// validate first. Refuses if the container isn't running.
+func (m *HAProxyManager) SignalReload(h *config.HAProxyConfig) error {
+	running, err := m.containerRunning(h.ContainerName)
+	if err != nil {
+		return err
+	}
+	if !running {
+		return fmt.Errorf("haproxy container %s is not running — cannot hot-reload (a fresh instance starts normally)", h.ContainerName)
+	}
+	fmt.Println("-> Reloading HAProxy (SIGUSR2 to master)...")
+	if _, err := m.run("kill", "--signal", "USR2", h.ContainerName); err != nil {
+		return fmt.Errorf("reloading HAProxy: %w", err)
+	}
+	fmt.Println("  [OK] HAProxy reloaded — master started a new worker, in-flight connections drain on the old one")
+	return nil
 }
 
 // EnsureContainer creates or restarts the HAProxy container (install
