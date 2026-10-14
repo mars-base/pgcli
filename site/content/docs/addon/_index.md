@@ -32,6 +32,7 @@ The following addons are currently supported:
 | [`silo`](./silo/) | S3-compatible object storage (Pigsty's MinIO fork) — same feature surface as the minio addon, shares one port pool; ships its own `mcli` client (Linux and macOS) |
 | [`rustfs`](./rustfs/) | S3-compatible object storage (Rust reimplementation) — SNSD/SNMD/MNMD erasure-coded layouts, fixed container uid handled inside pgcli's wrapper image, shares the one port pool (Linux only) |
 | [`garage`](./garage/) | S3-compatible object storage (Deuxfleurs' Rust store) — single-node v1, rendered `garage.toml`, two data dirs, four ports from its own pool, plaintext HTTP only (front with nginx for TLS) (Linux; macOS code-complete, untested) |
+| [`seaweedfs`](./seaweedfs/) | S3-compatible object storage (Go, volume-managed disk) — single-node `weed mini` or cross-host `weed server` cluster with filer metadata in a shared PostgreSQL, one credential pair shared by the whole cluster, native S3 TLS; own port pool (Linux; macOS code-complete, untested) |
 | [`redis`](./redis/) | Standalone key-value store for cache, session, ranking and counter data — selectable majors 7/8, auto-generated `requirepass`, RDB persistence, read replicas, native cluster sharding via `--cluster`, own port pool (Linux; macOS code-complete, untested) |
 | [`predixy`](./predixy/) | Redis protocol proxy — turns a native cluster into one plain `redis://` endpoint, so clients need no cluster awareness at all; own port pool (Linux only) |
 | [`pgadmin`](./pgadmin/) | pgAdmin 4 — the official PostgreSQL web administration UI, one container from the upstream image; web login auto-generated, optional one-time server seed via `--dsn`/`--pg-name`, persistent session store; own port pool (Linux; macOS code-complete, untested) |
@@ -63,4 +64,4 @@ pg addon remove <addon> [flags]     # remove the addon, container, and data
 ```
 
 See each addon's page for its specific flags and examples:
-[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [PostgREST](./postgrest/) · [HAProxy](./haproxy/) · [MinIO](./minio/) · [Silo](./silo/) · [rustfs](./rustfs/) · [Garage](./garage/) · [Redis](./redis/) · [Predixy](./predixy/) · [pgAdmin 4](./pgadmin/). Patroni pages live in [HA Cluster](../ha-cluster/).
+[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [PostgREST](./postgrest/) · [HAProxy](./haproxy/) · [MinIO](./minio/) · [Silo](./silo/) · [rustfs](./rustfs/) · [Garage](./garage/) · [SeaweedFS](./seaweedfs/) · [Redis](./redis/) · [Predixy](./predixy/) · [pgAdmin 4](./pgadmin/). Patroni pages live in [HA Cluster](../ha-cluster/).

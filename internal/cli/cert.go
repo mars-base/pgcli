@@ -39,7 +39,7 @@ var certCmd = &cobra.Command{
 	Long: `cert mints a self-signed certificate whose SubjectAltNames cover any mix of
 DNS names and IPs you give it — for anywhere you need TLS without a CA: a dev
 or test server, an internal endpoint, a service whose clients you control. It
-is also the pair MinIO's, silo's, and rustfs's bring-your-own-TLS mode consumes
+is also the pair MinIO's, silo's, rustfs's, and seaweedfs's bring-your-own-TLS mode consumes
 directly (rustfs reads it under the names rustfs_cert.pem/rustfs_key.pem, but
 pgcli mounts your files at those names, so any filenames work):
 

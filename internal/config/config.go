@@ -35,6 +35,7 @@ type Config struct {
 	PgAdminStartPort        int                       `yaml:"pgadmin_start_port,omitempty"`         // starting pgAdmin 4 web host port, default 5050
 	NginxStartPort          int                       `yaml:"nginx_start_port,omitempty"`           // starting nginx HTTP host port, default 8080 (HTTPS takes the next free port)
 	GarageStartPort         int                       `yaml:"garage_start_port,omitempty"`          // starting Garage S3 API host port, default 3900 (RPC, web, admin take the next three free ports)
+	SeaweedfsStartPort      int                       `yaml:"seaweedfs_start_port,omitempty"`       // starting SeaweedFS master host port, default 8400 (volume, filer, s3 take the next three free ports; gRPC twins at +10000 are reserved)
 	Postgres                PostgresConfig            `yaml:"postgres"`
 	Podman                  PodmanConfig              `yaml:"podman"`
 	PITR                    PITRConfig                `yaml:"pitr"`
@@ -95,6 +96,7 @@ type TopAddonsConfig struct {
 	Silo      map[string]SiloConfig           `yaml:"silo,omitempty"`
 	Rustfs    map[string]RustfsConfig         `yaml:"rustfs,omitempty"`
 	Garage    map[string]GarageConfig         `yaml:"garage,omitempty"`
+	Seaweedfs map[string]SeaweedfsConfig      `yaml:"seaweedfs,omitempty"`
 	Redis     map[string]RedisConfig          `yaml:"redis,omitempty"`
 	Predixy   map[string]PredixyConfig        `yaml:"predixy,omitempty"`
 	PgAdmin   map[string]PgAdminConfig        `yaml:"pgadmin,omitempty"`
@@ -507,6 +509,19 @@ const DefaultRustfsImageTag = "ghcr.io/mars-base/pgcli/pgcli-rustfs:1.0.0"
 // v2.4.1 is the current stable line; its config is a TOML file, not env, and it
 // serves plaintext HTTP with no native TLS (front it with nginx for HTTPS).
 const DefaultGarageImageTag = "docker.io/dxflrs/garage:v2.4.1"
+
+// DefaultSeaweedfsImageTag pins the public SeaweedFS image
+// (https://github.com/seaweedfs/seaweedfs, Apache-2.0) — a Go object store
+// whose volume-manager design sits between MinIO's all-erasure-coding and
+// Garage's all-replication models: data lives in append-only 32GB-capped
+// volumes replicated by placement code (replication for hot data, optional
+// erasure coding for warm), which is what makes it fast for many small
+// objects. The "_large_disk" variant is built with `-tags large_disk` (higher
+// per-volume file-descriptor/inode limits) and is what pgcli pins. Alpine
+// base, runs as root, ships /usr/bin/weed as both daemon (mini/server) and
+// control CLI (shell) — pulled directly, no wrapper image. 4.48 is the current
+// stable line (verified 2026-09-28); it has native S3 TLS.
+const DefaultSeaweedfsImageTag = "docker.io/chrislusf/seaweedfs:4.48_large_disk"
 
 // DefaultMCImageTag is the public pre-built MinIO client (mc) image: the
 // static upstream binary on scratch with a CA bundle. `pg mc` runs it in a
@@ -938,6 +953,121 @@ func (g GarageConfig) RPCPublicAddr() string {
 	return fmt.Sprintf("%s:%d", host, g.RPCPort)
 }
 
+// SeaweedfsConfig holds a standalone SeaweedFS addon — the Go object store at
+// https://github.com/seaweedfs/seaweedfs (Apache-2.0). It is a sibling manager
+// to garage/minio/rustfs/silo, not a flag on any of them, and shares Garage's
+// "render a config file, bind-mount it read-only" shape plus MinIO's
+// "static-membership, same command replicated to every host" cluster shape
+// (see internal/podman.SeaweedfsManager). Where it diverges from Garage:
+//
+//  1. Four ROLES in one container (master Raft, volume server, filer, S3
+//     gateway), not one daemon with four ports for one process. Single-node
+//     runs `weed mini` (all roles, one process, upstream's blessed single-
+//     node production form); cluster runs `weed server -filer -s3`.
+//  2. Ports are four CONSECUTIVE (master, volume, filer, s3) from SeaweedFS's
+//     own pool (seaweedfs_start_port, default 8400) — like Garage's own cursor,
+//     not the shared minio cursor. Every role also opens a gRPC port at
+//     http+10000 (verified on 4.48 for all four roles, not just filer), which
+//     the pool reserves as used but never assigns as a knob.
+//  3. Native S3 TLS (verified on vm01): --tls generates a self-signed pair and
+//     --tls-cert/--tls-key bring your own (a pg cert leaf works directly), the
+//     same contract as minio/rustfs — NOT Garage's nginx-front posture. With
+//     TLS on, the S3 role serves HTTPS on the pooled port and stops listening
+//     in cleartext entirely (-s3.port=0 -s3.port.https=P).
+//  4. Cluster metadata: every node runs filer+gateway, so filer metadata MUST
+//     live in a shared store — pgcli points it at a PostgreSQL via an explicit
+//     --dsn (a host-published/LAN address, since the addon container cannot
+//     reach an instance's container-local 127.0.0.1:5432; the operator
+//     pre-creates the database). This is the plan's whole reason a cluster is
+//     different from a bigger single node. Credentials follow the same shared
+//     rule: one --root-user/--root-password pair for the whole cluster, because
+//     each gateway authenticates against only its own s3.json.
+//
+// Cluster membership is MinIO-MNMD-style, not Garage's bootstrap/join: the
+// Raft peer list (-master.peers) is a FULL static list every node passes, so
+// the same install command runs on each host with only --advertise-host
+// differing. There is no designated first node; a node whose peers are not all
+// up yet just waits for quorum (the install health gate warns, never fails).
+//
+// Credentials are a single static identity in a rendered s3.json (4.48
+// schema: identities[].credentials is an ARRAY of {accessKey,secretKey}, and
+// the bare "Admin" action short-circuits every bucket check — per-bucket
+// action maps are gone). RootUser/RootPassword keep the CLI-uniform names and
+// map to that access/secret key pair. RootUser/RootPassword/FilerDSN are NOT
+// defaulted by ApplyDefaults (determinism contract, same as Garage) — the
+// install handler generates the pair and resolves the DSN.
+type SeaweedfsConfig struct {
+	ContainerName string `yaml:"container_name"`      // pgcli-seaweedfs<ns>-<name>
+	Name          string `yaml:"name,omitempty"`      // addon key, defaults to the map key
+	ImageTag      string `yaml:"image_tag,omitempty"` // docker.io/chrislusf/seaweedfs:... (default)
+
+	// DataDir is the single host dir behind the container's -dir (volumes +
+	// leveldb2 filer metadata when no FilerDSN). Default <base>/addon/
+	// seaweedfs/<name>/data.
+	DataDir string `yaml:"data_dir,omitempty"`
+
+	// Listen binds every role's socket (-ip.bind) AND, in single-node mode,
+	// the advertised -ip. Default 127.0.0.1. In cluster mode -ip is
+	// AdvertiseHost instead (see the -ip trap documented on the manager).
+	Listen string `yaml:"listen,omitempty"`
+
+	// Port is the pool anchor = master HTTP port; Volume/Filer/S3 take the
+	// next three. All four have a gRPC twin at +10000 that the pool records as
+	// used.
+	Port         int    `yaml:"port,omitempty"`          // master HTTP, from seaweedfs_start_port
+	VolumePort   int    `yaml:"volume_port,omitempty"`   // volume server HTTP
+	FilerPort    int    `yaml:"filer_port,omitempty"`    // filer HTTP
+	S3Port       int    `yaml:"s3_port,omitempty"`       // S3 gateway HTTP, or HTTPS when TLS
+	RootUser     string `yaml:"root_user,omitempty"`     // s3.json access key
+	RootPassword string `yaml:"root_password,omitempty"` // s3.json secret key
+
+	Bucket      string `yaml:"bucket,omitempty"`      // auto-created bucket, default = Name
+	Replication string `yaml:"replication,omitempty"` // placement code, default "000" (single), e.g. "001"/"002" cluster
+
+	// --- Multi-node. Cluster non-empty = cluster mode (weed server, shared
+	// filer store). AdvertiseHost is this node's -ip that peers dial; required
+	// in cluster mode. Peers is the FULL Raft list (ip:masterPort) written on
+	// every node — the operator supplies the others' via --peer, pgcli always
+	// folds in this node's own AdvertiseHost:Port. ---
+	Cluster       string   `yaml:"cluster,omitempty"`
+	AdvertiseHost string   `yaml:"advertise_host,omitempty"`
+	Peers         []string `yaml:"peers,omitempty"`
+
+	// FilerDSN is the shared PostgreSQL the cluster's filer metadata lives in
+	// (rendered into filer.toml [postgres2]). Given via --dsn only, and it must
+	// be dialable from every host (a host-published port / LAN address).
+	// Required in cluster mode, optional single-node (default: filer metadata
+	// stays in DataDir's leveldb2).
+	FilerDSN string `yaml:"filer_dsn,omitempty"`
+
+	// TLS is native S3 TLS: TLS generates a self-signed cert/key under the
+	// instance dir; CertFile/KeyFile bring your own (pg cert output). When
+	// either is set, S3Port serves HTTPS and the cleartext listener is off.
+	TLS      bool   `yaml:"tls,omitempty"`
+	CertFile string `yaml:"cert_file,omitempty"` // host path (BYO or generated), mounted as cert.pem
+	KeyFile  string `yaml:"key_file,omitempty"`  // host path, mounted as key.pem
+
+	// VolumeSizeMB is -master.volumeSizeLimitMB. mini defaults to 128, far too
+	// small for a real deployment; pgcli defaults 1024.
+	VolumeSizeMB uint `yaml:"volume_size_mb,omitempty"`
+
+	// Autostart brings this container up on host boot via the boot service
+	// (pg autostart enable --seaweedfs). Start-only, so install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// Clustered reports whether this SeaweedFS entry runs the multi-node topology.
+func (s SeaweedfsConfig) Clustered() bool { return s.Cluster != "" }
+
+// TLSOn reports whether the S3 gateway should serve HTTPS (either a
+// pgcli-generated cert or a bring-your-own pair).
+func (s SeaweedfsConfig) TLSOn() bool { return s.TLS || s.CertFile != "" || s.KeyFile != "" }
+
+// GRPCPort returns a role's gRPC twin port (http + 10000). SeaweedFS opens
+// these implicitly; the pool only needs to know they're taken, not assign
+// them.
+func SeaweedfsGRPCPort(httpPort int) int { return httpPort + 10000 }
+
 // RedisConfig holds a standalone Redis addon: a KV store for cache, session,
 // ranking and atomic-counter data, run as its own container off the upstream
 // docker.io/library/redis image (no wrapper build — Redis runs fine as root
@@ -1238,6 +1368,7 @@ func Default() *Config {
 		PgAdminStartPort:        5050,
 		NginxStartPort:          8080,
 		GarageStartPort:         3900,
+		SeaweedfsStartPort:      8400,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -1441,6 +1572,7 @@ type displayConfig struct {
 	PgAdminStartPort        int                       `yaml:"pgadmin_start_port,omitempty"`
 	NginxStartPort          int                       `yaml:"nginx_start_port,omitempty"`
 	GarageStartPort         int                       `yaml:"garage_start_port,omitempty"`
+	SeaweedfsStartPort      int                       `yaml:"seaweedfs_start_port,omitempty"`
 	Logging                 LoggingConfig             `yaml:"logging"`
 	Backup                  BackupConfig              `yaml:"backup"`
 	Pigsty                  PigstyConfig              `yaml:"pigsty"`
@@ -1469,6 +1601,7 @@ func (c *Config) Display() displayConfig {
 		PgAdminStartPort:        c.PgAdminStartPort,
 		NginxStartPort:          c.NginxStartPort,
 		GarageStartPort:         c.GarageStartPort,
+		SeaweedfsStartPort:      c.SeaweedfsStartPort,
 		Logging:                 c.Logging,
 		Backup:                  c.Backup,
 		Pigsty:                  c.Pigsty,
@@ -1572,6 +1705,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.GarageStartPort == 0 {
 		c.GarageStartPort = d.GarageStartPort
+	}
+	if c.SeaweedfsStartPort == 0 {
+		c.SeaweedfsStartPort = d.SeaweedfsStartPort
 	}
 
 	// Postgres
@@ -2000,6 +2136,38 @@ func (c *Config) ApplyDefaults() {
 			addon.ReplicationFactor = 1
 		}
 		c.Addons.Garage[name] = addon
+	}
+
+	// Top-level addons defaults (SeaweedFS). Same shape as the Garage block:
+	// DataDir stays empty for the manager to resolve under the base dir.
+	// RootUser/RootPassword/FilerDSN are NOT defaulted here (determinism
+	// contract) — the install handler generates the credential pair and
+	// resolves the filer DSN. Replication (placement code) and VolumeSizeMB
+	// carry SeaweedFS-specific defaults; the bucket defaults to the instance
+	// name (mirrors Garage's --default-bucket-named-after-instance choice).
+	for name, addon := range c.Addons.Seaweedfs {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-seaweedfs" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultSeaweedfsImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "127.0.0.1"
+		}
+		if addon.Replication == "" {
+			addon.Replication = "000"
+		}
+		if addon.VolumeSizeMB == 0 {
+			addon.VolumeSizeMB = 1024
+		}
+		if addon.Bucket == "" {
+			addon.Bucket = addon.Name
+		}
+		c.Addons.Seaweedfs[name] = addon
 	}
 
 	// Top-level addons defaults (Redis). Version is the source of truth for the
@@ -2757,6 +2925,64 @@ func (c *Config) autoAssignPorts() {
 			assignGarage(&addon.WebPort)
 			assignGarage(&addon.AdminPort)
 			c.Addons.Garage[name] = addon
+		}
+	}
+
+	// Allocate ports for SeaweedFS addons from their own pool
+	// (seaweedfs_start_port, default 8400). Like Garage, each instance takes
+	// FOUR consecutive ports — master, volume, filer, s3 — allocated together
+	// per instance so one instance's four never overlap another's or the
+	// cursor's. SeaweedFS differs from Garage in one structural way: every
+	// role ALSO implicitly opens a gRPC port at http+10000 (verified on 4.48
+	// for all four roles), which is not a knob to assign but must be recorded
+	// as taken so the cursor never walks an instance into one of its own
+	// siblings' gRPC ports. The +10000 of the NEXT not-yet-allocated port is
+	// likewise marked used as the cursor advances, to stop a later instance's
+	// http ports landing in an earlier instance's gRPC range.
+	{
+		seaweedfsBase := c.SeaweedfsStartPort
+		assignedSeaweedfs := map[int]bool{}
+		markSeaweedfsUsed := func(p int) { assignedSeaweedfs[p] = true }
+		for _, addon := range c.Addons.Seaweedfs {
+			for _, p := range []int{addon.Port, addon.VolumePort, addon.FilerPort, addon.S3Port} {
+				if p != 0 {
+					markSeaweedfsUsed(p)
+					markSeaweedfsUsed(SeaweedfsGRPCPort(p))
+				}
+			}
+		}
+		next := seaweedfsBase
+		nextFreeSeaweedfs := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedSeaweedfs[next] || assignedSeaweedfs[SeaweedfsGRPCPort(next)] {
+				next++
+			}
+			p := next
+			next++
+			markSeaweedfsUsed(p)
+			markSeaweedfsUsed(SeaweedfsGRPCPort(p))
+			return p
+		}
+		assignSeaweedfs := func(port *int) {
+			if *port == 0 && seaweedfsBase > 0 {
+				*port = nextFreeSeaweedfs()
+			} else if *port >= next {
+				next = *port + 1
+			}
+		}
+		names := make([]string, 0, len(c.Addons.Seaweedfs))
+		for name := range c.Addons.Seaweedfs {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.Seaweedfs[name]
+			// master first, then volume/filer/s3, so an instance's four land
+			// consecutively from the cursor.
+			assignSeaweedfs(&addon.Port)
+			assignSeaweedfs(&addon.VolumePort)
+			assignSeaweedfs(&addon.FilerPort)
+			assignSeaweedfs(&addon.S3Port)
+			c.Addons.Seaweedfs[name] = addon
 		}
 	}
 }

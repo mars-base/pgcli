@@ -75,8 +75,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartNginx(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --redis / --predixy / --pgadmin / --nginx)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartNginx(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --redis / --predixy / --pgadmin / --nginx)")
 		return nil
 	}
 
@@ -172,6 +172,13 @@ func startAutostart() error {
 	// garage instances (top-level infra addon, a Rust S3 store). Same position
 	// as minio/silo/rustfs: independent of the PostgreSQL stack, a backup repo.
 	if err := startAutostartGarage(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// seaweedfs instances (top-level infra addon, a Go S3 store). Same position
+	// as minio/silo/rustfs/garage: a cluster member's filer metadata lives in a
+	// pgcli instance, which is already up earlier in this chain.
+	if err := startAutostartSeaweedfs(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -645,6 +652,52 @@ func startAutostartGarage(c *config.Config) error {
 		gc := c.Addons.Garage[name]
 		if err := gm.StartContainer(&gc); err != nil {
 			fmt.Printf("  [X] garage autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartSeaweedfs reports whether any seaweedfs instance is autostart-enabled.
+func hasAutostartSeaweedfs(c *config.Config) bool {
+	for _, sc := range c.Addons.Seaweedfs {
+		if sc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartSeaweedfs starts each autostart-enabled seaweedfs instance.
+// Start-only semantics like the other object-store autostarts: StartContainer
+// re-renders s3.json (and filer.toml when a shared metadata DSN is set) and
+// recreates from the config if the container was removed. A cluster member
+// needs no orchestration — Raft recovers from the master's own -dir data and
+// re-joins its peers; a member that boots alone simply waits for quorum, and
+// weed tolerates its metadata database still being mid-startup by retrying.
+func startAutostartSeaweedfs(c *config.Config) error {
+	var names []string
+	for name, sc := range c.Addons.Seaweedfs {
+		if sc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	sm, err := podman.NewSeaweedfsManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		sc := c.Addons.Seaweedfs[name]
+		if err := sm.StartContainer(&sc); err != nil {
+			fmt.Printf("  [X] seaweedfs autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}
