@@ -184,7 +184,6 @@ func TestSeaweedWeedArgsSingle(t *testing.T) {
 	}
 	for _, want := range []string{
 		"-logtostderr=true",
-		"-dir=/data",
 		"-ip.bind=127.0.0.1",
 		"-master.port=8400",
 		"-volume.port=8401",
@@ -204,8 +203,54 @@ func TestSeaweedWeedArgsSingle(t *testing.T) {
 			t.Errorf("single argv missing %q:\n%s", want, joined)
 		}
 	}
+	// Exact: the single-dir case must use the bare constant, not a numbered slot.
+	if v, ok := findFlag(t, args, "-dir="); !ok || v != "-dir=/data" {
+		t.Errorf("single-node -dir = %q ok=%v, want -dir=/data", v, ok)
+	}
 	if strings.Contains(joined, "server") || strings.Contains(joined, "-master.peers") {
 		t.Errorf("single argv must not carry cluster flags:\n%s", joined)
+	}
+}
+
+// Multi-disk: weed's -dir is itself a comma list (verified on vm01 — mini
+// stats each element and the volume server reports one DiskStatuses entry per
+// dir), so N drives means one -dir=/data1,/data2,… with each host dir mounted
+// at its own /dataN slot.
+func TestSeaweedWeedArgsMultiDrive(t *testing.T) {
+	sc := swCfg("s1")
+	sc.Drives = []string{"/mnt/sw/d1", "/mnt/sw/d2", "/srv/sw/d3"}
+	args := buildWeedArgs(sc, "127.0.0.1", "", "")
+
+	if v, ok := findFlag(t, args, "-dir="); !ok || v != "-dir=/data1,/data2,/data3" {
+		t.Errorf("multi-drive -dir = %q ok=%v, want -dir=/data1,/data2,/data3", v, ok)
+	}
+	// The single-dir constant must never leak in alongside the numbered slots.
+	if strings.Contains(strings.Join(args, " "), "-dir=/data,") {
+		t.Errorf("bare /data must not appear once drives are set:\n%s", strings.Join(args, " "))
+	}
+
+	// Same shape on a cluster member — drives are a per-node knob.
+	cs := swCfg("c1")
+	cs.Cluster = "lab"
+	cs.AdvertiseHost = "10.0.0.12"
+	cs.Replication = "001"
+	cs.Peers = []string{"10.0.0.11:8400", "10.0.0.12:8400"}
+	cs.Drives = []string{"/mnt/sw/d1", "/mnt/sw/d2"}
+	cargs := buildWeedArgs(cs, "10.0.0.12", "", "")
+	if v, ok := findFlag(t, cargs, "-dir="); !ok || v != "-dir=/data1,/data2" {
+		t.Errorf("cluster member -dir = %q ok=%v, want -dir=/data1,/data2", v, ok)
+	}
+	assertWeedArgOrder(t, cargs, "server")
+}
+
+func TestSeaweedContainerDataDirs(t *testing.T) {
+	if got := containerDataDirs(&config.SeaweedfsConfig{}); len(got) != 1 || got[0] != "/data" {
+		t.Errorf("no drives = %v, want [/data]", got)
+	}
+	got := containerDataDirs(&config.SeaweedfsConfig{Drives: []string{"a", "b", "c", "d", "e"}})
+	want := []string{"/data1", "/data2", "/data3", "/data4", "/data5"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("5 drives = %v, want %v", got, want)
 	}
 }
 

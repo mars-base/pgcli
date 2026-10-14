@@ -42,7 +42,8 @@ O(1) 读取和廉价的小文件存储。pgcli 将其作为**独立的顶层插�
 
 主机侧状态存放在 `<base-dir>/addon/seaweedfs/<name>/` 下：
 
-- `data/` → `/data`（volume，单机时还有 filer 的 leveldb2 元数据），
+- `data/` → `/data`（volume，单机时还有 filer 的 leveldb2 元数据）——多盘模式下
+  被每盘一个 bind 挂载（`/data1`…`/dataN`）整体取代，见[多盘](#多盘)，
 - `s3.json` → `/etc/seaweedfs/s3.json:ro`（S3 身份；宿主侧权限 0600），
 - `filer.toml` → `/etc/seaweedfs/filer.toml:ro`（仅集群 / `--dsn`；渲染元数据
   DSN 的 `[postgres2]` 段），
@@ -72,6 +73,9 @@ pg addon install seaweedfs
 
 # 命名实例 + 显式数据目录
 pg addon install seaweedfs --name store --data-dir /srv/seaweedfs
+
+# 把单节点的 volume 铺到多块独立挂载的盘上
+pg addon install seaweedfs --name store --drive /mnt/sw-disk1 --drive /mnt/sw-disk2
 
 # 固定 master 端口（volume/filer/s3 顺取后三个；gRPC 孪生口 +10000）
 pg addon install seaweedfs --name store --port 8400
@@ -146,6 +150,45 @@ TLS 在底层改了什么（已实测）：明文监听器**关掉**（`-s3.port
 拒绝 TCP 连接），同一个池化 S3 端口变成 `-s3.port.https`。所以安装摘要里打印的
 端点是 `https://…:8403`，不是一个新端口。`pg mc` 照常指向它即可——loopback
 别名会自动带 `--insecure`；真实 CA 或生成的 CA 则要交给 S3 客户端做校验。
+
+## 多盘
+
+单节点可以用多块盘：`weed` 自己的 `-dir` 本就是一个逗号列表
+（`dir[,dir]…`），由**同一个 volume 服务器**把 volume 铺在这些目录上；pgcli 把
+它暴露成可重复的 `--drive`——每块盘一个宿主目录，各自挂到自己的槽位：
+
+```bash
+# 每个 --drive 都应是一块独立挂载的盘；drives 完全取代 --data-dir（两者同时给是错误）
+pg addon install seaweedfs --name store \
+  --drive /mnt/sw-disk1 --drive /mnt/sw-disk2 --drive /mnt/sw-disk3
+```
+
+摘要和 `pg addon list` 会打印映射，取代单独那行 `Data:`：
+
+```
+  Drive 1:       /mnt/sw-disk1 -> /data1
+  Drive 2:       /mnt/sw-disk2 -> /data2
+  Drive 3:       /mnt/sw-disk3 -> /data3
+```
+
+容器因此以 `-dir=/data1,/data2,/data3` 运行（已实测：volume 服务器的 `/status`
+把每个宿主目录报成独立的 `DiskStatuses` 条目、各自记账；`remove --clean-data`
+也会逐个遍历 drives，并拒绝删除仍是活动挂载点的那一个）。
+
+两点语义值得知道：
+
+- **这是放置，不是 RAID。** 是一个 volume 服务器把 `.vol` 文件分散到自己的目录
+  ——OS 层面既没有条带也没有镜像，各盘之间也**没有**纠删码（集群副本是另一件
+  正交的事，见[多节点集群](#多节点集群)）。一块盘消失，它上面的 volume 就没了；
+  这是否造成数据丢失取决于 placement code，而不是本地布局。
+- **设备检查是建议性的。** `install` 会对任何与宿主根文件系统同设备的 drive 发
+  出警告——多盘只有配独立挂载的盘才有意义。与 MinIO（会在启动时直接拒绝这种
+  盘）不同，weed 照样会用它们，所以 pgcli 只警告、不阻断。请先自行格式化并挂
+  载每块盘；pgcli 从不做分区或格式化。
+
+drives 是**逐节点**的开关：`--drive` 在集群成员（`weed server`）上用法完全相
+同，给每个节点配上自己的本地多盘 volume 服务器。stop/start 与 `--force` 重建
+会像处理其它配置变更一样处理 drive 集合——挂载与 `-dir` 都从 `pg.yaml` 重建。
 
 ## 多节点集群
 
@@ -332,6 +375,10 @@ addons:
       name: store
       image_tag: docker.io/chrislusf/seaweedfs:4.48_large_disk
       # data_dir: /srv/seaweedfs    # 省略则 <base-dir>/addon/seaweedfs/store/data
+      # --- 多盘（取代 data_dir；与其互斥）---
+      # drives:                      # 每盘一个宿主目录，挂到 /data1../dataN，
+      #   - /mnt/sw-disk1            #   并把它们逗号拼接后交给 -dir
+      #   - /mnt/sw-disk2
       listen: 127.0.0.1
       port: 8400                    # master 锚点；volume/filer/s3 = 后三个
       volume_port: 8401
@@ -359,7 +406,7 @@ addons:
 ```
 
 对 `listen`、端口、`root_user`、`root_password`、`image_tag`、`data_dir`、
-`filer_dsn` 或 TLS 材料的改动，在下一次
+`drives`、`filer_dsn` 或 TLS 材料的改动，在下一次
 `pg addon install seaweedfs --name store --force` 后生效。集群里的这次
 force-recreate 必须在**每台**成员上跑（每台主机各持有自己的 `pg.yaml` 和容器）。
 
@@ -390,7 +437,8 @@ Infra add-ons (seaweedfs):
 集群成员多出 `Cluster` / `Peers` / `Leader` / `Filer store` 四行；`Leader:` 是一
 次实时的 `/cluster/status` 读（尽力而为——成员没跑就省略，集群还在拼装、尚无
 leader 时打印成 `(none yet — still electing / no quorum)`）。单节点成员这四行都
-没有。开 TLS 时末尾追加一行 `TLS: native S3 HTTPS on 8403 (cleartext listener
+没有。多盘实例则以 `Drives` 块（每个 drive 一行 `- /dataN <- 宿主路径`）取代单
+独那行 `Data:`——见[多盘](#多盘)。开 TLS 时末尾追加一行 `TLS: native S3 HTTPS on 8403 (cleartext listener
 off)`。`pg addon list` 从不打印 secret key；要显式暴露用
 `pg addon list --show-password`（追加一行 `Secret key:`），或
 `pg addon password seaweedfs --name store`（`--file <path>` 以 0600 权限写入）。

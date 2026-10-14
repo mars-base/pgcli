@@ -146,6 +146,7 @@ func TestSeaweedfsSaveLoadRoundTrip(t *testing.T) {
 			Name:          "s1",
 			ImageTag:      DefaultSeaweedfsImageTag,
 			DataDir:       "/srv/sw/data",
+			Drives:        []string{"/mnt/sw/d1", "/mnt/sw/d2"},
 			Listen:        "127.0.0.1",
 			Port:          8400,
 			VolumePort:    8401,
@@ -195,6 +196,12 @@ func TestSeaweedfsSaveLoadRoundTrip(t *testing.T) {
 	}
 	if sc.CertFile != "/srv/sw/cert.pem" || sc.KeyFile != "/srv/sw/key.pem" {
 		t.Errorf("byo cert/key lost: %q %q", sc.CertFile, sc.KeyFile)
+	}
+	if sc.DataDir != "/srv/sw/data" {
+		t.Errorf("data dir lost: %q", sc.DataDir)
+	}
+	if d := sc.Drives; len(d) != 2 || d[0] != "/mnt/sw/d1" || d[1] != "/mnt/sw/d2" {
+		t.Errorf("drives lost in round-trip: %v", sc.Drives)
 	}
 	if sc.VolumeSizeMB != 1024 || !sc.Autostart {
 		t.Errorf("volume size/autostart lost: %d %v", sc.VolumeSizeMB, sc.Autostart)

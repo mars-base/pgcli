@@ -47,7 +47,9 @@ files inside the container where `pg logs` cannot see them.
 
 Host state lives under `<base-dir>/addon/seaweedfs/<name>/`:
 
-- `data/` → `/data` (volumes and, single-node, the filer's leveldb2 metadata),
+- `data/` → `/data` (volumes and, single-node, the filer's leveldb2 metadata) —
+  replaced by one bind mount per drive (`/data1`…`/dataN`) in multi-disk mode,
+  see [Multi-disk](#multi-disk),
 - `s3.json` → `/etc/seaweedfs/s3.json:ro` (the S3 identity; 0600 on the host),
 - `filer.toml` → `/etc/seaweedfs/filer.toml:ro` (cluster / `--dsn` only; the
   `[postgres2]` section rendering the metadata DSN),
@@ -80,6 +82,9 @@ pg addon install seaweedfs
 
 # a named instance with an explicit data directory
 pg addon install seaweedfs --name store --data-dir /srv/seaweedfs
+
+# spread one node's volumes across several separately-mounted disks
+pg addon install seaweedfs --name store --drive /mnt/sw-disk1 --drive /mnt/sw-disk2
 
 # a fixed master port (volume/filer/s3 take the next three; gRPC twins +10000)
 pg addon install seaweedfs --name store --port 8400
@@ -162,6 +167,53 @@ pooled S3 port becomes `-s3.port.https`. So the endpoint printed at install is
 `https://…:8403`, not an extra port. Point `pg mc` at it as usual — the loopback
 alias gets `--insecure` automatically; for a real or generated CA, pass its
 `ca.crt` to your S3 client.
+
+## Multi-disk
+
+A single node can use several disks: `weed`'s own `-dir` is a comma list
+(`dir[,dir]…`) that one volume server stores its volumes across, and pgcli
+exposes it as a repeatable `--drive` — one host directory per disk, each
+bind-mounted at its own slot:
+
+```bash
+# each --drive must be a separately mounted disk; the drives fully replace
+# --data-dir (combining the two is an error)
+pg addon install seaweedfs --name store \
+  --drive /mnt/sw-disk1 --drive /mnt/sw-disk2 --drive /mnt/sw-disk3
+```
+
+The summary and `pg addon list` then show the mapping instead of a single
+`Data:` line:
+
+```
+  Drive 1:       /mnt/sw-disk1 -> /data1
+  Drive 2:       /mnt/sw-disk2 -> /data2
+  Drive 3:       /mnt/sw-disk3 -> /data3
+```
+
+and the container runs with `-dir=/data1,/data2,/data3` (verified: the volume
+server's `/status` reports each host directory as its own `DiskStatuses` entry
+with independent disk accounting, and `remove --clean-data` walks the drives
+one by one, refusing any that is still a live mount point).
+
+Two semantics worth knowing:
+
+- **Placement, not RAID.** This is one volume server spreading `.vol` files
+  across its directories — no striping or mirroring at the OS level, and no
+  erasure coding *between* the drives either (the cluster replication story is
+  orthogonal — see [Multi-node cluster](#multi-node-cluster)). A drive that
+  disappears takes the volumes on it; whether that loses data depends on the
+  replication code, not on the local layout.
+- **Advisory device check.** `install` warns about any drive sitting on the
+  same device as the host root filesystem — multi-disk only pays off on
+  separately mounted disks. Unlike MinIO (which refuses such a drive at
+  startup), weed happily uses them, so pgcli warns and continues. Format and
+  mount each disk first; pgcli never partitions or formats anything.
+
+Drives are a per-node knob: `--drive` works exactly the same on a cluster
+member (`weed server`), giving each node its own local multi-disk volume
+server. Stop/start and `--force` recreate handle the drive set like any other
+config change — the mounts and `-dir` are rebuilt from `pg.yaml`.
 
 ## Multi-node cluster
 
@@ -363,6 +415,10 @@ addons:
       name: store
       image_tag: docker.io/chrislusf/seaweedfs:4.48_large_disk
       # data_dir: /srv/seaweedfs    # omit for <base-dir>/addon/seaweedfs/store/data
+      # --- multi-disk (replaces data_dir; mutually exclusive with it) ---
+      # drives:                      # one host dir per disk, mounted /data1../dataN,
+      #   - /mnt/sw-disk1            #   and -dir lists them comma-joined
+      #   - /mnt/sw-disk2
       listen: 127.0.0.1
       port: 8400                    # master anchor; volume/filer/s3 = next three
       volume_port: 8401
@@ -390,8 +446,8 @@ addons:
 ```
 
 Edits to `listen`, ports, `root_user`, `root_password`, `image_tag`,
-`data_dir`, `filer_dsn`, or the TLS material take effect after the next
-`pg addon install seaweedfs --name store --force`. In a cluster the force-recreate
+`data_dir`, `drives`, `filer_dsn`, or the TLS material take effect after the
+next `pg addon install seaweedfs --name store --force`. In a cluster the force-recreate
 must be run on **every** member (each host owns its own `pg.yaml` and container).
 
 ### List
@@ -422,7 +478,9 @@ Cluster members gain the `Cluster` / `Peers` / `Leader` / `Filer store` lines;
 `Leader:` is a live `/cluster/status` read (best-effort — omitted when the
 member is not running, and printed as `(none yet — still electing / no quorum)`
 while a still-assembling cluster has no leader). Single-node members show none
-of those four lines. With TLS on, a final `TLS: native S3 HTTPS on 8403
+of those four lines. A multi-disk instance shows the `Drives` block (with one
+`- /dataN <- host` line per drive) in place of the single `Data:` line — see
+[Multi-disk](#multi-disk). With TLS on, a final `TLS: native S3 HTTPS on 8403
 (cleartext listener off)` line is appended.
 `pg addon list` never prints the secret key; reveal it deliberately with
 `pg addon list --show-password` (appends a `Secret key:` line), or

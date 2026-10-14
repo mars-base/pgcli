@@ -109,9 +109,58 @@ func (m *SeaweedfsManager) resolveDataDir(sc *config.SeaweedfsConfig) string {
 	return filepath.Join(m.dir(sc), "data")
 }
 
+// resolveDriveDirs returns the host dirs backing this instance's -dir: the
+// explicit Drives list when set (multi-disk SNMD — one dir per disk), else the
+// single resolved DataDir. Mirrors MinioManager.resolveDriveDirs.
+func (m *SeaweedfsManager) resolveDriveDirs(sc *config.SeaweedfsConfig) []string {
+	if len(sc.Drives) > 0 {
+		return sc.Drives
+	}
+	return []string{m.resolveDataDir(sc)}
+}
+
+// containerDataDirs is the in-container path for each resolved drive: the
+// single-dir case keeps the constant /data; the multi-drive case mounts drive i
+// at /data(i+1), matching how -dir is comma-joined in buildWeedArgs. Depends
+// only on the drive COUNT (from sc.Drives), not the host paths, so it stays a
+// pure package-level helper like buildWeedArgs itself.
+func containerDataDirs(sc *config.SeaweedfsConfig) []string {
+	n := len(sc.Drives)
+	if n == 0 {
+		return []string{seaweedContainerDataDir}
+	}
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("%s%d", seaweedContainerDataDir, i+1)
+	}
+	return out
+}
+
+// DrivesSharingRootDevice returns the subset of this instance's drive dirs that
+// sit on the host's root device — advisory, same posture as MinIO/Silo's SNMD.
+// A multi-disk volume server is meant to spread data across SEPARATELY mounted
+// disks; pointing a drive at a plain dir on / works but defeats that, so the
+// install prints a per-drive warning. Unlike weed's own -ip check this is not
+// a correctness issue (weed never refuses a same-device dir), hence never fatal.
+func (m *SeaweedfsManager) DrivesSharingRootDevice(sc *config.SeaweedfsConfig) []string {
+	var bad []string
+	for _, d := range m.resolveDriveDirs(sc) {
+		if shared, err := sharesRootDevice(d); err == nil && shared {
+			bad = append(bad, d)
+		}
+	}
+	return bad
+}
+
 // DataDir returns the resolved host data directory (for display).
 func (m *SeaweedfsManager) DataDir(sc *config.SeaweedfsConfig) string {
 	return m.resolveDataDir(sc)
+}
+
+// Drives returns the resolved host drive dirs (for display; includes the
+// single-data-dir case, so it is the general accessor callers print).
+func (m *SeaweedfsManager) Drives(sc *config.SeaweedfsConfig) []string {
+	return m.resolveDriveDirs(sc)
 }
 
 func (m *SeaweedfsManager) s3ConfigPath(sc *config.SeaweedfsConfig) string {
@@ -333,9 +382,11 @@ func buildWeedArgs(sc *config.SeaweedfsConfig, bind, certPath, keyPath string) [
 	}
 
 	// common = the role flags both topologies pass, placed after the
-	// subcommand word.
+	// subcommand word. -dir is a comma list when multiple drives are mounted
+	// (weed treats each entry as a separate disk — verified: the volume server
+	// reports every dir in its own DiskStatuses entry).
 	common := []string{
-		"-dir=" + seaweedContainerDataDir,
+		"-dir=" + strings.Join(containerDataDirs(sc), ","),
 		"-ip=" + advertise,
 		"-ip.bind=" + bind,
 		fmt.Sprintf("-master.port=%d", sc.Port),
@@ -384,10 +435,12 @@ func buildWeedArgs(sc *config.SeaweedfsConfig, bind, certPath, keyPath string) [
 
 // createContainer runs the weed process under podman. Layout follows garage's
 // shape (netFlags → static flags → mounts → -e before image → argv), but weed
-// is argv-only — no env config — so there are no -e flags at all.
+// is argv-only — no env config — so there are no -e flags at all. Drives mount
+// at /data1../dataN and -dir lists them comma-separated (single-dir keeps the
+// bare /data).
 func (m *SeaweedfsManager) createContainer(sc *config.SeaweedfsConfig) error {
-	dataDir := m.resolveDataDir(sc)
-	for _, d := range []string{dataDir, m.dir(sc)} {
+	driveDirs := m.resolveDriveDirs(sc)
+	for _, d := range append(append([]string{}, driveDirs...), m.dir(sc)) {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			return fmt.Errorf("creating seaweedfs dir %s: %w", d, err)
 		}
@@ -436,10 +489,11 @@ func (m *SeaweedfsManager) createContainer(sc *config.SeaweedfsConfig) error {
 		"--stop-timeout", "60",
 		"--entrypoint", "/usr/bin/weed",
 	)
-	args = append(args,
-		"-v", fmt.Sprintf("%s:%s:z", hostMountPath(dataDir), seaweedContainerDataDir),
-		"-v", fmt.Sprintf("%s:%s:ro,z", hostMountPath(s3Path), seaweedContainerS3Config),
-	)
+	args = append(args, "-v", fmt.Sprintf("%s:%s:ro,z", hostMountPath(s3Path), seaweedContainerS3Config))
+	containerDirs := containerDataDirs(sc)
+	for i, d := range driveDirs {
+		args = append(args, "-v", fmt.Sprintf("%s:%s:z", hostMountPath(d), containerDirs[i]))
+	}
 	if filerPath != "" {
 		args = append(args, "-v", fmt.Sprintf("%s:%s:ro,z", hostMountPath(filerPath), seaweedContainerFilerCfg))
 	}
@@ -482,7 +536,10 @@ func (m *SeaweedfsManager) Remove(sc *config.SeaweedfsConfig, cleanData bool) er
 		path  string
 		label string
 	}
-	entries := []entry{{m.resolveDataDir(sc), "data directory"}}
+	var entries []entry
+	for _, d := range m.resolveDriveDirs(sc) {
+		entries = append(entries, entry{d, "data directory"})
+	}
 	if sc.DataDir == "" {
 		// pgcli-rendered files only live under the instance dir when no
 		// DataDir override moved it elsewhere.

@@ -60,6 +60,7 @@ func runAddonInstallSeaweedfs(cmd *cobra.Command) error {
 	}
 	imageTag, _ := cmd.Flags().GetString("image")
 	dataDir, _ := cmd.Flags().GetString("data-dir")
+	drives, _ := cmd.Flags().GetStringSlice("drive")
 	port, _ := cmd.Flags().GetInt("port")
 	listenAddr, _ := cmd.Flags().GetString("listen")
 	rootUser, _ := cmd.Flags().GetString("root-user")
@@ -123,6 +124,15 @@ func runAddonInstallSeaweedfs(cmd *cobra.Command) error {
 	}
 	if dataDir != "" {
 		existing.DataDir = dataDir
+	}
+	if len(drives) > 0 {
+		existing.Drives = drives
+	}
+	// Same axis rule as minio: --drive replaces the single -dir entirely, so
+	// combining it with an explicit --data-dir has no merge semantics. Checked
+	// post-merge so a stale `drives:` key in pg.yaml conflicts like a flag.
+	if len(existing.Drives) > 0 && existing.DataDir != "" {
+		return fmt.Errorf("--drive and --data-dir cannot be combined — multi-drive mode takes its data locations from --drive only")
 	}
 	if port != 0 {
 		// The single port knob: ApplyDefaults' pool walk takes it as the
@@ -281,6 +291,14 @@ func runAddonInstallSeaweedfs(cmd *cobra.Command) error {
 		if err := sm.EnsureImage(sc.ImageTag); err != nil {
 			return err
 		}
+		// Advisory only (unlike MinIO, which refuses a root-device drive): weed
+		// happily uses several dirs on one disk — it just defeats the point of
+		// spreading volumes across devices, so warn per-drive before start.
+		if len(sc.Drives) > 0 {
+			for _, d := range sm.DrivesSharingRootDevice(&sc) {
+				fmt.Printf("-> WARNING: drive %q is on the same device as the host root filesystem; SeaweedFS will still use it, but multi-drive only pays off on separately-mounted disks.\n", d)
+			}
+		}
 		role := "single-node (weed mini)"
 		if sc.Clustered() {
 			role = fmt.Sprintf("cluster %q member (weed server)", sc.Cluster)
@@ -349,7 +367,13 @@ func runAddonInstallSeaweedfs(cmd *cobra.Command) error {
 	}
 	fmt.Printf("  Container:     %s\n", sc.ContainerName)
 	fmt.Printf("  Image:         %s\n", sc.ImageTag)
-	fmt.Printf("  Data:          %s\n", sm.DataDir(&sc))
+	if len(sc.Drives) > 0 {
+		for i, d := range sm.Drives(&sc) {
+			fmt.Printf("  Drive %d:       %s -> /data%d\n", i+1, d, i+1)
+		}
+	} else {
+		fmt.Printf("  Data:          %s\n", sm.DataDir(&sc))
+	}
 	fmt.Printf("  S3 endpoint:   %s\n", sm.S3URL(&sc))
 	fmt.Printf("  Ports:         master=%d volume=%d filer=%d s3=%d (gRPC twins +10000)\n", sc.Port, sc.VolumePort, sc.FilerPort, sc.S3Port)
 	fmt.Printf("  Bucket:        %s\n", sc.Bucket)

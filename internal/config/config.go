@@ -1003,8 +1003,16 @@ type SeaweedfsConfig struct {
 
 	// DataDir is the single host dir behind the container's -dir (volumes +
 	// leveldb2 filer metadata when no FilerDSN). Default <base>/addon/
-	// seaweedfs/<name>/data.
+	// seaweedfs/<name>/data. Mutually exclusive with Drives.
 	DataDir string `yaml:"data_dir,omitempty"`
+
+	// Drives turns a single node into a multi-disk volume server: one host dir
+	// per disk, each separately mounted (weed's -dir is a comma list dir[,dir]…,
+	// and 4.48 reports each as its own DiskStatuses entry — verified). When set
+	// they are bind-mounted at /data1../dataN and -dir lists those paths; empty
+	// keeps the single DataDir at /data. Same semantics as MinIO/silo's SNMD;
+	// pgcli only warns (never blocks) when a drive shares the host root device.
+	Drives []string `yaml:"drives,omitempty"`
 
 	// Listen binds every role's socket (-ip.bind) AND, in single-node mode,
 	// the advertised -ip. Default 127.0.0.1. In cluster mode -ip is

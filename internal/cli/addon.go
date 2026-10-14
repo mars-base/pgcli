@@ -369,6 +369,7 @@ Examples:
   pg addon install rustfs --name store --drive /mnt/rustfs/d0 --drive /mnt/rustfs/d1 --drive /mnt/rustfs/d2 --drive /mnt/rustfs/d3 --tls
   pg addon install garage --name store            # single-node, plaintext HTTP; front with nginx for TLS
   pg addon install seaweedfs --name store --tls    # single-node "weed mini", native HTTPS S3
+  pg addon install seaweedfs --name store --drive /mnt/sw/d1 --drive /mnt/sw/d2   # multi-disk volume server (one dir per disk)
   pg addon install seaweedfs --name store --cluster lab --advertise-host 10.0.0.11 --replication 001 --root-user <SW-access-key> --root-password <secret-key> --dsn "postgres://admin:<pw>@10.0.0.11:35432/seaweed_store" --peer 10.0.0.11:8400 --peer 10.0.0.12:8400 --peer 10.0.0.13:8400
                                      # run the SAME command on .12 and .13, changing only --advertise-host (creds and --dsn stay identical)
   pg addon install redis
@@ -658,7 +659,7 @@ func init() {
 	addonInstallCmd.Flags().String("root-user", "", "MinIO/silo/rustfs root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config). For garage this is the seeded access key: omit it to auto-generate a GK-prefixed key (garage has no \"admin\" user). For seaweedfs it is the s3.json identity access key: omit it to auto-generate an SW-prefixed key on a SINGLE-NODE install only — under --cluster both it and --root-password are REQUIRED, since each node reads only its own s3.json and must present the identical identity")
 	addonInstallCmd.Flags().String("root-password", "", "MinIO/silo/rustfs root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand). For garage this is the seeded secret key; for seaweedfs the s3.json identity secret key — required (with --root-user) on every node of a --cluster install")
 	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO/silo/rustfs distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (MinIO/silo: path is the in-container export dir — /data with a plain --data-dir node, or /data1../dataN on a --drive node (MNMD); repeat for every node's every drive. rustfs: one endpoint per node — scheme://host:port, no path; it has no multi-node single-drive mode so --drive is required, and it derives the /data/rustfs0../rustfsN suffix itself. The list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
-	addonInstallCmd.Flags().StringSlice("drive", nil, "MinIO/silo/rustfs multi-drive host dir(s), each on its own disk — e.g. --drive /mnt/minio/disk1 --drive /mnt/minio/disk2 ... (repeat for each drive; alone this is single-node multi-drive (SNMD); combined with --endpoint it is one node of a multi-node multi-drive cluster (MNMD), and each endpoint addresses this node's drive slots (/data1../dataN for MinIO/silo, /data/rustfs0../rustfsN for rustfs). Mutually exclusive with --data-dir. MinIO/silo reject a drive sharing the root device; rustfs hard-requires every drive on its own physical device)")
+	addonInstallCmd.Flags().StringSlice("drive", nil, "MinIO/silo/rustfs/seaweedfs multi-drive host dir(s), each on its own disk — e.g. --drive /mnt/minio/disk1 --drive /mnt/minio/disk2 ... (repeat for each drive; for MinIO/silo alone this is single-node multi-drive (SNMD), combined with --endpoint it is one node of a multi-node multi-drive cluster (MNMD), and each endpoint addresses this node's drive slots (/data1../dataN for MinIO/silo, /data/rustfs0../rustfsN for rustfs). For seaweedfs it turns one node's volume server into a multi-disk one: each drive is bind-mounted at /data1../dataN and weed's -dir lists them all comma-joined (volumes spread across the disks, no erasure-coding between them); works on a single node and per-node in a --cluster. Mutually exclusive with --data-dir. MinIO/silo reject a drive sharing the root device; rustfs hard-requires every drive on its own physical device; seaweedfs only warns)")
 	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo/rustfs/seaweedfs: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo|rustfs>/<name>/, or the addon dir for seaweedfs; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Seaweedfs serves TLS natively: the S3 port becomes HTTPS-only (cleartext listener off). Changing this needs --force to recreate. NOT for garage: it has no native TLS (rejects --tls); front it with the nginx addon")
 	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo/rustfs: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt for MinIO/silo, rustfs_cert.pem for rustfs, cert.pem for seaweedfs). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
 	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo/rustfs: private key for --tls-cert (PEM; mounted read-only as private.key for MinIO/silo, rustfs_key.pem for rustfs, key.pem for seaweedfs). Must pair with the cert; both are required to enable BYO TLS")
@@ -4467,7 +4468,14 @@ func runAddonList(showPassword bool) error {
 			fmt.Printf("    Listen:      %s\n", sc.Listen)
 			fmt.Printf("    Ports:       master=%d volume=%d filer=%d s3=%d\n", sc.Port, sc.VolumePort, sc.FilerPort, sc.S3Port)
 			fmt.Printf("    S3 URL:      %s\n", s3url)
-			fmt.Printf("    Data:        %s\n", sm.DataDir(&sc))
+			if len(sc.Drives) > 0 {
+				fmt.Printf("    Drives:      %d (multi-disk volume server)\n", len(sc.Drives))
+				for i, d := range sc.Drives {
+					fmt.Printf("      - /data%d <- %s\n", i+1, d)
+				}
+			} else {
+				fmt.Printf("    Data:        %s\n", sm.DataDir(&sc))
+			}
 			fmt.Printf("    Access key:  %s\n", sc.RootUser)
 			if showPassword && sc.RootPassword != "" {
 				fmt.Printf("    Secret key:  %s\n", sc.RootPassword)
