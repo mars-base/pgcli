@@ -211,7 +211,10 @@ IMAGES := \
 	docker.io/library/redis:7.4.11 \
 	docker.io/library/redis:8.10.2 \
 	docker.io/dpage/pgadmin4:9.18 \
-	docker.io/library/nginx:1.27-alpine
+	docker.io/library/nginx:1.27-alpine \
+	docker.io/dxflrs/garage:v2.4.1 \
+	docker.io/chrislusf/seaweedfs:4.48_large_disk \
+	docker.io/grafana/grafana:13.2.4
 
 container-images-export:
 	@mkdir -p images

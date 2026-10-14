@@ -21,13 +21,16 @@ pgcli 使用的容器镜像及其默认 tag。
 | `docker.io/edoburu/pgbouncer` | `v1.25.2-p0` | PostgreSQL 连接池 | `DefaultPgBouncerImageTag` |
 | `docker.io/postgrest/postgrest` | `v16.3` | PostgREST（REST API over PostgreSQL） | `DefaultPostgrestImageTag` |
 | `docker.io/library/haproxy` | `3.2.23-alpine` | HTTP/TCP 负载均衡 | `DefaultHAProxyImageTag` |
-| `quay.io/coreos/etcd` | `v3.5.30` | 分布式键值存储（Patroni DCS） | `etcdctl.go:69` |
-| `ghcr.io/pgdogdev/pgdog` | `v0.1.57` | PostgreSQL 代理 / 连接池 | `config.go:204` |
+| `quay.io/coreos/etcd` | `v3.5.30` | 分布式键值存储（Patroni DCS） | `config.go:1953`（default 内联，`etcdctl.go:69` 亦引用） |
+| `ghcr.io/pgdogdev/pgdog` | `v0.1.57` | PostgreSQL 代理 / 连接池 | `config.go:1967` |
 | `docker.io/library/redis` | `7.4.11` | Redis 大版本 7（`--version 7`），纯上游镜像无 wrapper | `redisMajorImages["7"]` |
 | `docker.io/library/redis` | `8.10.2` | Redis 大版本 8（默认，`--version 8`），纯上游镜像无 wrapper | `redisMajorImages["8"]` |
 | `ghcr.io/mars-base/pgcli/predixy` | `7.0.1-alpine` | Predixy（Redis 集群代理），建立在上游 free edition 二进制之上的 wrapper，单架构 amd64 | `DefaultPredixyImageTag` |
 | `docker.io/dpage/pgadmin4` | `9.18` | pgAdmin 4（PostgreSQL 官方 Web 管理界面），纯上游镜像无 wrapper，双架构 manifest list | `DefaultPgAdminImageTag` |
 | `docker.io/library/nginx` | `1.27-alpine` | nginx HTTP 反向代理，纯上游镜像无 wrapper，双架构 manifest list | `DefaultNginxImageTag` |
+| `docker.io/dxflrs/garage` | `v2.4.1` | Garage（Deuxfleurs 的 Rust S3 存储，面向自建/异地集群），纯上游镜像无 wrapper，`FROM scratch` 无 shell | `DefaultGarageImageTag` |
+| `docker.io/chrislusf/seaweedfs` | `4.48_large_disk` | SeaweedFS（Go 对象存储，volume + placement-code 复制模型），纯上游镜像无 wrapper，`_large_disk` 变体 | `DefaultSeaweedfsImageTag` |
+| `docker.io/grafana/grafana` | `13.2.4` | Grafana（开源可观测性面板），纯上游官方镜像无 wrapper；自 12.4.0 起 `grafana-oss` 仓库冻结，OSS 构建就发在这个仓库里；默认 Alpine base，双架构 manifest list | `config.go:574`（`DefaultGrafanaImageTag`） |
 
 ## 镜像导出
 
@@ -92,6 +95,10 @@ podman save -o "$TARGET/pgadmin4_9.18.tar" docker.io/dpage/pgadmin4:9.18
 # nginx 上游镜像与 redis 一样是双架构 manifest list，先按 amd64 pull 再 save
 podman pull --platform linux/amd64 docker.io/library/nginx:1.27-alpine
 podman save -o "$TARGET/nginx_1.27-alpine.tar" docker.io/library/nginx:1.27-alpine
+
+# grafana 上游镜像同样是双架构 manifest list，先按 amd64 pull 再 save
+podman pull --platform linux/amd64 docker.io/grafana/grafana:13.2.4
+podman save -o "$TARGET/grafana_13.2.4.tar" docker.io/grafana/grafana:13.2.4
 ```
 
 ### rustfs（双架构 manifest 不能直接 save）
@@ -155,8 +162,26 @@ done
 - **nginx**：纯上游 `docker.io/library/nginx`，无 wrapper；基于 Alpine Linux 减小体积；
   pin 到 `1.27-alpine`（双架构 manifest list，amd64 + arm64——Apple Silicon 的
   podman machine 可直接跑）
+- **garage**：纯上游 `docker.io/dxflrs/garage`，无 wrapper（不同于 rustfs——
+  Garage 容器内以 root 跑，bind mount 属主天然可写，不需要 rustfs 那套
+  uid-10001 属主机制）；pin 到 stable 线 `v2.4.1`；镜像 `FROM scratch`、无
+  shell，`/garage` 二进制既是 daemon 也是控制 CLI；配置是渲染的 TOML
+  文件而非 env，只提供明文 HTTP 无原生 TLS（需要 HTTPS 用 nginx 前置）
+- **seaweedfs**：纯上游 `docker.io/chrislusf/seaweedfs`，无 wrapper；pin 到
+  `4.48_large_disk`——`_large_disk` 变体以 `-tags large_disk` 构建（更高的
+  每 volume fd/inode 上限）；Alpine base、以 root 跑，`/usr/bin/weed` 既是
+  daemon（mini/server）也是控制 CLI（shell），自带原生 S3 TLS
+- **grafana**：纯上游官方 `docker.io/grafana/grafana`，无 wrapper。注意自
+  release 12.4.0 起 `grafana/grafana-oss` 仓库**已冻结**——OSS 构建就发布在
+  `grafana/grafana` 里（两仓库镜像内容相同），pgcli 拉的就是它；无后缀 tag 即
+  Alpine base（官方推荐变体），`-ubuntu`/`-distroless`/`-slim` 变体存在但 pgcli
+  从不选用；pin 到 stable 线 `13.2.4`（2026-10-13 在 Docker Hub 核实），双架构
+  manifest list。与 pgadmin 不同：镜像固化 `USER 472`（root 组 gid 0）、
+  `run.sh` 既不 chown 也不降权，所以 pgcli 在创建容器前于宿主 chown 数据目录属主
+  （rootless 下经 `podman unshare chown 472:0`，rootful+root 下直接 `chown`）
 - **pgbouncer** / **postgrest** / **haproxy** / **etcd** / **pgdog**：上游官方或社区维护的稳定版本
 
 ---
 
-**最后更新**：2026-10-10（新增 nginx 镜像与插件）
+**最后更新**：2026-10-14（新增 grafana 插件镜像；此前 garage 与 seaweedfs
+两插件分别于 2026-10-12 / 2026-10-14 合入时补录）
