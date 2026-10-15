@@ -30,3 +30,19 @@ func TestAddonPasswordsExcludesPrometheus(t *testing.T) {
 		t.Error("prometheus:p1 unexpectedly present in addonPasswords")
 	}
 }
+
+// The two Prometheus Alertmanager-wiring flags must be repeatable StringArrays on
+// the shared install command — a migration to String/Slice silently changes
+// semantics (String drops repeats, Slice splits on commas, which would break
+// list-valued rule paths).
+func TestPrometheusWiringFlagsRegistered(t *testing.T) {
+	for _, name := range []string{"alertmanager-url", "rule-file"} {
+		f := addonInstallCmd.Flags().Lookup(name)
+		if f == nil {
+			t.Fatalf("--%s is not registered", name)
+		}
+		if f.Value.Type() != "stringArray" {
+			t.Errorf("--%s is %s, want stringArray (repeatable, no comma splitting)", name, f.Value.Type())
+		}
+	}
+}

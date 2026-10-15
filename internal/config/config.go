@@ -1400,6 +1400,21 @@ type PrometheusConfig struct {
 	Retention      string   `yaml:"retention,omitempty"`       // --storage.tsdb.retention.time, default 15d
 	Scrape         []string `yaml:"scrape,omitempty"`          // JOB=host:port[,host:port...] scrape specs, each rendering one static_configs job in the rendered prometheus.yml (render-mode only)
 	ScrapeInterval string   `yaml:"scrape_interval,omitempty"` // global scrape_interval in the rendered prometheus.yml, default 15s (render-mode only)
+	// Alertmanager lists the Alertmanager instances this Prometheus forwards fired
+	// alerts to — bare host[:port] or http(s)://host[:port][/path] URLs, rendered
+	// into an `alerting:` section (render-mode only; mutually exclusive with
+	// ConfFile, which owns the whole file). Setting it also folds one
+	// `alertmanager` scrape job over the same targets into the rendered config so
+	// Alertmanager's own /metrics is watched.
+	Alertmanager []string `yaml:"alertmanager,omitempty"`
+	// RuleFiles lists host paths to Prometheus rule files (*.rules.yml with a
+	// top-level `groups:` block). pgcli copies each into <base>/addon/prometheus/
+	// <name>/rules and mounts that dir read-only at /etc/prometheus/rules; the
+	// rendered prometheus.yml then references the copies via rule_files. Valid
+	// alongside ConfFile — the dir is copied in both modes, but only the rendered
+	// config wires it up automatically; a conf-file owner decides itself whether
+	// to point its own rule_files at /etc/prometheus/rules.
+	RuleFiles []string `yaml:"rule_files,omitempty"`
 	ConfFile       string   `yaml:"conf_file,omitempty"`       // optional host path to the user's own prometheus.yml; when set pgcli skips rendering and copies this file into the managed path to mount (mutually exclusive with Scrape/ScrapeInterval)
 	// Autostart brings this container up on host boot via the boot service
 	// (pg autostart enable --prometheus). Start-only: it starts the existing
@@ -2482,8 +2497,9 @@ func (c *Config) ApplyDefaults() {
 	// the addon page). Retention and ScrapeInterval are deterministic literals
 	// (not secrets), so filling them here is safe; they only take effect in
 	// rendered-config mode for ScrapeInterval, while Retention is a CLI flag and
-	// applies even alongside --conf-file. Scrape (extra targets) is never
-	// defaulted — an empty list still renders the always-present self job.
+	// applies even alongside --conf-file. Scrape (extra targets), Alertmanager
+	// (forwarding URLs) and RuleFiles are never defaulted — empty means "render
+	// without an alerting section / without rule_files", the same contract.
 	for name, addon := range c.Addons.Prometheus {
 		if addon.Name == "" {
 			addon.Name = name

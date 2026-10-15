@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -120,6 +121,12 @@ func (m *PrometheusManager) ConfigPath(pc *config.PrometheusConfig) string {
 	return filepath.Join(prometheusConfigDir(m.dataDir, pc.Name), "prometheus.yml")
 }
 
+// RulesDir is the host dir holding pgcli's copies of the instance's --rule-file
+// originals; it is bind-mounted read-only at /etc/prometheus/rules.
+func (m *PrometheusManager) RulesDir(pc *config.PrometheusConfig) string {
+	return filepath.Join(prometheusConfigDir(m.dataDir, pc.Name), "rules")
+}
+
 // renderPrometheusConfig builds the prometheus.yml text for a rendered-mode
 // instance. Pure function of the config so it can be unit-tested without
 // podman. It always emits a self-scrape job (so the server monitors itself and
@@ -128,6 +135,12 @@ func (m *PrometheusManager) ConfigPath(pc *config.PrometheusConfig) string {
 // them into one job per name carrying every listed target (the natural shape for
 // a fleet of identical exporters). Retention is NOT rendered here — it is a CLI
 // flag (--storage.tsdb.retention.time), see prometheusArgsAndEnv.
+//
+// Alertmanager, when set, folds in two things: an `alerting:` section listing
+// the normalized host:port targets (Prometheus pushes fired alerts there), and
+// a matching `alertmanager` scrape job so Alertmanager's own /metrics is watched
+// too. RuleFiles, when set, render a `rule_files:` section pointing at the
+// read-only managed rules dir pgcli mounts at /etc/prometheus/rules.
 func renderPrometheusConfig(pc *config.PrometheusConfig) (string, error) {
 	interval := pc.ScrapeInterval
 	if interval == "" {
@@ -135,6 +148,14 @@ func renderPrometheusConfig(pc *config.PrometheusConfig) (string, error) {
 	}
 
 	jobs, err := groupScrapeSpecs(pc.Scrape)
+	if err != nil {
+		return "", err
+	}
+	amTargets, amScheme, err := AlertmanagerTargets(pc.Alertmanager)
+	if err != nil {
+		return "", err
+	}
+	ruleNames, err := normalizeRuleNames(pc.RuleFiles)
 	if err != nil {
 		return "", err
 	}
@@ -146,8 +167,28 @@ func renderPrometheusConfig(pc *config.PrometheusConfig) (string, error) {
 	b.WriteString("\n")
 	b.WriteString("global:\n")
 	fmt.Fprintf(&b, "  scrape_interval: %s\n", interval)
-	b.WriteString("\n")
-	b.WriteString("scrape_configs:\n")
+	if len(ruleNames) > 0 {
+		b.WriteString("\nrule_files:\n")
+		for _, name := range ruleNames {
+			fmt.Fprintf(&b, "  - %q\n", prometheusContainerRulesDir+"/"+name)
+		}
+	}
+	if len(amTargets) > 0 {
+		b.WriteString("\nalerting:\n")
+		b.WriteString("  alertmanagers:\n")
+		// One list entry carrying every target: alertmanagers entries are
+		// load-balanced/split across by Prometheus only at the replica level, so a
+		// single static_configs with N targets is the natural "send to all of
+		// these" shape (mirrors the operator files in the wild).
+		if amScheme == "https" {
+			b.WriteString("    - scheme: https\n")
+			b.WriteString("      static_configs:\n")
+		} else {
+			b.WriteString("    - static_configs:\n")
+		}
+		fmt.Fprintf(&b, "        - targets: [%s]\n", quoteTargets(amTargets))
+	}
+	b.WriteString("\nscrape_configs:\n")
 	// Self job: scrape this server's own /metrics. Host networking on Linux makes
 	// localhost:<port> the host port directly; under the macOS bridge it is the
 	// container's own listener — either way a self-scrape always resolves. It is
@@ -161,6 +202,16 @@ func renderPrometheusConfig(pc *config.PrometheusConfig) (string, error) {
 		b.WriteString("    static_configs:\n")
 		b.WriteString("      - targets: [" + quoteTargets(j.Targets) + "]\n")
 	}
+	if len(amTargets) > 0 {
+		// Derived from the same --alertmanager-url list as the alerting section
+		// above, so watching Alertmanager is never a separate opt-in.
+		b.WriteString("  - job_name: alertmanager\n")
+		if amScheme == "https" {
+			b.WriteString("    scheme: https\n")
+		}
+		b.WriteString("    static_configs:\n")
+		fmt.Fprintf(&b, "      - targets: [%s]\n", quoteTargets(amTargets))
+	}
 	return b.String(), nil
 }
 
@@ -169,6 +220,87 @@ func renderPrometheusConfig(pc *config.PrometheusConfig) (string, error) {
 type scrapeJob struct {
 	Name    string
 	Targets []string
+}
+
+// prometheusContainerRulesDir is where pgcli bind-mounts the per-instance rules
+// dir (<managed config dir>/rules, holding copies of the operator's --rule-file
+// originals). It is mounted only when the instance has rule files.
+const prometheusContainerRulesDir = "/etc/prometheus/rules"
+
+// AlertmanagerTargets validates and normalizes the --alertmanager-url list into
+// scrape/forward targets: each entry is a bare host[:port] or an
+// http(s)://host[:port][/path] URL, and the portless form gets Alertmanager's
+// conventional 9093. Duplicate entries collapse. The second return value is the
+// web scheme — "http" or "https"; a bare entry is the http default. Mixed
+// schemes are rejected because Prometheus's `scheme:` keys the alerting block
+// and a scrape job as a whole, so one rendered config cannot serve both. HTTPS
+// carries into the render as `scheme: https` but without TLS knobs (CA,
+// skip-verify), which need --conf-file. ValidateAlertmanagerURLs runs the same
+// check before the CLI writes anything.
+func AlertmanagerTargets(urls []string) ([]string, string, error) {
+	var targets []string
+	scheme := ""
+	for _, u := range urls {
+		target, s := u, "http"
+		if strings.Contains(u, "://") {
+			parsed, err := url.Parse(u)
+			if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+				return nil, "", fmt.Errorf("alertmanager URL %q: want host[:port] or http(s)://host[:port][/path]", u)
+			}
+			target, s = parsed.Host, parsed.Scheme
+		} else if u == "" || strings.ContainsAny(u, " \t/\\\\") {
+			return nil, "", fmt.Errorf("alertmanager URL %q: want host[:port] or http(s)://host[:port][/path]", u)
+		}
+		if host, _, _ := strings.Cut(target, ":"); host == "" {
+			return nil, "", fmt.Errorf("alertmanager URL %q: no host", u)
+		}
+		if _, port, _ := strings.Cut(target, ":"); port == "" {
+			target += ":9093" // Alertmanager's conventional web port
+		}
+		if scheme == "" {
+			scheme = s
+		} else if s != scheme {
+			return nil, "", fmt.Errorf("alertmanager URLs mix http and https (%q vs %q) — one rendered config carries a single scheme, give them all the same one", scheme, s)
+		}
+		if !slices.Contains(targets, target) {
+			targets = append(targets, target)
+		}
+	}
+	if scheme == "" {
+		scheme = "http"
+	}
+	return targets, scheme, nil
+}
+
+// ValidateAlertmanagerURLs checks every --alertmanager-url entry (bare
+// host[:port] or http/https URL) WITHOUT probing connectivity — Prometheus
+// discovers dead alertmanagers through its own target health at alert time. A
+// malformed entry returns an error naming it; the CLI treats that as
+// abort-before-write.
+func ValidateAlertmanagerURLs(urls []string) error {
+	_, _, err := AlertmanagerTargets(urls)
+	return err
+}
+
+// normalizeRuleNames maps each --rule-file host path to its name inside the
+// managed rules dir (a flat copy, so the basename is the name). Two source
+// files sharing a basename would silently clobber each other, so the pair is
+// rejected before anything is written; the returned slice keeps input order.
+func normalizeRuleNames(paths []string) ([]string, error) {
+	seen := make([]string, 0, len(paths))
+	first := map[string]string{} // basename → first source path claiming it
+	for _, p := range paths {
+		base := filepath.Base(strings.TrimRight(p, string(filepath.Separator)))
+		if p == "" || base == "." || base == ".." || base == string(filepath.Separator) {
+			return nil, fmt.Errorf("rule file %q: cannot derive a file name from it", p)
+		}
+		if earlier, dup := first[base]; dup {
+			return nil, fmt.Errorf("rule files %q and %q share the name %q — the managed copy would overwrite one with the other; rename one source file and retry", earlier, p, base)
+		}
+		first[base] = p
+		seen = append(seen, base)
+	}
+	return seen, nil
 }
 
 // groupScrapeSpecs parses each "JOB=host:port[,host:port...]" spec and folds the
@@ -354,6 +486,12 @@ func ProbeScrapeTargets(scrape []string) (unreachable []string, err error) {
 // propagate. The file carries no secrets (only scrape targets and intervals),
 // so 0644 — matching nginx/haproxy and keeping it readable by the container's
 // nobody uid under rootless podman's mapping.
+//
+// RuleFiles are copied into <dir>/rules in BOTH modes (same inode-pinning
+// rationale, and the mount lives at the fixed /etc/prometheus/rules): the
+// rendered config references the copies automatically, and in conf-file mode
+// the operator's file decides whether the dir is used at all — a stale glob
+// is why the copy is pruned to exactly the current set on every write.
 func (m *PrometheusManager) WriteConfig(pc *config.PrometheusConfig) (string, error) {
 	dir := prometheusConfigDir(m.dataDir, pc.Name)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -361,6 +499,23 @@ func (m *PrometheusManager) WriteConfig(pc *config.PrometheusConfig) (string, er
 	}
 	path := filepath.Join(dir, "prometheus.yml")
 
+	// Read everything first so a bad source fails before any managed file moves.
+	ruleNames, err := normalizeRuleNames(pc.RuleFiles)
+	if err != nil {
+		return "", err
+	}
+	ruleData := make([][]byte, len(pc.RuleFiles))
+	for i, src := range pc.RuleFiles {
+		data, err := os.ReadFile(src)
+		if err != nil {
+			return "", fmt.Errorf("reading rule file %s: %w", src, err)
+		}
+		if len(data) == 0 {
+			return "", fmt.Errorf("rule file %s is empty", src)
+		}
+		ruleData[i] = data
+	}
+	var confData []byte
 	if pc.ConfFile != "" {
 		data, err := os.ReadFile(pc.ConfFile)
 		if err != nil {
@@ -369,7 +524,15 @@ func (m *PrometheusManager) WriteConfig(pc *config.PrometheusConfig) (string, er
 		if len(data) == 0 {
 			return "", fmt.Errorf("user conf file %s is empty", pc.ConfFile)
 		}
-		if err := os.WriteFile(path, data, 0644); err != nil {
+		confData = data
+	}
+
+	if err := m.writeRulesDir(pc, ruleNames, ruleData); err != nil {
+		return "", err
+	}
+
+	if pc.ConfFile != "" {
+		if err := os.WriteFile(path, confData, 0644); err != nil {
 			return "", fmt.Errorf("writing prometheus.yml: %w", err)
 		}
 		return path, nil
@@ -383,6 +546,44 @@ func (m *PrometheusManager) WriteConfig(pc *config.PrometheusConfig) (string, er
 		return "", fmt.Errorf("writing prometheus.yml: %w", err)
 	}
 	return path, nil
+}
+
+// writeRulesDir materializes the managed rules dir as EXACTLY ruleNames (paired
+// by index with the already-read ruleData): write/overwrite each copy 0644,
+// delete anything else in the dir. An empty set removes the dir outright —
+// nothing mounts it then, and leaving a stale dir around would resurrect old
+// rules the moment the operator re-adds --rule-file with a glob.
+func (m *PrometheusManager) writeRulesDir(pc *config.PrometheusConfig, ruleNames []string, ruleData [][]byte) error {
+	rulesDir := m.RulesDir(pc)
+	if len(ruleNames) == 0 {
+		if err := os.RemoveAll(rulesDir); err != nil {
+			return fmt.Errorf("removing stale rules dir %s: %w", rulesDir, err)
+		}
+		return nil
+	}
+	if err := os.MkdirAll(rulesDir, 0755); err != nil {
+		return fmt.Errorf("creating prometheus rules dir: %w", err)
+	}
+	keep := make(map[string]bool, len(ruleNames))
+	for i, name := range ruleNames {
+		keep[name] = true
+		if err := os.WriteFile(filepath.Join(rulesDir, name), ruleData[i], 0644); err != nil {
+			return fmt.Errorf("writing rule file %s: %w", name, err)
+		}
+	}
+	entries, err := os.ReadDir(rulesDir)
+	if err != nil {
+		return fmt.Errorf("listing prometheus rules dir: %w", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || keep[e.Name()] {
+			continue
+		}
+		if err := os.Remove(filepath.Join(rulesDir, e.Name())); err != nil {
+			return fmt.Errorf("removing stale rule copy %s: %w", e.Name(), err)
+		}
+	}
+	return nil
 }
 
 // EnsureImage pulls the Prometheus image if it is not present locally (pull-only:
@@ -488,8 +689,11 @@ func (m *PrometheusManager) StartContainer(pc *config.PrometheusConfig) error {
 // is unit-testable:
 //   - NO --user flag: the image's baked nobody (65534) is what must run — the
 //     data dir arrives pre-chowned by createContainer (see PrometheusManager).
-//   - Two mounts: the writable data dir at /prometheus (:z) and the rendered/
-//     copied config file read-only at /etc/prometheus/prometheus.yml (:ro,z).
+//   - Two mounts, plus a third when the instance has rule files: the writable
+//     data dir at /prometheus (:z), the rendered/copied config file read-only at
+//     /etc/prometheus/prometheus.yml (:ro,z), and the managed rules dir read-only
+//     at /etc/prometheus/rules (:ro,z). A directory mount (not a single-file pin)
+//     is fine here because pgcli fully re-materializes that dir on every write.
 //   - Everything after ImageTag is the `prometheus` binary's OWN flags — podman
 //     stops parsing container flags at the image name, so these reach the
 //     process. `--config.file` names the in-container mount path;
@@ -499,9 +703,10 @@ func (m *PrometheusManager) StartContainer(pc *config.PrometheusConfig) error {
 //     when set. `--web.enable-lifecycle` is deliberately ABSENT: reload happens
 //     via SIGHUP, so the unauthenticated HTTP reload endpoint is never exposed.
 //
-// dataDir and configPath are the caller's already-resolved host paths, so this
-// stays a pure function of its arguments.
-func prometheusArgsAndEnv(pc *config.PrometheusConfig, bridge bool, network, dataDir, configPath string) []string {
+// dataDir, configPath and rulesDir are the caller's already-resolved host paths,
+// so this stays a pure function of its arguments. rulesDir is mounted only when
+// pc.RuleFiles is non-empty (WriteConfig keeps that dir in lockstep with the list).
+func prometheusArgsAndEnv(pc *config.PrometheusConfig, bridge bool, network, dataDir, configPath, rulesDir string) []string {
 	args := []string{"run", "-d", "--name", pc.ContainerName}
 	args = append(args, netFlags(bridge, network, pc.HostPort)...)
 	args = append(args,
@@ -510,6 +715,11 @@ func prometheusArgsAndEnv(pc *config.PrometheusConfig, bridge bool, network, dat
 		"-v", fmt.Sprintf("%s:%s:z", hostMountPath(dataDir), prometheusContainerDataDir),
 		"-v", fmt.Sprintf("%s:%s:ro,z", hostMountPath(configPath), prometheusContainerConfigFile),
 	)
+	if len(pc.RuleFiles) > 0 {
+		args = append(args,
+			"-v", fmt.Sprintf("%s:%s:ro,z", hostMountPath(rulesDir), prometheusContainerRulesDir),
+		)
+	}
 	args = append(args, pc.ImageTag)
 	args = append(args,
 		"--config.file="+prometheusContainerConfigFile,
@@ -539,7 +749,7 @@ func (m *PrometheusManager) createContainer(pc *config.PrometheusConfig) error {
 		return err
 	}
 
-	args := prometheusArgsAndEnv(pc, m.bridge, m.cfg.Podman.Network, dataDir, configPath)
+	args := prometheusArgsAndEnv(pc, m.bridge, m.cfg.Podman.Network, dataDir, configPath, m.RulesDir(pc))
 	slog.Debug("podman prometheus run", "args", args)
 	if _, err := m.run(args...); err != nil {
 		return fmt.Errorf("creating Prometheus container: %w", err)
@@ -633,6 +843,12 @@ func (m *PrometheusManager) Remove(pc *config.PrometheusConfig, cleanData bool) 
 		if err := os.Remove(cfgPath); err != nil && !os.IsNotExist(err) {
 			fmt.Printf("  [!] Warning: removing config file %s: %v\n", cfgPath, err)
 		}
+	}
+	// So are the rules/ copies (--rule-file originals live wherever the operator
+	// put them and are never touched) — and unlike the data dir they carry no
+	// state to revive, so they go away even without cleanData.
+	if err := os.RemoveAll(m.RulesDir(pc)); err != nil {
+		fmt.Printf("  [!] Warning: removing rules dir: %v\n", err)
 	}
 
 	dataDir := m.resolveDataDir(pc)

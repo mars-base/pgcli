@@ -6,12 +6,13 @@ weight: 56
 
 `pg addon install alertmanager` runs [Alertmanager](https://prometheus.io/docs/alerting/latest/alertmanager/) — the alert deduplication, grouping, routing and notification layer that sits downstream of Prometheus — as a managed container from the official `docker.io/prom/alertmanager` image. Like Prometheus and Grafana it is a top-level addon: it fronts no single PostgreSQL instance, so it is not attached to any one of them. Prometheus and Alertmanager are the natural pair — Prometheus fires alerts, Alertmanager decides who gets notified and how — and this addon is Prometheus's near-exact twin in shape (single container, host networking on Linux, one web port from its own pool, persistent data dir, autostart, logs, rendered config file + trailing CLI flags, SIGHUP reload, no web login).
 
-> **This version does NOT wire the two together.** `pg addon install alertmanager` does
-> not inject an `alerting:` section into any `prometheus.yml`, and `pg addon install
-> prometheus` knows nothing about Alertmanager. The two run side by side; to actually
-> route Prometheus alerts here, point Prometheus at this instance yourself (or use
-> `--conf-file` on either side for a real routing tree). A future version may link them
-> up.
+> **The wiring lives on the Prometheus side.** `pg addon install alertmanager` does
+> not touch any `prometheus.yml` — and it does not need to: Prometheus points at
+> this instance itself, with
+> `pg addon install prometheus --alertmanager-url <host:port of this instance>`,
+> which injects the `alerting:` section (and a scrape job watching this instance's
+> `/metrics`). On a hand-written Prometheus config (`--conf-file`), write the
+> `alerting:` block yourself. Either way, once pointed here, alerts flow.
 
 > **There is NO web login/password — and the stakes are higher than Prometheus's.**
 > Alertmanager ships **no authentication at all**, and its unauthenticated API is
@@ -313,8 +314,8 @@ This flags the instance in `pg.yaml` and installs/refreshes a boot service (a sy
 boot-time start only brings the container up — reading the managed `alertmanager.yml`
 already on disk, and the data dir was already chowned at create time, so it needs no
 host privileges beyond podman itself. In the boot order Alertmanager starts right after
-Prometheus and before nginx — the natural companion to the collector above, even though
-v1 does not wire the two together. See [Autostart]({{< relref "../autostart" >}}) for
+Prometheus and before nginx — the natural companion to the collector above, which is
+also where the two get linked (`pg addon install prometheus --alertmanager-url …`). See [Autostart]({{< relref "../autostart" >}}) for
 the full mechanism, status and disabling.
 
 ## Remove
@@ -372,10 +373,12 @@ pg logs addon alertmanager -n 200     # last 200 lines (also -i / --tail)
 
 ## Known limitations
 
-- **Not wired to Prometheus.** This addon neither injects an `alerting:` section into a
-  `prometheus.yml` nor reads one from Prometheus; the two are independent (see the note
-  at the top). Real Prometheus→Alertmanager routing is left to you (`--conf-file`) or a
-  future version.
+- **One-sided wiring.** This addon neither injects an `alerting:` section into a
+  `prometheus.yml` nor reads one from Prometheus — it only receives whatever is
+  pushed to its API. The linking is done from the Prometheus side
+  (`pg addon install prometheus --alertmanager-url …`, render mode; in
+  `--conf-file` mode write the `alerting:` block yourself). An
+  `alertmanager`-aware `prometheus.yml` is never inspected from here.
 - **No authentication** — and its consequences are sharper than Prometheus's. The API can
   create silences (mute on-call) and reload config, and `POST /-/reload` cannot be
   disabled in the image (pgcli just doesn't use it). The only protection for a `0.0.0.0`

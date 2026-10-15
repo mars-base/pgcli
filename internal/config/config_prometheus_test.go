@@ -45,6 +45,14 @@ func TestPrometheusDefaults(t *testing.T) {
 	if pc.ConfFile != "" {
 		t.Errorf("conf file = %q, want empty (opt-in via --conf-file)", pc.ConfFile)
 	}
+	// Alertmanager and RuleFiles are never defaulted either — see
+	// TestPrometheusAlertmanagerRuleFilesNotDefaulted.
+	if len(pc.Alertmanager) != 0 {
+		t.Errorf("alertmanager = %v, want empty", pc.Alertmanager)
+	}
+	if len(pc.RuleFiles) != 0 {
+		t.Errorf("rule files = %v, want empty", pc.RuleFiles)
+	}
 	if pc.HostPort < cfg.PrometheusStartPort {
 		t.Errorf("port %d below base %d", pc.HostPort, cfg.PrometheusStartPort)
 	}
@@ -100,6 +108,8 @@ func TestPrometheusSaveLoadRoundTrip(t *testing.T) {
 			Retention:      "30d",
 			Scrape:         []string{"postgres-exporter=127.0.0.1:9187", "node-exporter=10.0.0.5:9100,10.0.0.6:9100"},
 			ScrapeInterval: "30s",
+			Alertmanager:   []string{"http://127.0.0.1:9093/", "http://am2:9093/"},
+			RuleFiles:      []string{"/srv/rules/general.rules.yml", "/srv/rules/disk.rules.yml"},
 			ConfFile:       "/etc/prometheus/my.yml",
 			Autostart:      true,
 		},
@@ -137,6 +147,12 @@ func TestPrometheusSaveLoadRoundTrip(t *testing.T) {
 	if pc.ConfFile != "/etc/prometheus/my.yml" {
 		t.Errorf("conf file not persisted: %q", pc.ConfFile)
 	}
+	if len(pc.Alertmanager) != 2 || pc.Alertmanager[1] != "http://am2:9093/" {
+		t.Errorf("alertmanager urls not persisted correctly: %v", pc.Alertmanager)
+	}
+	if len(pc.RuleFiles) != 2 || pc.RuleFiles[0] != "/srv/rules/general.rules.yml" {
+		t.Errorf("rule files not persisted correctly: %v", pc.RuleFiles)
+	}
 	if !pc.Autostart {
 		t.Error("autostart not persisted")
 	}
@@ -165,5 +181,28 @@ func TestPrometheusSaveLoadRoundTrip(t *testing.T) {
 	}
 	if again.ConfFile != "/etc/prometheus/my.yml" {
 		t.Errorf("ApplyDefaults dropped explicit conf file: %q", again.ConfFile)
+	}
+	if len(again.Alertmanager) != 2 {
+		t.Errorf("ApplyDefaults dropped explicit alertmanager urls: %v", again.Alertmanager)
+	}
+	if len(again.RuleFiles) != 2 {
+		t.Errorf("ApplyDefaults dropped explicit rule files: %v", again.RuleFiles)
+	}
+}
+
+// Alertmanager and RuleFiles must NEVER be conjured by ApplyDefaults — an empty
+// Alertmanager list means "render without an alerting: section", an empty
+// RuleFiles list means "render without rule_files:". Defaulting either would
+// silently wire a Prometheus to a target that does not exist.
+func TestPrometheusAlertmanagerRuleFilesNotDefaulted(t *testing.T) {
+	cfg := Default()
+	cfg.Addons.Prometheus = map[string]PrometheusConfig{"p1": {}}
+	cfg.ApplyDefaults()
+	pc := cfg.Addons.Prometheus["p1"]
+	if len(pc.Alertmanager) != 0 {
+		t.Errorf("alertmanager defaulted to %v, want empty", pc.Alertmanager)
+	}
+	if len(pc.RuleFiles) != 0 {
+		t.Errorf("rule files defaulted to %v, want empty", pc.RuleFiles)
 	}
 }

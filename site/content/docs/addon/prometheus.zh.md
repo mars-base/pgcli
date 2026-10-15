@@ -30,9 +30,11 @@ Prometheus 与 Grafana 的分歧在**配置方式**。Grafana 只经环境变量
 | `--scrape-append` | — | 同样的声明格式，但把追加的 job **合并**进已存的 `--scrape` 列表（同名 job 并入 target、新名字排到末尾）而非替换。每个被追加的目标都会探测，任一拉不到数据即**中止 install**——什么都不写。与 `--scrape`、`--conf-file` 互斥 |
 | `--scrape-interval` | `15s` | 渲染配置里的全局 `scrape_interval`；与 `--conf-file` 互斥 |
 | `--retention` | `15d` | TSDB 保留期（`--storage.tsdb.retention.time`）；时长如 `15d`、`6mo`、`2y`。是 CLI flag，故与 `--conf-file` 可并存 |
-| `--conf-file` | — | 你自己的 `prometheus.yml` 路径——完全跳过渲染（与 `--scrape`/`--scrape-append`/`--scrape-interval` 互斥）；见下 |
+| `--conf-file` | — | 你自己的 `prometheus.yml` 路径——完全跳过渲染（与 `--scrape`/`--scrape-append`/`--scrape-interval`/`--alertmanager-url` 互斥）；见下 |
+| `--alertmanager-url` | — | 本 Prometheus 转发已触发告警到的 Alertmanager 实例（可重复）：裸 `HOST[:PORT]`（不写端口则补 `9093`）或 `http(s)://HOST[:PORT][/path]`。渲染的配置会多出一段 `alerting:` 指向它，**并且**多出一个对应的 `alertmanager` 抓取 job（顺带盯住 Alertmanager 自己的 `/metrics`——不是另一个开关，二者一体）。全部条目先校验后落盘，且必须同一种 scheme（http/https 混用即中止）；**不**探测连通性。与 `--conf-file` 互斥；见下 |
+| `--rule-file` | — | rule 文件路径（`*.rules.yml`，顶层是 `groups:`；可重复）——pgcli 把每个文件拷进托管 rules 目录（只取 basename；两个文件撞名即中止），把该目录只读挂到 `/etc/prometheus/rules`，渲染的 `prometheus.yml` 随即用 `rule_files` 加载这些拷贝。**与 `--conf-file` 可并存**：拷贝和挂载无论如何都会发生，你自己的文件决定要不要引用它们。文件不存在或为空即中止——什么都不写；见下 |
 | `--data-dir` | 自动 | 覆盖数据目录（默认在 base 目录下） |
-| `--force` | false | 即使正在运行也重建——用于不热加载改动的配置，或应用改动的端口/监听/保留期 |
+| `--force` | false | 即使正在运行也重建——用于不热加载改动的配置，或应用改动的端口/监听/保留期（`--rule-file` 从无到有一样会触发重建，见下） |
 
 数据目录是 Prometheus 的 TSDB。它跨 `pg addon remove` 存活（用 `--clean-data` 才删除），重装同名实例即复活已采集的指标。镜像以固化的 `nobody`（uid/gid 65534）运行且不自建可写目录，所以 pgcli 在创建容器前先在宿主上把数据目录 chown 过去：rootless podman 下经 `podman unshare chown 65534:65534`，rootful 宿主且 pgcli 以 root 运行时直接递归 `chown`（与 Grafana 完全同构，只是 id 不同）。
 
@@ -76,6 +78,68 @@ pg addon install prometheus --name p1 --scrape-append node=10.0.0.7:9100
 
 对运行中的实例重复 `install`：当渲染/拷贝的配置**确实变了**时**热加载**（SIGHUP），没变则原样不动；`--force` 则重建容器——用于应用改动的 `--port` / `--listen` / `--retention`（它们是容器参数，而非配置文件内容）。
 
+## 把告警转发给 Alertmanager（`--alertmanager-url`）
+
+让一个 Prometheus 指向一个或多个 pgcli 托管的 Alertmanager，把已触发的告警推给它们：
+
+```bash
+pg addon install alertmanager --name am1
+pg addon install prometheus --name p1 \
+  --scrape postgres-exporter=127.0.0.1:9187 \
+  --alertmanager-url 127.0.0.1:9093
+```
+
+渲染出的 `prometheus.yml` 会因这一个 flag 多出**两处**——一段推送已触发告警的 `alerting:`，以及一个与之对应的 `alertmanager` 抓取 job（盯住每个 Alertmanager 自己的 `/metrics`）：
+
+```yaml
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["127.0.0.1:9093"]
+...
+  - job_name: alertmanager
+    static_configs:
+      - targets: ["127.0.0.1:9093"]
+```
+
+接受的形式是裸 `host[:port]`（不写端口则取 Alertmanager 惯用的 `9093`）或完整的 `http(s)://host[:port][/path]` URL；抓取目标那侧会剥掉 scheme 与 path，`https` 则在两段都带成 `scheme: https`（CA 文件等 TLS 旋钮超出渲染范围——那些要用 `--conf-file`）。所有条目**先于任何写入**完成校验，且必须共用一种 scheme（http 与 https 混用即中止），但**不**做连通性探测：Alertmanager 死没死由 Prometheus 自己跟踪，`pg addon prometheus reload` 也修不了网络问题。重跑 install 会**整体替换**已存的 URL 列表（它不像 `--scrape` 有追加形式）。
+
+实机验证接线：
+
+```bash
+curl -s localhost:9090/api/v1/alertmanagers           # activeAlertmanagers 列出目标
+curl -s 'localhost:9090/api/v1/targets?state=any' | grep -c alertmanager
+```
+
+## 加载告警规则（`--rule-file`）
+
+Prometheus 从 `rule_files:` 评估告警/记录规则。把 rule 文件交给 pgcli，它就变成托管拷贝：
+
+```bash
+pg addon install prometheus --name p1 --rule-file /srv/rules/alert.rules.yml
+```
+
+pgcli 把每个文件拷进 `<base>/addon/prometheus/<name>/rules/`，把**该目录**只读挂到 `/etc/prometheus/rules`，渲染的配置按文件名引用拷贝：
+
+```yaml
+rule_files:
+  - "/etc/prometheus/rules/alert.rules.yml"
+```
+
+目录是扁平的，所以起作用的是 **basename**：两个源文件撞同一个 basename 会中止 install（拷贝会悄悄覆盖掉一个）。
+
+改你的**原** rule 文件，一次普通的 reload 即可生效：`pg addon prometheus reload` 在发信号**之前**会把每个 `--rule-file` 重拷进托管目录，所以 Prometheus 原地重读新规则——不用 reinstall、不重启容器：
+
+```bash
+# 编辑 /srv/rules/alert.rules.yml ...
+pg addon prometheus reload --name p1
+curl -s localhost:9090/api/v1/rules    # 组内容已是改动后的；或看 pg logs addon prometheus
+```
+
+坏 rule 文件的遭遇与坏配置一样：Prometheus 沿用**上一份好规则集**并把解析错误打进日志，所以手改规则后 reload 完记得查日志（或 rules API）。这些拷贝是托管产物，与渲染出的 `prometheus.yml` 一样，`pg addon remove` 无论有没有 `--clean-data` 都会删掉它们。你的原文件绝不被碰。
+
+`--rule-file` 与其他渲染旋钮的不同点在于：它**与 `--conf-file` 可并存**——pgcli 无论如何都会拷规则、加挂载，是否引用 `/etc/prometheus/rules` 由你自己的文件决定（在里面写 `rule_files: ["/etc/prometheus/rules/*.rules.yml"]` 就能匹配到你传入的一切）。唯一一个新增后无法热加载生效的 flag 也是它：从无到有一样会改变挂载集合，而 `/etc/prometheus/rules` 这个挂载只在有 rule 文件时存在，SIGHUP 加不了 volume，所以这一跃变（及其反向）会重建容器。
+
 ## 自定义配置文件（`--conf-file`）
 
 把你自己的 `prometheus.yml` 交给 pgcli，它就完全跳过渲染：
@@ -84,7 +148,60 @@ pg addon install prometheus --name p1 --scrape-append node=10.0.0.7:9100
 pg addon install prometheus --name p1 --conf-file /etc/prometheus/my.yml
 ```
 
-pgcli 把你的文件**拷贝**进托管路径（`<base>/addon/prometheus/<name>/prometheus.yml`），并只读挂载**这份拷贝**——绝不挂你的原文件。这是刻意为之：单文件 bind mount 锁死源 inode，原地改你的原文件不会传播进运行中的容器。正因它是拷贝，改完你的原文件后跑 `pg addon prometheus reload` 会重拷并通知 Prometheus 重读。pgcli 不校验、不改写文件内容（与 nginx/haproxy 的 `--conf-file` 同一约定）。`--conf-file` 只与渲染旋钮 `--scrape`/`--scrape-append`/`--scrape-interval` 互斥；`--retention` 与 `--listen` 是 CLI flag，与它并存仍有效。重装时省略 `--conf-file` 即回到渲染模式。
+pgcli 把你的文件**拷贝**进托管路径（`<base>/addon/prometheus/<name>/prometheus.yml`），并只读挂载**这份拷贝**——绝不挂你的原文件。这是刻意为之：单文件 bind mount 锁死源 inode，原地改你的原文件不会传播进运行中的容器。正因它是拷贝，改完你的原文件后跑 `pg addon prometheus reload` 会重拷并通知 Prometheus 重读。pgcli 不校验、不改写文件内容（与 nginx/haproxy 的 `--conf-file` 同一约定）。`--conf-file` 与渲染旋钮 `--scrape`/`--scrape-append`/`--scrape-interval`/`--alertmanager-url` 互斥；`--retention`、`--listen` 是 CLI flag，`--rule-file` 是文件拷贝而非渲染旋钮，三者与它并存仍有效。重装时省略 `--conf-file` 即回到渲染模式。
+
+### 完整样例
+
+一份接好 pgcli Alertmanager、并加载 pgcli 托管 rule 文件的真实运维配置：
+
+```yaml
+# /etc/prometheus/my.yml
+# pg addon install prometheus --name p1 --conf-file /etc/prometheus/my.yml
+global:
+  scrape_interval: 15s
+  scrape_timeout: 15s
+  evaluation_interval: 1m
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - localhost:9093 # 指向默认基础端口 9093 上的 pgcli alertmanager
+
+rule_files:
+  - /etc/prometheus/rules/*.rules.yml # pgcli 的托管 rules 目录（--rule-file）
+
+remote_write: []
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090 # 这个 Prometheus 自身
+  - job_name: nodes
+    static_configs:
+      - targets:
+          - 10.246.36.2:9100
+        labels:
+          nodename: lhcloud1
+      - targets:
+          - 10.246.36.3:9100
+        labels:
+          nodename: lhcloud2
+      - targets:
+          - 10.246.36.4:9100
+        labels:
+          nodename: lhcloud3
+```
+
+`localhost:9090`、`localhost:9093` 能通，是因为 Linux 上容器跑在**宿主网络**里——Prometheus 容器内的 `localhost` 就是宿主，两个 web 端口都在上面监听。这份配置里能看到 pgcli 只参与了一处：`--rule-file` 会把你的 rule 文件拷进 `<base>/addon/prometheus/<name>/rules/` 并把该目录挂到 `/etc/prometheus/rules`，所以上面的 `rule_files:` glob 才解析得到；而 `alerting:` 段完全由你自己写——`--conf-file` 模式下 pgcli 不往文件里加任何东西，也不派生 `alertmanager` 抓取 job，且 `--alertmanager-url` 作为渲染旋钮会被拒绝。手写文件别等 reload 后才从日志里发现错误，先自查一遍：
+
+```bash
+c=$(podman ps --filter name=pgcli-prometheus --format '{{.Names}}' | head -1)
+podman exec "$c" promtool check config /etc/prometheus/prometheus.yml
+```
+
+检查的是 pgcli 挂载进容器的那份拷贝，所以在 install（或 reload）之后跑，而不是对着你的原文件路径跑。
 
 ## 热加载（配置热更新）
 
@@ -92,7 +209,7 @@ pgcli 把你的文件**拷贝**进托管路径（`<base>/addon/prometheus/<name>
 pg addon prometheus reload --name p1
 ```
 
-它重写托管的 `prometheus.yml`（渲染模式重渲、`--conf-file` 模式重拷你的文件），并向运行中的容器发 **SIGHUP**，让 Prometheus 原地重读——不重建容器、不中断抓取。它刻意用信号而非 HTTP `POST /-/reload` 端点，于是那条无鉴权重载路由永远不需要开启（不设 `--web.enable-lifecycle`）。若新配置有错，Prometheus 会沿用上一份好配置并打日志，所以对手写文件 reload 后请查 `pg logs addon prometheus`。实例须已在运行（`pg addon start prometheus`）。
+它重写托管的 `prometheus.yml`（渲染模式重渲、`--conf-file` 模式重拷你的文件，两种模式下都会重拷 `--rule-file` 的拷贝），并向运行中的容器发 **SIGHUP**，让 Prometheus 原地重读——不重建容器、不中断抓取。它刻意用信号而非 HTTP `POST /-/reload` 端点，于是那条无鉴权重载路由永远不需要开启（不设 `--web.enable-lifecycle`）。若新配置有错，Prometheus 会沿用上一份好配置并打日志，所以对手写文件 reload 后请查 `pg logs addon prometheus`。实例须已在运行（`pg addon start prometheus`）。有一类变化是信号救不了的：`--rule-file` 从无到有一样会增删 `/etc/prometheus/rules` **挂载**，所以这一跃变要靠普通 `install` 重建容器来应用——非空集合*内部*的改动，reload 就够了。
 
 ## 监听与暴露
 
@@ -123,11 +240,13 @@ addons:
         - node=10.0.0.5:9100,10.0.0.6:9100
       scrape_interval: 15s
       autostart: false
+      # alertmanager: [127.0.0.1:9093]            # 仅渲染模式：转发已触发告警 + 派生的抓取 job
+      # rule_files: [/srv/rules/alert.rules.yml]  # 拷进 <name>/rules，挂到 /etc/prometheus/rules
       # conf_file: /etc/prometheus/my.yml   # 用户文件模式，跳过渲染
       # data_dir: /srv/prometheus-data      # 可选，覆盖默认位置
 ```
 
-渲染的 `prometheus.yml` 承载全局 `scrape_interval`、始终存在的自监控 job、以及每个 `scrape` **JOB** 一个 `static_configs` job（该 job 声明的所有 target 折叠进同一行）。`retention` 与监听绑定**不在**那个文件里——它们作为 CLI flag 传给 `prometheus` 二进制（`--storage.tsdb.retention.time`、`--web.listen-address`），这正是它们能与 `--conf-file` 并存的原因。
+渲染的 `prometheus.yml` 承载全局 `scrape_interval`、始终存在的自监控 job、以及每个 `scrape` **JOB** 一个 `static_configs` job（该 job 声明的所有 target 折叠进同一行）；`--alertmanager-url` 会加上 `alerting:` 段与随之而来的 `alertmanager` 抓取 job，`--rule-file` 会加上 `rule_files:` 段。`retention` 与监听绑定**不在**那个文件里——它们作为 CLI flag 传给 `prometheus` 二进制（`--storage.tsdb.retention.time`、`--web.listen-address`），这正是它们能与 `--conf-file` 并存的原因。
 
 ### 列出
 
@@ -175,7 +294,7 @@ pg addon remove prometheus              # 保留 TSDB——已采集指标跨重
 pg addon remove prometheus --clean-data # 连 TSDB 一起删
 ```
 
-rootless podman 下，`--clean-data` 经 `podman unshare rm` 删除数据目录——Prometheus 以容器内 uid（65534）写文件，它映射到宿主的 subordinate uid，宿主用户无法直接 `rm`。`--conf-file` 模式只删 pgcli 的拷贝；你的原文件在何处都不被触碰。
+rootless podman 下，`--clean-data` 经 `podman unshare rm` 删除数据目录——Prometheus 以容器内 uid（65534）写文件，它映射到宿主的 subordinate uid，宿主用户无法直接 `rm`。`--conf-file` 模式只删 pgcli 的拷贝；你的原文件在何处都不被触碰。`--rule-file` 的原文件同样幸存——被删的只有托管的 `rules/` 拷贝，且它们在每次 `remove` 时都消失（无论有无 `--clean-data`，与渲染出的 `prometheus.yml` 一样，没有值得复活的状态）。
 
 ## 日志
 
@@ -196,7 +315,7 @@ pg logs addon prometheus -n 200     # 最近 200 行（也支持 -i / --tail）
 
 ## 已知限制
 
-- v1 是裸采集后端：不自带 PostgreSQL exporter（自己装好，再 `--scrape postgres-exporter=127.0.0.1:9187` 指向它）、不接 alertmanager、不做 remote-write。它是你让 Grafana 连的采集/存储/查询层。
+- v1 是裸采集后端：不自带 PostgreSQL exporter（自己装好，再 `--scrape postgres-exporter=127.0.0.1:9187` 指向它）、不做 remote-write。告警则是接好的：`--alertmanager-url` 把已触发告警转发给 pgcli 的 Alertmanager，`--rule-file` 加载告警规则（两者都是渲染模式；其余场景用 `--conf-file` 手写）。它是你让 Grafana 连的采集/存储/查询层。
 - **无鉴权。** Prometheus 的 API 执行任意 PromQL；`0.0.0.0` 绑定的唯一保护是网络边界。这比 Grafana 有密码兜底的 `0.0.0.0` 是实质更弱的态势——不要把它暴露到不可信网络。
 - pgcli 渲染或拷贝 `prometheus.yml`，但不校验它（install 阶段没有 `promtool check config` 闸门）。渲染出的配置不可能有错，但有错的 `--conf-file` 只会在 reload 时从容器日志里暴露。
 - 宿主侧的属主 chown 在 rootless podman（`podman unshare chown`）下自动完成，pgcli 以 root 跑在 rootful 宿主上也自动完成（直接 `chown`）。非 root 的 pgcli 连接一个显式配置的远程 rootful daemon 时没有自动路径。

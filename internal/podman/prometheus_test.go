@@ -52,7 +52,7 @@ func TestPrometheusArgsAndEnv(t *testing.T) {
 
 	t.Run("linux host networking", func(t *testing.T) {
 		pc := base()
-		args := prometheusArgsAndEnv(pc, false, "pgcli-net", "/home/u/.pgcli/addon/prometheus/p1/data", "/home/u/.pgcli/addon/prometheus/p1/prometheus.yml")
+		args := prometheusArgsAndEnv(pc, false, "pgcli-net", "/home/u/.pgcli/addon/prometheus/p1/data", "/home/u/.pgcli/addon/prometheus/p1/prometheus.yml", "/home/u/.pgcli/addon/prometheus/p1/rules")
 
 		if !slices.Contains(args, "--network") || !slices.Contains(args, "host") {
 			t.Errorf("expected --network host, got %v", args)
@@ -111,7 +111,7 @@ func TestPrometheusArgsAndEnv(t *testing.T) {
 	t.Run("macOS bridge networking publishes port and keeps a non-loopback bind", func(t *testing.T) {
 		pc := base()
 		pc.Listen = "127.0.0.1" // even a loopback listen is widened under bridge
-		args := prometheusArgsAndEnv(pc, true, "pgcli-net", "/data", "/cfg/prometheus.yml")
+		args := prometheusArgsAndEnv(pc, true, "pgcli-net", "/data", "/cfg/prometheus.yml", "/rules")
 
 		if !slices.Contains(args, "--network") || !slices.Contains(args, "pgcli-net") {
 			t.Errorf("expected --network pgcli-net, got %v", args)
@@ -131,7 +131,7 @@ func TestPrometheusArgsAndEnv(t *testing.T) {
 	t.Run("explicit non-loopback listen passes through", func(t *testing.T) {
 		pc := base()
 		pc.Listen = "10.0.0.5"
-		args := prometheusArgsAndEnv(pc, true, "pgcli-net", "/data", "/cfg/prometheus.yml")
+		args := prometheusArgsAndEnv(pc, true, "pgcli-net", "/data", "/cfg/prometheus.yml", "/rules")
 		if !slices.Contains(args, "--web.listen-address=10.0.0.5:39090") {
 			t.Errorf("explicit bind should pass through under bridge: %v", args)
 		}
@@ -140,12 +140,29 @@ func TestPrometheusArgsAndEnv(t *testing.T) {
 	t.Run("empty retention omits the flag", func(t *testing.T) {
 		pc := base()
 		pc.Retention = ""
-		args := prometheusArgsAndEnv(pc, false, "pgcli-net", "/data", "/cfg/prometheus.yml")
+		args := prometheusArgsAndEnv(pc, false, "pgcli-net", "/data", "/cfg/prometheus.yml", "/rules")
 		idx := imageIdx(args)
 		for _, a := range args[idx+1:] {
 			if strings.HasPrefix(a, "--storage.tsdb.retention.time") {
 				t.Errorf("empty retention should omit the flag entirely, got %q", a)
 			}
+		}
+	})
+
+	t.Run("no rule files means no rules mount", func(t *testing.T) {
+		pc := base()
+		args := prometheusArgsAndEnv(pc, false, "pgcli-net", "/data", "/cfg/prometheus.yml", "/rules")
+		if hasMount(args, "/rules:/etc/prometheus/rules:ro,z") {
+			t.Errorf("rules dir mount must be absent when RuleFiles is empty: %v", args)
+		}
+	})
+
+	t.Run("rule files mount the rules dir read-only", func(t *testing.T) {
+		pc := base()
+		pc.RuleFiles = []string{"/srv/rules/alert.rules.yml"}
+		args := prometheusArgsAndEnv(pc, false, "pgcli-net", "/data", "/cfg/prometheus.yml", "/rules")
+		if !hasMount(args, "/rules:/etc/prometheus/rules:ro,z") {
+			t.Errorf("rules dir mount missing (or not read-only): %v", args)
 		}
 	})
 }
@@ -234,6 +251,106 @@ func TestRenderPrometheusConfig(t *testing.T) {
 		}
 		if !strings.Contains(out, "scrape_interval: 15s") {
 			t.Errorf("want the 15s fallback, got:\n%s", out)
+		}
+	})
+
+	// No --alertmanager-url and no --rule-file must render NEITHER the alerting
+	// block, the derived job, nor rule_files — an empty list means "not wired",
+	// never an empty section (Prometheus rejects an alertmanagers list with no
+	// targets and a rule_files glob that matches nothing it can't see).
+	t.Run("no alertmanager no rule files means no extra sections", func(t *testing.T) {
+		out, err := renderPrometheusConfig(base())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"alerting:", "job_name: alertmanager", "rule_files:"} {
+			if strings.Contains(out, want) {
+				t.Errorf("rendered config must not contain %q when unset:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("alertmanager-url renders an alerting block and a derived scrape job", func(t *testing.T) {
+		pc := base()
+		pc.Alertmanager = []string{"http://127.0.0.1:9093/", "am2:9093"}
+		out, err := renderPrometheusConfig(pc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// alerting block, bare host normalized alongside the URL form.
+		if !strings.Contains(out, "alerting:\n  alertmanagers:\n    - static_configs:\n") {
+			t.Errorf("alerting block malformed:\n%s", out)
+		}
+		if !strings.Contains(out, `targets: ["127.0.0.1:9093", "am2:9093"]`) {
+			t.Errorf("alerting targets (normalized) missing:\n%s", out)
+		}
+		// Derived scrape job over the SAME targets — watching AM is not opt-in.
+		if !strings.Contains(out, "  - job_name: alertmanager\n    static_configs:\n      - targets: [\"127.0.0.1:9093\", \"am2:9093\"]") {
+			t.Errorf("derived alertmanager scrape job missing/mismatched:\n%s", out)
+		}
+	})
+
+	t.Run("portless alertmanager-url gets 9093", func(t *testing.T) {
+		pc := base()
+		pc.Alertmanager = []string{"am1"}
+		out, err := renderPrometheusConfig(pc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, `"am1:9093"`) {
+			t.Errorf("portless entry should default to 9093:\n%s", out)
+		}
+	})
+
+	t.Run("https alertmanager-url sets scheme on both block and job", func(t *testing.T) {
+		pc := base()
+		pc.Alertmanager = []string{"https://am1:9093/"}
+		out, err := renderPrometheusConfig(pc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, "    - scheme: https\n") {
+			t.Errorf("alerting scheme: https missing:\n%s", out)
+		}
+		if !strings.Contains(out, "  - job_name: alertmanager\n    scheme: https\n") {
+			t.Errorf("scrape job scheme: https missing:\n%s", out)
+		}
+	})
+
+	t.Run("mixed http and https alertmanager-url errors", func(t *testing.T) {
+		pc := base()
+		pc.Alertmanager = []string{"http://a:9093/", "https://b:9093/"}
+		if _, err := renderPrometheusConfig(pc); err == nil {
+			t.Error("want an error for mixed schemes, got nil")
+		}
+	})
+
+	t.Run("malformed alertmanager-url errors instead of rendering", func(t *testing.T) {
+		pc := base()
+		pc.Alertmanager = []string{"not a url"}
+		if _, err := renderPrometheusConfig(pc); err == nil {
+			t.Error("want an error for a malformed URL, got nil")
+		}
+	})
+
+	t.Run("rule_files render pointing at the container rules dir", func(t *testing.T) {
+		pc := base()
+		pc.RuleFiles = []string{"/srv/rules/alert.rules.yml", "/other/disk.rules.yml"}
+		out, err := renderPrometheusConfig(pc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// basename only — the host dirs are irrelevant once copied flat.
+		if !strings.Contains(out, "rule_files:\n  - \"/etc/prometheus/rules/alert.rules.yml\"\n  - \"/etc/prometheus/rules/disk.rules.yml\"\n") {
+			t.Errorf("rule_files section missing or mis-pathed:\n%s", out)
+		}
+	})
+
+	t.Run("duplicate rule file basenames error instead of clobbering", func(t *testing.T) {
+		pc := base()
+		pc.RuleFiles = []string{"/a/alert.rules.yml", "/b/alert.rules.yml"}
+		if _, err := renderPrometheusConfig(pc); err == nil {
+			t.Error("want an error for colliding rule basenames, got nil")
 		}
 	})
 }
@@ -373,6 +490,75 @@ func TestProbeScrapeTargets(t *testing.T) {
 // the original would not propagate). Render mode writes the generated YAML;
 // conf-file mode copies the user's file verbatim into that same managed path
 // and must not touch the original.
+func TestAlertmanagerTargets(t *testing.T) {
+	cases := []struct {
+		in      []string
+		want    []string
+		scheme  string
+		wantErr bool
+	}{
+		{nil, nil, "http", false},
+		{[]string{"am1"}, []string{"am1:9093"}, "http", false},
+		{[]string{"am1:19093"}, []string{"am1:19093"}, "http", false},
+		{[]string{"http://127.0.0.1:9093/"}, []string{"127.0.0.1:9093"}, "http", false},
+		{[]string{"https://am1:9093/alerting/path"}, []string{"am1:9093"}, "https", false},
+		// Duplicates collapse after normalization; order is first-appearance.
+		{[]string{"am2:9093", "http://am2:9093/"}, []string{"am2:9093"}, "http", false},
+		// A bare entry is the http default, so it coexists with explicit http.
+		{[]string{"am1", "http://am2:9093/"}, []string{"am1:9093", "am2:9093"}, "http", false},
+		// A bare entry does NOT resolve a mixed-scheme clash against explicit https.
+		{[]string{"http://a:9093/", "https://b:9093/"}, nil, "", true},
+		{[]string{""}, nil, "", true},                // empty entry, no host at all
+		{[]string{"ftp://am1:9093/"}, nil, "", true}, // unsupported scheme
+		{[]string{"http://"}, nil, "", true},         // no host
+		{[]string{"two words"}, nil, "", true},       // whitespace in a bare entry
+		{[]string{"host/path"}, nil, "", true},       // a path without scheme is nonsense
+	}
+	for _, c := range cases {
+		got, scheme, err := AlertmanagerTargets(c.in)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("AlertmanagerTargets(%v): want error, got (%v, %q)", c.in, got, scheme)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("AlertmanagerTargets(%v): %v", c.in, err)
+			continue
+		}
+		if !slices.Equal(got, c.want) || scheme != c.scheme {
+			t.Errorf("AlertmanagerTargets(%v) = (%v, %q), want (%v, %q)", c.in, got, scheme, c.want, c.scheme)
+		}
+		if err := ValidateAlertmanagerURLs(c.in); (err != nil) != c.wantErr {
+			t.Errorf("ValidateAlertmanagerURLs(%v) err=%v, wantErr=%v", c.in, err, c.wantErr)
+		}
+	}
+}
+
+func TestNormalizeRuleNames(t *testing.T) {
+	got, err := normalizeRuleNames([]string{"/srv/rules/a.rules.yml", "/other/b.rules.yml", "c.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"a.rules.yml", "b.rules.yml", "c.json"}; !slices.Equal(got, want) {
+		t.Errorf("names = %v, want %v", got, want)
+	}
+	// Trailing slashes must not turn the dir itself into the basename.
+	got, err = normalizeRuleNames([]string{"/srv/a.rules.yml/"})
+	if err != nil || !slices.Equal(got, []string{"a.rules.yml"}) {
+		t.Errorf("trailing slash: got (%v, %v)", got, err)
+	}
+	for _, bad := range [][]string{
+		{""},
+		{"/srv/x.rules.yml", "/other/x.rules.yml"}, // colliding basenames
+		{"/srv", "/srv"}, // dir-as-basename collision path
+	} {
+		if _, err := normalizeRuleNames(bad); err == nil {
+			t.Errorf("want an error for %v, got nil", bad)
+		}
+	}
+}
+
 func TestWriteConfigRenderVsConfFile(t *testing.T) {
 	base := t.TempDir()
 	m := &PrometheusManager{dataDir: base}
@@ -452,4 +638,153 @@ func TestWriteConfigRenderVsConfFile(t *testing.T) {
 			t.Error("want an error for an empty conf-file, got nil")
 		}
 	})
+}
+
+// Rule files are copied in BOTH modes (the mount lives at the fixed
+// /etc/prometheus/rules regardless of who renders the config), the managed dir
+// tracks the list exactly, and originals are never touched.
+func TestWriteConfigRuleFiles(t *testing.T) {
+	base := t.TempDir()
+	m := &PrometheusManager{dataDir: base}
+
+	srcDir := t.TempDir()
+	writeSrc := func(name, content string) string {
+		t.Helper()
+		p := filepath.Join(srcDir, name)
+		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	rulesPath := func(name string) string {
+		return filepath.Join(base, "addon", "prometheus", name, "rules")
+	}
+
+	t.Run("render mode copies rules and references them in the config", func(t *testing.T) {
+		a := writeSrc("alert.rules.yml", "groups:\n- name: g\n")
+		b := writeSrc("disk.rules.yml", "groups:\n- name: d\n")
+		pc := &config.PrometheusConfig{Name: "r1", HostPort: 9090, RuleFiles: []string{a, b}}
+
+		path, err := m.WriteConfig(pc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), "- \"/etc/prometheus/rules/alert.rules.yml\"") {
+			t.Errorf("rendered config must reference the container-side copy:\n%s", data)
+		}
+		for _, name := range []string{"alert.rules.yml", "disk.rules.yml"} {
+			got, err := os.ReadFile(filepath.Join(rulesPath("r1"), name))
+			if err != nil {
+				t.Fatalf("copy of %s missing: %v", name, err)
+			}
+			if len(got) == 0 {
+				t.Errorf("copy of %s is empty", name)
+			}
+		}
+		// Host dirs are irrelevant in the copy: basename only.
+		if strings.Contains(string(data), srcDir) {
+			t.Errorf("rendered config must not leak host source paths:\n%s", data)
+		}
+	})
+
+	t.Run("conf-file mode copies rules too, without touching the file", func(t *testing.T) {
+		user := writeSrc("my.yml", "global:\n  scrape_interval: 15s\n")
+		rule := writeSrc("alert.rules.yml", "groups:\n- name: g\n")
+		pc := &config.PrometheusConfig{Name: "r2", HostPort: 9090, ConfFile: user, RuleFiles: []string{rule}}
+
+		if _, err := m.WriteConfig(pc); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(rulesPath("r2"), "alert.rules.yml")); err != nil {
+			t.Errorf("conf-file mode must still copy rule files for the mount: %v", err)
+		}
+		// The copy verbatim — pgcli adds no rule_files: section of its own.
+		data, err := os.ReadFile(filepath.Join(base, "addon", "prometheus", "r2", "prometheus.yml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "rule_files:") {
+			t.Errorf("conf-file mode must not inject rule_files into the copy:\n%s", data)
+		}
+	})
+
+	t.Run("managed dir prunes to exactly the current list", func(t *testing.T) {
+		a := writeSrc("keep.rules.yml", "groups:\n- name: k\n")
+		stale := writeSrc("stale.rules.yml", "groups:\n- name: s\n")
+		pc := &config.PrometheusConfig{Name: "r3", HostPort: 9090, RuleFiles: []string{a, stale}}
+		if _, err := m.WriteConfig(pc); err != nil {
+			t.Fatal(err)
+		}
+		pc.RuleFiles = []string{a}
+		if _, err := m.WriteConfig(pc); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(rulesPath("r3"), "stale.rules.yml")); !os.IsNotExist(err) {
+			t.Errorf("dropping a rule file must delete its stale managed copy (err=%v)", err)
+		}
+		if _, err := os.Stat(filepath.Join(rulesPath("r3"), "keep.rules.yml")); err != nil {
+			t.Errorf("kept rule copy vanished: %v", err)
+		}
+		// And an empty list removes the dir entirely.
+		pc.RuleFiles = nil
+		if _, err := m.WriteConfig(pc); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(rulesPath("r3")); !os.IsNotExist(err) {
+			t.Errorf("empty rule list must remove the rules dir (err=%v)", err)
+		}
+	})
+
+	t.Run("bad rule files fail before prometheus.yml is rewritten", func(t *testing.T) {
+		pc := &config.PrometheusConfig{Name: "r4", HostPort: 9090}
+		goodPath, err := m.WriteConfig(pc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		good, err := os.ReadFile(goodPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		empty := writeSrc("empty.rules.yml", "")
+		missing := filepath.Join(srcDir, "nope.rules.yml")
+		dupA := writeSrc("dup.rules.yml", "groups:\n- name: a\n")
+		dupB := writeSrc2(t, srcDir, "dup.rules.yml")
+		for _, bad := range [][]string{{empty}, {missing}, {dupA, dupB}} {
+			pc.RuleFiles = bad
+			if _, err := m.WriteConfig(pc); err == nil {
+				t.Errorf("want an error for rule files %v, got nil", bad)
+			}
+		}
+		// Nothing moved: prometheus.yml byte-identical, rules dir never created.
+		after, err := os.ReadFile(goodPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(after) != string(good) {
+			t.Errorf("failed WriteConfig rewrote prometheus.yml anyway:\n%s", after)
+		}
+		if _, err := os.Stat(rulesPath("r4")); !os.IsNotExist(err) {
+			t.Errorf("failed WriteConfig created a rules dir (err=%v)", err)
+		}
+	})
+}
+
+// writeSrc2 exists so the duplicate-basename case can name a file that collides
+// with an earlier entry while still living in a distinct directory.
+func writeSrc2(t *testing.T, dir, name string) string {
+	t.Helper()
+	sub := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(sub, name)
+	if err := os.WriteFile(p, []byte("groups:\n- name: dup\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }

@@ -168,8 +168,11 @@ Infra addons (shared, not tied to one instance):
           passed as --config.file, alongside --web.listen-address, --storage.path
           and --cluster.listen-address= (empty, disabling the 9094 HA gossip);
           or, with --conf-file, your own file copied into pgcli's managed path
-          (mutually exclusive with --webhook-url). v1 does NOT wire this to a
-          Prometheus instance (no alerting section is injected). There is NO web
+          (mutually exclusive with --webhook-url). The Alertmanager side has no
+          Prometheus concept of its own — wiring happens on the Prometheus side:
+          pg addon install prometheus --alertmanager-url <this instance> injects
+          the alerting section (and watches this instance's /metrics).
+          There is NO web
           login/password: Alertmanager ships no authentication, and its API lets
           anyone who reaches it CREATE SILENCES (mute on-call) — the default
           0.0.0.0 listen is guarded ONLY by the network boundary; pass
@@ -213,8 +216,8 @@ Currently supported add-ons:
   postgrest   stateless REST API in front of a PostgreSQL schema (single container; Linux host network, macOS bridge)
   pgadmin     pgAdmin 4 — the official web administration UI (single container from docker.io/dpage/pgadmin4; web login auto-generated; Linux host network, macOS bridge)
   grafana     Grafana — the open-source observability dashboard (single container from docker.io/grafana; web login auto-generated; defaults to 0.0.0.0 since a dashboard is meant to be viewed remotely; Linux host network, macOS bridge)
-  prometheus  Prometheus — the metrics collection backend Grafana reads from (single container from docker.io/prom/prometheus; rendered prometheus.yml or --conf-file, --scrape targets, SIGHUP reload; NO web login — defaults to 0.0.0.0 guarded only by the network, use --listen 127.0.0.1 for loopback; Linux host network, macOS bridge)
-  alertmanager Alertmanager — the alert dedup/grouping/routing frontend of the Prometheus stack (single container from docker.io/prom/alertmanager; rendered alertmanager.yml with a no-op or --webhook-url web.hook receiver, or --conf-file; SIGHUP reload; cluster gossip disabled; NO web login — defaults to 0.0.0.0 guarded only by the network, and silences are dangerous, use --listen 127.0.0.1 for loopback; v1 does not wire into Prometheus; Linux host network, macOS bridge)
+  prometheus  Prometheus — the metrics collection backend Grafana reads from (single container from docker.io/prom/prometheus; rendered prometheus.yml or --conf-file, --scrape targets, --alertmanager-url to forward alerts + watch Alertmanager, --rule-file to load alerting rules, SIGHUP reload; NO web login — defaults to 0.0.0.0 guarded only by the network, use --listen 127.0.0.1 for loopback; Linux host network, macOS bridge)
+  alertmanager Alertmanager — the alert dedup/grouping/routing frontend of the Prometheus stack (single container from docker.io/prom/alertmanager; rendered alertmanager.yml with a no-op or --webhook-url web.hook receiver, or --conf-file; SIGHUP reload; cluster gossip disabled; NO web login — defaults to 0.0.0.0 guarded only by the network, and silences are dangerous, use --listen 127.0.0.1 for loopback; wired to Prometheus from the Prometheus side via --alertmanager-url; Linux host network, macOS bridge)
   nginx       HTTP reverse proxy in front of web services (path-based routing, optional TLS termination; single container from docker.io/library/nginx; Linux host network, macOS bridge)
 
 Two modes (pgbouncer, postgrest):
@@ -434,6 +437,8 @@ Prometheus (the metrics collection backend; top-level addon, Linux and macOS):
   pg addon install prometheus [--name p1] [--scrape JOB=HOST:PORT[,HOST:PORT...]] (repeatable)
                               [--scrape-append JOB=HOST:PORT[,HOST:PORT...]] (repeatable)
                               [--scrape-interval 15s] [--retention 15d]
+                              [--alertmanager-url URL] (repeatable)
+                              [--rule-file FILE] (repeatable)
                               [--port N] [--listen 0.0.0.0] [--conf-file FILE]
                               [--data-dir ...] [--image ...] [--force]
   Stored under top-level addons.prometheus in config. Prometheus scrapes metrics
@@ -449,8 +454,22 @@ Prometheus (the metrics collection backend; top-level addon, Linux and macOS):
   the same-named job) — every appended target is probed with GET /metrics and
   install aborts, touching nothing, if any returns no data. The two are mutually
   exclusive. --conf-file instead copies YOUR prometheus.yml into pgcli's managed
-  path (mutually exclusive with --scrape/--scrape-append/--scrape-interval, which
-  only shape the rendered file).
+  path (mutually exclusive with --scrape/--scrape-append/--scrape-interval and
+  --alertmanager-url, which all only shape the rendered file).
+  --alertmanager-url (bare host[:port] or http(s)://host[:port], repeatable) wires
+  this Prometheus to one or more Alertmanager instances: the rendered file gains an
+  alerting: section pushing fired alerts there PLUS a matching "alertmanager"
+  scrape job so their own /metrics is watched. All URLs are validated (and must
+  share one scheme — http or https) BEFORE anything is written; connectivity is
+  NOT probed (Prometheus shows a dead alertmanager as DOWN on its own).
+  --rule-file (repeatable) copies YOUR Prometheus rule files (*.rules.yml with a
+  groups: block) into the managed rules dir, bind-mounts that dir read-only at
+  /etc/prometheus/rules, and the rendered file loads them via rule_files. Unlike
+  --alertmanager-url it stays valid alongside --conf-file (the copy and mount
+  happen either way — your own file decides whether to reference them). The two
+  new flags are wired into the SIGHUP reload too, with one exception: a running
+  instance that goes from NO rule files to some needs the new mount, so install
+  recreates it rather than only reloading.
   There is NO web login/password: Prometheus ships no authentication. --listen
   defaults to 0.0.0.0 (so Grafana on another host can reach it), but that endpoint
   runs arbitrary PromQL and is guarded ONLY by your firewall — pass
@@ -484,9 +503,10 @@ Alertmanager (the alert dedup/grouping/routing frontend of the Prometheus stack;
   written; connectivity is NOT probed (a webhook fires at alert time). --conf-file
   instead copies YOUR alertmanager.yml into pgcli's managed path (mutually
   exclusive with --webhook-url) — the way to get real email/Slack/routing trees.
-  v1 does NOT wire this to a Prometheus instance: no alerting section is injected
-  into any prometheus.yml; point Prometheus at this URL yourself (or via
-  --conf-file) to connect them.
+  The wiring into Prometheus happens on the PROMETHEUS side: pg addon install
+  prometheus --alertmanager-url <host:port of this instance> injects the alerting
+  section there (and adds the scrape job watching this instance's /metrics);
+  in --conf-file mode write the alerting: block yourself.
   There is NO web login/password: Alertmanager ships no authentication, and this is
   sharper than Prometheus — anyone who reaches the port can CREATE SILENCES, i.e.
   mute your on-call. --listen defaults to 0.0.0.0; pass --listen 127.0.0.1 to keep
@@ -563,6 +583,8 @@ Examples:
   pg addon install prometheus --name p1 --scrape-append node=10.0.0.7:9100           # add a target to the node job (probed; aborts if down)
   pg addon install prometheus --name local --listen 127.0.0.1   # loopback-only (Prometheus has no auth)
   pg addon install prometheus --name p1 --conf-file /etc/prometheus/my.yml   # run your own prometheus.yml verbatim
+  pg addon install prometheus --name p1 --alertmanager-url 127.0.0.1:9093   # forward fired alerts to an alertmanager (bare host:port, repeatable; also scrapes it)
+  pg addon install prometheus --name p1 --rule-file /srv/rules/alert.rules.yml   # copy a rule file in and load it via rule_files (repeatable; works with --conf-file)
   pg addon install alertmanager
   pg addon install alertmanager --name am1 --webhook-url http://127.0.0.1:5001/   # fan-out to one webhook
   pg addon install alertmanager --name am1 --webhook-url http://a:5001/ --webhook-url http://b:5001/   # both URLs in one web.hook receiver
@@ -857,7 +879,7 @@ func init() {
 	addonInstallCmd.Flags().Int("https-port", 0, "nginx HTTPS listener host port, TLS only (0=auto-assign, next free port)")
 	addonInstallCmd.Flags().Int("worker-connections", 0, "nginx worker_connections (max simultaneous connections per worker; default 1024)")
 	addonInstallCmd.Flags().StringArray("upstream", nil, "nginx upstream target name=<upstream>,path=<location>,backend=<host:port> (repeatable; e.g. --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050, or backends=h1:p1,h2:p2 for multiple servers)")
-	addonInstallCmd.Flags().String("conf-file", "", "path to a full custom config file (nginx: nginx.conf, mutually exclusive with --upstream; haproxy: haproxy.cfg, mutually exclusive with --node/--ha; prometheus: prometheus.yml, mutually exclusive with --scrape/--scrape-append/--scrape-interval; alertmanager: alertmanager.yml, mutually exclusive with --webhook-url) — pgcli copies it into its managed path and mounts that, manages the container lifecycle, and you control the whole config; validated with nginx -t / haproxy -c at install (prometheus/alertmanager: not pre-validated — a bad file is logged and the last good config keeps serving; reload with SIGHUP)")
+	addonInstallCmd.Flags().String("conf-file", "", "path to a full custom config file (nginx: nginx.conf, mutually exclusive with --upstream; haproxy: haproxy.cfg, mutually exclusive with --node/--ha; prometheus: prometheus.yml, mutually exclusive with --scrape/--scrape-append/--scrape-interval/--alertmanager-url (but NOT --rule-file, which is copied and mounted either way); alertmanager: alertmanager.yml, mutually exclusive with --webhook-url) — pgcli copies it into its managed path and mounts that, manages the container lifecycle, and you control the whole config; validated with nginx -t / haproxy -c at install (prometheus/alertmanager: not pre-validated — a bad file is logged and the last good config keeps serving; reload with SIGHUP)")
 	addonInstallCmd.Flags().Bool("reload", false, "haproxy --conf-file only: hot-reload the running instance (validate with haproxy -c, then SIGUSR2) instead of recreating the container — no dropped connections; ignored otherwise")
 
 	// prometheus flags (top-level metrics collection backend)
@@ -865,6 +887,8 @@ func init() {
 	addonInstallCmd.Flags().String("scrape-interval", "", "Prometheus global scrape_interval in the rendered prometheus.yml (default \"15s\"); mutually exclusive with --conf-file")
 	addonInstallCmd.Flags().StringArray("scrape", nil, "Prometheus scrape spec JOB=HOST:PORT[,HOST:PORT...] (repeatable; the JOB name is required, and several comma-separated targets share one job) — declares the FULL job set (replaces the stored list), each rendering one static_configs job alongside the self-monitoring job; e.g. --scrape postgres-exporter=127.0.0.1:9187. Mutually exclusive with --scrape-append and --conf-file")
 	addonInstallCmd.Flags().StringArray("scrape-append", nil, "Prometheus scrape spec(s) JOB=HOST:PORT[,HOST:PORT...] to ADD to the instance's stored --scrape list (same form as --scrape, repeatable) instead of replacing it; folds each appended job's targets into the same-named job. Every appended target is probed with GET /metrics and install aborts, touching nothing, if any returns no data. Mutually exclusive with --scrape and --conf-file")
+	addonInstallCmd.Flags().StringArray("alertmanager-url", nil, "Prometheus: Alertmanager instance(s) to forward fired alerts to (repeatable; bare HOST[:PORT] — a portless entry gets Alertmanager's 9093 — or http(s)://HOST[:PORT][/path]). The rendered prometheus.yml gains an alerting: section pushing there PLUS a matching alertmanager scrape job (so Alertmanager's own /metrics is watched; not a separate opt-in). All entries are validated (and must share ONE scheme — mixing http and https aborts) BEFORE anything is written; connectivity is NOT probed (Prometheus shows a dead alertmanager itself). Mutually exclusive with --conf-file, which owns the whole file — write your own alerting: section there")
+	addonInstallCmd.Flags().StringArray("rule-file", nil, "Prometheus: path to a rule file (*.rules.yml with a top-level groups: block; repeatable) — pgcli copies each into its managed rules dir (basename only; two files sharing a basename abort), bind-mounts that dir read-only at /etc/prometheus/rules, and the rendered prometheus.yml loads the copies via rule_files. Valid alongside --conf-file: the copy and mount happen either way, and your own file decides whether to reference /etc/prometheus/rules. A missing or empty file aborts, touching nothing")
 	addonInstallCmd.Flags().StringArray("webhook-url", nil, "Alertmanager webhook URL to notify (repeatable; e.g. --webhook-url http://hook:5001/) — every URL is rendered as one webhook_configs entry of the SAME web.hook receiver (so multiple URLs fan out); the root route points at it. Each URL is validated (must parse as an http(s) URL with a host) BEFORE anything is written; a bad URL aborts the install touching nothing. Connectivity is NOT probed (a webhook fires at alert time, not install time). Mutually exclusive with --conf-file; without it the rendered config uses a name-only no-op receiver (nothing is ever sent)")
 
 	// minio flags (top-level single-node S3-compatible object storage)
@@ -5203,8 +5227,17 @@ func runAddonList(showPassword bool) error {
 			fmt.Printf("    Status:      %s\n", status)
 			fmt.Printf("    URL:         http://%s:%d/\n", pc.Listen, pc.HostPort)
 			mode := fmt.Sprintf("rendered (%d scrape job(s))", len(pc.Scrape))
+			if len(pc.Alertmanager) > 0 {
+				mode += fmt.Sprintf(" + alertmanager x%d", len(pc.Alertmanager))
+			}
+			if len(pc.RuleFiles) > 0 {
+				mode += fmt.Sprintf(", %d rule file(s)", len(pc.RuleFiles))
+			}
 			if pc.ConfFile != "" {
 				mode = "conf-file"
+				if len(pc.RuleFiles) > 0 {
+					mode += fmt.Sprintf(" (+%d rule file(s) mounted)", len(pc.RuleFiles))
+				}
 			}
 			fmt.Printf("    Config:      %s [%s]\n", pm.ConfigPath(&pc), mode)
 			fmt.Printf("    Retention:   %s\n", pc.Retention)
@@ -7216,6 +7249,8 @@ func runAddonInstallPrometheus(cmd *cobra.Command) error {
 	scrapeInterval, _ := cmd.Flags().GetString("scrape-interval")
 	scrapeSpecs, _ := cmd.Flags().GetStringArray("scrape")
 	scrapeAppendSpecs, _ := cmd.Flags().GetStringArray("scrape-append")
+	amURLs, _ := cmd.Flags().GetStringArray("alertmanager-url")
+	ruleFiles, _ := cmd.Flags().GetStringArray("rule-file")
 	confFile, _ := cmd.Flags().GetString("conf-file")
 	force, _ := cmd.Flags().GetBool("force")
 
@@ -7226,11 +7261,12 @@ func runAddonInstallPrometheus(cmd *cobra.Command) error {
 	}
 
 	// --conf-file replaces the rendered config, so it is mutually exclusive with
-	// the render knobs --scrape/--scrape-append/--scrape-interval. (--retention
-	// and --listen are CLI flags, not render knobs, so they stay valid alongside
-	// --conf-file.)
-	if confFile != "" && (len(scrapeSpecs) > 0 || len(scrapeAppendSpecs) > 0 || cmd.Flags().Changed("scrape-interval")) {
-		return fmt.Errorf("--conf-file is mutually exclusive with --scrape/--scrape-append/--scrape-interval (they configure the rendered prometheus.yml)")
+	// the render knobs --scrape/--scrape-append/--scrape-interval/--alertmanager-url
+	// (an operator file owns its alerting: section too). (--retention and
+	// --listen are CLI flags, and --rule-file only feeds a managed mount whose
+	// use the operator's file decides, so all three stay valid alongside it.)
+	if confFile != "" && (len(scrapeSpecs) > 0 || len(scrapeAppendSpecs) > 0 || cmd.Flags().Changed("scrape-interval") || len(amURLs) > 0) {
+		return fmt.Errorf("--conf-file is mutually exclusive with --scrape/--scrape-append/--scrape-interval/--alertmanager-url (they configure the rendered prometheus.yml) — write your own alerting: section in the file instead")
 	}
 	if confFile != "" {
 		info, err := os.Stat(confFile)
@@ -7242,6 +7278,31 @@ func runAddonInstallPrometheus(cmd *cobra.Command) error {
 		}
 		if info.Size() == 0 {
 			return fmt.Errorf("--conf-file: %s is empty", confFile)
+		}
+	}
+
+	// Validate the NEW flags up front, like --webhook-url does: a malformed URL
+	// or a missing/empty rule file aborts before any managed file is rewritten.
+	// No connectivity probe — Prometheus reports a dead alertmanager as DOWN in
+	// its own UI; the format check is all install-time signal there is.
+	if len(amURLs) > 0 {
+		if err := podman.ValidateAlertmanagerURLs(amURLs); err != nil {
+			return fmt.Errorf("--alertmanager-url: %w", err)
+		}
+	}
+	for _, rf := range ruleFiles {
+		info, err := os.Stat(rf)
+		if os.IsNotExist(err) {
+			return fmt.Errorf("--rule-file: %s not found", rf)
+		}
+		if err != nil {
+			return fmt.Errorf("--rule-file: %w", err)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("--rule-file: %s is a directory — pass individual rule files (a glob expands to them)", rf)
+		}
+		if info.Size() == 0 {
+			return fmt.Errorf("--rule-file: %s is empty", rf)
 		}
 	}
 
@@ -7291,6 +7352,19 @@ func runAddonInstallPrometheus(cmd *cobra.Command) error {
 			return err
 		}
 		existing.Scrape = merged
+	}
+	// alertmanager and rule_files are set or cleared wholesale like conf_file —
+	// they have no append form (an alertmanager list doubles as the derived
+	// scrape job's target set, and rule files arrive via shell globs, so merging
+	// stored and passed lists would silently resurrect dropped entries). The
+	// pre-update emptiness is remembered: flipping it changes the container's
+	// MOUNT set, which no SIGHUP can apply (see the recreate branch below).
+	hadRules := len(existing.RuleFiles) > 0
+	if cmd.Flags().Changed("alertmanager-url") {
+		existing.Alertmanager = amURLs
+	}
+	if cmd.Flags().Changed("rule-file") {
+		existing.RuleFiles = ruleFiles
 	}
 	// conf_file is set or cleared wholesale: passing --conf-file switches to
 	// operator-file mode; omitting it reverts to render mode (nil-out below).
@@ -7364,8 +7438,15 @@ func runAddonInstallPrometheus(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	// A --rule-file set going from empty to non-empty (or back) changes the
+	// container's MOUNT set — the read-only /etc/prometheus/rules bind exists
+	// only while there are rule files. SIGHUP rereads the config but cannot add
+	// a mount, so that transition (and its reverse) recreates the container even
+	// without --force. Losing scrapes for a few seconds beats a Prometheus whose
+	// rule_files: points at an unmounted directory.
+	rulesMountChanged := hadRules != (len(pc.RuleFiles) > 0)
 	reloaded := false
-	if running && !force {
+	if running && !force && !rulesMountChanged {
 		// Rendered/copied config is already refreshed on disk. If it differs, hot
 		// reload (SIGHUP); a broken conf-file would surface in the logs but never
 		// kills the running server (Prometheus keeps the last good config).
@@ -7392,10 +7473,15 @@ func runAddonInstallPrometheus(cmd *cobra.Command) error {
 	}
 
 	fmt.Println()
-	if running && !force {
-		fmt.Printf("✓ Prometheus %q (%s)\n", name, map[bool]string{true: "config reloaded", false: "unchanged"}[reloaded])
-	} else {
+	switch {
+	case !running:
 		fmt.Printf("✓ Prometheus installed: %q\n", name)
+	case force || rulesMountChanged:
+		fmt.Printf("✓ Prometheus %q recreated (%s)\n", name, map[bool]string{true: "--force", false: "rules mount set changed"}[force])
+	case reloaded:
+		fmt.Printf("✓ Prometheus %q (config reloaded)\n", name)
+	default:
+		fmt.Printf("✓ Prometheus %q (unchanged)\n", name)
 	}
 	fmt.Printf("  Container:  %s\n", pc.ContainerName)
 	fmt.Printf("  Image:      %s\n", pc.ImageTag)
@@ -7404,7 +7490,22 @@ func runAddonInstallPrometheus(cmd *cobra.Command) error {
 	if pc.ConfFile != "" {
 		fmt.Printf(" (from --conf-file %s)\n", pc.ConfFile)
 	} else {
-		fmt.Printf(" (rendered: 1 self job + %d scrape job(s))\n", len(pc.Scrape))
+		jobs := len(pc.Scrape)
+		if len(pc.Alertmanager) > 0 {
+			jobs++ // the derived alertmanager scrape job
+		}
+		fmt.Printf(" (rendered: 1 self job + %d scrape job(s))\n", jobs)
+	}
+	if len(pc.Alertmanager) > 0 {
+		fmt.Printf("  Alerts:     %s\n", strings.Join(pc.Alertmanager, ", "))
+	}
+	if len(pc.RuleFiles) > 0 {
+		ref := ", referenced by the rendered rule_files"
+		if pc.ConfFile != "" {
+			ref = " — your conf-file decides whether to reference them"
+		}
+		fmt.Printf("  Rules:      %d file(s) copied to %s (mounted at /etc/prometheus/rules%s)\n",
+			len(pc.RuleFiles), pm.RulesDir(&pc), ref)
 	}
 	fmt.Printf("  Retention:  %s\n", pc.Retention)
 	fmt.Printf("  URL:        http://%s:%d/\n", pc.Listen, pc.HostPort)
@@ -7576,8 +7677,9 @@ func runAddonPrometheusReload(cmd *cobra.Command) error {
 // --webhook-url, or a "no-op" receiver when none are given) or, with --conf-file,
 // the operator's own file; reload via SIGHUP.
 //
-// v1 deliberately does NOT wire this to Prometheus: no alerting section is
-// injected into any prometheus.yml.
+// The wiring into Prometheus lives on the PROMETHEUS side (--alertmanager-url
+// renders the alerting section there); this addon itself has no Prometheus
+// concept — it just receives whatever is pushed to its API.
 //
 // Security is stricter-than-Prometheus framing: there is no auth, and the API
 // lets anyone who reaches the port create silences (mute on-call) — so the

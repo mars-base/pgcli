@@ -6,11 +6,12 @@ weight: 56
 
 `pg addon install alertmanager` 以受管容器方式运行 [Alertmanager](https://prometheus.io/docs/alerting/latest/alertmanager/)——位于 Prometheus 下游的告警去重、分组、路由与通知层——直接跑官方 `docker.io/prom/alertmanager` 镜像。与 Prometheus、Grafana 一样，它是**顶层插件**：不前置某个具体实例，也不依附于任何一个。Prometheus 与 Alertmanager 是天然一对——Prometheus 触发告警，Alertmanager 决定通知谁、怎么通知——而本插件在形状上是 Prometheus 的近乎完全同构体（单容器、Linux 上宿主网络、各自端口池里的一个 web 端口、持久数据目录、开机自启、日志、渲染配置文件 + 镜像名之后的 CLI flag、SIGHUP 热加载、无 Web 登录）。
 
-> **这一版不把两者衔接起来。** `pg addon install alertmanager` 不会往任何
-> `prometheus.yml` 里注入 `alerting:` 段，`pg addon install prometheus` 也不知道
-> Alertmanager 的存在。两者各自独立运行；要让 Prometheus 的告警真正路由到这里，需要
-> 你自己把 Prometheus 指过来（或任一侧用 `--conf-file` 手写完整路由树）。未来版本可能
-> 会把两者接起来。
+> **衔接的工作在 Prometheus 那一侧。** `pg addon install alertmanager` 不碰任何
+> `prometheus.yml`——也不需要碰：由 Prometheus 自己指向本实例，命令是
+> `pg addon install prometheus --alertmanager-url <本实例的 host:port>`，它会注入
+> `alerting:` 段（外加一个抓取本实例 `/metrics` 的 job）。若 Prometheus 用的是自己的
+> 配置文件（`--conf-file`），就自己在里面写 `alerting:` 段。两种方式只要指过来了，告警
+> 就会流进来。
 
 > **没有 Web 登录/密码——而且比 Prometheus 的赌注更大。** Alertmanager **完全不
 > 带鉴权**，且它的无鉴权 API 的可写性比 Prometheus 那个以读为主的 API 更危险：任何能
@@ -286,7 +287,8 @@ pg autostart enable --alertmanager --name am1
 unit，macOS 上是 LaunchAgent）来执行 `pg start --autostart`。开机启动只负责把容器拉起
 来——读磁盘上已存在的托管 `alertmanager.yml`，且数据目录在创建时已 chown 过，除 podman
 本身外不需要任何宿主特权。启动顺序上 Alertmanager 排在 Prometheus 之后、nginx 之前——
-是上面那个采集器天然的搭档，即使 v1 并未把两者接通。完整机制、状态与关闭方式见 [开机
+是上面那个采集器天然的搭档，衔接也恰好在采集器那一侧完成（`pg addon install prometheus
+--alertmanager-url …`）。完整机制、状态与关闭方式见 [开机
 自启]({{< relref "../autostart" >}})。
 
 ## 移除
@@ -339,9 +341,11 @@ pg logs addon alertmanager -n 200     # 最近 200 行（也支持 -i / --tail�
 
 ## 已知限制
 
-- **未与 Prometheus 接通。** 本插件既不往 `prometheus.yml` 注入 `alerting:` 段，也不从
-  Prometheus 读取任何信息；两者互相独立（见开头那段说明）。真正的
-  Prometheus→Alertmanager 路由留给你自己（`--conf-file`）或未来版本。
+- **单向衔接。** 本插件既不往 `prometheus.yml` 注入 `alerting:` 段，也不从
+  Prometheus 读取任何信息——它只接收被推进其 API 的东西。接通的动作在 Prometheus
+  那一侧完成（`pg addon install prometheus --alertmanager-url …`，渲染模式；
+  `--conf-file` 模式就自己写 `alerting:` 段）。反过来，本插件这边也永远不会去检视任何
+  `prometheus.yml`。
 - **无鉴权**——且其后果比 Prometheus 更尖锐。API 能创建 silence（静音 oncall）、能重载
   配置，且 `POST /-/reload` 在镜像里无法关闭（pgcli 只是不去用它）。`0.0.0.0` 绑定的
   唯一保护是网络边界；不要把它暴露到不可信网络。

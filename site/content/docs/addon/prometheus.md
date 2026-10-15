@@ -32,9 +32,11 @@ Prometheus diverges from Grafana in **how it is configured**. Grafana is env-onl
 | `--scrape-append` | — | Same spec form, but folds the appended jobs' targets into the stored `--scrape` list (same-named job merges, new names append) instead of replacing it. Every appended target is probed and the install ABORTS — writing nothing — if any returns no data. Mutually exclusive with `--scrape` and `--conf-file` |
 | `--scrape-interval` | `15s` | Global `scrape_interval` in the rendered config; mutually exclusive with `--conf-file` |
 | `--retention` | `15d` | TSDB retention (`--storage.tsdb.retention.time`); a duration like `15d`, `6mo`, `2y`. A CLI flag, so it stays valid alongside `--conf-file` |
-| `--conf-file` | — | Path to your own `prometheus.yml` — skip rendering entirely (mutually exclusive with `--scrape`/`--scrape-append`/`--scrape-interval`); see below |
+| `--conf-file` | — | Path to your own `prometheus.yml` — skip rendering entirely (mutually exclusive with `--scrape`/`--scrape-append`/`--scrape-interval`/`--alertmanager-url`); see below |
+| `--alertmanager-url` | — | Alertmanager instance(s) to forward fired alerts to (repeatable): bare `HOST[:PORT]` (portless gets `9093`) or `http(s)://HOST[:PORT][/path]`. The rendered config gains an `alerting:` section pushing there **and** a matching `alertmanager` scrape job (so Alertmanager's own `/metrics` is watched — not a separate opt-in). All entries validated up front and must share one scheme (mixing http/https aborts); connectivity is **not** probed. Mutually exclusive with `--conf-file`; see below |
+| `--rule-file` | — | Path to a rule file (`*.rules.yml` with a top-level `groups:`; repeatable) — pgcli copies each into its managed rules dir (basename only; two files sharing a basename abort), mounts that dir read-only at `/etc/prometheus/rules`, and the rendered config loads the copies via `rule_files`. **Valid alongside `--conf-file`**: the copy and mount happen either way, your own file decides whether to reference them. A missing/empty file aborts, writing nothing; see below |
 | `--data-dir` | auto | Data directory override (default under the base dir) |
-| `--force` | false | Recreate even when running — instead of hot-reloading a changed config, or to apply changed ports / listen / retention |
+| `--force` | false | Recreate even when running — instead of hot-reloading a changed config, or to apply changed ports / listen / retention (install also recreates on its own when `--rule-file` goes from empty to non-empty or back, since that changes the container's mount set) |
 
 The data directory is Prometheus's TSDB. It survives `pg addon remove` (delete it with `--clean-data`), so reinstalling under the same name revives collected metrics. The image runs as a baked `nobody` (uid/gid 65534) and creates no writable directory itself, so pgcli chowns the data dir on the host before creating the container — via `podman unshare chown 65534:65534` under rootless podman, or a direct recursive `chown` when pgcli runs as root on a rootful host (exactly Grafana's mechanism, different id).
 
@@ -78,6 +80,68 @@ Scrape targets are dialled **from the Prometheus container**. On Linux (host net
 
 Re-running `install` on a running instance **hot-reloads** it (SIGHUP) when the rendered/copied config actually changed, and leaves it alone when it didn't; `--force` recreates the container instead — to apply a changed `--port` / `--listen` / `--retention` (which are container arguments, not config-file contents).
 
+## Forwarding alerts to Alertmanager (`--alertmanager-url`)
+
+Point a Prometheus instance at one or more pgcli-managed Alertmanagers and it will push fired alerts to them:
+
+```bash
+pg addon install alertmanager --name am1
+pg addon install prometheus --name p1 \
+  --scrape postgres-exporter=127.0.0.1:9187 \
+  --alertmanager-url 127.0.0.1:9093
+```
+
+The rendered `prometheus.yml` then gains **two** things from the one flag — an `alerting:` section that pushes fired alerts, and a matching `alertmanager` scrape job that watches each instance's own `/metrics`:
+
+```yaml
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["127.0.0.1:9093"]
+...
+  - job_name: alertmanager
+    static_configs:
+      - targets: ["127.0.0.1:9093"]
+```
+
+Accepted forms are bare `host[:port]` (a portless entry gets Alertmanager's conventional `9093`) or a full `http(s)://host[:port][/path]` URL; the scheme and path are stripped for the scrape target, and `https` is carried through as `scheme: https` on both sections (TLS knobs like CA files are out of render scope — they need `--conf-file`). Entries are validated **before** anything is written and must all share one scheme (http and https mixed together abort), but they are **not** connectivity-probed: Prometheus tracks dead alertmanagers on its own, and `pg addon prometheus reload` can't fix a network problem anyway. A re-run replaces the stored URL list wholesale (there is no append form for it, unlike `--scrape`).
+
+Verify the wiring live:
+
+```bash
+curl -s localhost:9090/api/v1/alertmanagers           # activeAlertmanagers lists the target
+curl -s 'localhost:9090/api/v1/targets?state=any' | grep -c alertmanager
+```
+
+## Loading alerting rules (`--rule-file`)
+
+Prometheus evaluates alerting/recording rules from `rule_files:`. Give pgcli the rule file and it becomes a managed copy:
+
+```bash
+pg addon install prometheus --name p1 --rule-file /srv/rules/alert.rules.yml
+```
+
+pgcli copies each file into `<base>/addon/prometheus/<name>/rules/`, bind-mounts **that directory** read-only at `/etc/prometheus/rules`, and the rendered config references the copy by name:
+
+```yaml
+rule_files:
+  - "/etc/prometheus/rules/alert.rules.yml"
+```
+
+A flat directory means the **basename** is what matters: two source files sharing one basename abort the install (the copy would silently clobber one).
+
+Editing your **original** rule file takes effect with a plain reload: `pg addon prometheus reload` re-copies every `--rule-file` into the managed dir *before* signalling, so Prometheus rereads the new rules in place — no reinstall, no container restart:
+
+```bash
+# edit /srv/rules/alert.rules.yml ...
+pg addon prometheus reload --name p1
+curl -s localhost:9090/api/v1/rules    # groups reflect the edit; or watch pg logs addon prometheus
+```
+
+A bad rule file is rejected the same way a bad config is: Prometheus keeps serving the **previous rule set** and logs the parse error, so check the log (or the rules API) after reloading hand-edited rules. The copies are managed artifacts, deleted by `pg addon remove` regardless of `--clean-data`, exactly like the rendered `prometheus.yml`. Your originals are never touched.
+
+`--rule-file` differs from the other render knobs in that it **stays valid alongside `--conf-file`**: pgcli copies the rules and adds the mount either way, and your own file decides whether to reference `/etc/prometheus/rules` (a `rule_files: ["/etc/prometheus/rules/*.rules.yml"]` glob in it picks up whatever you passed). The one flag whose addition cannot be hot-reloaded is this one going from empty to non-empty (or back): the `/etc/prometheus/rules` mount exists only while there are rule files, and a SIGHUP cannot add a volume, so that transition recreates the container.
+
 ## Custom config file (`--conf-file`)
 
 Give pgcli your own `prometheus.yml` and it skips rendering entirely:
@@ -86,7 +150,61 @@ Give pgcli your own `prometheus.yml` and it skips rendering entirely:
 pg addon install prometheus --name p1 --conf-file /etc/prometheus/my.yml
 ```
 
-pgcli **copies** your file into its managed path (`<base>/addon/prometheus/<name>/prometheus.yml`) and mounts **that copy** read-only — never your original. This is deliberate: a single-file bind mount pins the source inode, so an in-place edit of your original file would not propagate into the running container. Because it's a copy, editing your own file and running `pg addon prometheus reload` re-copies it and signals Prometheus to reread. pgcli does not validate or rewrite the file's contents (same contract as the nginx/haproxy `--conf-file`). `--conf-file` is mutually exclusive only with the render knobs `--scrape`/`--scrape-append`/`--scrape-interval`; `--retention` and `--listen` are CLI flags and stay valid alongside it. Omit `--conf-file` on a reinstall to go back to render mode.
+pgcli **copies** your file into its managed path (`<base>/addon/prometheus/<name>/prometheus.yml`) and mounts **that copy** read-only — never your original. This is deliberate: a single-file bind mount pins the source inode, so an in-place edit of your original file would not propagate into the running container. Because it's a copy, editing your own file and running `pg addon prometheus reload` re-copies it and signals Prometheus to reread. pgcli does not validate or rewrite the file's contents (same contract as the nginx/haproxy `--conf-file`). `--conf-file` is mutually exclusive with the render knobs `--scrape`/`--scrape-append`/`--scrape-interval`/`--alertmanager-url`; `--retention`, `--listen` and `--rule-file` are not render knobs and stay valid alongside it. Omit `--conf-file` on a reinstall to go back to render mode.
+
+### Worked example
+
+A real operator file wired to a pgcli Alertmanager and loading pgcli-managed rule files:
+
+```yaml
+# /etc/prometheus/my.yml
+# pg addon install prometheus --name p1 --conf-file /etc/prometheus/my.yml
+global:
+  scrape_interval: 15s
+  scrape_timeout: 15s
+  evaluation_interval: 1m
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - localhost:9093 # a pgcli alertmanager on its default base port
+
+rule_files:
+  - /etc/prometheus/rules/*.rules.yml # pgcli's managed rules dir (--rule-file)
+
+remote_write: []
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090 # this Prometheus itself
+  - job_name: nodes
+    static_configs:
+      - targets:
+          - 10.246.36.2:9100
+        labels:
+          nodename: lhcloud1
+      - targets:
+          - 10.246.36.3:9100
+        labels:
+          nodename: lhcloud2
+      - targets:
+          - 10.246.36.4:9100
+        labels:
+          nodename: lhcloud3
+```
+
+`localhost:9090` and `localhost:9093` work because Linux containers run on the **host network** — `localhost` inside Prometheus is the host, where both web ports listen. The two pieces pgcli contributes are visible in the file: `--rule-file` copies your rule files into `<base>/addon/prometheus/<name>/rules/` and bind-mounts that directory at `/etc/prometheus/rules`, which is why the `rule_files:` glob above resolves; the `alerting:` block, on the other hand, is yours to write — in `--conf-file` mode pgcli adds nothing to the file, does not derive the `alertmanager` scrape job either, and rejects `--alertmanager-url` as a render knob. Check a hand-written file before relying on `pg addon prometheus reload` to surface errors in the log:
+
+```bash
+c=$(podman ps --filter name=pgcli-prometheus --format '{{.Names}}' | head -1)
+podman exec "$c" promtool check config /etc/prometheus/prometheus.yml
+```
+
+That inspects the copy pgcli mounted, so run it after an install (or a reload) rather than against your original path.
+
 
 ## Reload (hot config change)
 
@@ -94,7 +212,7 @@ pgcli **copies** your file into its managed path (`<base>/addon/prometheus/<name
 pg addon prometheus reload --name p1
 ```
 
-This rewrites the managed `prometheus.yml` (re-render in render mode, re-copy your file in `--conf-file` mode) and sends **SIGHUP** to the running container, which makes Prometheus reread it in place — no container recreate, no dropped scrapes. It uses a signal rather than the HTTP `POST /-/reload` endpoint on purpose, so the unauthenticated reload route never has to be enabled (`--web.enable-lifecycle` is not set). Prometheus keeps serving on its last good config and logs an error if the new one is malformed, so check `pg logs addon prometheus` after reloading a hand-written file. The instance must already be running (`pg addon start prometheus`).
+This rewrites the managed `prometheus.yml` (re-render in render mode, re-copy your file in `--conf-file` mode, re-copy the `--rule-file` copies in both) and sends **SIGHUP** to the running container, which makes Prometheus reread it in place — no container recreate, no dropped scrapes. It uses a signal rather than the HTTP `POST /-/reload` endpoint on purpose, so the unauthenticated reload route never has to be enabled (`--web.enable-lifecycle` is not set). Prometheus keeps serving on its last good config and logs an error if the new one is malformed, so check `pg logs addon prometheus` after reloading a hand-written file. The instance must already be running (`pg addon start prometheus`). One change a signal cannot apply: `--rule-file` going from empty to non-empty (or back) adds/removes the `/etc/prometheus/rules` **mount**, so a plain `install` recreates the container for that transition — reload is enough for edits *within* a non-empty rule set.
 
 ## Listening and exposure
 
@@ -125,11 +243,13 @@ addons:
         - node=10.0.0.5:9100,10.0.0.6:9100
       scrape_interval: 15s
       autostart: false
+      # alertmanager: [127.0.0.1:9093]        # render-mode only: forward fired alerts + a derived scrape job
+      # rule_files: [/srv/rules/alert.rules.yml]  # copied into <name>/rules, mounted at /etc/prometheus/rules
       # conf_file: /etc/prometheus/my.yml   # operator-file mode, skips rendering
       # data_dir: /srv/prometheus-data      # optional, overrides the default location
 ```
 
-The rendered `prometheus.yml` carries the global `scrape_interval`, the always-present self job, and one `static_configs` job per `scrape` JOB (folding every target that job's spec lists). `retention` and the listener bind are **not** in that file — they are passed to the `prometheus` binary as CLI flags (`--storage.tsdb.retention.time`, `--web.listen-address`), which is why they remain settable alongside `--conf-file`.
+The rendered `prometheus.yml` carries the global `scrape_interval`, the always-present self job, and one `static_configs` job per `scrape` JOB (folding every target that job's spec lists); `--alertmanager-url` adds the `alerting:` section plus its `alertmanager` scrape job, and `--rule-file` adds a `rule_files:` section. `retention` and the listener bind are **not** in that file — they are passed to the `prometheus` binary as CLI flags (`--storage.tsdb.retention.time`, `--web.listen-address`), which is why they remain settable alongside `--conf-file`.
 
 ### List
 
@@ -177,7 +297,7 @@ pg addon remove prometheus              # keeps the TSDB — collected metrics s
 pg addon remove prometheus --clean-data # deletes the TSDB too
 ```
 
-Under rootless podman, `--clean-data` deletes the data dir through `podman unshare rm` — Prometheus writes as its container uid (65534), which maps to a subordinate uid the host user cannot `rm` directly. `--conf-file` mode removes only pgcli's copy; your original file wherever you put it is never touched.
+Under rootless podman, `--clean-data` deletes the data dir through `podman unshare rm` — Prometheus writes as its container uid (65534), which maps to a subordinate uid the host user cannot `rm` directly. `--conf-file` mode removes only pgcli's copy; your original file wherever you put it is never touched. `--rule-file` originals likewise survive — only the managed `rules/` copies go away, and they go away on every `remove`, with or without `--clean-data` (like the rendered `prometheus.yml`, they carry no state worth reviving).
 
 ## Logs
 
@@ -198,7 +318,7 @@ pg logs addon prometheus -n 200     # last 200 lines (also -i / --tail)
 
 ## Known limitations
 
-- v1 is a bare collection backend: it ships no PostgreSQL exporter (install one yourself and point `--scrape postgres-exporter=127.0.0.1:9187` at it), no alertmanager, and no remote-write. It is the scrape/store/query layer you point Grafana at.
+- v1 is a bare collection backend: it ships no PostgreSQL exporter (install one yourself and point `--scrape postgres-exporter=127.0.0.1:9187` at it) and no remote-write. Alerting, however, is wired: `--alertmanager-url` forwards fired alerts to a pgcli Alertmanager and `--rule-file` loads alerting rules (both render-mode; `--conf-file` covers the rest by hand). It is the scrape/store/query layer you point Grafana at.
 - **No authentication.** Prometheus's API runs arbitrary PromQL; the only protection for a `0.0.0.0` bind is the network boundary. This is a materially weaker posture than Grafana's password-guarded `0.0.0.0` — do not expose it on an untrusted network.
 - pgcli renders or copies `prometheus.yml` but does not validate it (there is no `promtool check config` gate at install). A bad rendered config is impossible, but a bad `--conf-file` surfaces only in the container logs on reload.
 - The host-side ownership chown is automatic under rootless podman (`podman unshare chown`) and when pgcli runs as root on a rootful host (direct `chown`). A rootful daemon talked to by a non-root pgcli (only via an explicitly configured remote socket) has no automatic path.
