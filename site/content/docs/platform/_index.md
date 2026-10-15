@@ -60,6 +60,7 @@ across machines, or that depend on Linux-only container internals, stay
 | Addon — **pgAdmin 4** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
 | Addon — **Grafana** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
 | Addon — **Prometheus** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
+| Addon — **Alertmanager** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
 | Addon — **nginx** | ✅ host network | ✅ bridge, published ports (lightly tested) |
 | Client — **`pg mc`** (MinIO client) | ✅ host network | ✅ bridge (see below) |
 | HA — **Patroni** (`pg ha`) | ✅ incl. cross-host | ❌ Linux only |
@@ -171,6 +172,21 @@ Addon networking differs per component:
   boundary. On macOS it joins `pgcli-net` with the port published — the same
   bridge path Grafana uses, code-complete but not yet exercised on a Mac, so the
   e2e coverage is Linux-only for now.
+- **[Alertmanager](/docs/addon/alertmanager/)** — **Linux; macOS code-complete,
+  untested.** Prometheus's downstream alert router and its near-exact twin: a
+  plain upstream `docker.io/prom/alertmanager` image, the same ownership shape
+  (baked `USER nobody`, uid/gid `65534`, no entrypoint fixup — pgcli pre-chowns
+  the host state dir), configured by a bind-mounted `alertmanager.yml` (rendered,
+  or copied from `--conf-file`) plus CLI flags after the image name. Two
+  Alertmanager-specific facts: `--cluster.listen-address=` is always passed empty
+  so a single instance never opens the HA gossip port (TCP+UDP `9094`), and unlike
+  Prometheus the unauthenticated `POST /-/reload` route **cannot** be disabled in
+  the image — pgcli reloads via SIGHUP so it never depends on that route, but the
+  route stays open regardless. That sits on top of a sharper exposure than
+  Prometheus's: `Listen` defaults to `0.0.0.0` with **no authentication**, and
+  reaching the port lets anyone **create silences** — silently muting every
+  notification the on-call expects. On macOS it joins `pgcli-net` with the port
+  published — the same bridge path, code-complete but not yet exercised on a Mac.
 - **[nginx](/docs/addon/nginx/)** — **both platforms (macOS lightly
   tested).** The HTTP reverse proxy joins `pgcli-net` on macOS with its ports
   published — the same bridge path the object stores use; it has been exercised

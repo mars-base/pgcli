@@ -56,6 +56,7 @@ pgcli 在 Linux 和 macOS 上都是驱动 [Podman](https://podman.io) 容器运�
 | 插件 —— **pgAdmin 4** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
 | 插件 —— **Grafana** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
 | 插件 —— **Prometheus** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
+| 插件 —— **Alertmanager** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
 | 插件 —— **nginx** | ✅ host 网络 | ✅ bridge，发布端口（轻度实测） |
 | 客户端 —— **`pg mc`**（MinIO 客户端） | ✅ host 网络 | ✅ bridge（见下） |
 | 高可用 —— **Patroni**（`pg ha`） | ✅ 含跨主机 | ❌ 仅 Linux |
@@ -149,6 +150,18 @@ macOS 上这些都是**单主机**：跨主机副本、跨多机的连接池属�
   且**该默认背后没有任何鉴权**：不像 Grafana 的 `0.0.0.0` 有密码兜底，这里的
   暴露面只靠网络边界。macOS 上加入 `pgcli-net` 并发布端口 —— 与 Grafana 相同的
   bridge 路径，代码完备但尚未在 Mac 上跑过，e2e 覆盖目前仅限 Linux。
+- **[Alertmanager](/docs/addon/alertmanager/)** —— **Linux；macOS 代码完备、未
+  实测**。Prometheus 的下游告警路由端，也是它的近乎完全同构体：纯上游
+  `docker.io/prom/alertmanager` 镜像，属主形态一致（固化 `USER nobody`，uid/gid
+  `65534`，entrypoint 不做属主管理——pgcli 预 chown 宿主状态目录），靠一份 bind
+  mount 的 `alertmanager.yml`（渲染而来，或从 `--conf-file` 拷贝）加镜像名之后的
+  CLI flag 配置。两个 Alertmanager 特有的事实：`--cluster.listen-address=` 始终以
+  空串传入，所以单实例永不开启 HA gossip 端口（TCP+UDP `9094`）；而与 Prometheus
+  不同，镜像里那条无鉴权的 `POST /-/reload` 路由**无法关闭**——pgcli 用 SIGHUP
+  重载、从而永远不依赖那条路由，但路由本身照样敞开。这叠在一个比 Prometheus 更
+  尖锐的暴露面上：`Listen` 默认 `0.0.0.0` 且**完全无鉴权**，能连到端口即可**创建
+  silence**——悄悄压掉 oncall 期待的每一条通知。macOS 上加入 `pgcli-net` 并发布
+  端口 —— 同一条 bridge 路径，代码完备但尚未在 Mac 上跑过。
 - **[nginx](/docs/addon/nginx/)** —— **两个平台都支持（macOS 轻度实测）**。HTTP
   反向代理，Linux 上走 host 网络；macOS 上加入 `pgcli-net` 并发布端口，与对象
   存储同一条 bridge 路径 —— 已跑通过但未经负载考验。上游镜像多架构

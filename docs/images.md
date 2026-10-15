@@ -30,8 +30,9 @@ pgcli 使用的容器镜像及其默认 tag。
 | `docker.io/library/nginx` | `1.27-alpine` | nginx HTTP 反向代理，纯上游镜像无 wrapper，双架构 manifest list | `DefaultNginxImageTag` |
 | `docker.io/dxflrs/garage` | `v2.4.1` | Garage（Deuxfleurs 的 Rust S3 存储，面向自建/异地集群），纯上游镜像无 wrapper，`FROM scratch` 无 shell | `DefaultGarageImageTag` |
 | `docker.io/chrislusf/seaweedfs` | `4.48_large_disk` | SeaweedFS（Go 对象存储，volume + placement-code 复制模型），纯上游镜像无 wrapper，`_large_disk` 变体 | `DefaultSeaweedfsImageTag` |
-| `docker.io/grafana/grafana` | `13.2.4` | Grafana（开源可观测性面板），纯上游官方镜像无 wrapper；自 12.4.0 起 `grafana-oss` 仓库冻结，OSS 构建就发在这个仓库里；默认 Alpine base，双架构 manifest list | `config.go:576`（`DefaultGrafanaImageTag`） |
-| `docker.io/prom/prometheus` | `v3.15.0` | Prometheus（指标采集后端，Grafana 的数据源），纯上游官方镜像无 wrapper；无后缀 tag 即 busybox 变体（带 shell），双架构 manifest list | `config.go:589`（`DefaultPrometheusImageTag`） |
+| `docker.io/grafana/grafana` | `13.2.4` | Grafana（开源可观测性面板），纯上游官方镜像无 wrapper；自 12.4.0 起 `grafana-oss` 仓库冻结，OSS 构建就发在这个仓库里；默认 Alpine base，双架构 manifest list | `config.go:578`（`DefaultGrafanaImageTag`） |
+| `docker.io/prom/prometheus` | `v3.15.0` | Prometheus（指标采集后端，Grafana 的数据源），纯上游官方镜像无 wrapper；无后缀 tag 即 busybox 变体（带 shell），双架构 manifest list | `config.go:591`（`DefaultPrometheusImageTag`） |
+| `docker.io/prom/alertmanager` | `v0.34.1` | Alertmanager（Prometheus 下游的告警去重/分组/路由端），纯上游官方镜像无 wrapper；无后缀 tag 即 busybox 变体（带 `amtool`），多架构 manifest list | `config.go:603`（`DefaultAlertmanagerImageTag`） |
 
 ## 镜像导出
 
@@ -104,6 +105,10 @@ podman save -o "$TARGET/grafana_13.2.4.tar" docker.io/grafana/grafana:13.2.4
 # prometheus 上游镜像同样是双架构 manifest list，先按 amd64 pull 再 save
 podman pull --platform linux/amd64 docker.io/prom/prometheus:v3.15.0
 podman save -o "$TARGET/prometheus_v3.15.0.tar" docker.io/prom/prometheus:v3.15.0
+
+# alertmanager 上游镜像同样是多架构 manifest list，先按 amd64 pull 再 save
+podman pull --platform linux/amd64 docker.io/prom/alertmanager:v0.34.1
+podman save -o "$TARGET/alertmanager_v0.34.1.tar" docker.io/prom/alertmanager:v0.34.1
 ```
 
 ### rustfs（双架构 manifest 不能直接 save）
@@ -194,9 +199,20 @@ done
   rootful+root 下直接 `chown`）。与 Grafana 不同的是配置方式：靠一份 bind mount
   的 `prometheus.yml`（渲染或从 `--conf-file` 拷贝）加镜像名之后的 CLI flag，而不
   是 env；且**完全没有鉴权**——`0.0.0.0` 默认背后没有密码兜底，暴露面只靠网络边界
+- **alertmanager**：纯上游官方 `docker.io/prom/alertmanager`，无 wrapper，是上面
+  prometheus 插件的下游同构体。无后缀 tag 即 **busybox 变体**（镜像内带 shell 与
+  `amtool`；另有 `-ubuntu`/`docker-alpine` 变体，pgcli 从不选用）；pin 到 stable 线
+  `v0.34.1`（多架构 manifest list）。属主形态与 prometheus/grafana 一致：固化
+  `USER nobody`（uid/gid `65534`）、entrypoint 不做属主管理，pgcli 创建容器前在宿主
+  chown 数据目录。两处差异：镜像名之后固定传 `--cluster.listen-address=`（空串）以彻底
+  关闭单实例永不用、且默认会占 TCP+UDP `9094` 的 HA gossip；且无鉴权的 `POST /-/reload`
+  **在镜像里关不掉**（不像 prometheus 的 `--web.enable-lifecycle` 可不设即隐去）——
+  pgcli 走 SIGHUP、不依赖该端点，但路由照样敞开，故暴露面比 prometheus 更危险（可达即
+  可创建 silence 静音 oncall）
 - **pgbouncer** / **postgrest** / **haproxy** / **etcd** / **pgdog**：上游官方或社区维护的稳定版本
 
 ---
 
-**最后更新**：2026-10-14（新增 grafana 与 prometheus 插件镜像；此前 garage 与
-seaweedfs 两插件分别于 2026-10-12 / 2026-10-14 合入时补录）
+**最后更新**：2026-10-15（新增 alertmanager 插件镜像；此前 grafana 与 prometheus
+于 2026-10-14 合入时补录，再往前 garage 与 seaweedfs 分别于 2026-10-12 /
+2026-10-14 合入时补录）

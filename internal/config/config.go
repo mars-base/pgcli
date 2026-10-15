@@ -35,6 +35,7 @@ type Config struct {
 	PgAdminStartPort        int                       `yaml:"pgadmin_start_port,omitempty"`         // starting pgAdmin 4 web host port, default 5050
 	GrafanaStartPort        int                       `yaml:"grafana_start_port,omitempty"`         // starting Grafana web host port, default 3000
 	PrometheusStartPort     int                       `yaml:"prometheus_start_port,omitempty"`      // starting Prometheus web host port, default 9090
+	AlertmanagerStartPort   int                       `yaml:"alertmanager_start_port,omitempty"`    // starting Alertmanager web host port, default 9093
 	NginxStartPort          int                       `yaml:"nginx_start_port,omitempty"`           // starting nginx HTTP host port, default 8080 (HTTPS takes the next free port)
 	GarageStartPort         int                       `yaml:"garage_start_port,omitempty"`          // starting Garage S3 API host port, default 3900 (RPC, web, admin take the next three free ports)
 	SeaweedfsStartPort      int                       `yaml:"seaweedfs_start_port,omitempty"`       // starting SeaweedFS master host port, default 8400 (volume, filer, s3 take the next three free ports; gRPC twins at +10000 are reserved)
@@ -88,23 +89,24 @@ type AddonsConfig struct {
 // (e.g. a PgBouncer fronting a remote database via --dsn), and for shared
 // infrastructure addons like etcd.
 type TopAddonsConfig struct {
-	PgBouncer  map[string]PgBouncerConfig      `yaml:"pgbouncer,omitempty"`
-	Postgrest  map[string]PostgrestConfig      `yaml:"postgrest,omitempty"`
-	Etcd       map[string]EtcdConfig           `yaml:"etcd,omitempty"`
-	PgDog      map[string]PgDogConfig          `yaml:"pgdog,omitempty"`
-	Patroni    map[string]PatroniClusterConfig `yaml:"patroni,omitempty"`
-	HAProxy    map[string]HAProxyConfig        `yaml:"haproxy,omitempty"`
-	Minio      map[string]MinioConfig          `yaml:"minio,omitempty"`
-	Silo       map[string]SiloConfig           `yaml:"silo,omitempty"`
-	Rustfs     map[string]RustfsConfig         `yaml:"rustfs,omitempty"`
-	Garage     map[string]GarageConfig         `yaml:"garage,omitempty"`
-	Seaweedfs  map[string]SeaweedfsConfig      `yaml:"seaweedfs,omitempty"`
-	Redis      map[string]RedisConfig          `yaml:"redis,omitempty"`
-	Predixy    map[string]PredixyConfig        `yaml:"predixy,omitempty"`
-	PgAdmin    map[string]PgAdminConfig        `yaml:"pgadmin,omitempty"`
-	Grafana    map[string]GrafanaConfig        `yaml:"grafana,omitempty"`
-	Prometheus map[string]PrometheusConfig     `yaml:"prometheus,omitempty"`
-	Nginx      map[string]NginxConfig          `yaml:"nginx,omitempty"`
+	PgBouncer    map[string]PgBouncerConfig      `yaml:"pgbouncer,omitempty"`
+	Postgrest    map[string]PostgrestConfig      `yaml:"postgrest,omitempty"`
+	Etcd         map[string]EtcdConfig           `yaml:"etcd,omitempty"`
+	PgDog        map[string]PgDogConfig          `yaml:"pgdog,omitempty"`
+	Patroni      map[string]PatroniClusterConfig `yaml:"patroni,omitempty"`
+	HAProxy      map[string]HAProxyConfig        `yaml:"haproxy,omitempty"`
+	Minio        map[string]MinioConfig          `yaml:"minio,omitempty"`
+	Silo         map[string]SiloConfig           `yaml:"silo,omitempty"`
+	Rustfs       map[string]RustfsConfig         `yaml:"rustfs,omitempty"`
+	Garage       map[string]GarageConfig         `yaml:"garage,omitempty"`
+	Seaweedfs    map[string]SeaweedfsConfig      `yaml:"seaweedfs,omitempty"`
+	Redis        map[string]RedisConfig          `yaml:"redis,omitempty"`
+	Predixy      map[string]PredixyConfig        `yaml:"predixy,omitempty"`
+	PgAdmin      map[string]PgAdminConfig        `yaml:"pgadmin,omitempty"`
+	Grafana      map[string]GrafanaConfig        `yaml:"grafana,omitempty"`
+	Prometheus   map[string]PrometheusConfig     `yaml:"prometheus,omitempty"`
+	Alertmanager map[string]AlertmanagerConfig   `yaml:"alertmanager,omitempty"`
+	Nginx        map[string]NginxConfig          `yaml:"nginx,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -587,6 +589,18 @@ const DefaultGrafanaImageTag = "docker.io/grafana/grafana:13.2.4"
 // internal/podman.PrometheusManager for how pgcli makes a bind-mounted
 // /prometheus writable by 65534. Keep this in sync when bumping.
 const DefaultPrometheusImageTag = "docker.io/prom/prometheus:v3.15.0"
+
+// DefaultAlertmanagerImageTag pins the Alertmanager image. prom/alertmanager is
+// the official multi-arch image on docker.io (pull-only — pgcli never builds it).
+// The tag has no suffix, which for this image is simply the busybox-based
+// build (unlike prom/prometheus there is no -alpine/-ubuntu family to choose;
+// a -distroless variant exists and pgcli never selects it). It bundles both the
+// alertmanager daemon and the amtool CLI. v0.34.1 is a fixed stable release on
+// the current v0.34 line (verified 2026-10-15 via the GitHub releases API). The
+// image runs as the fixed nobody uid 65534 (gid 65534) and does not fix up bind
+// mounts — see internal/podman.AlertmanagerManager for how pgcli makes a
+// bind-mounted /alertmanager writable by 65534. Keep this in sync when bumping.
+const DefaultAlertmanagerImageTag = "docker.io/prom/alertmanager:v0.34.1"
 
 // DefaultRedisMajor is the Redis major version installed when --version is not
 // given: "8", the current stable line upstream (docker.io/library/redis).
@@ -1393,6 +1407,42 @@ type PrometheusConfig struct {
 	Autostart bool `yaml:"autostart,omitempty"`
 }
 
+// AlertmanagerConfig holds a standalone Alertmanager addon — the alert
+// dedup/grouping/routing frontend of the Prometheus stack
+// (https://prometheus.io/docs/alerting/latest/alertmanager/). Shape mirrors
+// PrometheusConfig: a web UI on one host port, a persistent data dir outliving
+// the container, Listen defaulting to 0.0.0.0, and configuration by a RENDERED
+// alertmanager.yml (bind-mounted read-only) plus CLI flags after the image
+// (--config.file / --web.listen-address / --storage.path), not env vars — see
+// internal/podman.AlertmanagerManager for the render + argv shape.
+//
+// There is NO login/password: Alertmanager has no authentication, and the
+// exposure is worse than Prometheus's — anyone who can reach the port can
+// create SILENCES, i.e. suppress the on-call notifications. The firewall /
+// --listen 127.0.0.1 boundary is the only guard; the docs must say so loudly.
+//
+// Ownership matches Prometheus: the image is USER nobody (uid/gid 65534) and
+// does not fix up bind mounts, so pgcli pre-chowns the host data dir to
+// 65534:65534 (podman unshare chown rootless, direct chown rootful-as-root).
+//
+// v1 deliberately does NOT wire this to a Prometheus instance: no alerting
+// section is injected into a rendered prometheus.yml. Real notification
+// channels (email/Slack/routing trees) arrive via ConfFile.
+type AlertmanagerConfig struct {
+	ContainerName string   `yaml:"container_name"`      // pgcli-alertmanager<ns>-<name>
+	Name          string   `yaml:"name,omitempty"`      // addon key, defaults to the map key
+	ImageTag      string   `yaml:"image_tag,omitempty"` // docker.io/prom/alertmanager:v0.34.1 (default)
+	HostPort      int      `yaml:"host_port,omitempty"` // web host port, 9093+ auto-assigned
+	Listen        string   `yaml:"listen,omitempty"`    // --web.listen-address bind, default 0.0.0.0
+	DataDir       string   `yaml:"data_dir,omitempty"`  // host dir mounted at /alertmanager (silence + notify state); default <base>/addon/alertmanager/<name>/data
+	Webhook       []string `yaml:"webhook,omitempty"`   // webhook URLs rendered into the web.hook receiver of the alertmanager.yml (render-mode only)
+	ConfFile      string   `yaml:"conf_file,omitempty"` // optional host path to the user's own alertmanager.yml; when set pgcli skips rendering and copies this file into the managed path to mount (mutually exclusive with Webhook)
+	// Autostart brings this container up on host boot via the boot service
+	// (pg autostart enable --alertmanager). Start-only: it starts the existing
+	// container, so install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
 // PostgresConfig holds PostgreSQL connection settings.
 type PostgresConfig struct {
 	URL      string `yaml:"url"`      // connection string (postgres://user:pass@host:port/db)
@@ -1491,6 +1541,7 @@ func Default() *Config {
 		PgAdminStartPort:        5050,
 		GrafanaStartPort:        3000,
 		PrometheusStartPort:     9090,
+		AlertmanagerStartPort:   9093,
 		NginxStartPort:          8080,
 		GarageStartPort:         3900,
 		SeaweedfsStartPort:      8400,
@@ -1697,6 +1748,7 @@ type displayConfig struct {
 	PgAdminStartPort        int                       `yaml:"pgadmin_start_port,omitempty"`
 	GrafanaStartPort        int                       `yaml:"grafana_start_port,omitempty"`
 	PrometheusStartPort     int                       `yaml:"prometheus_start_port,omitempty"`
+	AlertmanagerStartPort   int                       `yaml:"alertmanager_start_port,omitempty"`
 	NginxStartPort          int                       `yaml:"nginx_start_port,omitempty"`
 	GarageStartPort         int                       `yaml:"garage_start_port,omitempty"`
 	SeaweedfsStartPort      int                       `yaml:"seaweedfs_start_port,omitempty"`
@@ -1728,6 +1780,7 @@ func (c *Config) Display() displayConfig {
 		PgAdminStartPort:        c.PgAdminStartPort,
 		GrafanaStartPort:        c.GrafanaStartPort,
 		PrometheusStartPort:     c.PrometheusStartPort,
+		AlertmanagerStartPort:   c.AlertmanagerStartPort,
 		NginxStartPort:          c.NginxStartPort,
 		GarageStartPort:         c.GarageStartPort,
 		SeaweedfsStartPort:      c.SeaweedfsStartPort,
@@ -1834,6 +1887,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.PrometheusStartPort == 0 {
 		c.PrometheusStartPort = d.PrometheusStartPort
+	}
+	if c.AlertmanagerStartPort == 0 {
+		c.AlertmanagerStartPort = d.AlertmanagerStartPort
 	}
 	if c.NginxStartPort == 0 {
 		c.NginxStartPort = d.NginxStartPort
@@ -2448,6 +2504,29 @@ func (c *Config) ApplyDefaults() {
 			addon.ScrapeInterval = "15s"
 		}
 		c.Addons.Prometheus[name] = addon
+	}
+
+	// Top-level addons defaults (Alertmanager). Same shape as Prometheus above:
+	// Listen defaults to 0.0.0.0 because a metrics-adjacent service is reached
+	// from other machines — but with a sharper edge than Prometheus: Alertmanager
+	// has no auth AND an exposed instance lets anyone create silences, i.e. mute
+	// your alerts. Network boundary is the only guard (see the addon docs).
+	// Webhook (rendered notification URLs) is never defaulted — an empty list
+	// still renders a valid no-op receiver.
+	for name, addon := range c.Addons.Alertmanager {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-alertmanager" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultAlertmanagerImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "0.0.0.0"
+		}
+		c.Addons.Alertmanager[name] = addon
 	}
 
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
@@ -3118,6 +3197,46 @@ func (c *Config) autoAssignPorts() {
 				next = addon.HostPort + 1
 			}
 			c.Addons.Prometheus[name] = addon
+		}
+	}
+
+	// Allocate ports for Alertmanager addons from their own pool
+	// (alertmanager_start_port, default 9093 — Alertmanager's default web port).
+	// One port per instance, same shape as the Prometheus block above. Unlike
+	// Prometheus (which binds one web port), a stock Alertmanager would also open
+	// its 9094 HA gossip port — pgcli disables that with --cluster.listen-address=
+	// for single instances, so this pool really is one port per instance. 9093
+	// shares no base with Prometheus (9090), Grafana (3000) or the rest.
+	{
+		alertmanagerBase := c.AlertmanagerStartPort
+		assignedAlertmanager := map[int]bool{}
+		for _, addon := range c.Addons.Alertmanager {
+			if addon.HostPort != 0 {
+				assignedAlertmanager[addon.HostPort] = true
+			}
+		}
+		next := alertmanagerBase
+		nextFreeAlertmanager := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedAlertmanager[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.Alertmanager))
+		for name := range c.Addons.Alertmanager {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.Alertmanager[name]
+			if addon.HostPort == 0 && alertmanagerBase > 0 {
+				addon.HostPort = nextFreeAlertmanager()
+			} else if addon.HostPort >= next {
+				next = addon.HostPort + 1
+			}
+			c.Addons.Alertmanager[name] = addon
 		}
 	}
 

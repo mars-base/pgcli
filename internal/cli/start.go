@@ -75,8 +75,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartNginx(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --redis / --predixy / --pgadmin / --grafana / --prometheus / --nginx)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartNginx(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --nginx)")
 		return nil
 	}
 
@@ -215,6 +215,15 @@ func startAutostart() error {
 	// on the PostgreSQL stack, but is a plausible reverse-proxy backend and the
 	// natural companion to the dashboard above.
 	if err := startAutostartPrometheus(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// Alertmanager instances (top-level web addon, the alert routing frontend of
+	// the Prometheus stack). Started right after Prometheus and before nginx: no
+	// dependency on the PostgreSQL stack, a plausible reverse-proxy backend, and
+	// the natural companion to the collector above (v1 does not wire the two
+	// together, but boot order anticipates a future link-up).
+	if err := startAutostartAlertmanager(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -939,6 +948,52 @@ func startAutostartPrometheus(c *config.Config) error {
 		pc := c.Addons.Prometheus[name]
 		if err := pm.StartContainer(&pc); err != nil {
 			fmt.Printf("  [X] prometheus autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartAlertmanager reports whether any Alertmanager instance is autostart-enabled.
+func hasAutostartAlertmanager(c *config.Config) bool {
+	for _, ac := range c.Addons.Alertmanager {
+		if ac.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartAlertmanager starts each autostart-enabled Alertmanager instance.
+// Start-only like Prometheus's: the container comes up reading the managed
+// alertmanager.yml already on disk, recreating it if the container was removed.
+// The state data dir was pre-chowned to uid/gid 65534 (nobody) at create time (a
+// plain `podman start` of an existing container needs none), so the boot-time
+// start needs the same podman access as install. Order is sorted by instance name
+// for deterministic, readable boot logs.
+func startAutostartAlertmanager(c *config.Config) error {
+	var names []string
+	for name, ac := range c.Addons.Alertmanager {
+		if ac.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	am, err := podman.NewAlertmanagerManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		ac := c.Addons.Alertmanager[name]
+		if err := am.StartContainer(&ac); err != nil {
+			fmt.Printf("  [X] alertmanager autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}

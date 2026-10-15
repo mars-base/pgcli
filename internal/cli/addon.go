@@ -156,6 +156,29 @@ Infra addons (shared, not tied to one instance):
           --clean-data. The image runs as a fixed uid 65534 (nobody) and creates
           no writable dir, so pgcli pre-chowns the data dir on the host (same
           path as Grafana).
+  pg addon install alertmanager
+          Stored under top-level addons.alertmanager in config (Linux and macOS).
+          Alertmanager — the alert dedup/grouping/routing frontend of the
+          Prometheus stack — run from the official docker.io/prom/alertmanager
+          image. Top-level only (it fronts a whole alerting pipeline, not one
+          instance's). It is configured by a RENDERED alertmanager.yml — one
+          minimal route pointing at a single receiver: "web.hook" carrying every
+          --webhook-url as one webhook_configs entry (fan-out), or a name-only
+          "no-op" receiver when none are given — bind-mounted read-only and
+          passed as --config.file, alongside --web.listen-address, --storage.path
+          and --cluster.listen-address= (empty, disabling the 9094 HA gossip);
+          or, with --conf-file, your own file copied into pgcli's managed path
+          (mutually exclusive with --webhook-url). v1 does NOT wire this to a
+          Prometheus instance (no alerting section is injected). There is NO web
+          login/password: Alertmanager ships no authentication, and its API lets
+          anyone who reaches it CREATE SILENCES (mute on-call) — the default
+          0.0.0.0 listen is guarded ONLY by the network boundary; pass
+          --listen 127.0.0.1 to keep it loopback-only. Reload without a recreate
+          via "pg addon alertmanager reload" (SIGHUP; the HTTP /-/reload endpoint
+          exists and cannot be disabled, but pgcli never uses it). Its
+          silence/notification state dir survives remove unless --clean-data. The
+          image runs as a fixed uid 65534 (nobody) and creates no writable dir,
+          so pgcli pre-chowns the data dir on the host (same path as Grafana).
 
 Commands:
   pg addon install <addon>    install an add-on
@@ -191,6 +214,7 @@ Currently supported add-ons:
   pgadmin     pgAdmin 4 — the official web administration UI (single container from docker.io/dpage/pgadmin4; web login auto-generated; Linux host network, macOS bridge)
   grafana     Grafana — the open-source observability dashboard (single container from docker.io/grafana; web login auto-generated; defaults to 0.0.0.0 since a dashboard is meant to be viewed remotely; Linux host network, macOS bridge)
   prometheus  Prometheus — the metrics collection backend Grafana reads from (single container from docker.io/prom/prometheus; rendered prometheus.yml or --conf-file, --scrape targets, SIGHUP reload; NO web login — defaults to 0.0.0.0 guarded only by the network, use --listen 127.0.0.1 for loopback; Linux host network, macOS bridge)
+  alertmanager Alertmanager — the alert dedup/grouping/routing frontend of the Prometheus stack (single container from docker.io/prom/alertmanager; rendered alertmanager.yml with a no-op or --webhook-url web.hook receiver, or --conf-file; SIGHUP reload; cluster gossip disabled; NO web login — defaults to 0.0.0.0 guarded only by the network, and silences are dangerous, use --listen 127.0.0.1 for loopback; v1 does not wire into Prometheus; Linux host network, macOS bridge)
   nginx       HTTP reverse proxy in front of web services (path-based routing, optional TLS termination; single container from docker.io/library/nginx; Linux host network, macOS bridge)
 
 Two modes (pgbouncer, postgrest):
@@ -441,6 +465,43 @@ Prometheus (the metrics collection backend; top-level addon, Linux and macOS):
   Re-running install hot-reloads a live container when the config changed; --force
   recreates it to apply a changed --port/--listen/--retention.
 
+Alertmanager (the alert dedup/grouping/routing frontend of the Prometheus stack; top-level addon, Linux and macOS):
+  pg addon install alertmanager [--name am1] [--webhook-url URL] (repeatable)
+                                [--port N] [--listen 0.0.0.0] [--conf-file FILE]
+                                [--data-dir ...] [--image ...] [--force]
+  Stored under top-level addons.alertmanager in config. Alertmanager receives
+  alerts from Prometheus, deduplicates and groups them, and routes them to
+  notification integrations (webhook/email/Slack/...); it also owns silences and
+  inhibition. It is configured by a rendered alertmanager.yml — one minimal route
+  (group by alertname) pointing at a single receiver — that pgcli bind-mounts
+  read-only and passes as --config.file, alongside --web.listen-address,
+  --storage.path, and --cluster.listen-address= (empty, which DISABLES the 9094
+  HA gossip since a single instance has no peers). Each --webhook-url becomes one
+  webhook_configs entry of the SAME "web.hook" receiver (so several URLs fan out
+  from one notification); with no --webhook-url the rendered config uses a
+  name-only "no-op" receiver — the UI/API is fully live but nothing is ever sent.
+  URLs are validated (must parse as http(s) with a host) BEFORE anything is
+  written; connectivity is NOT probed (a webhook fires at alert time). --conf-file
+  instead copies YOUR alertmanager.yml into pgcli's managed path (mutually
+  exclusive with --webhook-url) — the way to get real email/Slack/routing trees.
+  v1 does NOT wire this to a Prometheus instance: no alerting section is injected
+  into any prometheus.yml; point Prometheus at this URL yourself (or via
+  --conf-file) to connect them.
+  There is NO web login/password: Alertmanager ships no authentication, and this is
+  sharper than Prometheus — anyone who reaches the port can CREATE SILENCES, i.e.
+  mute your on-call. --listen defaults to 0.0.0.0; pass --listen 127.0.0.1 to keep
+  it loopback-only, or firewall it. (Unlike Prometheus, Alertmanager's HTTP POST
+  /-/reload endpoint CANNOT be disabled — pgcli simply never uses it.)
+  Reload config changes WITHOUT recreating the container via "pg addon
+  alertmanager reload" (rewrites the managed file, then SIGHUP). Data is the
+  silence/notification state under --data-dir (default
+  <base_dir>/addon/alertmanager/<name>/data), so remove/reinstall revives
+  silences; --clean-data deletes it. The image runs as uid/gid 65534 (nobody) and
+  creates no writable dir, so pgcli pre-chowns the data dir on the host (rootless
+  via "podman unshare chown 65534:65534"; a rootful host gets a manual-chown hint).
+  Re-running install hot-reloads a live container when the config changed; --force
+  recreates it to apply a changed --port/--listen.
+
 nginx (HTTP reverse proxy in front of web services; top-level addon, Linux and macOS):
   pg addon install nginx [--name proxy]
                          [--upstream name=<n>,path=<p>,backend=<h:p>] (repeatable)
@@ -502,6 +563,11 @@ Examples:
   pg addon install prometheus --name p1 --scrape-append node=10.0.0.7:9100           # add a target to the node job (probed; aborts if down)
   pg addon install prometheus --name local --listen 127.0.0.1   # loopback-only (Prometheus has no auth)
   pg addon install prometheus --name p1 --conf-file /etc/prometheus/my.yml   # run your own prometheus.yml verbatim
+  pg addon install alertmanager
+  pg addon install alertmanager --name am1 --webhook-url http://127.0.0.1:5001/   # fan-out to one webhook
+  pg addon install alertmanager --name am1 --webhook-url http://a:5001/ --webhook-url http://b:5001/   # both URLs in one web.hook receiver
+  pg addon install alertmanager --name local --listen 127.0.0.1   # loopback-only (Alertmanager has no auth, and silences are dangerous)
+  pg addon install alertmanager --name am1 --conf-file /etc/alertmanager/my.yml   # run your own alertmanager.yml verbatim
   pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050
   pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050 --upstream name=postgrest,path=/api,backend=127.0.0.1:3000 --tls`,
 	Args: cobra.ExactArgs(1),
@@ -572,8 +638,8 @@ var addonRemoveCmd = &cobra.Command{
 For local add-ons, use -i to specify the instance.
 For remote add-ons, use --pg-name to specify the pooler name.
 
-Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus) use --name.
-Remove keeps the data directory; pass --clean-data for object-storage/KV/pgAdmin/Grafana/Prometheus
+Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager) use --name.
+Remove keeps the data directory; pass --clean-data for object-storage/KV/pgAdmin/Grafana/Prometheus/Alertmanager
 data to go too.
 
 Examples:
@@ -589,7 +655,9 @@ Examples:
   pg addon remove grafana
   pg addon remove grafana --clean-data
   pg addon remove prometheus
-  pg addon remove prometheus --clean-data`,
+  pg addon remove prometheus --clean-data
+  pg addon remove alertmanager
+  pg addon remove alertmanager --clean-data`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonRemove(args[0], cmd)
@@ -621,6 +689,7 @@ Supported add-ons:
   pgadmin    pg addon start pgadmin [--name pgadmin]
   grafana    pg addon start grafana [--name grafana]
   prometheus pg addon start prometheus [--name prometheus]
+  alertmanager pg addon start alertmanager [--name alertmanager]
   nginx      pg addon start nginx [--name proxy]
   pgbouncer  pg addon start pgbouncer -i <instance>
              pg addon start pgbouncer --pg-name <remote-name>
@@ -640,6 +709,7 @@ Examples:
   pg addon start pgadmin
   pg addon start grafana
   pg addon start prometheus
+  pg addon start alertmanager
   pg addon start nginx --name proxy
   pg addon start pgbouncer -i proj01
   pg addon start postgrest --pg-name app-api`,
@@ -669,6 +739,7 @@ Supported add-ons:
   pgadmin    pg addon stop pgadmin [--name pgadmin]
   grafana    pg addon stop grafana [--name grafana]
   prometheus pg addon stop prometheus [--name prometheus]
+  alertmanager pg addon stop alertmanager [--name alertmanager]
   nginx      pg addon stop nginx [--name proxy]
   pgbouncer  pg addon stop pgbouncer -i <instance>
              pg addon stop pgbouncer --pg-name <remote-name>
@@ -688,6 +759,7 @@ Examples:
   pg addon stop pgadmin
   pg addon stop grafana
   pg addon stop prometheus
+  pg addon stop alertmanager
   pg addon stop nginx --name proxy
   pg addon stop pgbouncer -i proj01
   pg addon stop postgrest --pg-name app-api`,
@@ -704,12 +776,14 @@ Examples:
 func init() {
 	rootCmd.AddCommand(addonCmd)
 	addonCmd.AddCommand(addonInstallCmd, addonListCmd, addonPasswordCmd, addonRemoveCmd, addonStartCmd, addonStopCmd)
-	addonCmd.AddCommand(addonNginxCmd, addonHAProxyCmd, addonPrometheusCmd)
+	addonCmd.AddCommand(addonNginxCmd, addonHAProxyCmd, addonPrometheusCmd, addonAlertmanagerCmd)
 	addonNginxCmd.AddCommand(addonNginxReloadCmd, addonNginxTestCmd, addonNginxExecCmd)
 	addonHAProxyCmd.AddCommand(addonHAProxyReloadCmd)
 	addonPrometheusCmd.AddCommand(addonPrometheusReloadCmd)
+	addonAlertmanagerCmd.AddCommand(addonAlertmanagerReloadCmd)
 	addonHAProxyReloadCmd.Flags().String("name", "", "haproxy instance name")
 	addonPrometheusReloadCmd.Flags().String("name", "", "prometheus instance name (default \"prometheus\")")
+	addonAlertmanagerReloadCmd.Flags().String("name", "", "alertmanager instance name (default \"alertmanager\")")
 	addonNginxReloadCmd.Flags().String("name", "", "nginx instance name (default \"nginx\")")
 	addonNginxTestCmd.Flags().String("name", "", "nginx instance name (default \"nginx\")")
 	addonNginxTestCmd.Flags().String("conf-file", "", "path to an nginx.conf file to test directly (no installed instance required; overrides --name)")
@@ -749,10 +823,10 @@ func init() {
 	addonRemoveCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to remove")
 
 	// etcd flags (top-level shared-infrastructure addon)
-	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana or prometheus instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\")")
+	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus or alertmanager instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\")")
 	addonInstallCmd.Flags().Int("client-port", 0, "etcd client host port (0=auto-assign from etcd_start_port)")
 	addonInstallCmd.Flags().Int("peer-port", 0, "etcd peer host port (0=auto-assign, next free port after client)")
-	addonInstallCmd.Flags().String("image", "", "override the addon image tag verbatim (etcd default quay.io/coreos/etcd:v3.5.30; redis default resolved from --version, e.g. docker.io/library/redis:8.10.2; predixy default ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine; pgadmin default docker.io/dpage/pgadmin4:9.18; grafana default docker.io/grafana/grafana:13.2.4; prometheus default docker.io/prom/prometheus:v3.15.0)")
+	addonInstallCmd.Flags().String("image", "", "override the addon image tag verbatim (etcd default quay.io/coreos/etcd:v3.5.30; redis default resolved from --version, e.g. docker.io/library/redis:8.10.2; predixy default ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine; pgadmin default docker.io/dpage/pgadmin4:9.18; grafana default docker.io/grafana/grafana:13.2.4; prometheus default docker.io/prom/prometheus:v3.15.0; alertmanager default docker.io/prom/alertmanager:v0.34.1)")
 	addonInstallCmd.Flags().String("cluster", "", "cluster grouping token: etcd --initial-cluster-token (default \"pgcli-etcd\"); redis native-cluster name (--cluster-enabled yes, members sharing it form one cluster you assemble once with `pg redis-cli -- --cluster create ...`); garage — switch on multi-node mode (members sharing the name join one Garage cluster; requires --advertise-host); seaweedfs — switch on multi-node mode (members sharing the name join one Raft cluster via the full --peer list; requires --advertise-host, a shared --dsn metadata database, and the SAME --root-user/--root-password on every node)")
 	addonInstallCmd.Flags().StringArray("peer", nil, "cluster peer list (repeat one per peer): garage — an existing member's <id>@<addr> to connect to (a joiner usually needs just one — peering is transitive; printed by the bootstrap node's install summary). seaweedfs — a member's <ip>:<master_port> Raft address; pass the FULL list on EVERY node (weed requires the complete membership, MNMD-style, no bootstrap/join distinction), your own entry optional")
 	addonInstallCmd.Flags().String("replication", "", "seaweedfs cluster only: placement code XYZ (X=remote copies, Y=distinct racks, Z=distinct data centers; each digit 0-3), e.g. 001 = one remote copy. Default \"000\" (single-node — no peers to copy to). Immutable once set in a cluster")
@@ -763,11 +837,11 @@ func init() {
 	addonInstallCmd.Flags().Int("replication-factor", 0, "garage cluster only: object replication factor (garage.toml replication_factor; must be <= node count — a 3-node cluster with rf 3 tolerates losing 2; set it on EVERY member, the value is per-node config). Empty for garage = default 1 (single-node); etcd/redis ignore it")
 	addonInstallCmd.Flags().String("rpc-secret", "", "garage cluster only: the shared 64-hex cluster RPC secret (garage.toml rpc_secret) — generated by the bootstrap node and printed once; every joiner MUST pass the same value (pgcli never executes remotely, so you carry it). Invalid on a single-node install")
 	addonInstallCmd.Flags().Int("cluster-replicas", 0, "redis native-cluster only: per-master replica count for the --cluster create you will run (default 0 = masters-only). Only shapes the suggested assemble command and node-count guidance — which nodes become followers is decided by Redis at create time, not here; the whole group inherits the first member's value")
-	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs, garage, redis, pgAdmin or Grafana instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; garage default <base_dir>/addon/garage/<name>/data (its metadata dir is a sibling .../meta); seaweedfs default <base_dir>/addon/seaweedfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data; pgadmin default <base_dir>/addon/pgadmin/<name>/data; grafana default <base_dir>/addon/grafana/<name>/data; prometheus default <base_dir>/addon/prometheus/<name>/data)")
+	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs, garage, redis, pgAdmin or Grafana instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; garage default <base_dir>/addon/garage/<name>/data (its metadata dir is a sibling .../meta); seaweedfs default <base_dir>/addon/seaweedfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data; pgadmin default <base_dir>/addon/pgadmin/<name>/data; grafana default <base_dir>/addon/grafana/<name>/data; prometheus default <base_dir>/addon/prometheus/<name>/data; alertmanager default <base_dir>/addon/alertmanager/<name>/data)")
 	addonInstallCmd.Flags().String("advertise-host", "", "peer-visible host: etcd member peer/client URLs, redis native-cluster --cluster-announce-ip, , garage cluster rpc_public_addr, and seaweedfs cluster weed -ip that peers dial (empty=127.0.0.1 single-host; set a LAN IP or FQDN for cross-host clusters — required on every garage or seaweedfs --cluster member)")
 	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.0.0.12:2379 (implies --initial-cluster-state existing; requires --advertise-host)")
-	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana or prometheus instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\")")
-	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/garage/seaweedfs/redis/pgAdmin/Grafana/Prometheus data directory (object storage / backup repository / key-value data / pgAdmin config+sessions, Grafana dashboards sqlite DB, or Prometheus TSDB) and pgcli-rendered files beside it; no-op for predixy, which is stateless. Never drops a seaweedfs filer metadata database")
+	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus or alertmanager instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\")")
+	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/garage/seaweedfs/redis/pgAdmin/Grafana/Prometheus/Alertmanager data directory (object storage / backup repository / key-value data / pgAdmin config+sessions, Grafana dashboards sqlite DB, Prometheus TSDB, or Alertmanager silences+notification state) and pgcli-rendered files beside it; no-op for predixy, which is stateless. Never drops a seaweedfs filer metadata database")
 
 	// haproxy flags (top-level load balancer in front of a Patroni cluster)
 	addonInstallCmd.Flags().String("mode", "", "HAProxy routing mode: unified (default, all traffic to the leader) or split (separate read listener for replicas)")
@@ -783,7 +857,7 @@ func init() {
 	addonInstallCmd.Flags().Int("https-port", 0, "nginx HTTPS listener host port, TLS only (0=auto-assign, next free port)")
 	addonInstallCmd.Flags().Int("worker-connections", 0, "nginx worker_connections (max simultaneous connections per worker; default 1024)")
 	addonInstallCmd.Flags().StringArray("upstream", nil, "nginx upstream target name=<upstream>,path=<location>,backend=<host:port> (repeatable; e.g. --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050, or backends=h1:p1,h2:p2 for multiple servers)")
-	addonInstallCmd.Flags().String("conf-file", "", "path to a full custom config file (nginx: nginx.conf, mutually exclusive with --upstream; haproxy: haproxy.cfg, mutually exclusive with --node/--ha; prometheus: prometheus.yml, mutually exclusive with --scrape/--scrape-append/--scrape-interval) — pgcli copies it into its managed path and mounts that, manages the container lifecycle, and you control the whole config; validated with nginx -t / haproxy -c at install (prometheus: not pre-validated — a bad file is logged and the last good config keeps serving; reload with SIGHUP)")
+	addonInstallCmd.Flags().String("conf-file", "", "path to a full custom config file (nginx: nginx.conf, mutually exclusive with --upstream; haproxy: haproxy.cfg, mutually exclusive with --node/--ha; prometheus: prometheus.yml, mutually exclusive with --scrape/--scrape-append/--scrape-interval; alertmanager: alertmanager.yml, mutually exclusive with --webhook-url) — pgcli copies it into its managed path and mounts that, manages the container lifecycle, and you control the whole config; validated with nginx -t / haproxy -c at install (prometheus/alertmanager: not pre-validated — a bad file is logged and the last good config keeps serving; reload with SIGHUP)")
 	addonInstallCmd.Flags().Bool("reload", false, "haproxy --conf-file only: hot-reload the running instance (validate with haproxy -c, then SIGUSR2) instead of recreating the container — no dropped connections; ignored otherwise")
 
 	// prometheus flags (top-level metrics collection backend)
@@ -791,11 +865,12 @@ func init() {
 	addonInstallCmd.Flags().String("scrape-interval", "", "Prometheus global scrape_interval in the rendered prometheus.yml (default \"15s\"); mutually exclusive with --conf-file")
 	addonInstallCmd.Flags().StringArray("scrape", nil, "Prometheus scrape spec JOB=HOST:PORT[,HOST:PORT...] (repeatable; the JOB name is required, and several comma-separated targets share one job) — declares the FULL job set (replaces the stored list), each rendering one static_configs job alongside the self-monitoring job; e.g. --scrape postgres-exporter=127.0.0.1:9187. Mutually exclusive with --scrape-append and --conf-file")
 	addonInstallCmd.Flags().StringArray("scrape-append", nil, "Prometheus scrape spec(s) JOB=HOST:PORT[,HOST:PORT...] to ADD to the instance's stored --scrape list (same form as --scrape, repeatable) instead of replacing it; folds each appended job's targets into the same-named job. Every appended target is probed with GET /metrics and install aborts, touching nothing, if any returns no data. Mutually exclusive with --scrape and --conf-file")
+	addonInstallCmd.Flags().StringArray("webhook-url", nil, "Alertmanager webhook URL to notify (repeatable; e.g. --webhook-url http://hook:5001/) — every URL is rendered as one webhook_configs entry of the SAME web.hook receiver (so multiple URLs fan out); the root route points at it. Each URL is validated (must parse as an http(s) URL with a host) BEFORE anything is written; a bad URL aborts the install touching nothing. Connectivity is NOT probed (a webhook fires at alert time, not install time). Mutually exclusive with --conf-file; without it the rendered config uses a name-only no-op receiver (nothing is ever sent)")
 
 	// minio flags (top-level single-node S3-compatible object storage)
 	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo/rustfs S3 API host port (0=auto-assign from the shared minio_start_port pool); for garage, the S3 API port (0=auto from garage_start_port, default 3900 — garage takes four consecutive ports API/RPC/Web/Admin)")
 	addonInstallCmd.Flags().Int("console-port", 0, "MinIO/silo/rustfs web console host port (0=auto-assign, next free port)")
-	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo, rustfs, garage or seaweedfs server / PostgREST HTTP server / pgAdmin web server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network) — Redis, Predixy and Grafana default to \"0.0.0.0\" instead, since their password is always required (and a dashboard is meant to be viewed remotely); pass 127.0.0.1 to keep them loopback-only. Prometheus ALSO defaults to 0.0.0.0 (so Grafana can reach it remotely) but has NO auth at all — its API is guarded only by the network boundary, so pass 127.0.0.1 to keep it loopback-only")
+	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo, rustfs, garage or seaweedfs server / PostgREST HTTP server / pgAdmin web server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network) — Redis, Predixy and Grafana default to \"0.0.0.0\" instead, since their password is always required (and a dashboard is meant to be viewed remotely); pass 127.0.0.1 to keep them loopback-only. Prometheus and Alertmanager ALSO default to 0.0.0.0 but have NO auth at all — Alertmanager worse: anyone reaching its port can create silences (mute on-call). Both are guarded only by the network boundary, so pass 127.0.0.1 to keep them loopback-only")
 	addonInstallCmd.Flags().String("root-user", "", "MinIO/silo/rustfs root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config). For garage this is the seeded access key: omit it to auto-generate a GK-prefixed key (garage has no \"admin\" user). For seaweedfs it is the s3.json identity access key: omit it to auto-generate an SW-prefixed key on a SINGLE-NODE install only — under --cluster both it and --root-password are REQUIRED, since each node reads only its own s3.json and must present the identical identity")
 	addonInstallCmd.Flags().String("root-password", "", "MinIO/silo/rustfs root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand). For garage this is the seeded secret key; for seaweedfs the s3.json identity secret key — required (with --root-user) on every node of a --cluster install")
 	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO/silo/rustfs distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (MinIO/silo: path is the in-container export dir — /data with a plain --data-dir node, or /data1../dataN on a --drive node (MNMD); repeat for every node's every drive. rustfs: one endpoint per node — scheme://host:port, no path; it has no multi-node single-drive mode so --drive is required, and it derives the /data/rustfs0../rustfsN suffix itself. The list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
@@ -803,7 +878,7 @@ func init() {
 	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo/rustfs/seaweedfs: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo|rustfs>/<name>/, or the addon dir for seaweedfs; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Seaweedfs serves TLS natively: the S3 port becomes HTTPS-only (cleartext listener off). Changing this needs --force to recreate. NOT for garage: it has no native TLS (rejects --tls); front it with the nginx addon")
 	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo/rustfs: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt for MinIO/silo, rustfs_cert.pem for rustfs, cert.pem for seaweedfs). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
 	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo/rustfs: private key for --tls-cert (PEM; mounted read-only as private.key for MinIO/silo, rustfs_key.pem for rustfs, key.pem for seaweedfs). Must pair with the cert; both are required to enable BYO TLS")
-	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/PostgREST/pgAdmin/Grafana/Prometheus container even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, a changed pgAdmin --email/--dsn/--pg-name or Grafana --admin-user seed, or to force-recreate a Prometheus instance instead of hot-reloading its config)")
+	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/PostgREST/pgAdmin/Grafana/Prometheus/Alertmanager container even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, a changed pgAdmin --email/--dsn/--pg-name or Grafana --admin-user seed, or to force-recreate a Prometheus instance instead of hot-reloading its config)")
 
 	// redis flags (top-level standalone KV store — the first version-selectable addon)
 	addonInstallCmd.Flags().String("version", "", "Redis major version to install: 7 or 8 (default \"8\"); each maps to a pinned upstream docker.io/library/redis tag. Ignored for every other addon")
@@ -820,7 +895,7 @@ func init() {
 	addonInstallCmd.Flags().Int("replica-of-port", 0, "Redis: remote master's port, paired with --replica-of-host")
 
 	// start / stop flags
-	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana or prometheus instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\")")
+	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus or alertmanager instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\")")
 	addonStartCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to start")
 	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin or grafana instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\")")
 	addonStopCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to stop")
@@ -831,7 +906,7 @@ func init() {
 	addonPasswordCmd.Flags().String("file", "", "write the password to this file (mode 0600) instead of stdout, keeping it out of shell history and scrollback")
 
 	// pgdog flags (top-level shared Postgres proxy addon)
-	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port) / PostgREST HTTP host port (0=auto-assign from postgrest_start_port) / Redis host port (0=auto-assign from redis_start_port, default 6379) / Predixy proxy host port (0=auto-assign from predixy_start_port, default 7617) / pgAdmin web host port (0=auto-assign from pgadmin_start_port, default 5050) / Grafana web host port (0=auto-assign from grafana_start_port, default 3000) / Prometheus web host port (0=auto-assign from prometheus_start_port, default 9090)")
+	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port) / PostgREST HTTP host port (0=auto-assign from postgrest_start_port) / Redis host port (0=auto-assign from redis_start_port, default 6379) / Predixy proxy host port (0=auto-assign from predixy_start_port, default 7617) / pgAdmin web host port (0=auto-assign from pgadmin_start_port, default 5050) / Grafana web host port (0=auto-assign from grafana_start_port, default 3000) / Prometheus web host port (0=auto-assign from prometheus_start_port, default 9090) / Alertmanager web host port (0=auto-assign from alertmanager_start_port, default 9093)")
 	addonInstallCmd.Flags().String("host", "", "PgDog listen address (default 127.0.0.1)")
 	addonInstallCmd.Flags().String("pool-mode", "", "PgDog pooler mode: transaction (default) or session")
 	addonInstallCmd.Flags().Int("workers", 0, "worker threads: PgDog (default 2) / Predixy proxy WorkerThreads (default 1)")
@@ -880,12 +955,14 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallGrafana(cmd)
 	case "prometheus":
 		return runAddonInstallPrometheus(cmd)
+	case "alertmanager":
+		return runAddonInstallAlertmanager(cmd)
 	case "nginx":
 		return runAddonInstallNginx(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, nginx)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -5150,6 +5227,45 @@ func runAddonList(showPassword bool) error {
 		fmt.Println("  (none)")
 	}
 
+	// alertmanager (alert routing frontend, top-level addon; Linux host network, macOS bridge)
+	fmt.Println()
+	fmt.Println("Web add-ons (alertmanager):")
+	hasAlertmanager := false
+	if am, err := podman.NewAlertmanagerManager(cfg); err == nil {
+		for _, name := range sortedAddonNames(cfg.Addons.Alertmanager) {
+			ac := cfg.Addons.Alertmanager[name]
+			hasAlertmanager = true
+			status := "stopped"
+			if running, err := am.ContainerRunning(ac.ContainerName); err == nil && running {
+				status = "running"
+			}
+			fmt.Printf("  %s (name: %s)\n", "alertmanager", name)
+			fmt.Printf("    Status:      %s\n", status)
+			fmt.Printf("    URL:         http://%s:%d/\n", ac.Listen, ac.HostPort)
+			mode := fmt.Sprintf("rendered (%d webhook)", len(ac.Webhook))
+			if ac.ConfFile != "" {
+				mode = "conf-file"
+			}
+			fmt.Printf("    Config:      %s [%s]\n", am.ConfigPath(&ac), mode)
+			fmt.Printf("    Data:        %s\n", am.DataDir(&ac))
+			fmt.Printf("    Image:       %s\n", ac.ImageTag)
+			fmt.Printf("    Container:   %s\n", ac.ContainerName)
+		}
+	} else if len(cfg.Addons.Alertmanager) > 0 {
+		// Configured but the manager is unavailable (podman missing): still show them.
+		for _, name := range sortedAddonNames(cfg.Addons.Alertmanager) {
+			ac := cfg.Addons.Alertmanager[name]
+			hasAlertmanager = true
+			fmt.Printf("  %s (name: %s)\n", "alertmanager", name)
+			fmt.Printf("    Status:      n/a (%v)\n", err)
+			fmt.Printf("    URL:         http://%s:%d/\n", ac.Listen, ac.HostPort)
+			fmt.Printf("    Container:   %s\n", ac.ContainerName)
+		}
+	}
+	if !hasAlertmanager {
+		fmt.Println("  (none)")
+	}
+
 	// nginx (HTTP reverse proxy, top-level addon; Linux + macOS)
 	fmt.Println()
 	fmt.Println("Web add-ons (nginx):")
@@ -5345,12 +5461,14 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemoveGrafana(cmd)
 	case "prometheus":
 		return runAddonRemovePrometheus(cmd)
+	case "alertmanager":
+		return runAddonRemoveAlertmanager(cmd)
 	case "nginx":
 		return runAddonRemoveNginx(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, nginx)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -5657,10 +5775,12 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartGrafana(cmd)
 	case "prometheus":
 		return runAddonStartPrometheus(cmd)
+	case "alertmanager":
+		return runAddonStartAlertmanager(cmd)
 	case "nginx":
 		return runAddonStartNginx(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, nginx)", addonName)
 	}
 }
 
@@ -5696,10 +5816,12 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopGrafana(cmd)
 	case "prometheus":
 		return runAddonStopPrometheus(cmd)
+	case "alertmanager":
+		return runAddonStopAlertmanager(cmd)
 	case "nginx":
 		return runAddonStopNginx(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, nginx)", addonName)
 	}
 }
 
@@ -7445,6 +7567,335 @@ func runAddonPrometheusReload(cmd *cobra.Command) error {
 	return pm.Reload(pc)
 }
 
+// runAddonInstallAlertmanager installs an Alertmanager container — the alert
+// dedup/grouping/routing frontend of the Prometheus stack — from the official
+// docker.io/prom/alertmanager image. It is the Prometheus addon's twin in shape:
+// top-level-only (addons.alertmanager.<name>, key defaults to "alertmanager"),
+// one host port, persistent state dir, configured by a RENDERED alertmanager.yml
+// (one minimal route pointing at a single receiver — "web.hook" carrying every
+// --webhook-url, or a "no-op" receiver when none are given) or, with --conf-file,
+// the operator's own file; reload via SIGHUP.
+//
+// v1 deliberately does NOT wire this to Prometheus: no alerting section is
+// injected into any prometheus.yml.
+//
+// Security is stricter-than-Prometheus framing: there is no auth, and the API
+// lets anyone who reaches the port create silences (mute on-call) — so the
+// exposure NOTE below is louder than Prometheus's.
+func runAddonInstallAlertmanager(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "alertmanager"
+	}
+	imageTag, _ := cmd.Flags().GetString("image")
+	dataDir, _ := cmd.Flags().GetString("data-dir")
+	port, _ := cmd.Flags().GetInt("port")
+	listenAddr, _ := cmd.Flags().GetString("listen")
+	webhooks, _ := cmd.Flags().GetStringArray("webhook-url")
+	confFile, _ := cmd.Flags().GetString("conf-file")
+	force, _ := cmd.Flags().GetBool("force")
+
+	// --conf-file replaces the rendered config entirely, so it cannot coexist
+	// with --webhook-url (which configures the rendered receiver).
+	if confFile != "" && len(webhooks) > 0 {
+		return fmt.Errorf("--conf-file is mutually exclusive with --webhook-url (it configures the rendered alertmanager.yml)")
+	}
+	if confFile != "" {
+		info, err := os.Stat(confFile)
+		if os.IsNotExist(err) {
+			return fmt.Errorf("--conf-file: %s not found", confFile)
+		}
+		if err != nil {
+			return fmt.Errorf("--conf-file: %w", err)
+		}
+		if info.Size() == 0 {
+			return fmt.Errorf("--conf-file: %s is empty", confFile)
+		}
+	}
+	// Validate webhook URLs BEFORE writing anything — a malformed URL aborts
+	// with nothing touched (no pg.yaml change, no config rewrite, no reload).
+	// This is format-only validation, not a connectivity probe: unlike a
+	// Prometheus scrape target (GET /metrics at scrape time), a webhook is a POST
+	// that only fires at alert time, so probing it at install would say nothing
+	// useful about a not-yet-running listener.
+	if err := podman.ValidateWebhooks(webhooks); err != nil {
+		return fmt.Errorf("--webhook-url: %w", err)
+	}
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.Alertmanager == nil {
+		cfg.Addons.Alertmanager = make(map[string]config.AlertmanagerConfig)
+	}
+	existing, ok := cfg.Addons.Alertmanager[name]
+	if !ok {
+		existing = config.AlertmanagerConfig{
+			ContainerName: "pgcli-alertmanager" + nsSuffixCLI(cfg.Namespace) + "-" + name,
+			Name:          name,
+		}
+	}
+	if dataDir != "" {
+		existing.DataDir = dataDir
+	}
+	if cmd.Flags().Changed("port") {
+		existing.HostPort = port
+	}
+	if listenAddr != "" {
+		existing.Listen = listenAddr
+	}
+	if cmd.Flags().Changed("webhook-url") {
+		// Set or cleared wholesale: passing --webhook-url replaces the stored
+		// list (it declares the full fan-out set), omitting it reverts to no-op.
+		existing.Webhook = webhooks
+	}
+	existing.ConfFile = confFile
+	if imageTag != "" {
+		existing.ImageTag = imageTag
+	}
+	cfg.Addons.Alertmanager[name] = existing
+
+	cfg.ApplyDefaults()
+	ac := cfg.Addons.Alertmanager[name]
+
+	if err := ensureProxyBridge(cfg); err != nil {
+		return err
+	}
+
+	am, err := podman.NewAlertmanagerManager(cfg)
+	if err != nil {
+		return fmt.Errorf("Alertmanager manager: %w", err)
+	}
+
+	fmt.Printf("-> Preparing Alertmanager image %s...\n", ac.ImageTag)
+	if err := am.EnsureImage(ac.ImageTag); err != nil {
+		return err
+	}
+
+	cfgPathOut := am.ConfigPath(&ac)
+	oldConf, _ := os.ReadFile(cfgPathOut)
+
+	if _, err := am.WriteConfig(&ac); err != nil {
+		return err
+	}
+
+	running, err := am.ContainerRunning(ac.ContainerName)
+	if err != nil {
+		return err
+	}
+	reloaded := false
+	if running && !force {
+		newConf, _ := os.ReadFile(cfgPathOut)
+		if string(oldConf) != string(newConf) {
+			fmt.Println("-> Config changed, reloading Alertmanager (SIGHUP)...")
+			if err := am.SignalReload(&ac); err != nil {
+				return err
+			}
+			reloaded = true
+		} else {
+			fmt.Println("  [OK] Alertmanager running, config unchanged")
+		}
+	} else {
+		fmt.Println("-> Starting Alertmanager container...")
+		if err := am.EnsureContainer(&ac); err != nil {
+			return err
+		}
+	}
+
+	cfg.Addons.Alertmanager[name] = ac
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	fmt.Println()
+	if running && !force {
+		fmt.Printf("✓ Alertmanager %q (%s)\n", name, map[bool]string{true: "config reloaded", false: "unchanged"}[reloaded])
+	} else {
+		fmt.Printf("✓ Alertmanager installed: %q\n", name)
+	}
+	fmt.Printf("  Container:  %s\n", ac.ContainerName)
+	fmt.Printf("  Image:      %s\n", ac.ImageTag)
+	fmt.Printf("  Data:       %s\n", am.DataDir(&ac))
+	fmt.Printf("  Config:     %s", cfgPathOut)
+	switch {
+	case ac.ConfFile != "":
+		fmt.Printf(" (from --conf-file %s)\n", ac.ConfFile)
+	case len(ac.Webhook) > 0:
+		fmt.Printf(" (rendered: webhook receiver, %d url(s))\n", len(ac.Webhook))
+	default:
+		fmt.Printf(" (rendered: no-op receiver)\n")
+	}
+	fmt.Printf("  URL:        http://%s:%d/\n", ac.Listen, ac.HostPort)
+	fmt.Println()
+	if ac.Listen == "0.0.0.0" {
+		fmt.Println("  NOTE: listening on every interface. Alertmanager has NO authentication, and this is more")
+		fmt.Println("        dangerous than an open Prometheus: anyone who reaches this port can CREATE SILENCES,")
+		fmt.Println("        i.e. silently mute every notification your on-call expects. Restrict exposure with")
+		fmt.Println("        `pg addon install alertmanager --name <name> --listen 127.0.0.1 --force`, or firewall it.")
+	}
+	return nil
+}
+
+// resolveAlertmanagerConfig loads the config and returns the AlertmanagerConfig
+// for the given --name (default "alertmanager"), or an error if not found.
+// Shared by the start/stop/reload subcommands.
+func resolveAlertmanagerConfig(cmd *cobra.Command) (*config.AlertmanagerConfig, error) {
+	if err := loadConfigForDSN(); err != nil {
+		return nil, err
+	}
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "alertmanager"
+	}
+	if cfg.Addons.Alertmanager == nil {
+		return nil, fmt.Errorf("no alertmanager addons configured")
+	}
+	ac, ok := cfg.Addons.Alertmanager[name]
+	if !ok {
+		return nil, fmt.Errorf("alertmanager instance %q not found (use 'pg addon list' to see available)", name)
+	}
+	return &ac, nil
+}
+
+// runAddonRemoveAlertmanager removes an Alertmanager container and pgcli's
+// rendered alertmanager.yml copy. The state dir (silences, notification state)
+// is kept unless --clean-data. In --conf-file mode the operator's original file
+// lives wherever they put it and is never touched.
+func runAddonRemoveAlertmanager(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "alertmanager"
+	}
+	cleanData, _ := cmd.Flags().GetBool("clean-data")
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.Alertmanager == nil {
+		return fmt.Errorf("no Alertmanager add-ons configured")
+	}
+	ac, ok := cfg.Addons.Alertmanager[name]
+	if !ok {
+		return fmt.Errorf("Alertmanager %q not found", name)
+	}
+
+	am, err := podman.NewAlertmanagerManager(cfg)
+	if err != nil {
+		return fmt.Errorf("Alertmanager manager: %w", err)
+	}
+
+	fmt.Printf("-> Removing Alertmanager %q...\n", name)
+	if err := am.Remove(&ac, cleanData); err != nil {
+		return err
+	}
+
+	delete(cfg.Addons.Alertmanager, name)
+	if len(cfg.Addons.Alertmanager) == 0 {
+		cfg.Addons.Alertmanager = nil
+	}
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	fmt.Printf("✓ Alertmanager %q removed\n", name)
+	if !cleanData {
+		fmt.Printf("  (data dir kept — reinstall the same name revives silences and notification state; --clean-data to delete it)\n")
+	}
+	return nil
+}
+
+func runAddonStartAlertmanager(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "alertmanager"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	if cfg.Addons.Alertmanager == nil {
+		return fmt.Errorf("no Alertmanager add-ons configured (run 'pg addon install alertmanager')")
+	}
+	ac, ok := cfg.Addons.Alertmanager[name]
+	if !ok {
+		return fmt.Errorf("Alertmanager %q not found (run 'pg addon install alertmanager --name %s')", name, name)
+	}
+	if err := ensureProxyBridge(cfg); err != nil {
+		return err
+	}
+	am, err := podman.NewAlertmanagerManager(cfg)
+	if err != nil {
+		return fmt.Errorf("Alertmanager manager: %w", err)
+	}
+	fmt.Printf("-> Starting Alertmanager %q...\n", name)
+	return am.StartContainer(&ac)
+}
+
+func runAddonStopAlertmanager(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "alertmanager"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	ac, ok := cfg.Addons.Alertmanager[name]
+	if !ok {
+		return fmt.Errorf("Alertmanager %q not found", name)
+	}
+	am, err := podman.NewAlertmanagerManager(cfg)
+	if err != nil {
+		return fmt.Errorf("Alertmanager manager: %w", err)
+	}
+	running, _ := am.ContainerRunning(ac.ContainerName)
+	if !running {
+		fmt.Printf("Alertmanager %q is not running\n", name)
+		return nil
+	}
+	fmt.Printf("-> Stopping Alertmanager %q...\n", name)
+	if _, err := am.Stop(ac.ContainerName); err != nil {
+		return err
+	}
+	fmt.Printf("✓ Alertmanager %q stopped\n", name)
+	return nil
+}
+
+// runAddonAlertmanagerReload rewrites the mounted alertmanager.yml (re-render in
+// render mode, re-copy in --conf-file mode) and signals the running container to
+// reread it via SIGHUP — no container recreate. Note: unlike Prometheus's
+// opt-in HTTP reload endpoint, Alertmanager's POST /-/reload cannot be disabled;
+// pgcli simply never uses it, so the mechanism is uniform across addons.
+func runAddonAlertmanagerReload(cmd *cobra.Command) error {
+	ac, err := resolveAlertmanagerConfig(cmd)
+	if err != nil {
+		return err
+	}
+	am, err := podman.NewAlertmanagerManager(cfg)
+	if err != nil {
+		return fmt.Errorf("Alertmanager manager: %w", err)
+	}
+	fmt.Printf("-> Reloading alertmanager %q...\n", ac.Name)
+	return am.Reload(ac)
+}
+
 // resolvePgBouncerTarget maps (pg-name / cfgInstance) to (pbConf, instName).
 // pg-name non-empty → remote (top-level addons.pgbouncer[pg-name]); otherwise
 // local (instances.<-i>.addons.pgbouncer).
@@ -7846,5 +8297,47 @@ Examples:
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonPrometheusReload(cmd)
+	},
+}
+
+// ---------------------------------------------------------------------------
+// alertmanager-specific subcommands: reload
+// ---------------------------------------------------------------------------
+
+var addonAlertmanagerCmd = &cobra.Command{
+	Use:   "alertmanager",
+	Short: "Manage Alertmanager addon instances",
+	Long: `Manage Alertmanager addon instances with dedicated subcommands.
+
+Subcommands:
+  reload   Hot-reload the mounted alertmanager.yml via SIGHUP (no container recreate)
+
+Examples:
+  pg addon alertmanager reload --name am1   # apply an edited config seamlessly`,
+}
+
+var addonAlertmanagerReloadCmd = &cobra.Command{
+	Use:   "reload",
+	Short: "Hot-reload a running Alertmanager instance (SIGHUP, no container restart)",
+	Long: `Apply config changes to a running Alertmanager instance without recreating
+the container — rewrite the managed alertmanager.yml (re-render it in render
+mode, or re-copy the operator's --conf-file into the managed path), then send
+SIGHUP so Alertmanager rereads it in place. This is the Alertmanager equivalent
+of 'pg addon nginx reload' / 'pg addon prometheus reload'.
+
+Note: unlike Prometheus (where pgcli never enables the HTTP reload route at
+all), Alertmanager's POST /-/reload endpoint exists and CANNOT be disabled.
+pgcli simply uses SIGHUP instead, so the mechanism is uniform across addons and
+never depends on that unauthenticated route. Alertmanager keeps serving on its
+last good config and logs an error if the new one is malformed; check 'pg logs'
+after reloading a hand-written file.
+
+The instance must already be running ('pg addon start alertmanager --name <name>').
+
+Examples:
+  pg addon alertmanager reload --name am1`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runAddonAlertmanagerReload(cmd)
 	},
 }
