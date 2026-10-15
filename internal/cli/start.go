@@ -75,8 +75,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartNginx(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --redis / --predixy / --pgadmin / --grafana / --nginx)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartNginx(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --redis / --predixy / --pgadmin / --grafana / --prometheus / --nginx)")
 		return nil
 	}
 
@@ -207,6 +207,14 @@ func startAutostart() error {
 	// with no dependency on the PostgreSQL stack, but still ahead of nginx below
 	// since a dashboard is a plausible reverse-proxy backend.
 	if err := startAutostartGrafana(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// Prometheus instances (top-level web addon, the metrics backend Grafana
+	// reads from). Started after Grafana and before nginx: it has no dependency
+	// on the PostgreSQL stack, but is a plausible reverse-proxy backend and the
+	// natural companion to the dashboard above.
+	if err := startAutostartPrometheus(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -885,6 +893,52 @@ func startAutostartGrafana(c *config.Config) error {
 		gc := c.Addons.Grafana[name]
 		if err := gm.StartContainer(&gc); err != nil {
 			fmt.Printf("  [X] grafana autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartPrometheus reports whether any Prometheus instance is autostart-enabled.
+func hasAutostartPrometheus(c *config.Config) bool {
+	for _, pc := range c.Addons.Prometheus {
+		if pc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartPrometheus starts each autostart-enabled Prometheus instance.
+// Start-only like Grafana's: the container comes up reading the managed
+// prometheus.yml already on disk, recreating it if the container was removed.
+// The TSDB data dir was pre-chowned to uid/gid 65534 (nobody) at create time (a
+// plain `podman start` of an existing container needs none), so the boot-time
+// start needs the same podman access as install. Order is sorted by instance name
+// for deterministic, readable boot logs.
+func startAutostartPrometheus(c *config.Config) error {
+	var names []string
+	for name, pc := range c.Addons.Prometheus {
+		if pc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	pm, err := podman.NewPrometheusManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		pc := c.Addons.Prometheus[name]
+		if err := pm.StartContainer(&pc); err != nil {
+			fmt.Printf("  [X] prometheus autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}

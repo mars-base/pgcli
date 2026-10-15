@@ -1,0 +1,205 @@
+---
+title: "Prometheus"
+description: "Run Prometheus, the metrics collection backend Grafana reads from, as a managed container."
+weight: 55
+---
+
+`pg addon install prometheus` runs [Prometheus](https://prometheus.io/) — the metrics collection and alerting backend — as a managed container from the official `docker.io/prom/prometheus` image. Like Grafana it is a top-level addon: it fronts no single PostgreSQL instance (it scrapes many endpoints), so it is not attached to any one of them. The two are natural partners — Prometheus scrapes and stores, Grafana visualises — and share the same lifecycle shape (single container, host networking on Linux, one web port from its own pool, persistent data dir, autostart, logs).
+
+Prometheus diverges from Grafana in **how it is configured**. Grafana is env-only (`GF_*`); Prometheus reads a config **file** (`prometheus.yml`) and takes its runtime tuning as **CLI flags passed after the image name** (`--config.file` / `--web.listen-address` / `--storage.tsdb.path` / `--storage.tsdb.retention.time`). So pgcli renders `prometheus.yml`, bind-mounts it read-only, and points `--config.file` at the in-container path.
+
+> **There is NO web login/password.** Unlike Grafana (whose `0.0.0.0` default is
+> guarded by a generated strong password), Prometheus ships **no authentication at
+> all**. Its HTTP API runs arbitrary PromQL and can be loaded by expensive queries,
+> so a remote-exposed instance is guarded **only by the network boundary** — your
+> firewall, or `--listen 127.0.0.1` for loopback. Treat exposing it like exposing
+> an unauthenticated read/write console, not like a password-protected dashboard.
+
+> **Platform**: Linux is the tested platform. The design supports macOS (the
+> image is multi-arch; the container runs under the podman machine VM on the
+> `pgcli-net` bridge with the port published), but it has not been validated
+> there yet.
+
+## Parameters
+
+| Flag | Default | Description |
+|---|---|---|
+| `--name` | `prometheus` | Instance name (map key) |
+| `--image` | `docker.io/prom/prometheus:v3.15.0` | Image override |
+| `--port` | auto (base 9090) | Host web port; auto-allocated from `prometheus_start_port` |
+| `--listen` | `0.0.0.0` | Bind address — defaults to every interface; use `127.0.0.1` for loopback-only (see the exposure warning above) |
+| `--scrape` | — (self job always present) | Scrape spec `JOB=HOST:PORT[,HOST:PORT...]` (repeatable) — the job name is required and every comma-separated target joins that one `static_configs` job in the generated `prometheus.yml`. Declares the FULL job set (replaces the stored list). Targets are probed with `GET /metrics` from the host; unreachable ones only warn |
+| `--scrape-append` | — | Same spec form, but folds the appended jobs' targets into the stored `--scrape` list (same-named job merges, new names append) instead of replacing it. Every appended target is probed and the install ABORTS — writing nothing — if any returns no data. Mutually exclusive with `--scrape` and `--conf-file` |
+| `--scrape-interval` | `15s` | Global `scrape_interval` in the rendered config; mutually exclusive with `--conf-file` |
+| `--retention` | `15d` | TSDB retention (`--storage.tsdb.retention.time`); a duration like `15d`, `6mo`, `2y`. A CLI flag, so it stays valid alongside `--conf-file` |
+| `--conf-file` | — | Path to your own `prometheus.yml` — skip rendering entirely (mutually exclusive with `--scrape`/`--scrape-append`/`--scrape-interval`); see below |
+| `--data-dir` | auto | Data directory override (default under the base dir) |
+| `--force` | false | Recreate even when running — instead of hot-reloading a changed config, or to apply changed ports / listen / retention |
+
+The data directory is Prometheus's TSDB. It survives `pg addon remove` (delete it with `--clean-data`), so reinstalling under the same name revives collected metrics. The image runs as a baked `nobody` (uid/gid 65534) and creates no writable directory itself, so pgcli chowns the data dir on the host before creating the container — via `podman unshare chown 65534:65534` under rootless podman, or a direct recursive `chown` when pgcli runs as root on a rootful host (exactly Grafana's mechanism, different id).
+
+## Install
+
+```bash
+pg addon install prometheus
+```
+
+The command pulls the image if needed, renders a `prometheus.yml`, creates the container, and prints the URL, config path, and retention:
+
+```
+✓ Prometheus installed: "prometheus"
+  Container:  pgcli-prometheus-default-prometheus
+  Image:      docker.io/prom/prometheus:v3.15.0
+  Data:       /home/you/.pgcli/addon/prometheus/prometheus/data
+  Config:     /home/you/.pgcli/addon/prometheus/prometheus/prometheus.yml (rendered: 1 self job + 0 scrape job(s))
+  Retention:  15d
+  URL:        http://0.0.0.0:9090/
+```
+
+The rendered config **always** contains a self-monitoring job that scrapes this server's own `/metrics`, so it is never idle; `--scrape` adds more jobs. Point Grafana at `http://<host>:9090/` as a Prometheus datasource and you can query immediately.
+
+```bash
+# each --scrape spec is one job; the name before = is required, and several
+# comma-separated targets share that one job (the shape for a fleet of exporters)
+pg addon install prometheus --name p1 \
+  --scrape postgres-exporter=127.0.0.1:9187 \
+  --scrape node=10.0.0.5:9100,10.0.0.6:9100
+```
+
+Re-running install with `--scrape` **replaces** the whole stored job set. To add to it instead, use `--scrape-append` — it folds each appended job's targets into the stored job of the same name (de-duplicating) and appends unseen names, then hot-reloads:
+
+```bash
+pg addon install prometheus --name p1 --scrape-append node=10.0.0.7:9100
+```
+
+The two flags probe differently, on purpose: a freshly **appended** target must answer `GET /metrics` with 200 or the command aborts before writing anything (pg.yaml and the running container untouched); with plain `--scrape` an unreachable target is only a warning and the install proceeds — Prometheus will surface it as `DOWN`, and a full-list declaration is often pointed at endpoints that are legitimately not up yet. The probe dials from the host — on Linux (host network) that is the same namespace the container scrapes from; on the macOS bridge it differs, so the probe is skipped there.
+
+Scrape targets are dialled **from the Prometheus container**. On Linux (host network) a `127.0.0.1:<port>` target reaches the host's loopback directly; on the macOS bridge it reaches the container's own namespace instead, so a remote or VM-resident target should be given a routable address.
+
+Re-running `install` on a running instance **hot-reloads** it (SIGHUP) when the rendered/copied config actually changed, and leaves it alone when it didn't; `--force` recreates the container instead — to apply a changed `--port` / `--listen` / `--retention` (which are container arguments, not config-file contents).
+
+## Custom config file (`--conf-file`)
+
+Give pgcli your own `prometheus.yml` and it skips rendering entirely:
+
+```bash
+pg addon install prometheus --name p1 --conf-file /etc/prometheus/my.yml
+```
+
+pgcli **copies** your file into its managed path (`<base>/addon/prometheus/<name>/prometheus.yml`) and mounts **that copy** read-only — never your original. This is deliberate: a single-file bind mount pins the source inode, so an in-place edit of your original file would not propagate into the running container. Because it's a copy, editing your own file and running `pg addon prometheus reload` re-copies it and signals Prometheus to reread. pgcli does not validate or rewrite the file's contents (same contract as the nginx/haproxy `--conf-file`). `--conf-file` is mutually exclusive only with the render knobs `--scrape`/`--scrape-append`/`--scrape-interval`; `--retention` and `--listen` are CLI flags and stay valid alongside it. Omit `--conf-file` on a reinstall to go back to render mode.
+
+## Reload (hot config change)
+
+```bash
+pg addon prometheus reload --name p1
+```
+
+This rewrites the managed `prometheus.yml` (re-render in render mode, re-copy your file in `--conf-file` mode) and sends **SIGHUP** to the running container, which makes Prometheus reread it in place — no container recreate, no dropped scrapes. It uses a signal rather than the HTTP `POST /-/reload` endpoint on purpose, so the unauthenticated reload route never has to be enabled (`--web.enable-lifecycle` is not set). Prometheus keeps serving on its last good config and logs an error if the new one is malformed, so check `pg logs addon prometheus` after reloading a hand-written file. The instance must already be running (`pg addon start prometheus`).
+
+## Listening and exposure
+
+Prometheus's `Listen` defaults to `0.0.0.0`: the container shares the host's network namespace, so the UI and API are reachable on every interface at the assigned port. This matches Grafana's default for the same practical reason (Grafana on another host needs to reach it) — but **there is no password behind it**. Anyone who can reach the port can run arbitrary PromQL and read your collected metrics. For a loopback-only deployment pass `--listen 127.0.0.1` (recreate with `--force`); `pg addon list` then shows `http://127.0.0.1:<port>/`. Otherwise, restrict access at the firewall.
+
+## Ports
+
+Each Prometheus instance owns a single port: the web UI/API. It is allocated from a pool with base `prometheus_start_port` (default `9090` — Prometheus's conventional web port), incrementing for every additional instance and skipping ports already taken by any managed container or the `used_ports` list. The allocation is written into `pg.yaml`, so a reinstall never re-hands-out a port another addon is using. `9090` shares no number with Grafana (`3000`), pgAdmin (`5050`), or nginx (`8080`); an explicit `--port` still wins.
+
+```bash
+pg addon install prometheus --name p2          # second instance: next free port (9091 if 9090 taken)
+pg addon install prometheus --name p3 --port 9100  # explicit port still takes precedence
+```
+
+## Configuration
+
+```yaml
+addons:
+  prometheus:
+    p1:
+      name: p1
+      image_tag: docker.io/prom/prometheus:v3.15.0
+      host_port: 9090
+      listen: 0.0.0.0
+      retention: 15d
+      scrape:
+        - postgres-exporter=127.0.0.1:9187
+        - node=10.0.0.5:9100,10.0.0.6:9100
+      scrape_interval: 15s
+      autostart: false
+      # conf_file: /etc/prometheus/my.yml   # operator-file mode, skips rendering
+      # data_dir: /srv/prometheus-data      # optional, overrides the default location
+```
+
+The rendered `prometheus.yml` carries the global `scrape_interval`, the always-present self job, and one `static_configs` job per `scrape` JOB (folding every target that job's spec lists). `retention` and the listener bind are **not** in that file — they are passed to the `prometheus` binary as CLI flags (`--storage.tsdb.retention.time`, `--web.listen-address`), which is why they remain settable alongside `--conf-file`.
+
+### List
+
+```bash
+pg addon list
+```
+
+```
+Web add-ons (prometheus):
+  prometheus (name: p1)
+    Status:      running
+    URL:         http://0.0.0.0:9090/
+    Config:      /home/you/.pgcli/addon/prometheus/p1/prometheus.yml [rendered (1 scrape job(s))]
+    Retention:   15d
+    Data:        /home/you/.pgcli/addon/prometheus/p1/data
+    Image:       docker.io/prom/prometheus:v3.15.0
+    Container:   pgcli-prometheus-p1
+```
+
+There are no credentials to reveal — Prometheus has none — so `--show-password` shows nothing extra for it.
+
+## Start and stop
+
+Containers run with podman's `unless-stopped` restart policy, so they come back automatically with the podman service after a host reboot. `start`/`stop` manage them explicitly:
+
+```bash
+pg addon stop prometheus
+pg addon start prometheus
+```
+
+## Auto-start on Boot
+
+To have a Prometheus instance started automatically on host boot, enable it:
+
+```bash
+pg autostart enable --prometheus --name p1
+```
+
+This flags the instance in `pg.yaml` and installs/refreshes a boot service (a systemd `--user` unit on Linux, a LaunchAgent on macOS) that runs `pg start --autostart`. A boot-time start only brings the container up — reading the managed `prometheus.yml` already on disk, and the data dir was already chowned at create time, so it needs no host privileges beyond podman itself. Prometheus starts after Grafana and before nginx in the boot order. See [Autostart]({{< relref "../autostart" >}}) for the full mechanism, status and disabling.
+
+## Remove
+
+```bash
+pg addon remove prometheus              # keeps the TSDB — collected metrics survive a reinstall
+pg addon remove prometheus --clean-data # deletes the TSDB too
+```
+
+Under rootless podman, `--clean-data` deletes the data dir through `podman unshare rm` — Prometheus writes as its container uid (65534), which maps to a subordinate uid the host user cannot `rm` directly. `--conf-file` mode removes only pgcli's copy; your original file wherever you put it is never touched.
+
+## Logs
+
+```bash
+pg logs addon prometheus            # show recent console output
+pg logs addon prometheus -f         # follow
+pg logs addon prometheus -n 200     # last 200 lines (also -i / --tail)
+```
+
+## Troubleshooting
+
+- **`install` fails with "chowning Prometheus data dir ... to 65534:65534"** — the image runs as `nobody` (uid/gid 65534) and never fixes ownership itself, so pgcli chowns the host data dir before creating the container: through `podman unshare chown` under **rootless** podman (where the mapped subordinate uid is the only correct target), or a direct recursive `chown` when pgcli itself runs as root on a **rootful** host. The manager shells out to the plain `podman` CLI, so this only fails outside those two cases — e.g. a non-root `pg` explicitly pointed at someone else's rootful daemon. Run the install as root, or switch to rootless podman; a manual `sudo chown -R 65534:65534 <data-dir>` alone does not clear it, since pgcli re-checks ownership on every install attempt.
+- **A scrape target shows `DOWN`** — confirm Prometheus can reach it (it dials from the container; on Linux `127.0.0.1:<port>` is the host loopback, but a cross-host/VM target needs a routable address, especially on the macOS bridge). Check the exporter is up and the path is `/metrics`. `pg logs addon prometheus` shows scrape failures.
+- **`--scrape-append` aborted with "returned no data"** — by design: an appended target must answer `GET /metrics` with 200 from the host before anything is written (the existing instance and `pg.yaml` stay untouched). Bring the exporter up, or use plain `--scrape` (which only warns) when declaring the full job set. The probe is skipped on macOS.
+- **A config reload didn't take effect** — `pg addon prometheus reload` needs the container running; if the new `prometheus.yml` is malformed Prometheus keeps serving the last good config and logs the error. Check `pg logs addon prometheus`, fix the file, reload again.
+- **Port already allocated** — the assigned port is held in `pg.yaml` and skipped for later instances; free it with `pg addon remove` first, or pick another with `--port N`.
+- **Remote API unreachable / unexpectedly reachable** — on the default `0.0.0.0` a failure to reach it is host firewall, not bind address; conversely, if you did *not* want it reachable, `--listen 127.0.0.1 --force`.
+
+## Known limitations
+
+- v1 is a bare collection backend: it ships no PostgreSQL exporter (install one yourself and point `--scrape postgres-exporter=127.0.0.1:9187` at it), no alertmanager, and no remote-write. It is the scrape/store/query layer you point Grafana at.
+- **No authentication.** Prometheus's API runs arbitrary PromQL; the only protection for a `0.0.0.0` bind is the network boundary. This is a materially weaker posture than Grafana's password-guarded `0.0.0.0` — do not expose it on an untrusted network.
+- pgcli renders or copies `prometheus.yml` but does not validate it (there is no `promtool check config` gate at install). A bad rendered config is impossible, but a bad `--conf-file` surfaces only in the container logs on reload.
+- The host-side ownership chown is automatic under rootless podman (`podman unshare chown`) and when pgcli runs as root on a rootful host (direct `chown`). A rootful daemon talked to by a non-root pgcli (only via an explicitly configured remote socket) has no automatic path.
+- On macOS the container runs inside the podman machine; it has been validated on Linux only.

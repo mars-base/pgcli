@@ -59,6 +59,7 @@ across machines, or that depend on Linux-only container internals, stay
 | Addon — **SeaweedFS** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
 | Addon — **pgAdmin 4** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
 | Addon — **Grafana** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
+| Addon — **Prometheus** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
 | Addon — **nginx** | ✅ host network | ✅ bridge, published ports (lightly tested) |
 | Client — **`pg mc`** (MinIO client) | ✅ host network | ✅ bridge (see below) |
 | HA — **Patroni** (`pg ha`) | ✅ incl. cross-host | ❌ Linux only |
@@ -156,6 +157,20 @@ Addon networking differs per component:
   on macOS it joins `pgcli-net` with the port published and its `listen` widened
   to `0.0.0.0` — the same bridge path pgAdmin/redis use, code-complete but not
   yet exercised on a Mac, so the e2e coverage is Linux-only for now.
+- **[Prometheus](/docs/addon/prometheus/)** — **Linux, tested; macOS expected.**
+  A plain upstream `docker.io/prom/prometheus` image with no wrapper, the same
+  ownership shape as Grafana (baked `USER nobody`, uid/gid `65534`, no entrypoint
+  fixup) — pgcli pre-chowns the host TSDB dir via `podman unshare chown
+  65534:65534` under rootless podman, or a direct recursive `chown` when pgcli
+  runs as root on a rootful host. Unlike Grafana it is configured by a
+  bind-mounted `prometheus.yml` (rendered, or copied from `--conf-file`) plus CLI
+  flags after the image name, not env vars. On Linux it serves over host
+  networking on `prometheus_start_port` (on every interface by default) — with
+  **no authentication** behind that default, so unlike Grafana's
+  password-guarded `0.0.0.0`, this exposure is guarded only by the network
+  boundary. On macOS it joins `pgcli-net` with the port published — the same
+  bridge path Grafana uses, code-complete but not yet exercised on a Mac, so the
+  e2e coverage is Linux-only for now.
 - **[nginx](/docs/addon/nginx/)** — **both platforms (macOS lightly
   tested).** The HTTP reverse proxy joins `pgcli-net` on macOS with its ports
   published — the same bridge path the object stores use; it has been exercised

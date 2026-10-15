@@ -55,6 +55,7 @@ pgcli 在 Linux 和 macOS 上都是驱动 [Podman](https://podman.io) 容器运�
 | 插件 —— **SeaweedFS** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
 | 插件 —— **pgAdmin 4** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
 | 插件 —— **Grafana** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
+| 插件 —— **Prometheus** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
 | 插件 —— **nginx** | ✅ host 网络 | ✅ bridge，发布端口（轻度实测） |
 | 客户端 —— **`pg mc`**（MinIO 客户端） | ✅ host 网络 | ✅ bridge（见下） |
 | 高可用 —— **Patroni**（`pg ha`） | ✅ 含跨主机 | ❌ 仅 Linux |
@@ -137,6 +138,17 @@ macOS 上这些都是**单主机**：跨主机副本、跨多机的连接池属�
   卡）；macOS 上加入 `pgcli-net` 并发布端口、`listen` 放宽到 `0.0.0.0` —— 与
   pgAdmin/redis 相同的 bridge 路径，代码完备但尚未在 Mac 上跑过，e2e 覆盖目前
   仅限 Linux。
+- **[Prometheus](/docs/addon/prometheus/)** —— **Linux 已实测；macOS 预期可用**。
+  纯上游 `docker.io/prom/prometheus` 镜像，没有 wrapper，属主形态与 Grafana
+  一致（固化 `USER nobody`，uid/gid `65534`，entrypoint 不做任何属主管理）——
+  pgcli 在创建容器前先把宿主 TSDB 目录 chown 过去：rootless podman 下经
+  `podman unshare chown 65534:65534`，pgcli 以 root 跑在 rootful 宿主上则直接
+  递归 `chown`。与 Grafana 不同，它靠一份 bind mount 的 `prometheus.yml`（渲染
+  而来，或从 `--conf-file` 拷贝）加镜像名之后的 CLI flag 配置，而非环境变量。
+  Linux 上走 host 网络，端口取自 `prometheus_start_port`（默认开放全部网卡）——
+  且**该默认背后没有任何鉴权**：不像 Grafana 的 `0.0.0.0` 有密码兜底，这里的
+  暴露面只靠网络边界。macOS 上加入 `pgcli-net` 并发布端口 —— 与 Grafana 相同的
+  bridge 路径，代码完备但尚未在 Mac 上跑过，e2e 覆盖目前仅限 Linux。
 - **[nginx](/docs/addon/nginx/)** —— **两个平台都支持（macOS 轻度实测）**。HTTP
   反向代理，Linux 上走 host 网络；macOS 上加入 `pgcli-net` 并发布端口，与对象
   存储同一条 bridge 路径 —— 已跑通过但未经负载考验。上游镜像多架构

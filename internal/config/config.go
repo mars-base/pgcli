@@ -34,6 +34,7 @@ type Config struct {
 	PredixyStartPort        int                       `yaml:"predixy_start_port,omitempty"`         // starting Predixy proxy listener host port, default 7617
 	PgAdminStartPort        int                       `yaml:"pgadmin_start_port,omitempty"`         // starting pgAdmin 4 web host port, default 5050
 	GrafanaStartPort        int                       `yaml:"grafana_start_port,omitempty"`         // starting Grafana web host port, default 3000
+	PrometheusStartPort     int                       `yaml:"prometheus_start_port,omitempty"`      // starting Prometheus web host port, default 9090
 	NginxStartPort          int                       `yaml:"nginx_start_port,omitempty"`           // starting nginx HTTP host port, default 8080 (HTTPS takes the next free port)
 	GarageStartPort         int                       `yaml:"garage_start_port,omitempty"`          // starting Garage S3 API host port, default 3900 (RPC, web, admin take the next three free ports)
 	SeaweedfsStartPort      int                       `yaml:"seaweedfs_start_port,omitempty"`       // starting SeaweedFS master host port, default 8400 (volume, filer, s3 take the next three free ports; gRPC twins at +10000 are reserved)
@@ -87,22 +88,23 @@ type AddonsConfig struct {
 // (e.g. a PgBouncer fronting a remote database via --dsn), and for shared
 // infrastructure addons like etcd.
 type TopAddonsConfig struct {
-	PgBouncer map[string]PgBouncerConfig      `yaml:"pgbouncer,omitempty"`
-	Postgrest map[string]PostgrestConfig      `yaml:"postgrest,omitempty"`
-	Etcd      map[string]EtcdConfig           `yaml:"etcd,omitempty"`
-	PgDog     map[string]PgDogConfig          `yaml:"pgdog,omitempty"`
-	Patroni   map[string]PatroniClusterConfig `yaml:"patroni,omitempty"`
-	HAProxy   map[string]HAProxyConfig        `yaml:"haproxy,omitempty"`
-	Minio     map[string]MinioConfig          `yaml:"minio,omitempty"`
-	Silo      map[string]SiloConfig           `yaml:"silo,omitempty"`
-	Rustfs    map[string]RustfsConfig         `yaml:"rustfs,omitempty"`
-	Garage    map[string]GarageConfig         `yaml:"garage,omitempty"`
-	Seaweedfs map[string]SeaweedfsConfig      `yaml:"seaweedfs,omitempty"`
-	Redis     map[string]RedisConfig          `yaml:"redis,omitempty"`
-	Predixy   map[string]PredixyConfig        `yaml:"predixy,omitempty"`
-	PgAdmin   map[string]PgAdminConfig        `yaml:"pgadmin,omitempty"`
-	Grafana   map[string]GrafanaConfig        `yaml:"grafana,omitempty"`
-	Nginx     map[string]NginxConfig          `yaml:"nginx,omitempty"`
+	PgBouncer  map[string]PgBouncerConfig      `yaml:"pgbouncer,omitempty"`
+	Postgrest  map[string]PostgrestConfig      `yaml:"postgrest,omitempty"`
+	Etcd       map[string]EtcdConfig           `yaml:"etcd,omitempty"`
+	PgDog      map[string]PgDogConfig          `yaml:"pgdog,omitempty"`
+	Patroni    map[string]PatroniClusterConfig `yaml:"patroni,omitempty"`
+	HAProxy    map[string]HAProxyConfig        `yaml:"haproxy,omitempty"`
+	Minio      map[string]MinioConfig          `yaml:"minio,omitempty"`
+	Silo       map[string]SiloConfig           `yaml:"silo,omitempty"`
+	Rustfs     map[string]RustfsConfig         `yaml:"rustfs,omitempty"`
+	Garage     map[string]GarageConfig         `yaml:"garage,omitempty"`
+	Seaweedfs  map[string]SeaweedfsConfig      `yaml:"seaweedfs,omitempty"`
+	Redis      map[string]RedisConfig          `yaml:"redis,omitempty"`
+	Predixy    map[string]PredixyConfig        `yaml:"predixy,omitempty"`
+	PgAdmin    map[string]PgAdminConfig        `yaml:"pgadmin,omitempty"`
+	Grafana    map[string]GrafanaConfig        `yaml:"grafana,omitempty"`
+	Prometheus map[string]PrometheusConfig     `yaml:"prometheus,omitempty"`
+	Nginx      map[string]NginxConfig          `yaml:"nginx,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -572,6 +574,19 @@ const DefaultPgAdminImageTag = "docker.io/dpage/pgadmin4:9.18"
 // chown or drop privileges — see internal/podman.GrafanaManager for how pgcli
 // makes a bind-mounted /var/lib/grafana writable by 472.
 const DefaultGrafanaImageTag = "docker.io/grafana/grafana:13.2.4"
+
+// DefaultPrometheusImageTag pins the Prometheus image. prom/prometheus is the
+// official multi-arch image on docker.io (pull-only — pgcli never builds it).
+// The default tag has no suffix, i.e. the busybox variant (the recommended
+// non-distroless build, with a shell for debugging); a -distroless variant
+// exists but pgcli never selects it. v3.15.0 is a fixed stable release on the
+// current v3 line (verified on Docker Hub 2026-10-14; latest == v3.15.0 at
+// pinning time). v3.13.x is the parallel LTS patch line, deliberately not
+// pinned. The image runs as the fixed nobody uid 65534 (gid 65534) and its
+// entrypoint does NOT chown or drop privileges — see
+// internal/podman.PrometheusManager for how pgcli makes a bind-mounted
+// /prometheus writable by 65534. Keep this in sync when bumping.
+const DefaultPrometheusImageTag = "docker.io/prom/prometheus:v3.15.0"
 
 // DefaultRedisMajor is the Redis major version installed when --version is not
 // given: "8", the current stable line upstream (docker.io/library/redis).
@@ -1337,6 +1352,47 @@ type GrafanaConfig struct {
 	Autostart bool `yaml:"autostart,omitempty"`
 }
 
+// PrometheusConfig holds a standalone Prometheus addon — the metrics
+// collection backend (https://prometheus.io/). Shape mirrors GrafanaConfig: a
+// web UI on one host port, a persistent data dir outliving the container, and
+// Listen defaulting to 0.0.0.0. Unlike Grafana it is configured by a RENDERED
+// prometheus.yml (bind-mounted read-only) plus CLI flags passed after the image
+// (--config.file / --web.listen-address / --storage.tsdb.path /
+// --storage.tsdb.retention.time), not environment variables — so see
+// internal/podman.PrometheusManager for the render + argv shape.
+//
+// There is NO login/password: Prometheus has no authentication. Its HTTP API
+// can run arbitrary PromQL, so a remote-exposed instance is guarded only by the
+// network boundary (firewall / --listen 127.0.0.1), not a generated secret —
+// the docs must not imply it is as safe to expose as Grafana.
+//
+// Ownership matches Grafana's divergence: the image is USER nobody (uid/gid
+// 65534) and its entrypoint does NOT chown, so pgcli pre-chowns the host data
+// dir to 65534:65534 before starting the container (podman unshare chown under
+// rootless, direct chown as root on a rootful host).
+//
+// Retention/Scrape/ScrapeInterval are render knobs that only apply in
+// rendered-config mode; when ConfFile is set they are mutually exclusive with
+// it (pgcli copies the user file into the managed path and mounts that, so it
+// does not render). Retention is the exception — it is a CLI flag, not a render
+// knob, so it still applies alongside --conf-file.
+type PrometheusConfig struct {
+	ContainerName  string   `yaml:"container_name"`            // pgcli-prometheus<ns>-<name>
+	Name           string   `yaml:"name,omitempty"`            // addon key, defaults to the map key
+	ImageTag       string   `yaml:"image_tag,omitempty"`       // docker.io/prom/prometheus:v3.15.0 (default)
+	HostPort       int      `yaml:"host_port,omitempty"`       // web host port, 9090+ auto-assigned
+	Listen         string   `yaml:"listen,omitempty"`          // --web.listen-address bind, default 0.0.0.0 (see ApplyDefaults walk for rationale)
+	DataDir        string   `yaml:"data_dir,omitempty"`        // host dir mounted at /prometheus (tsdb); default <base>/addon/prometheus/<name>/data
+	Retention      string   `yaml:"retention,omitempty"`       // --storage.tsdb.retention.time, default 15d
+	Scrape         []string `yaml:"scrape,omitempty"`          // JOB=host:port[,host:port...] scrape specs, each rendering one static_configs job in the rendered prometheus.yml (render-mode only)
+	ScrapeInterval string   `yaml:"scrape_interval,omitempty"` // global scrape_interval in the rendered prometheus.yml, default 15s (render-mode only)
+	ConfFile       string   `yaml:"conf_file,omitempty"`       // optional host path to the user's own prometheus.yml; when set pgcli skips rendering and copies this file into the managed path to mount (mutually exclusive with Scrape/ScrapeInterval)
+	// Autostart brings this container up on host boot via the boot service
+	// (pg autostart enable --prometheus). Start-only: it starts the existing
+	// container, so install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
 // PostgresConfig holds PostgreSQL connection settings.
 type PostgresConfig struct {
 	URL      string `yaml:"url"`      // connection string (postgres://user:pass@host:port/db)
@@ -1434,6 +1490,7 @@ func Default() *Config {
 		PredixyStartPort:        7617,
 		PgAdminStartPort:        5050,
 		GrafanaStartPort:        3000,
+		PrometheusStartPort:     9090,
 		NginxStartPort:          8080,
 		GarageStartPort:         3900,
 		SeaweedfsStartPort:      8400,
@@ -1639,6 +1696,7 @@ type displayConfig struct {
 	PredixyStartPort        int                       `yaml:"predixy_start_port,omitempty"`
 	PgAdminStartPort        int                       `yaml:"pgadmin_start_port,omitempty"`
 	GrafanaStartPort        int                       `yaml:"grafana_start_port,omitempty"`
+	PrometheusStartPort     int                       `yaml:"prometheus_start_port,omitempty"`
 	NginxStartPort          int                       `yaml:"nginx_start_port,omitempty"`
 	GarageStartPort         int                       `yaml:"garage_start_port,omitempty"`
 	SeaweedfsStartPort      int                       `yaml:"seaweedfs_start_port,omitempty"`
@@ -1669,6 +1727,7 @@ func (c *Config) Display() displayConfig {
 		PredixyStartPort:        c.PredixyStartPort,
 		PgAdminStartPort:        c.PgAdminStartPort,
 		GrafanaStartPort:        c.GrafanaStartPort,
+		PrometheusStartPort:     c.PrometheusStartPort,
 		NginxStartPort:          c.NginxStartPort,
 		GarageStartPort:         c.GarageStartPort,
 		SeaweedfsStartPort:      c.SeaweedfsStartPort,
@@ -1772,6 +1831,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.GrafanaStartPort == 0 {
 		c.GrafanaStartPort = d.GrafanaStartPort
+	}
+	if c.PrometheusStartPort == 0 {
+		c.PrometheusStartPort = d.PrometheusStartPort
 	}
 	if c.NginxStartPort == 0 {
 		c.NginxStartPort = d.NginxStartPort
@@ -2353,6 +2415,39 @@ func (c *Config) ApplyDefaults() {
 			addon.AdminUser = "admin"
 		}
 		c.Addons.Grafana[name] = addon
+	}
+
+	// Top-level addons defaults (Prometheus). Same shape as Grafana above.
+	// Listen defaults to 0.0.0.0 for the same reason — a metrics backend is
+	// scraped/queried from other machines (and Grafana reads its API) — but
+	// unlike Grafana there is NO password guarding that exposure: Prometheus has
+	// no authentication and its API runs arbitrary PromQL, so the firewall /
+	// `--listen 127.0.0.1` is the only boundary (documented in the manager and
+	// the addon page). Retention and ScrapeInterval are deterministic literals
+	// (not secrets), so filling them here is safe; they only take effect in
+	// rendered-config mode for ScrapeInterval, while Retention is a CLI flag and
+	// applies even alongside --conf-file. Scrape (extra targets) is never
+	// defaulted — an empty list still renders the always-present self job.
+	for name, addon := range c.Addons.Prometheus {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-prometheus" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultPrometheusImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "0.0.0.0"
+		}
+		if addon.Retention == "" {
+			addon.Retention = "15d"
+		}
+		if addon.ScrapeInterval == "" {
+			addon.ScrapeInterval = "15s"
+		}
+		c.Addons.Prometheus[name] = addon
 	}
 
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
@@ -2982,6 +3077,47 @@ func (c *Config) autoAssignPorts() {
 				next = addon.HostPort + 1
 			}
 			c.Addons.Grafana[name] = addon
+		}
+	}
+
+	// Allocate ports for Prometheus addons from their own pool
+	// (prometheus_start_port, default 9090 — Prometheus's default web port). One
+	// port per instance, same shape as the Grafana block above: a web UI
+	// listener and nothing else. 9090 does not collide with any other pool's
+	// base port on this host (see the *StartPort fields block near the top of
+	// this file for the current bases) — so a Prometheus instance and a Grafana
+	// instance always end up on distinct ports even before the nextFree cursor
+	// logic gets a chance to skip.
+	{
+		prometheusBase := c.PrometheusStartPort
+		assignedPrometheus := map[int]bool{}
+		for _, addon := range c.Addons.Prometheus {
+			if addon.HostPort != 0 {
+				assignedPrometheus[addon.HostPort] = true
+			}
+		}
+		next := prometheusBase
+		nextFreePrometheus := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedPrometheus[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.Prometheus))
+		for name := range c.Addons.Prometheus {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.Prometheus[name]
+			if addon.HostPort == 0 && prometheusBase > 0 {
+				addon.HostPort = nextFreePrometheus()
+			} else if addon.HostPort >= next {
+				next = addon.HostPort + 1
+			}
+			c.Addons.Prometheus[name] = addon
 		}
 	}
 

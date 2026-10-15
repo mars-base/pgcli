@@ -30,7 +30,8 @@ pgcli 使用的容器镜像及其默认 tag。
 | `docker.io/library/nginx` | `1.27-alpine` | nginx HTTP 反向代理，纯上游镜像无 wrapper，双架构 manifest list | `DefaultNginxImageTag` |
 | `docker.io/dxflrs/garage` | `v2.4.1` | Garage（Deuxfleurs 的 Rust S3 存储，面向自建/异地集群），纯上游镜像无 wrapper，`FROM scratch` 无 shell | `DefaultGarageImageTag` |
 | `docker.io/chrislusf/seaweedfs` | `4.48_large_disk` | SeaweedFS（Go 对象存储，volume + placement-code 复制模型），纯上游镜像无 wrapper，`_large_disk` 变体 | `DefaultSeaweedfsImageTag` |
-| `docker.io/grafana/grafana` | `13.2.4` | Grafana（开源可观测性面板），纯上游官方镜像无 wrapper；自 12.4.0 起 `grafana-oss` 仓库冻结，OSS 构建就发在这个仓库里；默认 Alpine base，双架构 manifest list | `config.go:574`（`DefaultGrafanaImageTag`） |
+| `docker.io/grafana/grafana` | `13.2.4` | Grafana（开源可观测性面板），纯上游官方镜像无 wrapper；自 12.4.0 起 `grafana-oss` 仓库冻结，OSS 构建就发在这个仓库里；默认 Alpine base，双架构 manifest list | `config.go:576`（`DefaultGrafanaImageTag`） |
+| `docker.io/prom/prometheus` | `v3.15.0` | Prometheus（指标采集后端，Grafana 的数据源），纯上游官方镜像无 wrapper；无后缀 tag 即 busybox 变体（带 shell），双架构 manifest list | `config.go:589`（`DefaultPrometheusImageTag`） |
 
 ## 镜像导出
 
@@ -99,6 +100,10 @@ podman save -o "$TARGET/nginx_1.27-alpine.tar" docker.io/library/nginx:1.27-alpi
 # grafana 上游镜像同样是双架构 manifest list，先按 amd64 pull 再 save
 podman pull --platform linux/amd64 docker.io/grafana/grafana:13.2.4
 podman save -o "$TARGET/grafana_13.2.4.tar" docker.io/grafana/grafana:13.2.4
+
+# prometheus 上游镜像同样是双架构 manifest list，先按 amd64 pull 再 save
+podman pull --platform linux/amd64 docker.io/prom/prometheus:v3.15.0
+podman save -o "$TARGET/prometheus_v3.15.0.tar" docker.io/prom/prometheus:v3.15.0
 ```
 
 ### rustfs（双架构 manifest 不能直接 save）
@@ -179,9 +184,19 @@ done
   manifest list。与 pgadmin 不同：镜像固化 `USER 472`（root 组 gid 0）、
   `run.sh` 既不 chown 也不降权，所以 pgcli 在创建容器前于宿主 chown 数据目录属主
   （rootless 下经 `podman unshare chown 472:0`，rootful+root 下直接 `chown`）
+- **prometheus**：纯上游官方 `docker.io/prom/prometheus`，无 wrapper。无后缀 tag
+  即 **busybox 变体**（镜像内带 shell，官方推荐用于普通部署；另有
+  `-alpine`/`-ubuntu`/`glibc` 变体，pgcli 从不选用）；pin 到 stable 线
+  `v3.15.0`（2026-10-14 在 Docker Hub 核实，`latest` 即指向此 tag），双架构
+  manifest list。与 Grafana 同构的属主形态：镜像固化 `USER nobody`
+  （uid/gid `65534`），entrypoint 不做任何属主管理，所以 pgcli 同样在创建容器前
+  于宿主 chown 数据目录（rootless 下经 `podman unshare chown 65534:65534`，
+  rootful+root 下直接 `chown`）。与 Grafana 不同的是配置方式：靠一份 bind mount
+  的 `prometheus.yml`（渲染或从 `--conf-file` 拷贝）加镜像名之后的 CLI flag，而不
+  是 env；且**完全没有鉴权**——`0.0.0.0` 默认背后没有密码兜底，暴露面只靠网络边界
 - **pgbouncer** / **postgrest** / **haproxy** / **etcd** / **pgdog**：上游官方或社区维护的稳定版本
 
 ---
 
-**最后更新**：2026-10-14（新增 grafana 插件镜像；此前 garage 与 seaweedfs
-两插件分别于 2026-10-12 / 2026-10-14 合入时补录）
+**最后更新**：2026-10-14（新增 grafana 与 prometheus 插件镜像；此前 garage 与
+seaweedfs 两插件分别于 2026-10-12 / 2026-10-14 合入时补录）

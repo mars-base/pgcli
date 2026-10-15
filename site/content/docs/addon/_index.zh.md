@@ -39,6 +39,7 @@ pgcli 支持通过插件系统扩展 PostgreSQL 功能。插件是独立的容�
 | [`pgadmin`](./pgadmin/) | pgAdmin 4——PostgreSQL 官方 Web 管理界面，单容器直接跑上游镜像；Web 登录自动生成，可选经 `--dsn`/`--pg-name` 一次性预置服务器，持久化会话存储；独立端口池（Linux；macOS 代码完备、未实测） |
 | [`nginx`](./nginx/) | HTTP 反向代理，前置多个 Web 服务——按声明的后端做基于路径的路由，可选 TLS 终止，渲染 `nginx.conf` 或用自己的 `--conf-file`，配置变更后 `pg addon nginx reload`；独立端口池（Linux 与 macOS） |
 | [`grafana`](./grafana/) | Grafana——开源可观测性面板，单容器直接跑官方上游镜像；Web 登录自动生成，`Listen` 默认 `0.0.0.0`（关闭自助注册），v1 只经环境变量（`GF_*`）配置、无 provisioning；独立端口池（Linux；macOS 代码完备、未实测） |
+| [`prometheus`](./prometheus/) | Prometheus——Grafana 读取的指标采集后端，单容器直接跑官方 `docker.io/prom/prometheus` 镜像；渲染 `prometheus.yml`（自带自监控 job + 每个 `--scrape` JOB 一个 job，该 job 声明的 target 全部并入其中；`--scrape-append` 增量合并）或用自己的 `--conf-file`，`pg addon prometheus reload` 经 SIGHUP 热加载；**无 Web 登录**——`Listen` 默认 `0.0.0.0` 仅靠网络边界保护（仅本机访问用 `--listen 127.0.0.1`）；独立端口池（Linux；macOS 代码完备、未实测） |
 
 每个插件都有独立页面，包含命令、参数与故障排除说明。
 
@@ -67,4 +68,4 @@ pg addon remove <addon> [flags]     # 移除插件、容器与数据
 ```
 
 各插件的具体参数与示例见其独立页面：
-[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [PostgREST](./postgrest/) · [HAProxy](./haproxy/) · [MinIO](./minio/) · [Silo](./silo/) · [rustfs](./rustfs/) · [Garage](./garage/) · [SeaweedFS](./seaweedfs/) · [Redis](./redis/) · [Predixy](./predixy/) · [pgAdmin 4](./pgadmin/) · [nginx](./nginx/) · [Grafana](./grafana/)。Patroni 相关页面见 [HA 集群](../ha-cluster/)。
+[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [PostgREST](./postgrest/) · [HAProxy](./haproxy/) · [MinIO](./minio/) · [Silo](./silo/) · [rustfs](./rustfs/) · [Garage](./garage/) · [SeaweedFS](./seaweedfs/) · [Redis](./redis/) · [Predixy](./predixy/) · [pgAdmin 4](./pgadmin/) · [nginx](./nginx/) · [Grafana](./grafana/) · [Prometheus](./prometheus/)。Patroni 相关页面见 [HA 集群](../ha-cluster/)。

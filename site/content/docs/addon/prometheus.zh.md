@@ -1,0 +1,203 @@
+---
+title: "Prometheus"
+description: "以 pgcli 插件方式运行 Prometheus——Grafana 读取的指标采集后端，单容器直接跑上游官方镜像"
+weight: 55
+---
+
+`pg addon install prometheus` 以受管容器方式运行 [Prometheus](https://prometheus.io/)——指标采集与告警后端——直接跑官方 `docker.io/prom/prometheus` 镜像。与 Grafana 一样，它是**顶层插件**：不前置某个具体实例（它抓很多端点），也不依附于任何一个。二者是天然搭档——Prometheus 负责采集与存储、Grafana 负责可视化——且生命周期形状完全一致（单容器、Linux 上宿主网络、各自端口池里的一个 web 端口、持久数据目录、开机自启、日志）。
+
+Prometheus 与 Grafana 的分歧在**配置方式**。Grafana 只经环境变量（`GF_*`）；Prometheus 读一份配置**文件**（`prometheus.yml`），且把运行时调优作为**镜像名之后的 CLI flag** 传入（`--config.file` / `--web.listen-address` / `--storage.tsdb.path` / `--storage.tsdb.retention.time`）。所以 pgcli 渲染 `prometheus.yml`、只读 bind mount 进容器，并让 `--config.file` 指向容器内该路径。
+
+> **没有 Web 登录/密码。** 与 Grafana（其 `0.0.0.0` 默认由自动生成的强密码兜底）
+> 不同，Prometheus **完全不带鉴权**。它的 HTTP API 可执行任意 PromQL，昂贵查询也
+> 能把自身打满，所以远程暴露的实例**只靠网络边界**保护——防火墙，或
+> `--listen 127.0.0.1` 收紧为仅回环。请把它当作一个无鉴权的读/写控制台来对待，而
+> 非一个有密码保护的面板。
+
+> **平台**：Linux 是已实测的平台。设计上也支持 macOS（镜像多架构；容器在
+> `pgcli-net` bridge 上以发布端口的方式跑在 podman machine 里），但尚未在
+> Mac 上验证过。
+
+## 参数
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--name` | `prometheus` | 实例名（map 键） |
+| `--image` | `docker.io/prom/prometheus:v3.15.0` | 覆盖镜像 |
+| `--port` | 自动（基址 9090） | Web 宿主端口；自 `prometheus_start_port` 自动分配 |
+| `--listen` | `0.0.0.0` | 绑定地址——默认开放全部网卡；`127.0.0.1` 收紧为仅回环（见上方暴露警告） |
+| `--scrape` | —（自带自监控 job） | 抓取声明 `JOB=HOST:PORT[,HOST:PORT...]`（可重复）——job 名必填，逗号分隔的多个 target 全部并入这一个 job，在渲染的 `prometheus.yml` 里成一个 `static_configs` job。声明的是**完整** job 集合（整体替换已存列表）。目标会被宿主侧 `GET /metrics` 探测，探测不通仅告警 |
+| `--scrape-append` | — | 同样的声明格式，但把追加的 job **合并**进已存的 `--scrape` 列表（同名 job 并入 target、新名字排到末尾）而非替换。每个被追加的目标都会探测，任一拉不到数据即**中止 install**——什么都不写。与 `--scrape`、`--conf-file` 互斥 |
+| `--scrape-interval` | `15s` | 渲染配置里的全局 `scrape_interval`；与 `--conf-file` 互斥 |
+| `--retention` | `15d` | TSDB 保留期（`--storage.tsdb.retention.time`）；时长如 `15d`、`6mo`、`2y`。是 CLI flag，故与 `--conf-file` 可并存 |
+| `--conf-file` | — | 你自己的 `prometheus.yml` 路径——完全跳过渲染（与 `--scrape`/`--scrape-append`/`--scrape-interval` 互斥）；见下 |
+| `--data-dir` | 自动 | 覆盖数据目录（默认在 base 目录下） |
+| `--force` | false | 即使正在运行也重建——用于不热加载改动的配置，或应用改动的端口/监听/保留期 |
+
+数据目录是 Prometheus 的 TSDB。它跨 `pg addon remove` 存活（用 `--clean-data` 才删除），重装同名实例即复活已采集的指标。镜像以固化的 `nobody`（uid/gid 65534）运行且不自建可写目录，所以 pgcli 在创建容器前先在宿主上把数据目录 chown 过去：rootless podman 下经 `podman unshare chown 65534:65534`，rootful 宿主且 pgcli 以 root 运行时直接递归 `chown`（与 Grafana 完全同构，只是 id 不同）。
+
+## 安装
+
+```bash
+pg addon install prometheus
+```
+
+命令会按需拉取镜像、渲染一份 `prometheus.yml`、创建容器，并打印 URL、配置路径与保留期：
+
+```
+✓ Prometheus installed: "prometheus"
+  Container:  pgcli-prometheus-default-prometheus
+  Image:      docker.io/prom/prometheus:v3.15.0
+  Data:       /home/you/.pgcli/addon/prometheus/prometheus/data
+  Config:     /home/you/.pgcli/addon/prometheus/prometheus/prometheus.yml (rendered: 1 self job + 0 scrape job(s))
+  Retention:  15d
+  URL:        http://0.0.0.0:9090/
+```
+
+渲染的配置**始终**含一个抓取本服务自身 `/metrics` 的自监控 job，所以绝不会空转；`--scrape` 添加更多 job。在 Grafana 里把 `http://<host>:9090/` 加成 Prometheus 数据源，即可立刻查询。
+
+```bash
+# 每个 --scrape 声明就是一个 job；= 前的 job 名必填，
+# 逗号分隔的多个 target 共用这一个 job（同构 exporter 舰队的自然形状）
+pg addon install prometheus --name p1 \
+  --scrape postgres-exporter=127.0.0.1:9187 \
+  --scrape node=10.0.0.5:9100,10.0.0.6:9100
+```
+
+带 `--scrape` 重复 install 会**整体替换**已存的 job 集合。想增量追加就用 `--scrape-append`——它把每个被追加 job 的 target 并入同名已存 job（自动去重）、新 job 名排到末尾，然后热加载：
+
+```bash
+pg addon install prometheus --name p1 --scrape-append node=10.0.0.7:9100
+```
+
+两个 flag 的探测策略刻意不同：被**追加**的目标必须以 200 应答 `GET /metrics`，否则命令在写入任何东西之前就中止（pg.yaml 与运行中的容器分毫未动）；而 `--scrape` 声明完整集合时，探测不通只告警、install 照常——Prometheus 自己会把它标成 `DOWN`，且全量声明时常包含尚未就绪的端点。探测从**宿主**拨号——Linux（宿主网络）上与容器抓取处于同一命名空间，判定即容器所见；macOS bridge 下两者不同，故直接跳过探测。
+
+抓取目标是**从 Prometheus 容器内拨号**的。Linux（宿主网络）上 `127.0.0.1:<port>` 直达宿主回环；macOS bridge 下它到的是容器自身命名空间，所以远程或 VM 内的目标要给一个可路由地址。
+
+对运行中的实例重复 `install`：当渲染/拷贝的配置**确实变了**时**热加载**（SIGHUP），没变则原样不动；`--force` 则重建容器——用于应用改动的 `--port` / `--listen` / `--retention`（它们是容器参数，而非配置文件内容）。
+
+## 自定义配置文件（`--conf-file`）
+
+把你自己的 `prometheus.yml` 交给 pgcli，它就完全跳过渲染：
+
+```bash
+pg addon install prometheus --name p1 --conf-file /etc/prometheus/my.yml
+```
+
+pgcli 把你的文件**拷贝**进托管路径（`<base>/addon/prometheus/<name>/prometheus.yml`），并只读挂载**这份拷贝**——绝不挂你的原文件。这是刻意为之：单文件 bind mount 锁死源 inode，原地改你的原文件不会传播进运行中的容器。正因它是拷贝，改完你的原文件后跑 `pg addon prometheus reload` 会重拷并通知 Prometheus 重读。pgcli 不校验、不改写文件内容（与 nginx/haproxy 的 `--conf-file` 同一约定）。`--conf-file` 只与渲染旋钮 `--scrape`/`--scrape-append`/`--scrape-interval` 互斥；`--retention` 与 `--listen` 是 CLI flag，与它并存仍有效。重装时省略 `--conf-file` 即回到渲染模式。
+
+## 热加载（配置热更新）
+
+```bash
+pg addon prometheus reload --name p1
+```
+
+它重写托管的 `prometheus.yml`（渲染模式重渲、`--conf-file` 模式重拷你的文件），并向运行中的容器发 **SIGHUP**，让 Prometheus 原地重读——不重建容器、不中断抓取。它刻意用信号而非 HTTP `POST /-/reload` 端点，于是那条无鉴权重载路由永远不需要开启（不设 `--web.enable-lifecycle`）。若新配置有错，Prometheus 会沿用上一份好配置并打日志，所以对手写文件 reload 后请查 `pg logs addon prometheus`。实例须已在运行（`pg addon start prometheus`）。
+
+## 监听与暴露
+
+Prometheus 的 `Listen` 默认 `0.0.0.0`：容器共享宿主网络命名空间，所以 UI 与 API 在宿主每个网卡的分配端口上可达。这与 Grafana 的默认一致（别的机器上的 Grafana 要能连它）——但**背后没有密码**。任何能连到端口的人都能执行任意 PromQL、读你采集的指标。想要仅回环的部署，传 `--listen 127.0.0.1`（用 `--force` 重建）；`pg addon list` 会显示 `http://127.0.0.1:<port>/`。否则请在防火墙层面限制访问。
+
+## 端口
+
+每个 Prometheus 实例占有**一个**端口：Web UI/API。它取自以 `prometheus_start_port`（默认 `9090`——Prometheus 惯例端口）为基址的端口池，每多一个实例递增，并跳过任何已被受管容器或 `used_ports` 列表占用的端口。分配结果写入 `pg.yaml`，所以重装绝不会把别的插件在用的端口再发一遍。`9090` 与 Grafana（`3000`）、pgAdmin（`5050`）、nginx（`8080`）都不重号；显式 `--port` 仍优先。
+
+```bash
+pg addon install prometheus --name p2          # 第二个实例：下一个空闲端口（9090 被占则 9091）
+pg addon install prometheus --name p3 --port 9100  # 显式端口仍优先
+```
+
+## 配置
+
+```yaml
+addons:
+  prometheus:
+    p1:
+      name: p1
+      image_tag: docker.io/prom/prometheus:v3.15.0
+      host_port: 9090
+      listen: 0.0.0.0
+      retention: 15d
+      scrape:
+        - postgres-exporter=127.0.0.1:9187
+        - node=10.0.0.5:9100,10.0.0.6:9100
+      scrape_interval: 15s
+      autostart: false
+      # conf_file: /etc/prometheus/my.yml   # 用户文件模式，跳过渲染
+      # data_dir: /srv/prometheus-data      # 可选，覆盖默认位置
+```
+
+渲染的 `prometheus.yml` 承载全局 `scrape_interval`、始终存在的自监控 job、以及每个 `scrape` **JOB** 一个 `static_configs` job（该 job 声明的所有 target 折叠进同一行）。`retention` 与监听绑定**不在**那个文件里——它们作为 CLI flag 传给 `prometheus` 二进制（`--storage.tsdb.retention.time`、`--web.listen-address`），这正是它们能与 `--conf-file` 并存的原因。
+
+### 列出
+
+```bash
+pg addon list
+```
+
+```
+Web add-ons (prometheus):
+  prometheus (name: p1)
+    Status:      running
+    URL:         http://0.0.0.0:9090/
+    Config:      /home/you/.pgcli/addon/prometheus/p1/prometheus.yml [rendered (1 scrape job(s))]
+    Retention:   15d
+    Data:        /home/you/.pgcli/addon/prometheus/p1/data
+    Image:       docker.io/prom/prometheus:v3.15.0
+    Container:   pgcli-prometheus-p1
+```
+
+没有凭据可揭示——Prometheus 本就没有——所以 `--show-password` 对它不会多显示任何东西。
+
+## 启停
+
+容器以 podman 的 `unless-stopped` 重启策略运行，宿主重启后随 podman 服务自动回来。`start`/`stop` 显式管理它们：
+
+```bash
+pg addon stop prometheus
+pg addon start prometheus
+```
+
+## 开机自启
+
+要让 Prometheus 实例在宿主开机时自动启动，开启它：
+
+```bash
+pg autostart enable --prometheus --name p1
+```
+
+这会在 `pg.yaml` 里给实例打标记，并安装/刷新一个开机服务（Linux 上是 systemd `--user` unit，macOS 上是 LaunchAgent）来执行 `pg start --autostart`。开机启动只负责把容器拉起来——读磁盘上已存在的托管 `prometheus.yml`，且数据目录在创建时已 chown 过，除 podman 本身外不需要任何宿主特权。启动顺序上 Prometheus 排在 Grafana 之后、nginx 之前。完整机制、状态与关闭方式见 [开机自启]({{< relref "../autostart" >}})。
+
+## 移除
+
+```bash
+pg addon remove prometheus              # 保留 TSDB——已采集指标跨重装存活
+pg addon remove prometheus --clean-data # 连 TSDB 一起删
+```
+
+rootless podman 下，`--clean-data` 经 `podman unshare rm` 删除数据目录——Prometheus 以容器内 uid（65534）写文件，它映射到宿主的 subordinate uid，宿主用户无法直接 `rm`。`--conf-file` 模式只删 pgcli 的拷贝；你的原文件在何处都不被触碰。
+
+## 日志
+
+```bash
+pg logs addon prometheus            # 最近的控制台输出
+pg logs addon prometheus -f         # 跟踪
+pg logs addon prometheus -n 200     # 最近 200 行（也支持 -i / --tail）
+```
+
+## 排障
+
+- **`install` 失败于 "chowning Prometheus data dir ... to 65534:65534"** —— 镜像以 `nobody`（uid/gid 65534）运行且从不自己修复属主，所以 pgcli 在创建容器前先把宿主数据目录 chown 过去：**rootless** podman 下经 `podman unshare chown`（映射后的 subordinate uid 才是正确目标），**rootful** 宿主且 pgcli 自身以 root 运行时直接递归 `chown`。pgcli 是直接调用 `podman` CLI，所以只在这两种情形之外才会失败——例如非 root 的 `pg` 被显式指向别人的 rootful daemon。遇到时以 root 跑 install，或改用 rootless podman；单纯 `sudo chown -R 65534:65534 <data-dir>` 不能消除该错误，因为每次 install 都会重新校验属主。
+- **某个抓取目标显示 `DOWN`** —— 确认 Prometheus 能连到它（它从容器内拨号；Linux 上 `127.0.0.1:<port>` 是宿主回环，但跨主机/VM 目标需要可路由地址，macOS bridge 上尤甚）。确认 exporter 在跑、路径是 `/metrics`。`pg logs addon prometheus` 会显示抓取失败。
+- **`--scrape-append` 中止于 "returned no data"** —— 这是设计行为：被追加的目标必须以 200 应答宿主的 `GET /metrics`，否则任何东西都不写入（已存实例与 `pg.yaml` 分毫未动）。要么先把 exporter 拉起来，要么改用 `--scrape`（仅告警）声明完整 job 集合。macOS 上跳过该探测。
+- **配置 reload 没生效** —— `pg addon prometheus reload` 需要容器在运行；若新的 `prometheus.yml` 有格式错误，Prometheus 会沿用上一份好配置并打日志。查 `pg logs addon prometheus`，改好文件，再 reload。
+- **端口已被分配** —— 已分配的端口记在 `pg.yaml` 里并为后续实例跳过；先 `pg addon remove` 释放，或用 `--port N` 另选一个。
+- **远程 API 打不开 / 意外可访问** —— 默认 `0.0.0.0` 下打不开是宿主防火墙问题，不是绑定地址；反之若你**不**想被访问，用 `--listen 127.0.0.1 --force`。
+
+## 已知限制
+
+- v1 是裸采集后端：不自带 PostgreSQL exporter（自己装好，再 `--scrape postgres-exporter=127.0.0.1:9187` 指向它）、不接 alertmanager、不做 remote-write。它是你让 Grafana 连的采集/存储/查询层。
+- **无鉴权。** Prometheus 的 API 执行任意 PromQL；`0.0.0.0` 绑定的唯一保护是网络边界。这比 Grafana 有密码兜底的 `0.0.0.0` 是实质更弱的态势——不要把它暴露到不可信网络。
+- pgcli 渲染或拷贝 `prometheus.yml`，但不校验它（install 阶段没有 `promtool check config` 闸门）。渲染出的配置不可能有错，但有错的 `--conf-file` 只会在 reload 时从容器日志里暴露。
+- 宿主侧的属主 chown 在 rootless podman（`podman unshare chown`）下自动完成，pgcli 以 root 跑在 rootful 宿主上也自动完成（直接 `chown`）。非 root 的 pgcli 连接一个显式配置的远程 rootful daemon 时没有自动路径。
+- macOS 上容器跑在 podman machine 里；目前只在 Linux 上验证过。
