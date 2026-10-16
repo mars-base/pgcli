@@ -131,7 +131,148 @@ recreate).
 
 Gitea's `Listen` defaults to `0.0.0.0`: the container shares the host's network namespace, so the web UI and Git HTTP are reachable on every interface at the assigned port. This is deliberate — a Git host is cloned from other machines — and is protected by the generated strong admin password plus `DISABLE_REGISTRATION=true` (self-service account creation is off; create users from the admin UI or the in-container CLI). For a loopback-only deployment pass `--listen 127.0.0.1` (recreate with `--force`).
 
-`--listen` is also what displayed clone URLs use: a wildcard bind is not a connectable address, so it is echoed as `localhost`, and any explicit host/IP appears verbatim in `ROOT_URL` and the `ssh://` URLs. One gap to know about: pgcli renders `ROOT_URL` as `http://<host>:<web-port>/` — it has no setting to advertise the `https` scheme or a proxy's port 443, so when Gitea sits behind a TLS proxy the URLs Gitea *displays* still read `http://…:3080/`. Cloning over the proxy's `https://<host>/` URL works regardless; only the in-page hint is off. For a real domain and TLS, front it with the [nginx]({{< relref "./nginx" >}}) addon — and use nginx's **custom `--conf-file` mode** there, because the template's default `client_max_body_size` (1 MiB) rejects larger `git push` uploads with HTTP 413.
+`--listen` is also what displayed clone URLs use: a wildcard bind is not a connectable address, so it is echoed as `localhost`, and any explicit host/IP appears verbatim in `ROOT_URL` and the `ssh://` URLs. When Gitea sits behind a reverse proxy that forwards `X-Forwarded-Proto` and `Host` — which pgcli's nginx template does by default — Gitea **rewrites the displayed clone URL to match the incoming request**, so the code button on the repo page reads `https://<proxy-host>/<owner>/<repo>.git` correctly (scheme from `X-Forwarded-Proto`, host from `Host`, standard port dropped). pgcli's rendered `ROOT_URL` stays `http://<host>:<web-port>/` because there is no config face to advertise `https`/the proxy port — but that only governs webhook/redirect URLs generated *server-side*; interactive clone URLs follow the request. For TLS, see [HTTPS via nginx](#https-via-nginx).
+
+## HTTPS via nginx
+
+Gitea serves plaintext HTTP; to reach it over `https://` you front it with the
+[nginx]({{< relref "./nginx" >}}) addon, which terminates TLS and proxies to the
+Gitea web port. Two things to get right: bring your own certificate (or let
+pgcli mint a self-signed one), and use nginx's **custom `--conf-file` mode** —
+the template's default `client_max_body_size` (1 MiB) rejects any larger
+`git push` with HTTP 413.
+
+```bash
+# 1. a self-signed leaf whose SAN covers the host you clone by (IP and/or DNS)
+pg cert --host 10.0.0.9,git.internal \
+        --cert-file /srv/gitea.crt --key-file /srv/gitea.key
+```
+
+Write the proxy config as `/srv/gitea-nginx.conf` — the parts that matter for
+Git are `client_max_body_size 10m` (nginx's built-in default is 1 MiB, and
+without raising it a larger `git push` dies with HTTP 413 before reaching
+Gitea) and the long `proxy_*_timeout` (streaming `git push` outlives the 60s
+default). The same file as a generic template also lives in the nginx docs
+("Git HTTP push with `client_max_body_size`"):
+
+```nginx
+worker_processes auto;
+pid /tmp/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    # Lift nginx's request-body cap so git pushes aren't rejected. nginx's
+    # built-in default is 1 MiB — anything larger dies with HTTP 413 before
+    # reaching Gitea. 10m covers typical pushes; raise it (or use 0 for no
+    # limit) if you commit larger binaries.
+    client_max_body_size 10m;
+    proxy_read_timeout 300s;
+    proxy_send_timeout 300s;
+
+    upstream gitea {
+        server 127.0.0.1:3080;    # the Gitea web port pgcli allocated
+    }
+
+    server {
+        listen 0.0.0.0:80;
+        location / {
+            return 308 https://$host$request_uri;   # force HTTPS (308 keeps method+body,
+        }                                           # so git push survives the redirect)
+    }
+
+    server {
+        listen 0.0.0.0:443 ssl;
+        # pgcli bind-mounts the --tls-cert / --tls-key files at these paths:
+        ssl_certificate     /etc/nginx/certs/public.crt;
+        ssl_certificate_key /etc/nginx/certs/private.key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+
+        location / {
+            proxy_pass http://gitea;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;   # what makes the displayed
+        }                                                 # clone URL read https://…
+    }
+}
+```
+
+```bash
+# 2. install the proxy on that file (recreate anytime with --force)
+pg addon install nginx --name proxy --conf-file /srv/gitea-nginx.conf \
+  --tls --tls-cert /srv/gitea.crt --tls-key /srv/gitea.key \
+  --http-port 80 --https-port 443 --listen 0.0.0.0
+```
+
+The nginx proxy now serves `https://10.0.0.9/` and forwards to Gitea's
+`127.0.0.1:3080`. Clone and push over the proxy URL (hand clients the `.crt` as
+their CA so the self-signed cert verifies):
+
+```bash
+git clone https://10.0.0.9/<owner>/<repo>.git        # over the TLS proxy
+git -c http.sslCAInfo=/srv/gitea.crt push ...        # trust the self-signed leaf
+```
+
+Notes:
+
+- The Gitea web port (3080) is still open directly; the proxy does not hide it.
+  For an origin that only nginx may reach, reinstall Gitea with
+  `--listen 127.0.0.1` so it binds loopback only, and point the proxy's backend
+  at `127.0.0.1:3080` (same host) — works because both run on the host network.
+- `pg addon nginx reload` will **not** pick up an external edit to the mounted
+  `nginx.conf` (the bind mount pins the original inode, so a `sed -i`/editor
+  rewrite is invisible until the container restarts). Reload only applies
+  changes pgcli itself wrote. After hand-editing the conf, restart with
+  `pg addon stop nginx --name proxy && pg addon start nginx --name proxy`, or
+  reinstall with `--force`.
+- A **real CA cert** (Let's Encrypt / ZeroSSL / corporate) is the right choice in
+  production — see *Production domain + a real CA* below; it drops the
+  `--cacert` hand-off entirely, browsers and git trust it out of the box.
+- git-over-ssh (`--ssh-port`) is independent of this; TLS here only fronts the
+  web UI and Git-over-HTTP.
+
+### Production domain + a real CA (Let's Encrypt / corporate)
+
+For anything facing the internet, don't ship a `pg cert` self-signed leaf —
+point a real domain at the host (e.g. `git.example.com → 203.0.113.7`) and get a
+CA-signed certificate for it. How you obtain that certificate is outside
+pgcli's scope — any CA and any tool you like; all that matters is ending up
+with a PEM cert (including its intermediate chain) and its private key.
+
+Then create the nginx proxy exactly as in the steps above, **only swapping the
+certificate paths** for your domain cert — the same `--conf-file`, ports and
+`--tls` are unchanged:
+
+```bash
+pg addon install nginx --name proxy --conf-file /srv/gitea-nginx.conf \
+  --tls \
+  --tls-cert /etc/ssl/git.example.com/fullchain.pem \
+  --tls-key  /etc/ssl/git.example.com/privkey.pem \
+  --http-port 80 --https-port 443 --listen 0.0.0.0
+```
+
+Set `--listen git.example.com` on the Gitea install too (with `--force`), so
+`ROOT_URL` and any `ssh://` hints carry the real hostname. Once it's up, users
+clone `https://git.example.com/<owner>/<repo>.git` with no CA hand-off —
+browsers and `git` trust public CAs by default.
+
+Remember to replace the certificate before it expires. pgcli copies the BYO
+pair into the addon's TLS dir (`<base>/addon/nginx/<name>/tls/` as
+`public.crt` / `private.key`) at install, and that directory is bind-mounted
+into the container — so renewal is: overwrite those two files, then
+
+```bash
+pg addon nginx reload --name proxy
+```
+
+(Verified: the served certificate changes immediately after the reload. This
+works because the TLS dir is mounted as a directory; unlike the single-file
+`nginx.conf` mount, new contents are visible to the running container.)
+
 
 ## Retrieving the web login
 
@@ -263,6 +404,6 @@ pg logs addon gitea -n 200     # last 200 lines (also -i / --tail)
 ## Known limitations
 
 - The image must be pinned to a version tag and upgraded by changing `--image` (Gitea migrates its database forward on first boot of the newer image — there is no downgrade path). **Rootful and rootless builds have mutually incompatible data layouts**: pgcli pins the rootful build and an `-rootless` tag will not read the existing `/data` (or the data written by another rootless deployment).
-- Plaintext HTTP: TLS termination and real hostnames are the [nginx]({{< relref "./nginx" >}}) addon's job — front Gitea with it in **custom `--conf-file` mode** (the template's 1 MiB `client_max_body_size` default breaks larger `git push`). Note pgcli renders Gitea's `ROOT_URL` as `http://<host>:<web-port>/` with no setting to advertise `https`/the proxy port, so the clone URLs Gitea *shows* stay `http://…:3080` even behind TLS — `https://<host>/` clones work regardless; only the displayed hint is stale.
+- Plaintext HTTP: TLS termination and real hostnames are the [nginx]({{< relref "./nginx" >}}) addon's job — front Gitea with it in **custom `--conf-file` mode** (the template's 1 MiB `client_max_body_size` default breaks larger `git push`). Gitea rewrites the on-page clone URL from `X-Forwarded-Proto` + `Host`, so behind nginx's default proxy headers the copy button reads `https://<proxy>/…` correctly. pgcli renders `ROOT_URL` as `http://<host>:<web-port>/` and v1 exposes no knob to change that — the only visible effect so far is anything Gitea generates from `ROOT_URL` directly (rather than from the request) keeps the internal http origin.
 - v1 sets no OAuth, SMTP, webhook-tuning, or repository-storage (MinFS) options — everything beyond the table above is Gitea-side configuration pgcli deliberately leaves alone. Self-registration is closed; create users from the admin UI.
 - On macOS the container runs inside the podman machine; it has been validated on Linux only.

@@ -116,7 +116,124 @@ sshd 是有意不可达的,所以不给 `-p`。后续 install 不传 `--ssh-port
 
 Gitea 的 `Listen` 默认 `0.0.0.0`：容器共享宿主网络命名空间，所以 Web UI 与 Git HTTP 在宿主每个网卡的分配端口上可达。这是有意为之——Git 服务就是给别的机器克隆的——并由自动生成的强 admin 密码加 `DISABLE_REGISTRATION=true`（关闭自助注册；建号请在 admin UI 或容器内命令行操作）保护。想要仅回环的部署，传 `--listen 127.0.0.1`（用 `--force` 重建）。
 
-`--listen` 同时也是展示用 clone URL 的主机名：通配绑定不是可连地址，所以 `0.0.0.0` 会显示成 `localhost`；显式主机/IP 则原样进入 `ROOT_URL` 与 `ssh://` URL。有一个要知道的缺口：pgcli 把 `ROOT_URL` 渲染成 `http://<host>:<web端口>/`，没有任何配置项能让它声明 `https` 协议或反代的 443 端口，所以 Gitea 躲到 TLS 反代后面时，页面上*显示*的 clone URL 仍是 `http://…:3080/`。用反代的 `https://<host>/` 去 clone 仍然可用，只是页面提示不对。要真域名和 TLS 就用 [nginx]({{< relref "./nginx" >}}) 插件前置——且那里要用 nginx 的**自定义 `--conf-file` 模式**，因为模板默认的 `client_max_body_size`（1 MiB）会用 HTTP 413 拒掉较大的 `git push` 上传。
+`--listen` 同时也是展示用 clone URL 的主机名：通配绑定不是可连地址，所以 `0.0.0.0` 会显示成 `localhost`；显式主机/IP 则原样进入 `ROOT_URL` 与 `ssh://` URL。当 Gitea 躲在转发了 `X-Forwarded-Proto` 与 `Host` 的反代后面时——pgcli 的 nginx 模板默认就转这两个头——Gitea 会**按进来的请求重写页面显示的 clone URL**，所以仓库页的克隆按钮读作 `https://<代理主机>/<owner>/<repo>.git`，完全正确（scheme 取自 `X-Forwarded-Proto`、host 取自 `Host`、标准端口省略）。pgcli 渲染的 `ROOT_URL` 仍是 `http://<host>:<web端口>/`（没有配置项能宣告 `https`/代理端口），但那只管 Gitea **服务端**按 `ROOT_URL` 直接生成的 URL；交互式 clone URL 跟着请求走。要上 TLS，见下文「经 nginx 提供 HTTPS」一节。
+
+## 经 nginx 提供 HTTPS
+
+Gitea 自己只走明文 HTTP；要用 `https://` 访问，就用 [nginx]({{< relref "./nginx" >}}) 插件前置它——由 nginx 终止 TLS 再反代到 Gitea 的 Web 端口。两点关键：自带证书（或让 pgcli 签一张自签证书），以及用 nginx 的**自定义 `--conf-file` 模式**——模板默认的 `client_max_body_size`（1 MiB）会把稍大的 `git push` 用 HTTP 413 拒掉。
+
+```bash
+# 1. 签一张自签叶子证书，SAN 覆盖你克隆用的主机名（IP 和/或 DNS）
+pg cert --host 10.0.0.9,git.internal \
+        --cert-file /srv/gitea.crt --key-file /srv/gitea.key
+```
+
+把代理配置写成 `/srv/gitea-nginx.conf`——对 Git 真正要紧的是
+`client_max_body_size 10m`（nginx 内建默认只有 1 MiB，不抬高的话稍大的 push 还没
+到 Gitea 就以 HTTP 413 死掉）和放长的 `proxy_*_timeout`（流式 `git push` 会超过
+60s 默认值）。同一份文件作为通用模板样例也在 nginx 文档里（「Git HTTP 推送与
+`client_max_body_size`」）：
+
+```nginx
+worker_processes auto;
+pid /tmp/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    # 抬高 nginx 请求体上限，避免 git push 被拒。内建默认 1 MiB——更大的请求还没
+    # 到 Gitea 就以 HTTP 413 死掉。10m 能覆盖常见 push；要提交更大的二进制就继续
+    # 调高（或写 0 完全不限制）。
+    client_max_body_size 10m;
+    proxy_read_timeout 300s;
+    proxy_send_timeout 300s;
+
+    upstream gitea {
+        server 127.0.0.1:3080;    # pgcli 给 Gitea 分配的 Web 端口
+    }
+
+    server {
+        listen 0.0.0.0:80;
+        location / {
+            return 308 https://$host$request_uri;   # 强制 HTTPS（308 保留方法与 body，
+        }                                           # git push 能挺过重定向）
+    }
+
+    server {
+        listen 0.0.0.0:443 ssl;
+        # pgcli 把 --tls-cert / --tls-key 文件挂到这两个路径：
+        ssl_certificate     /etc/nginx/certs/public.crt;
+        ssl_certificate_key /etc/nginx/certs/private.key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+
+        location / {
+            proxy_pass http://gitea;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;   # 页面 clone URL 读成 https:// 就靠它
+        }
+    }
+}
+```
+
+```bash
+# 2. 用这份文件装代理（改动后用 --force 重建）
+pg addon install nginx --name proxy --conf-file /srv/gitea-nginx.conf \
+  --tls --tls-cert /srv/gitea.crt --tls-key /srv/gitea.key \
+  --http-port 80 --https-port 443 --listen 0.0.0.0
+```
+
+nginx 代理现在在 `https://10.0.0.9/` 上服务，并转发到 Gitea 的 `127.0.0.1:3080`。用代理地址克隆与 push（把 `.crt` 作为 CA 交给客户端，自签证书才能通过校验）：
+
+```bash
+git clone https://10.0.0.9/<owner>/<repo>.git        # 经 TLS 代理
+git -c http.sslCAInfo=/srv/gitea.crt push ...        # 信任这张自签叶子
+```
+
+注意：
+
+- Gitea 的 Web 端口（3080）仍然直接开着，代理并不会把它藏起来。若只想让 nginx 能访问源站，给 Gitea 用 `--listen 127.0.0.1` 重装让它只绑回环，并把代理 backend 指向 `127.0.0.1:3080`（同一台宿主）——因为两者都跑在宿主网络上，这样是通的。
+- `pg addon nginx reload` **不会**吃到对外部挂载 `nginx.conf` 的手工改动（bind mount 钉住了原始 inode，`sed -i`/编辑器整体重写后容器看不到，直到重启）。reload 只应用 pgcli 自己写入的改动。手改配置后，用 `pg addon stop nginx --name proxy && pg addon start nginx --name proxy` 重启，或 `--force` 重装。
+- **真实 CA 证书**（Let's Encrypt / ZeroSSL / 企业 CA）才是线上环境的正解——见下文「线上域名 + 真实 CA」；它彻底免去 `--cacert` 交接，浏览器与 git 默认可信。
+- git-over-ssh（`--ssh-port`）与此无关；这里的 TLS 只前置 Web 与 Git-over-HTTP。
+
+### 线上域名 + 真实 CA（Let's Encrypt / 企业 CA）
+
+面向公网的部署不要发 `pg cert` 的自签叶子——给主机指一个真域名（如
+`git.example.com → 203.0.113.7`），为它拿一张 CA 签发的证书。如何取得这张证书
+不在 pgcli 的范畴内——任意 CA、任意工具都行；只要最后手里有一张 PEM 证书（含中
+间链）和它的私钥即可。
+
+然后**照上文那样创建 nginx 代理，只把证书路径换成你的域名证书**——同一份
+`--conf-file`、端口、`--tls` 都不变：
+
+```bash
+pg addon install nginx --name proxy --conf-file /srv/gitea-nginx.conf \
+  --tls \
+  --tls-cert /etc/ssl/git.example.com/fullchain.pem \
+  --tls-key  /etc/ssl/git.example.com/privkey.pem \
+  --http-port 80 --https-port 443 --listen 0.0.0.0
+```
+
+Gitea 安装也带上 `--listen git.example.com`（配 `--force`），让 `ROOT_URL` 与任
+何 `ssh://` 提示都带上真主机名。起来后用户直接
+`https://git.example.com/<owner>/<repo>.git` 克隆，无需任何 CA 交接——浏览器和
+`git` 默认可信公共 CA。
+
+记得在证书过期前更换。pgcli 在装的时候会把自带的证书对拷进插件的 TLS 目录
+（`<base>/addon/nginx/<name>/tls/` 下的 `public.crt` / `private.key`），而这个目
+录是 bind-mount 进容器的——所以续期就是：覆盖这两个文件，然后
+
+```bash
+pg addon nginx reload --name proxy
+```
+
+（已实测：reload 后所服务的证书立即更换。这行得通是因为 TLS 是**目录**挂载；不
+像 `nginx.conf` 那个单文件挂载，新内容运行中的容器直接可见。）
+
 
 ## 取回 Web 登录
 
@@ -244,6 +361,6 @@ pg logs addon gitea -n 200     # 最近 200 行（也支持 -i / --tail）
 ## 已知限制
 
 - 镜像必须钉在版本 tag 上，升级=换 `--image`（Gitea 在新镜像首启时向前迁移数据库——没有回退路径）。**rootful 与 rootless 构建的数据布局互不兼容**：pgcli 钉的是 rootful 构建，换成 `-rootless` tag 读不了现有 `/data`（也读不了别的 rootless 部署写的数据）。
-- 明文 HTTP：TLS 终止与真域名是 [nginx]({{< relref "./nginx" >}}) 插件的职责——用它的**自定义 `--conf-file` 模式**前置 Gitea（模板默认的 1 MiB `client_max_body_size` 会打断稍大的 `git push`）。注意 pgcli 把 Gitea 的 `ROOT_URL` 渲染成 `http://<host>:<web端口>/`，没有配置项能宣告 `https`/反代端口，所以即便躲在 TLS 反代后面，Gitea*显示*的 clone URL 仍是 `http://…:3080`——用 `https://<host>/` 克隆照常可用，只是页内提示是旧的。
+- 明文 HTTP：TLS 终止与真域名是 [nginx]({{< relref "./nginx" >}}) 插件的职责——用它的**自定义 `--conf-file` 模式**前置 Gitea（模板默认的 1 MiB `client_max_body_size` 会打断稍大的 `git push`）。Gitea 依 `X-Forwarded-Proto` + `Host` 重写页面 clone URL，所以在 nginx 默认转发这些头时，克隆按钮读作 `https://<代理>/…` 是对的。pgcli 把 `ROOT_URL` 渲染成 `http://<host>:<web端口>/`，v1 没有配置项能改——目前可见的影响只是：凡 Gitea 直接依 `ROOT_URL`（而非依请求）生成的 URL，仍用内部 http 源。
 - v1 不配置 OAuth、SMTP、webhook 调优或仓库存储（MinFS）选项——上表之外的一切都是 Gitea 侧配置，pgcli 刻意不碰。自助注册是关的；建号请在 admin UI 操作。
 - macOS 上容器跑在 podman machine 里；目前只在 Linux 上验证过。

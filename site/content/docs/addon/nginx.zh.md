@@ -581,8 +581,8 @@ events {
 
 http {
     # nginx 内建默认 1 MiB —— 更大的 git push 会以 HTTP 413 死掉。
-    # 0 完全关闭体积校验；想保留上限而不是无限制，就写一个字节值（如 512m）。
-    client_max_body_size 0;
+    # 10m 覆盖常见 push；要提交更大的二进制就继续调高（或写 0 完全不限制）。
+    client_max_body_size 10m;
 
     # push/receive-pack 的流式请求可能超过 60s 默认值。
     proxy_read_timeout 300s;

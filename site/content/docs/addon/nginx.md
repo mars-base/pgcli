@@ -624,9 +624,9 @@ events {
 
 http {
     # nginx's built-in default is 1 MiB — a bigger git push dies with HTTP 413.
-    # 0 disables the size check entirely; set a byte value (e.g. 512m) instead
-    # if you want a ceiling rather than no limit.
-    client_max_body_size 0;
+    # 10m covers typical pushes; raise it (or use 0 to disable the check) if
+    # you commit larger binaries.
+    client_max_body_size 10m;
 
     # push/receive-pack streams can outlast the 60s default.
     proxy_read_timeout 300s;
