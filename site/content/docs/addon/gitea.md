@@ -129,7 +129,7 @@ recreate).
 
 ## Listening and exposure
 
-Gitea's `Listen` defaults to `0.0.0.0`: the container shares the host's network namespace, so the web UI and Git HTTP are reachable on every interface at the assigned port. This is deliberate — a Git host is cloned from other machines — and is protected by the generated strong admin password plus `DISABLE_REGISTRATION=true` (self-service account creation is off; create users from the admin UI or the in-container CLI). For a loopback-only deployment pass `--listen 127.0.0.1` (recreate with `--force`).
+Gitea's `Listen` defaults to `0.0.0.0`: the container shares the host's network namespace, so the web UI and Git HTTP are reachable on every interface at the assigned port. This is deliberate — a Git host is cloned from other machines — and is protected by the generated strong admin password plus `DISABLE_REGISTRATION=true` (self-service account creation is off; create accounts with `pg addon gitea user create`). For a loopback-only deployment pass `--listen 127.0.0.1` (recreate with `--force`).
 
 `--listen` is also what displayed clone URLs use: a wildcard bind is not a connectable address, so it is echoed as `localhost`, and any explicit host/IP appears verbatim in `ROOT_URL` and the `ssh://` URLs. When Gitea sits behind a reverse proxy that forwards `X-Forwarded-Proto` and `Host` — which pgcli's nginx template does by default — Gitea **rewrites the displayed clone URL to match the incoming request**, so the code button on the repo page reads `https://<proxy-host>/<owner>/<repo>.git` correctly (scheme from `X-Forwarded-Proto`, host from `Host`, standard port dropped). pgcli's rendered `ROOT_URL` stays `http://<host>:<web-port>/` because there is no config face to advertise `https`/the proxy port — but that only governs webhook/redirect URLs generated *server-side*; interactive clone URLs follow the request. For TLS, see [HTTPS via nginx](#https-via-nginx).
 
@@ -285,6 +285,48 @@ pg addon password gitea --file ./pw  # or write it to a 0600 file
 
 It is also stored in `pg.yaml` (`addons.gitea.<name>.password`).
 
+## Managing accounts (members and admins)
+
+Self-registration is closed, so every account beyond the install admin is created
+by an admin. `pg addon gitea user` wraps the in-container `gitea admin user …`
+CLI (run as the git uid automatically) so you manage accounts from the host
+without a manual `podman exec`. The instance must be running.
+
+```bash
+# a member, generated password (printed once, NOT stored in pg.yaml)
+pg addon gitea user create --username alice --email alice@corp.example
+# a member, pinned password
+pg addon gitea user create --username bob   --password 'B0b-pin-pass'
+# a second site admin
+pg addon gitea user create --username carol --admin
+# list everyone
+pg addon gitea user list
+# remove an account (must own nothing, or use --purge) ...
+pg addon gitea user delete --username bob
+# ... or drop everything the account owns
+pg addon gitea user delete --username bob --purge
+```
+
+| flag (`create`) | default | meaning |
+|---|---|---|
+| `--username` | (required) | the account name |
+| `--email` | `<username>@localhost` | pass a real address when the user should get notifications / password resets |
+| `--password` | generated | pin the login, or let pgcli generate a strong one and print it once |
+| `--admin` | false | create a site admin instead of a normal member |
+| `--must-change-password` | **false** | Gitea's own default is true for every account after the first; that forces a change on first login and, until it happens, returns **403 for HTTP clone/push and API basic-auth**. pgcli sends `=false` explicitly so a member can clone immediately — set it true only to hand out a one-time password |
+
+These logins are Gitea's own accounts, not pgcli-managed, so a **generated**
+password is printed once and is **not written to `pg.yaml`** — record it at
+creation. (Only the install admin's login is stored; that one you retrieve with
+`pg addon password gitea`.) To change an existing account's password, run
+`gitea admin user change-password` inside the container.
+
+`delete` refuses to remove the install admin (it is pgcli's stored login). A
+plain delete only succeeds for an account that owns nothing; if it still owns
+repositories Gitea refuses with `user still has ownership of repositories` —
+pass `--purge` to remove the account *and* everything it owns (repos, orgs,
+comments).
+
 ## Ports
 
 Each Gitea instance takes one port for the web UI, allocated from a pool with base `gitea_start_port` (default `3080` — Gitea's conventional 3000 is the Grafana pool's base in pgcli, so Gitea starts one pool over; still recognizably "the Gitea port"). Every instance *also* takes a port from a second pool (`gitea_ssh_start_port`, default `2222` — the conventional Gitea SSH mapping) to park the image's always-running sshd off 22; whether SSH is on or off only decides whether that port is a live clone endpoint or an idle listener, so the reservation is held either way. Both pools skip ports already taken by any managed container or the `used_ports` list, and the allocations are written into `pg.yaml`:
@@ -405,5 +447,5 @@ pg logs addon gitea -n 200     # last 200 lines (also -i / --tail)
 
 - The image must be pinned to a version tag and upgraded by changing `--image` (Gitea migrates its database forward on first boot of the newer image — there is no downgrade path). **Rootful and rootless builds have mutually incompatible data layouts**: pgcli pins the rootful build and an `-rootless` tag will not read the existing `/data` (or the data written by another rootless deployment).
 - Plaintext HTTP: TLS termination and real hostnames are the [nginx]({{< relref "./nginx" >}}) addon's job — front Gitea with it in **custom `--conf-file` mode** (the template's 1 MiB `client_max_body_size` default breaks larger `git push`). Gitea rewrites the on-page clone URL from `X-Forwarded-Proto` + `Host`, so behind nginx's default proxy headers the copy button reads `https://<proxy>/…` correctly. pgcli renders `ROOT_URL` as `http://<host>:<web-port>/` and v1 exposes no knob to change that — the only visible effect so far is anything Gitea generates from `ROOT_URL` directly (rather than from the request) keeps the internal http origin.
-- v1 sets no OAuth, SMTP, webhook-tuning, or repository-storage (MinFS) options — everything beyond the table above is Gitea-side configuration pgcli deliberately leaves alone. Self-registration is closed; create users from the admin UI.
+- v1 sets no OAuth, SMTP, webhook-tuning, or repository-storage (MinFS) options — everything beyond the table above is Gitea-side configuration pgcli deliberately leaves alone. Self-registration is closed; create users with `pg addon gitea user create`.
 - On macOS the container runs inside the podman machine; it has been validated on Linux only.

@@ -1,6 +1,7 @@
 package podman
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -287,5 +288,127 @@ func TestGiteaStoreExists(t *testing.T) {
 	}
 	if GiteaStoreExists("") {
 		t.Fatal("empty path is never an existing store")
+	}
+}
+
+// hasFlagVal reports whether flag appears immediately followed by value.
+func hasFlagVal(args []string, flag, value string) bool {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) && args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
+// TestGiteaUserCreateArgs pins the argv the `gitea admin user create` wrapper
+// builds — the crux being that must-change-password is ALWAYS sent explicitly.
+// Its Gitea default is true for every account after the first, and a forced
+// change also blocks HTTP clone/push and API basic-auth with 403 until the user
+// changes it; an omitted flag is exactly the trap, so a default-false member
+// must emit --must-change-password=false, never nothing.
+func TestGiteaUserCreateArgs(t *testing.T) {
+	member := giteaUserCreateArgs(GiteaUserCreateSpec{
+		Username: "alice", Email: "alice@corp", Password: "pw123",
+		MustChangePassword: false,
+	})
+	if member[0] != "admin" || member[1] != "user" || member[2] != "create" {
+		t.Fatalf("args must lead with admin user create, got %v", member[:3])
+	}
+	for _, kv := range [][2]string{
+		{"--username", "alice"}, {"--email", "alice@corp"}, {"--password", "pw123"},
+		{"--must-change-password=false", ""},
+	} {
+		if kv[1] == "" {
+			if !slices.Contains(member, kv[0]) {
+				t.Errorf("member args missing %s: %v", kv[0], member)
+			}
+		} else if !hasFlagVal(member, kv[0], kv[1]) {
+			t.Errorf("member args missing %s %s: %v", kv[0], kv[1], member)
+		}
+	}
+	if slices.Contains(member, "--admin") {
+		t.Errorf("a member must not carry --admin: %v", member)
+	}
+
+	admin := giteaUserCreateArgs(GiteaUserCreateSpec{
+		Username: "bob", Email: "bob@corp", Password: "pw",
+		Admin: true, MustChangePassword: true,
+	})
+	if !slices.Contains(admin, "--admin") {
+		t.Errorf("admin args missing --admin: %v", admin)
+	}
+	if !slices.Contains(admin, "--must-change-password=true") {
+		t.Errorf("must-change=true args missing explicit true: %v", admin)
+	}
+
+	// Empty email is omitted entirely (the CLI layer fills the default; the
+	// manager must not pass an empty --email that Gitea would reject).
+	noEmail := giteaUserCreateArgs(GiteaUserCreateSpec{Username: "u", Password: "p"})
+	if slices.Contains(noEmail, "--email") {
+		t.Errorf("empty email must be omitted, not passed as --email \"\": %v", noEmail)
+	}
+}
+
+// TestGiteaUserDeleteArgs pins the delete argv and the --purge toggle.
+func TestGiteaUserDeleteArgs(t *testing.T) {
+	plain := giteaUserDeleteArgs("alice", false)
+	if !hasFlagVal(plain, "--username", "alice") {
+		t.Fatalf("delete args missing --username alice: %v", plain)
+	}
+	if slices.Contains(plain, "--purge") {
+		t.Errorf("plain delete must not purge: %v", plain)
+	}
+	purged := giteaUserDeleteArgs("alice", true)
+	if !slices.Contains(purged, "--purge") {
+		t.Errorf("purge delete missing --purge: %v", purged)
+	}
+}
+
+// TestGiteaUserInList pins the table match behind UserExists: a username is
+// found as a whitespace-delimited field, not a loose substring, and the empty
+// username never matches (Fields of a header line could otherwise contain "").
+func TestGiteaUserInList(t *testing.T) {
+	const table = `ID   Username Email             IsActive IsAdmin 2FA
+1    gitea    gitea@localhost   true     true    false
+3    alice    alice@example.com true     false   false
+7    gitea-bot giteabot@x        true     false   false`
+	if !giteaUserInList(table, "alice") {
+		t.Error("alice should be found")
+	}
+	if !giteaUserInList(table, "gitea-bot") {
+		t.Error("gitea-bot should be found")
+	}
+	if giteaUserInList(table, "gitea-backup") {
+		t.Error("gitea-backup must NOT match the gitea/gitea-bot rows as a substring")
+	}
+	if giteaUserInList(table, "") {
+		t.Error("empty username must never match")
+	}
+}
+
+// TestGiteaErr pins the failure-message collapse: Gitea's CLI floods combined
+// output with storage-init INFO lines and ends with the real reason as
+// `Command error: …` (or `Fatal: …`). The wrapper must surface just that line,
+// and never swallow a failure that carries neither marker (fall back to err).
+func TestGiteaErr(t *testing.T) {
+	base := errors.New("podman exec … : exit status 1")
+	ownErr := errors.New("own failure")
+
+	noisy := "2026-10-16 storage init INFO one\n2026-10-16 storage init INFO two\nCommand error: user still has ownership of repositories [uid: 4]"
+	if got := giteaErr(noisy, base); got.Error() != "user still has ownership of repositories [uid: 4]" {
+		t.Errorf("Command error line not extracted cleanly: %q", got)
+	}
+	fatal := "some INFO\nFatal: bad flag"
+	if got := giteaErr(fatal, base); got.Error() != "bad flag" {
+		t.Errorf("Fatal line not extracted: %q", got)
+	}
+	// No Gitea marker → fall back to the original error (don't lose podman
+	// failures like a missing container).
+	if got := giteaErr("random noise with no marker", ownErr); got != ownErr {
+		t.Errorf("no-marker case must return the original err, got %q", got)
+	}
+	if giteaErr("anything", nil) != nil {
+		t.Error("a nil error must stay nil")
 	}
 }

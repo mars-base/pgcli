@@ -881,11 +881,13 @@ Examples:
 func init() {
 	rootCmd.AddCommand(addonCmd)
 	addonCmd.AddCommand(addonInstallCmd, addonListCmd, addonPasswordCmd, addonRemoveCmd, addonStartCmd, addonStopCmd)
-	addonCmd.AddCommand(addonNginxCmd, addonHAProxyCmd, addonPrometheusCmd, addonAlertmanagerCmd)
+	addonCmd.AddCommand(addonNginxCmd, addonHAProxyCmd, addonPrometheusCmd, addonAlertmanagerCmd, addonGiteaCmd)
 	addonNginxCmd.AddCommand(addonNginxReloadCmd, addonNginxTestCmd, addonNginxExecCmd)
 	addonHAProxyCmd.AddCommand(addonHAProxyReloadCmd)
 	addonPrometheusCmd.AddCommand(addonPrometheusReloadCmd)
 	addonAlertmanagerCmd.AddCommand(addonAlertmanagerReloadCmd)
+	addonGiteaCmd.AddCommand(addonGiteaUserCmd)
+	addonGiteaUserCmd.AddCommand(addonGiteaUserCreateCmd, addonGiteaUserDeleteCmd, addonGiteaUserListCmd)
 	addonHAProxyReloadCmd.Flags().String("name", "", "haproxy instance name")
 	addonPrometheusReloadCmd.Flags().String("name", "", "prometheus instance name (default \"prometheus\")")
 	addonAlertmanagerReloadCmd.Flags().String("name", "", "alertmanager instance name (default \"alertmanager\")")
@@ -894,6 +896,16 @@ func init() {
 	addonNginxTestCmd.Flags().String("conf-file", "", "path to an nginx.conf file to test directly (no installed instance required; overrides --name)")
 	addonNginxTestCmd.Flags().String("image", "", "image tag to use for the temporary test container (default: docker.io/library/nginx:1.27-alpine)")
 	addonNginxExecCmd.Flags().String("name", "", "nginx instance name (default \"nginx\")")
+	addonGiteaUserCreateCmd.Flags().String("name", "", "gitea instance name (default \"gitea\")")
+	addonGiteaUserCreateCmd.Flags().String("username", "", "account to create (required)")
+	addonGiteaUserCreateCmd.Flags().String("email", "", "account email (default \"<username>@localhost\")")
+	addonGiteaUserCreateCmd.Flags().String("password", "", "login password; generate a strong one if omitted (printed once, not stored)")
+	addonGiteaUserCreateCmd.Flags().Bool("admin", false, "create a site admin instead of a normal member")
+	addonGiteaUserCreateCmd.Flags().Bool("must-change-password", false, "force a password change on first login (off by default — on it also blocks HTTP clone/push and API basic-auth until changed)")
+	addonGiteaUserDeleteCmd.Flags().String("name", "", "gitea instance name (default \"gitea\")")
+	addonGiteaUserDeleteCmd.Flags().String("username", "", "account to delete (required)")
+	addonGiteaUserDeleteCmd.Flags().Bool("purge", false, "also remove the account's repositories, organizations and comments (destructive)")
+	addonGiteaUserListCmd.Flags().String("name", "", "gitea instance name (default \"gitea\")")
 
 	// Basic flags
 	addonInstallCmd.Flags().String("dsn", "", "pgbouncer/postgrest: PG instance connection string for remote mode (postgres://user:pass@host:port/db) / pgadmin: a one-time server to pre-register in its UI (mutually exclusive with --pg-name there) / seaweedfs: the filer's shared metadata PostgreSQL for --cluster (REQUIRED; must be reachable from EVERY host, so use the host-published port / LAN address, not an instance's container-local 127.0.0.1:5432; the metadata database itself must already exist — pgcli only probes connectivity and never creates or drops databases here, weed's postgres2 store creates its own tables inside it) / gitea: the metadata database instead of the embedded SQLite (optional; same contract — the database must already exist, Gitea creates its own schema on first boot, and it must be reachable from the Gitea container)")
@@ -8928,4 +8940,239 @@ Examples:
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonAlertmanagerReload(cmd)
 	},
+}
+
+// ---------------------------------------------------------------------------
+// gitea-specific subcommands: user create / delete / list
+// ---------------------------------------------------------------------------
+//
+// Gitea's self-registration is closed by pgcli (DISABLE_REGISTRATION=true), so
+// every account beyond the install-time admin is created by an admin. These
+// wrap the in-container `gitea admin user ...` CLI — which must run as the
+// container's git uid (1000), handled by GiteaManager.execGitea — so operators
+// do not have to hand-write `podman exec -u 1000 ...`.
+
+var addonGiteaCmd = &cobra.Command{
+	Use:   "gitea",
+	Short: "Manage Gitea addon accounts",
+	Long: `Manage accounts on a Gitea addon instance with dedicated subcommands.
+
+Gitea runs with self-registration disabled, so accounts are created by an
+admin — here, from the host, without a manual 'podman exec'.
+
+Subcommands:
+  user   Create, delete, and list Gitea web accounts (members or admins)
+
+Examples:
+  pg addon gitea user create --username alice --email alice@corp.example
+  pg addon gitea user list`,
+}
+
+var addonGiteaUserCmd = &cobra.Command{
+	Use:   "user",
+	Short: "Create, delete, and list Gitea accounts",
+	Long: `Manage the Gitea web accounts (the same credentials used to sign into the UI
+and for HTTP clone/push). Self-registration is off, so this is how colleagues
+get accounts.
+
+Subcommands:
+  create   Create an account (member by default; --admin for a site admin)
+  delete   Delete an account (--purge to drop its repos/orgs/comments too)
+  list     List all accounts (ID, username, email, active, admin, 2FA)
+
+The instance must already be running ('pg addon start gitea --name <name>').`,
+}
+
+var addonGiteaUserCreateCmd = &cobra.Command{
+	Use:   "create",
+	Short: "Create a Gitea web account",
+	Long: `Create an account on a running Gitea instance by running 'gitea admin user
+create' inside its container (as the git uid). Pass --username; the account is a
+normal member unless you add --admin.
+
+Password: pass --password to pin the login. With no --password pgcli generates a
+strong one and prints it once (retrieve a lost generated password only by
+creating a new account or resetting inside the container — it is not stored in
+pg.yaml, since these are Gitea's own accounts, not pgcli-managed logins).
+
+--must-change-password defaults to false: Gitea would otherwise force a password
+change on first login, which also blocks HTTP clone/push and API basic-auth
+until changed. Set --must-change-password=true to restore that behavior (e.g.
+to hand a one-time password to someone who must set their own).
+
+--email defaults to <username>@localhost; pass a real address when users should
+receive notifications or password resets.`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runAddonGiteaUserCreate(cmd)
+	},
+}
+
+var addonGiteaUserDeleteCmd = &cobra.Command{
+	Use:   "delete",
+	Short: "Delete a Gitea web account",
+	Long: `Delete an account by running 'gitea admin user delete' inside the container.
+A plain delete only succeeds for an account that owns nothing — if it still
+owns repositories Gitea refuses it with 'user still has ownership of
+repositories'. Pass --purge to remove the account AND everything it owns
+(repositories, organizations, comments), which is destructive and not
+reversible from pgcli.`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runAddonGiteaUserDelete(cmd)
+	},
+}
+
+var addonGiteaUserListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List Gitea web accounts",
+	Long: `List every account in the instance's database — ID, username, email, whether
+it is active, an admin, and has 2FA. Mirrors 'gitea admin user list'.`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runAddonGiteaUserList(cmd)
+	},
+}
+
+// resolveGiteaConfig loads the config and returns the GiteaConfig for the given
+// --name (default "gitea"), erroring if it is missing or not running — the
+// user subcommands exec inside the container, so a stopped instance is a clear
+// failure rather than a cryptic podman error.
+func resolveGiteaConfig(cmd *cobra.Command) (*config.GiteaConfig, *podman.GiteaManager, error) {
+	if err := loadConfigForDSN(); err != nil {
+		return nil, nil, err
+	}
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "gitea"
+	}
+	if cfg.Addons.Gitea == nil {
+		return nil, nil, fmt.Errorf("no gitea add-ons configured (run 'pg addon install gitea')")
+	}
+	gc, ok := cfg.Addons.Gitea[name]
+	if !ok {
+		return nil, nil, fmt.Errorf("gitea instance %q not found (use 'pg addon list' to see available)", name)
+	}
+	gm, err := podman.NewGiteaManager(cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("gitea manager: %w", err)
+	}
+	running, err := gm.ContainerRunning(gc.ContainerName)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !running {
+		return nil, nil, fmt.Errorf("gitea instance %q is not running (start it with 'pg addon start gitea --name %s')", name, name)
+	}
+	return &gc, gm, nil
+}
+
+func runAddonGiteaUserCreate(cmd *cobra.Command) error {
+	gc, gm, err := resolveGiteaConfig(cmd)
+	if err != nil {
+		return err
+	}
+	username, _ := cmd.Flags().GetString("username")
+	if username == "" {
+		return fmt.Errorf("--username is required")
+	}
+	email, _ := cmd.Flags().GetString("email")
+	if email == "" {
+		email = username + "@localhost"
+	}
+	password, _ := cmd.Flags().GetString("password")
+	admin, _ := cmd.Flags().GetBool("admin")
+	mustChange, _ := cmd.Flags().GetBool("must-change-password")
+
+	generated := false
+	if password == "" {
+		pw, err := generatePassword(20)
+		if err != nil {
+			return fmt.Errorf("generating Gitea password: %w", err)
+		}
+		password = pw
+		generated = true
+	}
+
+	exists, err := gm.UserExists(gc, username)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return fmt.Errorf("gitea user %q already exists (delete it first with 'pg addon gitea user delete --username %s')", username, username)
+	}
+
+	if err := gm.CreateUser(gc, podman.GiteaUserCreateSpec{
+		Username:           username,
+		Email:              email,
+		Password:           password,
+		Admin:              admin,
+		MustChangePassword: mustChange,
+	}); err != nil {
+		return err
+	}
+
+	role := "member"
+	if admin {
+		role = "site admin"
+	}
+	fmt.Printf("✓ Created Gitea %s: %q\n", role, username)
+	fmt.Printf("  Email:      %s\n", email)
+	if generated {
+		fmt.Printf("  Password:   %s\n", password)
+		fmt.Println("  (Generated — not stored anywhere. Record it now; it cannot be recovered.)")
+	} else {
+		fmt.Println("  Password:   <the value you passed with --password>")
+	}
+	if mustChange {
+		fmt.Println("  NOTE: must-change-password is ON — they must change it on first login, and until then HTTP clone/push and API basic-auth return 403.")
+	}
+	return nil
+}
+
+func runAddonGiteaUserDelete(cmd *cobra.Command) error {
+	gc, gm, err := resolveGiteaConfig(cmd)
+	if err != nil {
+		return err
+	}
+	username, _ := cmd.Flags().GetString("username")
+	if username == "" {
+		return fmt.Errorf("--username is required")
+	}
+	purge, _ := cmd.Flags().GetBool("purge")
+
+	exists, err := gm.UserExists(gc, username)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("gitea user %q not found (list accounts with 'pg addon gitea user list')", username)
+	}
+	if username == gc.AdminUser {
+		return fmt.Errorf("refusing to delete the install admin %q — it is pgcli's stored Gitea login (see 'pg addon password gitea'); create another admin first, or rotate this one in-container", username)
+	}
+
+	if err := gm.DeleteUser(gc, username, purge); err != nil {
+		return err
+	}
+	fmt.Printf("✓ Deleted Gitea user %q\n", username)
+	if purge {
+		fmt.Println("  (purged: their repositories, organizations and comments were removed too)")
+	} else {
+		fmt.Println("  (owned nothing, so it removed cleanly — an account with repositories requires --purge)")
+	}
+	return nil
+}
+
+func runAddonGiteaUserList(cmd *cobra.Command) error {
+	gc, gm, err := resolveGiteaConfig(cmd)
+	if err != nil {
+		return err
+	}
+	out, err := gm.ListUsers(gc)
+	if err != nil {
+		return err
+	}
+	fmt.Print(out)
+	return nil
 }

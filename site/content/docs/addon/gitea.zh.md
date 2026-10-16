@@ -114,7 +114,7 @@ sshd 是有意不可达的,所以不给 `-p`。后续 install 不传 `--ssh-port
 
 ## 监听与暴露
 
-Gitea 的 `Listen` 默认 `0.0.0.0`：容器共享宿主网络命名空间，所以 Web UI 与 Git HTTP 在宿主每个网卡的分配端口上可达。这是有意为之——Git 服务就是给别的机器克隆的——并由自动生成的强 admin 密码加 `DISABLE_REGISTRATION=true`（关闭自助注册；建号请在 admin UI 或容器内命令行操作）保护。想要仅回环的部署，传 `--listen 127.0.0.1`（用 `--force` 重建）。
+Gitea 的 `Listen` 默认 `0.0.0.0`：容器共享宿主网络命名空间，所以 Web UI 与 Git HTTP 在宿主每个网卡的分配端口上可达。这是有意为之——Git 服务就是给别的机器克隆的——并由自动生成的强 admin 密码加 `DISABLE_REGISTRATION=true`（关闭自助注册；建号请用 `pg addon gitea user create`）保护。想要仅回环的部署，传 `--listen 127.0.0.1`（用 `--force` 重建）。
 
 `--listen` 同时也是展示用 clone URL 的主机名：通配绑定不是可连地址，所以 `0.0.0.0` 会显示成 `localhost`；显式主机/IP 则原样进入 `ROOT_URL` 与 `ssh://` URL。当 Gitea 躲在转发了 `X-Forwarded-Proto` 与 `Host` 的反代后面时——pgcli 的 nginx 模板默认就转这两个头——Gitea 会**按进来的请求重写页面显示的 clone URL**，所以仓库页的克隆按钮读作 `https://<代理主机>/<owner>/<repo>.git`，完全正确（scheme 取自 `X-Forwarded-Proto`、host 取自 `Host`、标准端口省略）。pgcli 渲染的 `ROOT_URL` 仍是 `http://<host>:<web端口>/`（没有配置项能宣告 `https`/代理端口），但那只管 Gitea **服务端**按 `ROOT_URL` 直接生成的 URL；交互式 clone URL 跟着请求走。要上 TLS，见下文「经 nginx 提供 HTTPS」一节。
 
@@ -246,6 +246,44 @@ pg addon password gitea --file ./pw  # 或写入 0600 文件
 
 它也存于 `pg.yaml`（`addons.gitea.<name>.password`）。
 
+## 账号管理（成员与管理员）
+
+自助注册是关闭的，所以除安装 admin 外的每个账号都由 admin 创建。
+`pg addon gitea user` 封装了容器内的 `gitea admin user …` CLI（自动以 git uid 运行），
+让你在宿主上直接管账号，不必手写 `podman exec`。实例必须在运行。
+
+```bash
+# 成员，密码自动生成（一次性打印，且不写入 pg.yaml）
+pg addon gitea user create --username alice --email alice@corp.example
+# 成员，指定密码
+pg addon gitea user create --username bob   --password 'B0b-pin-pass'
+# 再建一个站点管理员
+pg addon gitea user create --username carol --admin
+# 列出全部账号
+pg addon gitea user list
+# 删除账号（须不拥有任何仓库，否则用 --purge）……
+pg addon gitea user delete --username bob
+# ……或连账号拥有的一切一起清掉
+pg addon gitea user delete --username bob --purge
+```
+
+| flag（`create`） | 默认 | 说明 |
+|---|---|---|
+| `--username` | （必填） | 账号名 |
+| `--email` | `<username>@localhost` | 需要收通知/重置密码时传真实地址 |
+| `--password` | 自动生成 | 指定登录密码，或让 pgcli 生成强密码并一次性打印 |
+| `--admin` | false | 建站点管理员而非普通成员 |
+| `--must-change-password` | **false** | Gitea 自身对"除第一个外的账号"默认 true：会强制首次登录改密，而改密前 **HTTP clone/push 与 API basic-auth 一律 403**。pgcli 显式发 `=false`，让成员建号即可克隆——只有要发一次性密码时才设 true |
+
+这些是 Gitea 自己的账号、非 pgcli 托管，所以**自动生成的密码**只打印一次、
+**不写入 `pg.yaml`**——建号时当场记下。（只有安装 admin 的登录会被存，那个用
+`pg addon password gitea` 取回。）要改既有账号密码，进容器跑
+`gitea admin user change-password`。
+
+`delete` 拒删安装 admin（那是 pgcli 存的登录）。普通删除只对"不拥有任何东西"的
+账号成功；若该账号还有仓库，Gitea 会以 `user still has ownership of repositories`
+拒绝——加 `--purge` 才能连账号及其拥有的一切（仓库、组织、评论）一起删掉。
+
 ## 端口
 
 每个 Gitea 实例占**一个** Web 端口，取自以 `gitea_start_port`（默认 `3080`——Gitea 惯例的 3000 在 pgcli 里是 Grafana 池的基址，所以 Gitea 往后挪了一个池；仍然一眼认得出"Gitea 的端口"）为基址的端口池，每多一个实例递增。**每一个**实例——SSH 开或关都一样——还从第二个池（`gitea_ssh_start_port`，默认 `2222`——Gitea 惯例的 SSH 映射）再拿一个端口用来 park 那个永远在跑的 s6 sshd 离 22；SSH 是否启用只决定那个端口是活的克隆端点还是一个没人连的空闲监听。两个池都跳过任何已被受管容器或 `used_ports` 列表占用的端口，分配结果写入 `pg.yaml`：
@@ -362,5 +400,5 @@ pg logs addon gitea -n 200     # 最近 200 行（也支持 -i / --tail）
 
 - 镜像必须钉在版本 tag 上，升级=换 `--image`（Gitea 在新镜像首启时向前迁移数据库——没有回退路径）。**rootful 与 rootless 构建的数据布局互不兼容**：pgcli 钉的是 rootful 构建，换成 `-rootless` tag 读不了现有 `/data`（也读不了别的 rootless 部署写的数据）。
 - 明文 HTTP：TLS 终止与真域名是 [nginx]({{< relref "./nginx" >}}) 插件的职责——用它的**自定义 `--conf-file` 模式**前置 Gitea（模板默认的 1 MiB `client_max_body_size` 会打断稍大的 `git push`）。Gitea 依 `X-Forwarded-Proto` + `Host` 重写页面 clone URL，所以在 nginx 默认转发这些头时，克隆按钮读作 `https://<代理>/…` 是对的。pgcli 把 `ROOT_URL` 渲染成 `http://<host>:<web端口>/`，v1 没有配置项能改——目前可见的影响只是：凡 Gitea 直接依 `ROOT_URL`（而非依请求）生成的 URL，仍用内部 http 源。
-- v1 不配置 OAuth、SMTP、webhook 调优或仓库存储（MinFS）选项——上表之外的一切都是 Gitea 侧配置，pgcli 刻意不碰。自助注册是关的；建号请在 admin UI 操作。
+- v1 不配置 OAuth、SMTP、webhook 调优或仓库存储（MinFS）选项——上表之外的一切都是 Gitea 侧配置，pgcli 刻意不碰。自助注册是关的；建号请用 `pg addon gitea user create`。
 - macOS 上容器跑在 podman machine 里；目前只在 Linux 上验证过。

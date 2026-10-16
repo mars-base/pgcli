@@ -1,6 +1,7 @@
 package podman
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -415,6 +416,28 @@ func (m *GiteaManager) execGitea(gc *config.GiteaConfig, d time.Duration, args .
 	return execIdleKilled(m.podman, d, defaultIdleKill, execArgs...)
 }
 
+// giteaErr collapses a failed `gitea admin user …` exec into a one-line reason.
+// execGitea captures combined output, and Gitea's CLI logs a burst of storage
+// init INFO lines before its real failure — which it always prints last as
+// `Command error: <reason>` (or `Fatal: <reason>`). Surfacing the whole blob
+// buries the point, so this returns just that final meaningful line. When
+// neither marker is present (e.g. a podman-level failure with no Gitea output),
+// it falls back to the original err so nothing is lost.
+func giteaErr(out string, err error) error {
+	if err == nil {
+		return nil
+	}
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
+		if r, ok := strings.CutPrefix(strings.TrimSpace(line), "Command error: "); ok {
+			return errors.New(r)
+		}
+		if r, ok := strings.CutPrefix(strings.TrimSpace(line), "Fatal: "); ok {
+			return errors.New(r)
+		}
+	}
+	return err
+}
+
 // AdminExists reports whether the admin web account is already present in the
 // instance's database (`gitea admin user list`). Used as the install-time
 // idempotency gate — in SQLite mode it is equivalent to GiteaStoreExists plus
@@ -425,15 +448,23 @@ func (m *GiteaManager) AdminExists(gc *config.GiteaConfig) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	// Output is a table; usernames start after the leading ID column. Match
-	// the field rather than a bare substring so `gitea` does not collide with
-	// e.g. `gitea-backup-bot`.
-	for line := range strings.SplitSeq(out, "\n") {
-		if slices.Contains(strings.Fields(line), gc.AdminUser) {
-			return true, nil
+	return giteaUserInList(out, gc.AdminUser), nil
+}
+
+// giteaUserInList reports whether a username appears in the output of
+// `gitea admin user list`. The output is a table whose second column is the
+// username; matching on the whitespace-delimited field rather than a bare
+// substring keeps `gitea` from colliding with e.g. `gitea-backup-bot`.
+func giteaUserInList(listOut, username string) bool {
+	if username == "" {
+		return false
+	}
+	for line := range strings.SplitSeq(listOut, "\n") {
+		if slices.Contains(strings.Fields(line), username) {
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
 
 // WaitForReady polls `gitea admin user list` until the instance answers —
@@ -464,7 +495,7 @@ func (m *GiteaManager) WaitForReady(gc *config.GiteaConfig, timeout time.Duratio
 // --must-change-password=false matters: without it Gitea marks the account
 // forced-change and the password pgcli printed becomes single-use.
 func (m *GiteaManager) CreateAdmin(gc *config.GiteaConfig) error {
-	_, err := m.execGitea(gc, 30*time.Second,
+	out, err := m.execGitea(gc, 30*time.Second,
 		"admin", "user", "create",
 		"--admin",
 		"--username", gc.AdminUser,
@@ -473,9 +504,94 @@ func (m *GiteaManager) CreateAdmin(gc *config.GiteaConfig) error {
 		"--must-change-password=false",
 	)
 	if err != nil {
-		return fmt.Errorf("creating Gitea admin user %q: %w", gc.AdminUser, err)
+		return fmt.Errorf("creating Gitea admin user %q: %w", gc.AdminUser, giteaErr(out, err))
 	}
 	return nil
+}
+
+// GiteaUserCreateSpec carries the knobs of `gitea admin user create` that
+// pg addon gitea user create exposes. Password must already be resolved by the
+// caller (pgcli generates it when the operator omits --password) — this layer
+// never invents a secret, it only assembles and runs the command.
+type GiteaUserCreateSpec struct {
+	Username           string
+	Email              string
+	Password           string
+	Admin              bool
+	MustChangePassword bool
+}
+
+// giteaUserCreateArgs builds the `admin user create` argv (everything after the
+// gitea binary) from a spec. It is a pure function so the flag matrix — the
+// --admin toggle, and especially always passing --must-change-password[=false]
+// explicitly — is unit-testable without a container. The default-true
+// must-change-password is the trap that bit field testing: leaving it implicit
+// forces every new member to change their password on first login, which also
+// blocks HTTP clone/push and API basic-auth until then.
+func giteaUserCreateArgs(s GiteaUserCreateSpec) []string {
+	args := []string{
+		"admin", "user", "create",
+		"--username", s.Username,
+		"--password", s.Password,
+		fmt.Sprintf("--must-change-password=%t", s.MustChangePassword),
+	}
+	if s.Email != "" {
+		args = append(args, "--email", s.Email)
+	}
+	if s.Admin {
+		args = append(args, "--admin")
+	}
+	return args
+}
+
+// giteaUserDeleteArgs builds the `admin user delete` argv. purge maps to
+// --purge (drop the user's repos/orgs/comments too); without it Gitea keeps
+// their content and just removes the account.
+func giteaUserDeleteArgs(username string, purge bool) []string {
+	args := []string{"admin", "user", "delete", "--username", username}
+	if purge {
+		args = append(args, "--purge")
+	}
+	return args
+}
+
+// UserExists reports whether a username is present in the instance's database.
+// The container must be running (it execs the CLI); callers surface a clear
+// error otherwise.
+func (m *GiteaManager) UserExists(gc *config.GiteaConfig, username string) (bool, error) {
+	out, err := m.execGitea(gc, 20*time.Second, "admin", "user", "list")
+	if err != nil {
+		return false, err
+	}
+	return giteaUserInList(out, username), nil
+}
+
+// CreateUser runs `gitea admin user create` inside the container. Gitea itself
+// rejects a duplicate username with a non-zero exit, so the caller can treat a
+// pre-existing account as an error (or gate on UserExists first).
+func (m *GiteaManager) CreateUser(gc *config.GiteaConfig, s GiteaUserCreateSpec) error {
+	out, err := m.execGitea(gc, 30*time.Second, giteaUserCreateArgs(s)...)
+	if err != nil {
+		return fmt.Errorf("creating Gitea user %q: %w", s.Username, giteaErr(out, err))
+	}
+	return nil
+}
+
+// DeleteUser runs `gitea admin user delete` inside the container. Gitea deletes
+// without prompting when run non-interactively; --purge also removes the
+// account's repositories, organizations and comments.
+func (m *GiteaManager) DeleteUser(gc *config.GiteaConfig, username string, purge bool) error {
+	out, err := m.execGitea(gc, 30*time.Second, giteaUserDeleteArgs(username, purge)...)
+	if err != nil {
+		return fmt.Errorf("deleting Gitea user %q: %w", username, giteaErr(out, err))
+	}
+	return nil
+}
+
+// ListUsers returns the raw output of `gitea admin user list` — the ID /
+// Username / Email / IsActive / IsAdmin / 2FA table Gitea prints.
+func (m *GiteaManager) ListUsers(gc *config.GiteaConfig) (string, error) {
+	return m.execGitea(gc, 20*time.Second, "admin", "user", "list")
 }
 
 // Remove stops and removes the Gitea container. The data dir is kept by
