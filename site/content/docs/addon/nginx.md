@@ -75,6 +75,27 @@ a self-signed leaf certificate via `tlsca.Generate` under
 HTTP one, so existing plain-text clients keep working. With BYO certs, the
 given files are bind-mounted instead.
 
+A BYO cert is often a `pg cert` leaf — that command mints a self-signed
+certificate with any mix of DNS and IP SANs, exactly the shape a Git/DB
+endpoint needs when clients you control can be handed the CA file:
+
+```bash
+pg cert --host git.example.com,10.0.0.9 \
+        --cert-file /srv/gitea.crt --key-file /srv/gitea.key
+pg addon install nginx --name proxy --listen 0.0.0.0 \
+  --upstream name=gitea,path=/,backend=127.0.0.1:3080 \
+  --tls --tls-cert /srv/gitea.crt --tls-key /srv/gitea.key \
+  --http-port 80 --https-port 443
+```
+
+**Proxying Git (and any large POST): raise `client_max_body_size`.** The
+template mode sets no request-body limit, so nginx applies its built-in default
+of **1 MiB** — a `git push` (or any upload) larger than that comes back as
+`HTTP 413`. The template gives you no flag for this, so front a Git service
+with **custom mode** (`--conf-file`); see the complete working example under
+"Git HTTP push with `client_max_body_size`" in *Common custom config patterns*
+below.
+
 ## Install
 
 Backends are supplied one of two ways (mutually exclusive):
@@ -588,6 +609,81 @@ http {
     }
 }
 ```
+
+**Git HTTP push with `client_max_body_size`** — front a Git host (Gitea,
+GitLab, a bare `git http-backend`) with a complete custom `nginx.conf` that
+lifts the 1 MiB body limit and keeps long `git-receive-pack` requests alive:
+
+```nginx
+worker_processes auto;
+pid /tmp/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    # nginx's built-in default is 1 MiB — a bigger git push dies with HTTP 413.
+    # 0 disables the size check entirely; set a byte value (e.g. 512m) instead
+    # if you want a ceiling rather than no limit.
+    client_max_body_size 0;
+
+    # push/receive-pack streams can outlast the 60s default.
+    proxy_read_timeout 300s;
+    proxy_send_timeout 300s;
+
+    upstream gitea {
+        server 127.0.0.1:3080;
+    }
+
+    server {
+        listen 0.0.0.0:80;
+        access_log /var/log/nginx/gitea.access.log;
+        error_log  /var/log/nginx/gitea.error.log;
+
+        location / {
+            proxy_pass http://gitea;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+
+    server {
+        listen 0.0.0.0:443 ssl;
+        # pgcli bind-mounts the --tls-cert / --tls-key files at these paths.
+        ssl_certificate     /etc/nginx/certs/public.crt;
+        ssl_certificate_key /etc/nginx/certs/private.key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+
+        access_log /var/log/nginx/gitea.access.log;
+        error_log  /var/log/nginx/gitea.error.log;
+
+        location / {
+            proxy_pass http://gitea;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+}
+```
+
+```bash
+pg cert --host 10.0.0.9,git.internal \
+        --cert-file /srv/gitea.crt --key-file /srv/gitea.key
+pg addon install nginx --name proxy --conf-file /srv/gitea-nginx.conf \
+  --tls --tls-cert /srv/gitea.crt --tls-key /srv/gitea.key \
+  --http-port 80 --https-port 443
+```
+
+`--conf-file` and `--upstream` are mutually exclusive, but `--tls` /
+`--tls-cert` / `--tls-key` still apply in custom mode: pgcli mounts the cert
+pair at `/etc/nginx/certs/public.crt` and `/etc/nginx/certs/private.key`, which
+the config above references — a custom file simply takes over writing the
+`listen`/`ssl_certificate` lines itself.
 
 **Static file serving with caching** — serve files from a host-mounted
 directory with browser caching headers, sendfile optimization, and access

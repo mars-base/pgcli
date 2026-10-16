@@ -131,7 +131,7 @@ recreate).
 
 Gitea's `Listen` defaults to `0.0.0.0`: the container shares the host's network namespace, so the web UI and Git HTTP are reachable on every interface at the assigned port. This is deliberate — a Git host is cloned from other machines — and is protected by the generated strong admin password plus `DISABLE_REGISTRATION=true` (self-service account creation is off; create users from the admin UI or the in-container CLI). For a loopback-only deployment pass `--listen 127.0.0.1` (recreate with `--force`).
 
-`--listen` is also what displayed clone URLs use: a wildcard bind is not a connectable address, so it is echoed as `localhost`, and any explicit host/IP appears verbatim in `ROOT_URL` and the `ssh://` URLs. Front it with [nginx]({{< relref "./nginx" >}}) for a real domain and TLS — that also fixes clone URLs when Gitea moves behind a reverse proxy (set `--listen <public-host>` to match).
+`--listen` is also what displayed clone URLs use: a wildcard bind is not a connectable address, so it is echoed as `localhost`, and any explicit host/IP appears verbatim in `ROOT_URL` and the `ssh://` URLs. One gap to know about: pgcli renders `ROOT_URL` as `http://<host>:<web-port>/` — it has no setting to advertise the `https` scheme or a proxy's port 443, so when Gitea sits behind a TLS proxy the URLs Gitea *displays* still read `http://…:3080/`. Cloning over the proxy's `https://<host>/` URL works regardless; only the in-page hint is off. For a real domain and TLS, front it with the [nginx]({{< relref "./nginx" >}}) addon — and use nginx's **custom `--conf-file` mode** there, because the template's default `client_max_body_size` (1 MiB) rejects larger `git push` uploads with HTTP 413.
 
 ## Retrieving the web login
 
@@ -263,6 +263,6 @@ pg logs addon gitea -n 200     # last 200 lines (also -i / --tail)
 ## Known limitations
 
 - The image must be pinned to a version tag and upgraded by changing `--image` (Gitea migrates its database forward on first boot of the newer image — there is no downgrade path). **Rootful and rootless builds have mutually incompatible data layouts**: pgcli pins the rootful build and an `-rootless` tag will not read the existing `/data` (or the data written by another rootless deployment).
-- Plaintext HTTP: TLS termination and real hostnames are the [nginx]({{< relref "./nginx" >}}) addon's job (set `--listen` to the public host so clone URLs follow).
+- Plaintext HTTP: TLS termination and real hostnames are the [nginx]({{< relref "./nginx" >}}) addon's job — front Gitea with it in **custom `--conf-file` mode** (the template's 1 MiB `client_max_body_size` default breaks larger `git push`). Note pgcli renders Gitea's `ROOT_URL` as `http://<host>:<web-port>/` with no setting to advertise `https`/the proxy port, so the clone URLs Gitea *shows* stay `http://…:3080` even behind TLS — `https://<host>/` clones work regardless; only the displayed hint is stale.
 - v1 sets no OAuth, SMTP, webhook-tuning, or repository-storage (MinFS) options — everything beyond the table above is Gitea-side configuration pgcli deliberately leaves alone. Self-registration is closed; create users from the admin UI.
 - On macOS the container runs inside the podman machine; it has been validated on Linux only.

@@ -61,6 +61,25 @@ TLS 可选。未提供 `--tls-cert`/`--tls-key` 时，pgcli 通过 `tlsca.Genera
 `<base-dir>/addon/nginx/<name>/tls/` 下生成自签名叶子证书。HTTPS 监听器与 HTTP
 监听器并行运行，现有明文客户端继续工作。提供 BYO 证书时，改为挂载指定文件。
 
+BYO 证书常常就是 `pg cert` 签发的叶子证书——该命令签一张自签名证书，SAN 可以是
+任意域名 + IP 组合，正是"客户端可控、能把 CA 文件交出去"的 Git/DB 端点所需形
+态：
+
+```bash
+pg cert --host git.example.com,10.0.0.9 \
+        --cert-file /srv/gitea.crt --key-file /srv/gitea.key
+pg addon install nginx --name proxy --listen 0.0.0.0 \
+  --upstream name=gitea,path=/,backend=127.0.0.1:3080 \
+  --tls --tls-cert /srv/gitea.crt --tls-key /srv/gitea.key \
+  --http-port 80 --https-port 443
+```
+
+**代理 Git（及任何大 POST）：必须抬高 `client_max_body_size`。** 模板模式不设
+请求体上限，于是 nginx 用其内建默认 **1 MiB**——超过它的 `git push`（或任何上
+传）会返回 `HTTP 413`。模板没有对应 flag，所以给 Git 服务前置时要用**自定义模
+式**（`--conf-file`）；完整可用样例见下文「常见自定义配置模式」里的「Git HTTP
+推送与 `client_max_body_size`」。
+
 ## 安装
 
 backends 通过两种方式之一提供（互斥）：
@@ -547,6 +566,79 @@ http {
     }
 }
 ```
+
+**Git HTTP 推送与 `client_max_body_size`** —— 用一份完整的自定义 `nginx.conf`
+前置 Git 服务（Gitea、GitLab、裸 `git http-backend` 等），抬掉 1 MiB 请求体上限，
+并让长 `git-receive-pack` 请求不断流：
+
+```nginx
+worker_processes auto;
+pid /tmp/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    # nginx 内建默认 1 MiB —— 更大的 git push 会以 HTTP 413 死掉。
+    # 0 完全关闭体积校验；想保留上限而不是无限制，就写一个字节值（如 512m）。
+    client_max_body_size 0;
+
+    # push/receive-pack 的流式请求可能超过 60s 默认值。
+    proxy_read_timeout 300s;
+    proxy_send_timeout 300s;
+
+    upstream gitea {
+        server 127.0.0.1:3080;
+    }
+
+    server {
+        listen 0.0.0.0:80;
+        access_log /var/log/nginx/gitea.access.log;
+        error_log  /var/log/nginx/gitea.error.log;
+
+        location / {
+            proxy_pass http://gitea;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+
+    server {
+        listen 0.0.0.0:443 ssl;
+        # pgcli 把 --tls-cert / --tls-key 文件挂到这两个路径。
+        ssl_certificate     /etc/nginx/certs/public.crt;
+        ssl_certificate_key /etc/nginx/certs/private.key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+
+        access_log /var/log/nginx/gitea.access.log;
+        error_log  /var/log/nginx/gitea.error.log;
+
+        location / {
+            proxy_pass http://gitea;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+}
+```
+
+```bash
+pg cert --host 10.0.0.9,git.internal \
+        --cert-file /srv/gitea.crt --key-file /srv/gitea.key
+pg addon install nginx --name proxy --conf-file /srv/gitea-nginx.conf \
+  --tls --tls-cert /srv/gitea.crt --tls-key /srv/gitea.key \
+  --http-port 80 --https-port 443
+```
+
+`--conf-file` 与 `--upstream` 互斥，但 `--tls` / `--tls-cert` / `--tls-key` 在
+自定义模式下依然生效：pgcli 仍把证书对挂在 `/etc/nginx/certs/public.crt` 与
+`/etc/nginx/certs/private.key`——上面这份配置正是引用它们；自定义文件只是接管了
+`listen`/`ssl_certificate` 这些行的书写。
 
 **静态文件服务 + 缓存** —— 从宿主挂载目录提供文件，带浏览器缓存头、
 sendfile 优化和访问控制：

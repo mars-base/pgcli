@@ -116,7 +116,7 @@ sshd 是有意不可达的,所以不给 `-p`。后续 install 不传 `--ssh-port
 
 Gitea 的 `Listen` 默认 `0.0.0.0`：容器共享宿主网络命名空间，所以 Web UI 与 Git HTTP 在宿主每个网卡的分配端口上可达。这是有意为之——Git 服务就是给别的机器克隆的——并由自动生成的强 admin 密码加 `DISABLE_REGISTRATION=true`（关闭自助注册；建号请在 admin UI 或容器内命令行操作）保护。想要仅回环的部署，传 `--listen 127.0.0.1`（用 `--force` 重建）。
 
-`--listen` 同时也是展示用 clone URL 的主机名：通配绑定不是可连地址，所以 `0.0.0.0` 会显示成 `localhost`；显式主机/IP 则原样进入 `ROOT_URL` 与 `ssh://` URL。要真域名和 TLS 就用 [nginx]({{< relref "./nginx" >}}) 前置——Gitea 躲到反代后面时 clone URL 也跟着修正（把 `--listen <public-host>` 设成对外主机名即可）。
+`--listen` 同时也是展示用 clone URL 的主机名：通配绑定不是可连地址，所以 `0.0.0.0` 会显示成 `localhost`；显式主机/IP 则原样进入 `ROOT_URL` 与 `ssh://` URL。有一个要知道的缺口：pgcli 把 `ROOT_URL` 渲染成 `http://<host>:<web端口>/`，没有任何配置项能让它声明 `https` 协议或反代的 443 端口，所以 Gitea 躲到 TLS 反代后面时，页面上*显示*的 clone URL 仍是 `http://…:3080/`。用反代的 `https://<host>/` 去 clone 仍然可用，只是页面提示不对。要真域名和 TLS 就用 [nginx]({{< relref "./nginx" >}}) 插件前置——且那里要用 nginx 的**自定义 `--conf-file` 模式**，因为模板默认的 `client_max_body_size`（1 MiB）会用 HTTP 413 拒掉较大的 `git push` 上传。
 
 ## 取回 Web 登录
 
@@ -244,6 +244,6 @@ pg logs addon gitea -n 200     # 最近 200 行（也支持 -i / --tail）
 ## 已知限制
 
 - 镜像必须钉在版本 tag 上，升级=换 `--image`（Gitea 在新镜像首启时向前迁移数据库——没有回退路径）。**rootful 与 rootless 构建的数据布局互不兼容**：pgcli 钉的是 rootful 构建，换成 `-rootless` tag 读不了现有 `/data`（也读不了别的 rootless 部署写的数据）。
-- 明文 HTTP：TLS 终止与真域名是 [nginx]({{< relref "./nginx" >}}) 插件的职责（把 `--listen` 设成公开主机名，clone URL 会跟上）。
+- 明文 HTTP：TLS 终止与真域名是 [nginx]({{< relref "./nginx" >}}) 插件的职责——用它的**自定义 `--conf-file` 模式**前置 Gitea（模板默认的 1 MiB `client_max_body_size` 会打断稍大的 `git push`）。注意 pgcli 把 Gitea 的 `ROOT_URL` 渲染成 `http://<host>:<web端口>/`，没有配置项能宣告 `https`/反代端口，所以即便躲在 TLS 反代后面，Gitea*显示*的 clone URL 仍是 `http://…:3080`——用 `https://<host>/` 克隆照常可用，只是页内提示是旧的。
 - v1 不配置 OAuth、SMTP、webhook 调优或仓库存储（MinFS）选项——上表之外的一切都是 Gitea 侧配置，pgcli 刻意不碰。自助注册是关的；建号请在 admin UI 操作。
 - macOS 上容器跑在 podman machine 里；目前只在 Linux 上验证过。
