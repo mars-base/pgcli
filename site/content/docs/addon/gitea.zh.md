@@ -24,8 +24,9 @@ weight: 57
 | `--admin-user` | `gitea` | Web 登录账号（**故意不用** `git`——那是容器内的 OS 用户，`ssh://` 克隆认证的就是它） |
 | `--password` | 自动生成 | Web 登录密码（**仅在 admin 账号尚不存在时生效**，见下） |
 | `--dsn` | 空 | 用 `postgres://user:pass@host:port/db` 把元数据放到外置 PostgreSQL，替代内嵌 SQLite；目标库必须已存在 |
+| `--allow-registration` | false | 打开自助注册（Web UI 出现注册入口）。默认关闭——见「监听与暴露」一节 |
 | `--data-dir` | 自动 | 覆盖数据目录（默认在 base 目录下） |
-| `--force` | false | 即使正在运行也重建——用于应用改动的端口、凭据、dsn 或监听地址 |
+| `--force` | false | 即使正在运行也重建——用于应用改动的端口、凭据、dsn、监听地址或注册开关 |
 
 ## 安装
 
@@ -115,6 +116,8 @@ sshd 是有意不可达的,所以不给 `-p`。后续 install 不传 `--ssh-port
 ## 监听与暴露
 
 Gitea 的 `Listen` 默认 `0.0.0.0`：容器共享宿主网络命名空间，所以 Web UI 与 Git HTTP 在宿主每个网卡的分配端口上可达。这是有意为之——Git 服务就是给别的机器克隆的——并由自动生成的强 admin 密码加 `DISABLE_REGISTRATION=true`（关闭自助注册；建号请用 `pg addon gitea user create`）保护。想要仅回环的部署，传 `--listen 127.0.0.1`（用 `--force` 重建）。
+
+`--allow-registration` 翻开的就是后一道闸：`pg addon install gitea --name <n> --allow-registration --force` 会渲染 `DISABLE_REGISTRATION=false`，Web UI 上随之出现注册入口；重新关闭要用 `--allow-registration=false --force`——开关是存进 `pg.yaml` 的配置值、只在显式传该 flag 时改写，所以普通重装（或不带 flag 的重装）会原样保留存储状态，改动也只有 `--force` 才推入运行中的容器。放开带来的是**建号垃圾**而非夺权：实测注册表单建出的账号 `IsAdmin=false`——Gitea 没有任何办法让注册产生管理员；提升为站点管理员只有 `pg addon gitea user create --admin` 或 admin 面板两条路，与账号如何产生无关。若确要在公开监听下开放注册，Gitea 同属 `service` 段的配套收紧项（`REGISTER_EMAIL_CONFIRM`、验证码、`REQUIRE_SIGNIN_VIEW`）不在 pgcli 渲染的 env 集合里，仍属 Gitea 侧配置。
 
 `--listen` 同时也是展示用 clone URL 的主机名：通配绑定不是可连地址，所以 `0.0.0.0` 会显示成 `localhost`；显式主机/IP 则原样进入 `ROOT_URL` 与 `ssh://` URL。当 Gitea 躲在转发了 `X-Forwarded-Proto` 与 `Host` 的反代后面时——pgcli 的 nginx 模板默认就转这两个头——Gitea 会**按进来的请求重写页面显示的 clone URL**，所以仓库页的克隆按钮读作 `https://<代理主机>/<owner>/<repo>.git`，完全正确（scheme 取自 `X-Forwarded-Proto`、host 取自 `Host`、标准端口省略）。pgcli 渲染的 `ROOT_URL` 仍是 `http://<host>:<web端口>/`（没有配置项能宣告 `https`/代理端口），但那只管 Gitea **服务端**按 `ROOT_URL` 直接生成的 URL；交互式 clone URL 跟着请求走。要上 TLS，见下文「经 nginx 提供 HTTPS」一节。
 
@@ -321,7 +324,9 @@ addons:
 里那份就是被这些变量重写出来的，所以手改 `app.ini` 不是受支持的配置路径——
 pgcli 没设的 Gitea 项虽在 app.ini 里能存活，但请自担风险。pgcli 设置的变量
 有：跳过向导（`INSTALL_LOCK`）、监听器（`HTTP_PORT`/`HTTP_ADDR`）、展示 URL
-（`ROOT_URL`）、关闭注册（`DISABLE_REGISTRATION`）、**总是发出**的裸
+（`ROOT_URL`）、注册闸门（`DISABLE_REGISTRATION`，**两态都显式渲染**——默认
+`true`，`--allow-registration` 时 `false`；因为 Gitea 自己的默认是**开**，
+少发一行就覆盖不掉持久 app.ini 里的旧值）、**总是发出**的裸
 `SSH_LISTEN_PORT`/`SSH_PORT` 对（把 s6 sshd park 离 22）、`DISABLE_SSH=true`
 （SSH 关：Gitea 不写 `authorized_keys`、不显示 ssh:// URL）或——SSH 开
 时——`DISABLE_SSH=false` 加 `GITEA__server__` 下渲染 URL 用的

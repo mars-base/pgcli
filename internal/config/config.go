@@ -1511,6 +1511,12 @@ type GiteaConfig struct {
 	SSH           bool   `yaml:"ssh,omitempty"`        // live git-over-ssh: DISABLE_SSH=false so Gitea writes the git user's authorized_keys for the image's sshd (clone over ssh:// in addition to HTTP). Off by default — but that only stops *live* cloning, not the sshd process itself: the official image runs s6 sshd unconditionally, so even an SSH-off instance parks it on SSHPort below.
 	SSHPort       int    `yaml:"ssh_port,omitempty"`   // host port the image's s6 sshd binds (via the bare SSH_LISTEN_PORT/SSH_PORT env it actually reads). Allocated from the gitea_ssh_start_port pool for EVERY instance, SSH on or off — parking the always-on sshd off 22 is the whole point. When SSH is on it is a live listener mirrored into the clone URLs; when off it is an idle listener nothing connects to. 0 = auto.
 	Dsn           string `yaml:"dsn,omitempty"`        // optional postgres://user:pass@host:port/db for Gitea's metadata database (rendered into GITEA__database__*); empty = embedded SQLite inside /data. The database must already exist — Gitea creates its own schema on first boot.
+	// AllowRegistration opens Gitea's self-service signup (the web UI shows a
+	// Register entry; DISABLE_REGISTRATION=false). Off by default — closed
+	// self-registration is one of the two guards on the default 0.0.0.0 listen.
+	// Signups always create NORMAL users: Gitea has no way to make the web
+	// register form produce an admin, so this opens account spam, not takeover.
+	AllowRegistration bool `yaml:"allow_registration,omitempty"`
 	// Autostart brings this container up on host boot via the boot service
 	// (pg autostart enable --gitea). Start-only: it starts the existing
 	// container, so install first.

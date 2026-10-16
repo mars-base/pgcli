@@ -228,6 +228,24 @@ func TestGiteaArgsAndEnv(t *testing.T) {
 		}
 	})
 
+	t.Run("allow-registration flips DISABLE_REGISTRATION both ways", func(t *testing.T) {
+		gc := base()
+		// Both states must be RENDERED EXPLICITLY: Gitea's own app.ini default
+		// is open registration, so omitting the =false line would leave a stale
+		// =false persisted in a revived app.ini unoverridden.
+		if args := giteaArgsAndEnv(gc, false, "pgcli-net", "/data"); !hasEnv(args, "GITEA__service__DISABLE_REGISTRATION=true") {
+			t.Errorf("closed by default must render =true: %v", args)
+		}
+		gc.AllowRegistration = true
+		args := giteaArgsAndEnv(gc, false, "pgcli-net", "/data")
+		if !hasEnv(args, "GITEA__service__DISABLE_REGISTRATION=false") {
+			t.Errorf("open registration must render =false: %v", args)
+		}
+		if hasEnv(args, "GITEA__service__DISABLE_REGISTRATION=true") {
+			t.Errorf("must not render both: %v", args)
+		}
+	})
+
 	t.Run("dsn renders the postgres database env", func(t *testing.T) {
 		gc := base()
 		gc.Dsn = "postgres://gitea:pw@db.example.com:5433/gitea_db"

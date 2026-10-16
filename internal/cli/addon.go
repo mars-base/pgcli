@@ -549,7 +549,8 @@ Alertmanager (the alert dedup/grouping/routing frontend of the Prometheus stack;
 Gitea (the self-hosted Git service; top-level addon, Linux and macOS):
   pg addon install gitea [--name git1] [--admin-user gitea] [--password ...]
                          [--port N] [--ssh-port N] [--listen 0.0.0.0]
-                         [--dsn postgres://...] [--data-dir ...] [--image ...] [--force]
+                         [--allow-registration] [--force]
+                         [--dsn postgres://...] [--data-dir ...] [--image ...]
   --admin-user/--password are Gitea's WEB LOGIN credentials for the site-admin
   account; the password is generated when omitted, printed once, and stored under
   addons.gitea.<name>.password — read it with "pg addon password gitea". Unlike
@@ -574,6 +575,11 @@ Gitea (the self-hosted Git service; top-level addon, Linux and macOS):
   --listen defaults to 0.0.0.0 (a Git host is usually pushed to from other
   machines; containers run on the host network), guarded by the generated
   password and closed self-registration; pass --listen 127.0.0.1 for loopback.
+  --allow-registration opens that last guard: Gitea's web UI shows a Register
+  entry and anyone reaching the port can sign up (always as a NORMAL user —
+  Gitea cannot make the register form produce an admin — so this is spam risk,
+  not takeover). It is a stored toggle applied on --force recreate; close it
+  again with --allow-registration=false --force.
   ROOT_URL is derived from --listen (a wildcard 0.0.0.0 collapses to localhost)
   so displayed clone URLs are connectable rather than echoing the bind address.
   --dsn puts Gitea's metadata in an EXTERNAL PostgreSQL instead of the embedded
@@ -666,6 +672,7 @@ Examples:
   pg addon install gitea --name git1 --ssh-port 2222                           # also expose git@...:2222 clone/push over SSH
   pg addon install gitea --name git1 --dsn "postgres://gitea:pass@127.0.0.1:5432/giteadb"  # metadata in an existing PostgreSQL instead of SQLite
   pg addon install gitea --name local --listen 127.0.0.1                       # loopback-only instead of the 0.0.0.0 default
+  pg addon install gitea --name git1 --allow-registration --force             # open self-service signup (web Register entry; signups are normal users)
   pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050
   pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050 --upstream name=postgrest,path=/api,backend=127.0.0.1:3000 --tls`,
 	Args: cobra.ExactArgs(1),
@@ -997,12 +1004,13 @@ func init() {
 	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo/rustfs/seaweedfs: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo|rustfs>/<name>/, or the addon dir for seaweedfs; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Seaweedfs serves TLS natively: the S3 port becomes HTTPS-only (cleartext listener off). Changing this needs --force to recreate. NOT for garage: it has no native TLS (rejects --tls); front it with the nginx addon")
 	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo/rustfs: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt for MinIO/silo, rustfs_cert.pem for rustfs, cert.pem for seaweedfs). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
 	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo/rustfs: private key for --tls-cert (PEM; mounted read-only as private.key for MinIO/silo, rustfs_key.pem for rustfs, key.pem for seaweedfs). Must pair with the cert; both are required to enable BYO TLS")
-	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/PostgREST/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea container even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, a changed pgAdmin --email/--dsn/--pg-name, Grafana --admin-user or Gitea --admin-user/--ssh-port/--dsn seed, or to force-recreate a Prometheus instance instead of hot-reloading its config)")
+	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/PostgREST/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea container even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, a changed pgAdmin --email/--dsn/--pg-name, Grafana --admin-user or Gitea --admin-user/--ssh-port/--dsn seed/--allow-registration, or to force-recreate a Prometheus instance instead of hot-reloading its config)")
 
 	// redis flags (top-level standalone KV store — the first version-selectable addon)
 	addonInstallCmd.Flags().String("version", "", "Redis major version to install: 7 or 8 (default \"8\"); each maps to a pinned upstream docker.io/library/redis tag. Ignored for every other addon")
 	addonInstallCmd.Flags().String("password", "", "Redis requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls) / Predixy proxy password (REQUIRED, never generated: it must be the proxied cluster's requirepass — read it with `pg addon password redis --name <member>`) / pgAdmin, Grafana or Gitea WEB login password (generated on first install if omitted — not a PostgreSQL password; retrieve it with `pg addon password pgadmin`/`grafana`/`gitea`. For Grafana it only takes effect while grafana.db is absent; for Gitea the stored password is the one pgcli CREATES the admin account with, so it is inert on a revived store whose admin already exists)")
 	addonInstallCmd.Flags().String("admin-user", "", "Grafana WEB login user (GF_SECURITY_ADMIN_USER; default \"admin\") / Gitea WEB login user (created via `gitea admin user create`; default \"gitea\" — deliberately NOT the container's OS user \"git\") — the account you sign into the web UI with, unrelated to any PostgreSQL role")
+	addonInstallCmd.Flags().Bool("allow-registration", false, "Gitea: open self-service signup (GITEA__service__DISABLE_REGISTRATION=false; the web UI shows a Register entry). Closed by default — it is one of the two guards on the default 0.0.0.0 listen. Signups always create NORMAL users: Gitea offers no way for the register form to produce an admin, so this opens account spam, not takeover. The toggle needs --force to reach the live container; close it again with --allow-registration=false --force")
 	addonInstallCmd.Flags().String("email", "", "pgAdmin WEB login email (PGADMIN_DEFAULT_EMAIL; default \"admin@pgcli.lan\") — the account you sign into the web UI with, unrelated to any PostgreSQL role; the image rejects reserved TLDs such as .local")
 	addonInstallCmd.Flags().String("maxmemory", "", "Redis memory cap, e.g. 256mb or 2gb — turns the instance into a real cache (allkeys-lru evicts keys at the cap); empty means no cap")
 	addonInstallCmd.Flags().String("maxmemory-policy", "", "Redis eviction policy to pair with --maxmemory (noeviction | allkeys-lru | allkeys-lfu | volatile-lru | volatile-lfu | volatile-ttl; default allkeys-lru; requires --maxmemory)")
@@ -7529,6 +7537,7 @@ func runAddonInstallGitea(cmd *cobra.Command) error {
 	adminUser, _ := cmd.Flags().GetString("admin-user")
 	password, _ := cmd.Flags().GetString("password")
 	dsn, _ := cmd.Flags().GetString("dsn")
+	allowReg, _ := cmd.Flags().GetBool("allow-registration")
 	force, _ := cmd.Flags().GetBool("force")
 
 	// --dsn is validated BEFORE anything is written: an unparseable DSN would
@@ -7593,6 +7602,13 @@ func runAddonInstallGitea(cmd *cobra.Command) error {
 	}
 	if dsn != "" {
 		existing.Dsn = dsn
+	}
+	if cmd.Flags().Changed("allow-registration") {
+		// Gated on Changed like --ssh-port: a plain re-install without the flag
+		// must not silently close registration on an instance opened with it.
+		// Flipping the stored value only affects the live container through the
+		// --force recreate below (the toggle rides env into app.ini).
+		existing.AllowRegistration = allowReg
 	}
 	if imageTag != "" {
 		existing.ImageTag = imageTag
@@ -7713,9 +7729,19 @@ func runAddonInstallGitea(cmd *cobra.Command) error {
 	fmt.Printf("  Login password: %s\n", gc.Password)
 	fmt.Println("  (Web login only — not a PostgreSQL password. Retrieve it later with `pg addon password gitea`.)")
 	fmt.Println()
+	if gc.AllowRegistration {
+		fmt.Println("  Self-registration: OPEN (--allow-registration; the web UI shows a Register entry — signups are always NORMAL users, never admins)")
+	} else {
+		fmt.Println("  Self-registration: closed (open it with --allow-registration --force; accounts via `pg addon gitea user create`)")
+	}
+	fmt.Println()
 	fmt.Println("  Create your first org/repo in the web UI; the admin above has site-admin rights.")
 	if gc.Listen == "0.0.0.0" {
-		fmt.Println("  NOTE: listening on every interface (a Git host is usually reached from other machines); the login above and closed self-registration are the only gate.")
+		if gc.AllowRegistration {
+			fmt.Println("  NOTE: listening on every interface AND self-registration is open — anyone who can reach the port can create accounts (normal users only, but expect spam). Close it again (--allow-registration=false --force) or bind loopback.")
+		} else {
+			fmt.Println("  NOTE: listening on every interface (a Git host is usually reached from other machines); the login above and closed self-registration are the only gate.")
+		}
 		fmt.Printf("        loopback-only: pg addon install gitea --name %s --listen 127.0.0.1 --force\n", name)
 	}
 	return nil

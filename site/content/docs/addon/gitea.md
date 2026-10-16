@@ -33,8 +33,9 @@ The install is fully non-interactive: `INSTALL_LOCK=true` skips Gitea's web setu
 | `--admin-user` | `gitea` | Web login user (deliberately not `git` — that is the container's OS user `ssh://` clones authenticate *as*) |
 | `--password` | auto-generated | Web login password (applied only when the admin account does not yet exist — see below) |
 | `--dsn` | empty | `postgres://user:pass@host:port/db` to keep Gitea's metadata in an external PostgreSQL instead of the embedded SQLite; the database must already exist |
+| `--allow-registration` | false | Open self-service signup (the web UI shows a Register entry). Closed by default — see [Listening and exposure](#listening-and-exposure) |
 | `--data-dir` | auto | Data directory override (default under the base dir) |
-| `--force` | false | Recreate even when running — to apply changed ports, credentials, dsn or listen address |
+| `--force` | false | Recreate even when running — to apply changed ports, credentials, dsn, listen address or the registration toggle |
 
 ## Install
 
@@ -130,6 +131,8 @@ recreate).
 ## Listening and exposure
 
 Gitea's `Listen` defaults to `0.0.0.0`: the container shares the host's network namespace, so the web UI and Git HTTP are reachable on every interface at the assigned port. This is deliberate — a Git host is cloned from other machines — and is protected by the generated strong admin password plus `DISABLE_REGISTRATION=true` (self-service account creation is off; create accounts with `pg addon gitea user create`). For a loopback-only deployment pass `--listen 127.0.0.1` (recreate with `--force`).
+
+`--allow-registration` flips that second guard: `pg addon install gitea --name <n> --allow-registration --force` renders `DISABLE_REGISTRATION=false` and the web UI grows a Register entry. Close it again with `--allow-registration=false --force` — the toggle is a stored config value gated on the flag being *passed*, so a plain re-install (or one without the flag) keeps whatever state is stored, and only `--force` pushes a change into the live container. What opens up is account *spam*, not takeover: a field test confirmed the register form creates a **NORMAL user** (`IsAdmin=false`) — Gitea has no way to make signup produce an admin; elevation is exclusively `pg addon gitea user create --admin` or the admin panel, independent of how the account was born. Companion Gitea-side hardening for an open-registration site lives in the same `service` section (`REGISTER_EMAIL_CONFIRM`, CAPTCHA, `REQUIRE_SIGNIN_VIEW`) — outside pgcli's rendered env set, so it stays Gitea-side configuration.
 
 `--listen` is also what displayed clone URLs use: a wildcard bind is not a connectable address, so it is echoed as `localhost`, and any explicit host/IP appears verbatim in `ROOT_URL` and the `ssh://` URLs. When Gitea sits behind a reverse proxy that forwards `X-Forwarded-Proto` and `Host` — which pgcli's nginx template does by default — Gitea **rewrites the displayed clone URL to match the incoming request**, so the code button on the repo page reads `https://<proxy-host>/<owner>/<repo>.git` correctly (scheme from `X-Forwarded-Proto`, host from `Host`, standard port dropped). pgcli's rendered `ROOT_URL` stays `http://<host>:<web-port>/` because there is no config face to advertise `https`/the proxy port — but that only governs webhook/redirect URLs generated *server-side*; interactive clone URLs follow the request. For TLS, see [HTTPS via nginx](#https-via-nginx).
 
@@ -367,7 +370,10 @@ hand-editing it is not a supported configuration path (settings pgcli does not
 set survive the rewrite, but changing one of pgcli's own keys by hand just gets
 undone on the next boot). The variables pgcli sets are: the wizard skip
 (`INSTALL_LOCK`), the listener (`HTTP_PORT`/`HTTP_ADDR`), the display URL
-(`ROOT_URL`), closed registration (`DISABLE_REGISTRATION`), the always-emitted
+(`ROOT_URL`), the registration gate (`DISABLE_REGISTRATION`, rendered in both
+states — `true` by default, `false` with `--allow-registration`, since Gitea's
+own default is *open* and an omitted line could not override a persisted one),
+the always-emitted
 **bare** `SSH_LISTEN_PORT`/`SSH_PORT` pair that parks the s6 sshd off 22,
 `DISABLE_SSH=true` when SSH is off (Gitea then also does not write
 `authorized_keys` or show ssh:// URLs) or — when SSH is on — `DISABLE_SSH=false`

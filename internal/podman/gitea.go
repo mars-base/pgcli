@@ -285,7 +285,11 @@ func giteaArgsAndEnv(gc *config.GiteaConfig, bridge bool, network, dataDir strin
 		"GITEA__server__HTTP_PORT=" + strconv.Itoa(gc.HostPort),
 		"GITEA__server__HTTP_ADDR=" + proxyBindHost(bridge, gc.Listen),
 		"GITEA__server__ROOT_URL=" + fmt.Sprintf("http://%s:%d/", GiteaDisplayHost(gc.Listen), gc.HostPort),
-		"GITEA__service__DISABLE_REGISTRATION=true",
+		// Both states are rendered explicitly: Gitea's own default is OPEN
+		// registration, and config lives entirely in the env-to-app.ini
+		// channel, so emitting =false only when closed would leave nothing to
+		// override a stale =true persisted in a revived app.ini.
+		"GITEA__service__DISABLE_REGISTRATION=" + strconv.FormatBool(!gc.AllowRegistration),
 	}
 	if gc.SSHPort != 0 {
 		// The image's s6 sshd is always started and reads its bind port from
