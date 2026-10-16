@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -182,6 +183,28 @@ Infra addons (shared, not tied to one instance):
           silence/notification state dir survives remove unless --clean-data. The
           image runs as a fixed uid 65534 (nobody) and creates no writable dir,
           so pgcli pre-chowns the data dir on the host (same path as Grafana).
+  pg addon install gitea
+          Stored under top-level addons.gitea in config (Linux and macOS).
+          Gitea — the self-hosted Git service — run from the official
+          docker.io/gitea/gitea image (the version line moved from 1.2x to 28.x
+          in late 2026). A web login user/password is required at first launch;
+          the password is generated and printed once — retrieve it with
+          "pg addon password gitea". Unlike Grafana, the account is not seeded
+          from env: pgcli skips the setup wizard (INSTALL_LOCK=true), waits for
+          first-boot migrations, then runs "gitea admin user create" inside the
+          container. Listen defaults to 0.0.0.0 (a Git host is pushed to from
+          other machines), guarded by the generated password and closed
+          self-registration. Optional --ssh-port exposes git-over-ssh (the
+          image's OpenSSH) clone/push on its own port pool. Metadata is the embedded SQLite in
+          the data dir by default, or an EXTERNAL PostgreSQL via --dsn (must
+          already exist; same contract as PostgREST). Crypto secrets
+          (SECRET_KEY/INTERNAL_TOKEN) are never injected — the volume owns them
+          (re-injecting a per-install secret would silently re-key a surviving
+          DB). Its data dir holds repos, app.ini and the SQLite DB and survives
+          remove unless --clean-data. The rootful image su-execs the git user
+          (uid/gid 1000) but does not chown an existing bind mount, so pgcli
+          pre-chowns the data dir on the host (rootless via "podman unshare
+          chown 1000:1000"; a rootful host running pgcli as root chowns directly).
 
 Commands:
   pg addon install <addon>    install an add-on
@@ -218,6 +241,7 @@ Currently supported add-ons:
   grafana     Grafana — the open-source observability dashboard (single container from docker.io/grafana; web login auto-generated; defaults to 0.0.0.0 since a dashboard is meant to be viewed remotely; Linux host network, macOS bridge)
   prometheus  Prometheus — the metrics collection backend Grafana reads from (single container from docker.io/prom/prometheus; rendered prometheus.yml or --conf-file, --scrape targets, --alertmanager-url to forward alerts + watch Alertmanager, --rule-file to load alerting rules, SIGHUP reload; NO web login — defaults to 0.0.0.0 guarded only by the network, use --listen 127.0.0.1 for loopback; Linux host network, macOS bridge)
   alertmanager Alertmanager — the alert dedup/grouping/routing frontend of the Prometheus stack (single container from docker.io/prom/alertmanager; rendered alertmanager.yml with a no-op or --webhook-url web.hook receiver, or --conf-file; SIGHUP reload; cluster gossip disabled; NO web login — defaults to 0.0.0.0 guarded only by the network, and silences are dangerous, use --listen 127.0.0.1 for loopback; wired to Prometheus from the Prometheus side via --alertmanager-url; Linux host network, macOS bridge)
+  gitea       Gitea — the self-hosted Git service (single container from docker.io/gitea/gitea; web login auto-generated and created via "gitea admin user create"; optional --ssh-port for clone/push over SSH; SQLite by default or --dsn to put its metadata in a PostgreSQL you already run; defaults to 0.0.0.0 since a Git host is reached from other machines; Linux host network, macOS bridge)
   nginx       HTTP reverse proxy in front of web services (path-based routing, optional TLS termination; single container from docker.io/library/nginx; Linux host network, macOS bridge)
 
 Two modes (pgbouncer, postgrest):
@@ -522,6 +546,53 @@ Alertmanager (the alert dedup/grouping/routing frontend of the Prometheus stack;
   Re-running install hot-reloads a live container when the config changed; --force
   recreates it to apply a changed --port/--listen.
 
+Gitea (the self-hosted Git service; top-level addon, Linux and macOS):
+  pg addon install gitea [--name git1] [--admin-user gitea] [--password ...]
+                         [--port N] [--ssh-port N] [--listen 0.0.0.0]
+                         [--dsn postgres://...] [--data-dir ...] [--image ...] [--force]
+  --admin-user/--password are Gitea's WEB LOGIN credentials for the site-admin
+  account; the password is generated when omitted, printed once, and stored under
+  addons.gitea.<name>.password — read it with "pg addon password gitea". Unlike
+  Grafana (GF_SECURITY_ADMIN_*), Gitea has NO env for the admin login: pgcli
+  skips the web setup wizard (INSTALL_LOCK=true), waits for the container to
+  finish first-boot migrations, then runs "gitea admin user create" inside it.
+  Because the account is created (not seeded from env), the stored password is the
+  one pgcli CREATED it with — on a revived data dir whose admin already exists,
+  creation is skipped and the printed password is inert (rotate it inside the
+  container with "gitea admin user change-password"). SECRET_KEY/INTERNAL_TOKEN
+  are NEVER injected: the image's environment-to-ini re-applies every GITEA__*
+  env into the PERSISTED app.ini on each boot, so a per-install secret would
+  silently re-key a surviving database's encrypted 2FA/OAuth state — the volume
+  owns crypto secrets, pgcli owns only the login above.
+  --ssh-port N turns on git-over-ssh on host port N (N>0). The official image
+  runs an OpenSSH sshd unconditionally, so SSH-off does not stop that daemon —
+  it just parks it on an idle pool port (off 22, so it never fights the host
+  sshd). Unset, the instance auto-assigns from gitea_ssh_start_port (default
+  2222); pass --ssh-port 0 to take N off and let it re-park. On Linux the port
+  is bound directly (host networking), so the clone URL is
+  ssh://git@<host>:N/<owner>/<repo>.git. Without it, clone/push is HTTP-only.
+  --listen defaults to 0.0.0.0 (a Git host is usually pushed to from other
+  machines; containers run on the host network), guarded by the generated
+  password and closed self-registration; pass --listen 127.0.0.1 for loopback.
+  ROOT_URL is derived from --listen (a wildcard 0.0.0.0 collapses to localhost)
+  so displayed clone URLs are connectable rather than echoing the bind address.
+  --dsn puts Gitea's metadata in an EXTERNAL PostgreSQL instead of the embedded
+  SQLite (same contract as PostgREST --dsn: the database must already exist and
+  be reachable from the container — pgcli never creates or drops it, Gitea builds
+  its schema on first boot); the repos and app.ini still live in --data-dir.
+  Data is Gitea's single /data volume (repos, app.ini, its self-generated
+  secrets, the default SQLite DB, ssh host keys) under --data-dir (default
+  <base_dir>/addon/gitea/<name>/data), so remove/reinstall revives repos and
+  settings; --clean-data deletes it (rootless: via "podman unshare rm" since
+  files land owned by the container's mapped 1000 uid). The rootful image starts
+  as root and su-execs the git user (uid/gid 1000, USER_UID/USER_GID) but does
+  NOT chown an existing bind mount, so pgcli pre-chowns the data dir on the host
+  (rootless via "podman unshare chown 1000:1000"; a rootful host running pgcli
+  as root gets a direct recursive chown). TLS is not wired up yet (plaintext
+  http; front it with the nginx addon for HTTPS). Re-running install reuses a
+  live container; --force recreates it to apply a changed
+  --port/--ssh-port/--listen/--admin-user/--password/--dsn.
+
 nginx (HTTP reverse proxy in front of web services; top-level addon, Linux and macOS):
   pg addon install nginx [--name proxy]
                          [--upstream name=<n>,path=<p>,backend=<h:p>] (repeatable)
@@ -590,6 +661,11 @@ Examples:
   pg addon install alertmanager --name am1 --webhook-url http://a:5001/ --webhook-url http://b:5001/   # both URLs in one web.hook receiver
   pg addon install alertmanager --name local --listen 127.0.0.1   # loopback-only (Alertmanager has no auth, and silences are dangerous)
   pg addon install alertmanager --name am1 --conf-file /etc/alertmanager/my.yml   # run your own alertmanager.yml verbatim
+  pg addon install gitea
+  pg addon install gitea --name git1 --admin-user root                         # web login; admin created after first boot
+  pg addon install gitea --name git1 --ssh-port 2222                           # also expose git@...:2222 clone/push over SSH
+  pg addon install gitea --name git1 --dsn "postgres://gitea:pass@127.0.0.1:5432/giteadb"  # metadata in an existing PostgreSQL instead of SQLite
+  pg addon install gitea --name local --listen 127.0.0.1                       # loopback-only instead of the 0.0.0.0 default
   pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050
   pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050 --upstream name=postgrest,path=/api,backend=127.0.0.1:3000 --tls`,
 	Args: cobra.ExactArgs(1),
@@ -623,14 +699,15 @@ pg.yaml.`,
 // shaped for $(...) capture in scripts.
 var addonPasswordCmd = &cobra.Command{
 	Use:   "password <addon>",
-	Short: "Print an add-on's stored password (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin/Grafana web login password)",
+	Short: "Print an add-on's stored password (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin/Grafana/Gitea web login password)",
 	Long: `Print the password stored for one add-on instance: the Redis
 requirepass (generated by pgcli), the Predixy proxy password (the
 operator-supplied copy of the proxied cluster's requirepass), the
 MinIO/silo/rustfs root password or garage secret key (the access-key secret — pair it with the
-instance's Root user from "pg addon list"), or the pgAdmin or Grafana web login
-password (the PGADMIN_DEFAULT_PASSWORD / GF_SECURITY_ADMIN_PASSWORD generated for
-the UI's sign-in form — not a PostgreSQL password).
+instance's Root user from "pg addon list"), or the pgAdmin, Grafana or Gitea web
+login password (the PGADMIN_DEFAULT_PASSWORD / GF_SECURITY_ADMIN_PASSWORD / Gitea
+admin-account password generated for the UI's sign-in form — not a PostgreSQL
+password).
 
 The single value goes to stdout with no decoration, so it composes into
 scripts and app config:
@@ -660,8 +737,8 @@ var addonRemoveCmd = &cobra.Command{
 For local add-ons, use -i to specify the instance.
 For remote add-ons, use --pg-name to specify the pooler name.
 
-Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager) use --name.
-Remove keeps the data directory; pass --clean-data for object-storage/KV/pgAdmin/Grafana/Prometheus/Alertmanager
+Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea) use --name.
+Remove keeps the data directory; pass --clean-data for object-storage/KV/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea
 data to go too.
 
 Examples:
@@ -679,7 +756,9 @@ Examples:
   pg addon remove prometheus
   pg addon remove prometheus --clean-data
   pg addon remove alertmanager
-  pg addon remove alertmanager --clean-data`,
+  pg addon remove alertmanager --clean-data
+  pg addon remove gitea
+  pg addon remove gitea --clean-data`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonRemove(args[0], cmd)
@@ -712,6 +791,7 @@ Supported add-ons:
   grafana    pg addon start grafana [--name grafana]
   prometheus pg addon start prometheus [--name prometheus]
   alertmanager pg addon start alertmanager [--name alertmanager]
+  gitea      pg addon start gitea [--name gitea]
   nginx      pg addon start nginx [--name proxy]
   pgbouncer  pg addon start pgbouncer -i <instance>
              pg addon start pgbouncer --pg-name <remote-name>
@@ -732,6 +812,7 @@ Examples:
   pg addon start grafana
   pg addon start prometheus
   pg addon start alertmanager
+  pg addon start gitea
   pg addon start nginx --name proxy
   pg addon start pgbouncer -i proj01
   pg addon start postgrest --pg-name app-api`,
@@ -762,6 +843,7 @@ Supported add-ons:
   grafana    pg addon stop grafana [--name grafana]
   prometheus pg addon stop prometheus [--name prometheus]
   alertmanager pg addon stop alertmanager [--name alertmanager]
+  gitea      pg addon stop gitea [--name gitea]
   nginx      pg addon stop nginx [--name proxy]
   pgbouncer  pg addon stop pgbouncer -i <instance>
              pg addon stop pgbouncer --pg-name <remote-name>
@@ -782,6 +864,7 @@ Examples:
   pg addon stop grafana
   pg addon stop prometheus
   pg addon stop alertmanager
+  pg addon stop gitea
   pg addon stop nginx --name proxy
   pg addon stop pgbouncer -i proj01
   pg addon stop postgrest --pg-name app-api`,
@@ -813,7 +896,7 @@ func init() {
 	addonNginxExecCmd.Flags().String("name", "", "nginx instance name (default \"nginx\")")
 
 	// Basic flags
-	addonInstallCmd.Flags().String("dsn", "", "PG instance connection string for remote mode (postgres://user:pass@host:port/db) / pgadmin: a one-time server to pre-register in its UI (mutually exclusive with --pg-name there) / seaweedfs: the filer's shared metadata PostgreSQL for --cluster (REQUIRED; must be reachable from EVERY host, so use the host-published port / LAN address, not an instance's container-local 127.0.0.1:5432; the metadata database itself must already exist — pgcli only probes connectivity and never creates or drops databases here, weed's postgres2 store creates its own tables inside it)")
+	addonInstallCmd.Flags().String("dsn", "", "pgbouncer/postgrest: PG instance connection string for remote mode (postgres://user:pass@host:port/db) / pgadmin: a one-time server to pre-register in its UI (mutually exclusive with --pg-name there) / seaweedfs: the filer's shared metadata PostgreSQL for --cluster (REQUIRED; must be reachable from EVERY host, so use the host-published port / LAN address, not an instance's container-local 127.0.0.1:5432; the metadata database itself must already exist — pgcli only probes connectivity and never creates or drops databases here, weed's postgres2 store creates its own tables inside it) / gitea: the metadata database instead of the embedded SQLite (optional; same contract — the database must already exist, Gitea creates its own schema on first boot, and it must be reachable from the Gitea container)")
 	addonInstallCmd.Flags().String("pg-name", "", "name to identify a remote PgBouncer or PostgREST (required with --dsn) / pgadmin: resolve the DSN from this locally-managed instance instead of passing --dsn (its own addon --name is unrelated to this)")
 	addonInstallCmd.Flags().Int("max-client-conn", 0, "maximum number of client connections allowed (default 100)")
 	addonInstallCmd.Flags().Int("default-pool-size", 0, "number of server connections per user/database pair (default 20)")
@@ -845,10 +928,10 @@ func init() {
 	addonRemoveCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to remove")
 
 	// etcd flags (top-level shared-infrastructure addon)
-	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus or alertmanager instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\")")
+	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager or gitea instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"gitea\")")
 	addonInstallCmd.Flags().Int("client-port", 0, "etcd client host port (0=auto-assign from etcd_start_port)")
 	addonInstallCmd.Flags().Int("peer-port", 0, "etcd peer host port (0=auto-assign, next free port after client)")
-	addonInstallCmd.Flags().String("image", "", "override the addon image tag verbatim (etcd default quay.io/coreos/etcd:v3.5.30; redis default resolved from --version, e.g. docker.io/library/redis:8.10.2; predixy default ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine; pgadmin default docker.io/dpage/pgadmin4:9.18; grafana default docker.io/grafana/grafana:13.2.4; prometheus default docker.io/prom/prometheus:v3.15.0; alertmanager default docker.io/prom/alertmanager:v0.34.1)")
+	addonInstallCmd.Flags().String("image", "", "override the addon image tag verbatim (etcd default quay.io/coreos/etcd:v3.5.30; redis default resolved from --version, e.g. docker.io/library/redis:8.10.2; predixy default ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine; pgadmin default docker.io/dpage/pgadmin4:9.18; grafana default docker.io/grafana/grafana:13.2.4; prometheus default docker.io/prom/prometheus:v3.15.0; alertmanager default docker.io/prom/alertmanager:v0.34.1; gitea default docker.io/gitea/gitea:28.1.0)")
 	addonInstallCmd.Flags().String("cluster", "", "cluster grouping token: etcd --initial-cluster-token (default \"pgcli-etcd\"); redis native-cluster name (--cluster-enabled yes, members sharing it form one cluster you assemble once with `pg redis-cli -- --cluster create ...`); garage — switch on multi-node mode (members sharing the name join one Garage cluster; requires --advertise-host); seaweedfs — switch on multi-node mode (members sharing the name join one Raft cluster via the full --peer list; requires --advertise-host, a shared --dsn metadata database, and the SAME --root-user/--root-password on every node)")
 	addonInstallCmd.Flags().StringArray("peer", nil, "cluster peer list (repeat one per peer): garage — an existing member's <id>@<addr> to connect to (a joiner usually needs just one — peering is transitive; printed by the bootstrap node's install summary). seaweedfs — a member's <ip>:<master_port> Raft address; pass the FULL list on EVERY node (weed requires the complete membership, MNMD-style, no bootstrap/join distinction), your own entry optional")
 	addonInstallCmd.Flags().String("replication", "", "seaweedfs cluster only: placement code XYZ (X=remote copies, Y=distinct racks, Z=distinct data centers; each digit 0-3), e.g. 001 = one remote copy. Default \"000\" (single-node — no peers to copy to). Immutable once set in a cluster")
@@ -859,11 +942,11 @@ func init() {
 	addonInstallCmd.Flags().Int("replication-factor", 0, "garage cluster only: object replication factor (garage.toml replication_factor; must be <= node count — a 3-node cluster with rf 3 tolerates losing 2; set it on EVERY member, the value is per-node config). Empty for garage = default 1 (single-node); etcd/redis ignore it")
 	addonInstallCmd.Flags().String("rpc-secret", "", "garage cluster only: the shared 64-hex cluster RPC secret (garage.toml rpc_secret) — generated by the bootstrap node and printed once; every joiner MUST pass the same value (pgcli never executes remotely, so you carry it). Invalid on a single-node install")
 	addonInstallCmd.Flags().Int("cluster-replicas", 0, "redis native-cluster only: per-master replica count for the --cluster create you will run (default 0 = masters-only). Only shapes the suggested assemble command and node-count guidance — which nodes become followers is decided by Redis at create time, not here; the whole group inherits the first member's value")
-	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs, garage, redis, pgAdmin or Grafana instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; garage default <base_dir>/addon/garage/<name>/data (its metadata dir is a sibling .../meta); seaweedfs default <base_dir>/addon/seaweedfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data; pgadmin default <base_dir>/addon/pgadmin/<name>/data; grafana default <base_dir>/addon/grafana/<name>/data; prometheus default <base_dir>/addon/prometheus/<name>/data; alertmanager default <base_dir>/addon/alertmanager/<name>/data)")
+	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs, garage, redis, pgAdmin, Grafana or Gitea instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; garage default <base_dir>/addon/garage/<name>/data (its metadata dir is a sibling .../meta); seaweedfs default <base_dir>/addon/seaweedfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data; pgadmin default <base_dir>/addon/pgadmin/<name>/data; grafana default <base_dir>/addon/grafana/<name>/data; prometheus default <base_dir>/addon/prometheus/<name>/data; alertmanager default <base_dir>/addon/alertmanager/<name>/data; gitea default <base_dir>/addon/gitea/<name>/data)")
 	addonInstallCmd.Flags().String("advertise-host", "", "peer-visible host: etcd member peer/client URLs, redis native-cluster --cluster-announce-ip, , garage cluster rpc_public_addr, and seaweedfs cluster weed -ip that peers dial (empty=127.0.0.1 single-host; set a LAN IP or FQDN for cross-host clusters — required on every garage or seaweedfs --cluster member)")
 	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.0.0.12:2379 (implies --initial-cluster-state existing; requires --advertise-host)")
-	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus or alertmanager instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\")")
-	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/garage/seaweedfs/redis/pgAdmin/Grafana/Prometheus/Alertmanager data directory (object storage / backup repository / key-value data / pgAdmin config+sessions, Grafana dashboards sqlite DB, Prometheus TSDB, or Alertmanager silences+notification state) and pgcli-rendered files beside it; no-op for predixy, which is stateless. Never drops a seaweedfs filer metadata database")
+	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager or gitea instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"gitea\")")
+	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/garage/seaweedfs/redis/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea data directory (object storage / backup repository / key-value data / pgAdmin config+sessions, Grafana dashboards sqlite DB, Prometheus TSDB, Alertmanager silences+notification state, or Gitea repos + app.ini + its default SQLite DB) and pgcli-rendered files beside it; no-op for predixy, which is stateless. Never drops a seaweedfs filer metadata database or a Gitea --dsn PostgreSQL database")
 
 	// haproxy flags (top-level load balancer in front of a Patroni cluster)
 	addonInstallCmd.Flags().String("mode", "", "HAProxy routing mode: unified (default, all traffic to the leader) or split (separate read listener for replicas)")
@@ -894,7 +977,7 @@ func init() {
 	// minio flags (top-level single-node S3-compatible object storage)
 	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo/rustfs S3 API host port (0=auto-assign from the shared minio_start_port pool); for garage, the S3 API port (0=auto from garage_start_port, default 3900 — garage takes four consecutive ports API/RPC/Web/Admin)")
 	addonInstallCmd.Flags().Int("console-port", 0, "MinIO/silo/rustfs web console host port (0=auto-assign, next free port)")
-	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo, rustfs, garage or seaweedfs server / PostgREST HTTP server / pgAdmin web server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network) — Redis, Predixy and Grafana default to \"0.0.0.0\" instead, since their password is always required (and a dashboard is meant to be viewed remotely); pass 127.0.0.1 to keep them loopback-only. Prometheus and Alertmanager ALSO default to 0.0.0.0 but have NO auth at all — Alertmanager worse: anyone reaching its port can create silences (mute on-call). Both are guarded only by the network boundary, so pass 127.0.0.1 to keep them loopback-only")
+	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo, rustfs, garage or seaweedfs server / PostgREST HTTP server / pgAdmin web server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network) — Redis, Predixy and Grafana default to \"0.0.0.0\" instead, since their password is always required (and a dashboard is meant to be viewed remotely); pass 127.0.0.1 to keep them loopback-only. Gitea also defaults to \"0.0.0.0\" — a Git host is pushed to from other machines, and its generated admin login plus closed self-registration are the gate. Prometheus and Alertmanager ALSO default to 0.0.0.0 but have NO auth at all — Alertmanager worse: anyone reaching its port can create silences (mute on-call). Both are guarded only by the network boundary, so pass 127.0.0.1 to keep them loopback-only")
 	addonInstallCmd.Flags().String("root-user", "", "MinIO/silo/rustfs root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config). For garage this is the seeded access key: omit it to auto-generate a GK-prefixed key (garage has no \"admin\" user). For seaweedfs it is the s3.json identity access key: omit it to auto-generate an SW-prefixed key on a SINGLE-NODE install only — under --cluster both it and --root-password are REQUIRED, since each node reads only its own s3.json and must present the identical identity")
 	addonInstallCmd.Flags().String("root-password", "", "MinIO/silo/rustfs root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand). For garage this is the seeded secret key; for seaweedfs the s3.json identity secret key — required (with --root-user) on every node of a --cluster install")
 	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO/silo/rustfs distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (MinIO/silo: path is the in-container export dir — /data with a plain --data-dir node, or /data1../dataN on a --drive node (MNMD); repeat for every node's every drive. rustfs: one endpoint per node — scheme://host:port, no path; it has no multi-node single-drive mode so --drive is required, and it derives the /data/rustfs0../rustfsN suffix itself. The list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
@@ -902,12 +985,12 @@ func init() {
 	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo/rustfs/seaweedfs: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo|rustfs>/<name>/, or the addon dir for seaweedfs; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Seaweedfs serves TLS natively: the S3 port becomes HTTPS-only (cleartext listener off). Changing this needs --force to recreate. NOT for garage: it has no native TLS (rejects --tls); front it with the nginx addon")
 	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo/rustfs: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt for MinIO/silo, rustfs_cert.pem for rustfs, cert.pem for seaweedfs). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
 	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo/rustfs: private key for --tls-cert (PEM; mounted read-only as private.key for MinIO/silo, rustfs_key.pem for rustfs, key.pem for seaweedfs). Must pair with the cert; both are required to enable BYO TLS")
-	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/PostgREST/pgAdmin/Grafana/Prometheus/Alertmanager container even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, a changed pgAdmin --email/--dsn/--pg-name or Grafana --admin-user seed, or to force-recreate a Prometheus instance instead of hot-reloading its config)")
+	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/PostgREST/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea container even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, a changed pgAdmin --email/--dsn/--pg-name, Grafana --admin-user or Gitea --admin-user/--ssh-port/--dsn seed, or to force-recreate a Prometheus instance instead of hot-reloading its config)")
 
 	// redis flags (top-level standalone KV store — the first version-selectable addon)
 	addonInstallCmd.Flags().String("version", "", "Redis major version to install: 7 or 8 (default \"8\"); each maps to a pinned upstream docker.io/library/redis tag. Ignored for every other addon")
-	addonInstallCmd.Flags().String("password", "", "Redis requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls) / Predixy proxy password (REQUIRED, never generated: it must be the proxied cluster's requirepass — read it with `pg addon password redis --name <member>`) / pgAdmin or Grafana WEB login password (generated on first install if omitted — not a PostgreSQL password; retrieve it with `pg addon password pgadmin` or `pg addon password grafana`; for Grafana it only takes effect while grafana.db is absent)")
-	addonInstallCmd.Flags().String("admin-user", "", "Grafana WEB login user (GF_SECURITY_ADMIN_USER; default \"admin\") — the account you sign into the dashboard with, unrelated to any PostgreSQL role")
+	addonInstallCmd.Flags().String("password", "", "Redis requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls) / Predixy proxy password (REQUIRED, never generated: it must be the proxied cluster's requirepass — read it with `pg addon password redis --name <member>`) / pgAdmin, Grafana or Gitea WEB login password (generated on first install if omitted — not a PostgreSQL password; retrieve it with `pg addon password pgadmin`/`grafana`/`gitea`. For Grafana it only takes effect while grafana.db is absent; for Gitea the stored password is the one pgcli CREATES the admin account with, so it is inert on a revived store whose admin already exists)")
+	addonInstallCmd.Flags().String("admin-user", "", "Grafana WEB login user (GF_SECURITY_ADMIN_USER; default \"admin\") / Gitea WEB login user (created via `gitea admin user create`; default \"gitea\" — deliberately NOT the container's OS user \"git\") — the account you sign into the web UI with, unrelated to any PostgreSQL role")
 	addonInstallCmd.Flags().String("email", "", "pgAdmin WEB login email (PGADMIN_DEFAULT_EMAIL; default \"admin@pgcli.lan\") — the account you sign into the web UI with, unrelated to any PostgreSQL role; the image rejects reserved TLDs such as .local")
 	addonInstallCmd.Flags().String("maxmemory", "", "Redis memory cap, e.g. 256mb or 2gb — turns the instance into a real cache (allkeys-lru evicts keys at the cap); empty means no cap")
 	addonInstallCmd.Flags().String("maxmemory-policy", "", "Redis eviction policy to pair with --maxmemory (noeviction | allkeys-lru | allkeys-lfu | volatile-lru | volatile-lfu | volatile-ttl; default allkeys-lru; requires --maxmemory)")
@@ -919,18 +1002,19 @@ func init() {
 	addonInstallCmd.Flags().Int("replica-of-port", 0, "Redis: remote master's port, paired with --replica-of-host")
 
 	// start / stop flags
-	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus or alertmanager instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\")")
+	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager or gitea instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"gitea\")")
 	addonStartCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to start")
-	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin or grafana instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\")")
+	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager or gitea instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"gitea\")")
 	addonStopCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to stop")
 
 	// list / password flags
-	addonListCmd.Flags().Bool("show-password", false, "also print stored credentials (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin/Grafana web login password) — off by default so the listing stays paste-safe")
-	addonPasswordCmd.Flags().String("name", "", "instance to reveal (redis/predixy/minio/silo/rustfs/garage/seaweedfs/pgadmin/grafana; default \"redis\"/\"predixy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"pgadmin\"/\"grafana\")")
+	addonListCmd.Flags().Bool("show-password", false, "also print stored credentials (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin/Grafana/Gitea web login password) — off by default so the listing stays paste-safe")
+	addonPasswordCmd.Flags().String("name", "", "instance to reveal (redis/predixy/minio/silo/rustfs/garage/seaweedfs/pgadmin/grafana/gitea; default \"redis\"/\"predixy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"pgadmin\"/\"grafana\"/\"gitea\")")
 	addonPasswordCmd.Flags().String("file", "", "write the password to this file (mode 0600) instead of stdout, keeping it out of shell history and scrollback")
 
 	// pgdog flags (top-level shared Postgres proxy addon)
-	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port) / PostgREST HTTP host port (0=auto-assign from postgrest_start_port) / Redis host port (0=auto-assign from redis_start_port, default 6379) / Predixy proxy host port (0=auto-assign from predixy_start_port, default 7617) / pgAdmin web host port (0=auto-assign from pgadmin_start_port, default 5050) / Grafana web host port (0=auto-assign from grafana_start_port, default 3000) / Prometheus web host port (0=auto-assign from prometheus_start_port, default 9090) / Alertmanager web host port (0=auto-assign from alertmanager_start_port, default 9093)")
+	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port) / PostgREST HTTP host port (0=auto-assign from postgrest_start_port) / Redis host port (0=auto-assign from redis_start_port, default 6379) / Predixy proxy host port (0=auto-assign from predixy_start_port, default 7617) / pgAdmin web host port (0=auto-assign from pgadmin_start_port, default 5050) / Grafana web host port (0=auto-assign from grafana_start_port, default 3000) / Prometheus web host port (0=auto-assign from prometheus_start_port, default 9090) / Alertmanager web host port (0=auto-assign from alertmanager_start_port, default 9093) / Gitea web host port (0=auto-assign from gitea_start_port, default 3080)")
+	addonInstallCmd.Flags().Int("ssh-port", 0, "Gitea: host port for git-over-ssh (the image's OpenSSH) clone/push — any N>0 enables it. The image always runs sshd, so N=0 does not stop it, only parks it on an idle pool port (off 22). With no explicit value the port auto-assigns from gitea_ssh_start_port (default 2222); on Linux that port is bound directly (host networking), so the clone URL shows ssh://git@<listen>:<port>/...")
 	addonInstallCmd.Flags().String("host", "", "PgDog listen address (default 127.0.0.1)")
 	addonInstallCmd.Flags().String("pool-mode", "", "PgDog pooler mode: transaction (default) or session")
 	addonInstallCmd.Flags().Int("workers", 0, "worker threads: PgDog (default 2) / Predixy proxy WorkerThreads (default 1)")
@@ -981,12 +1065,14 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallPrometheus(cmd)
 	case "alertmanager":
 		return runAddonInstallAlertmanager(cmd)
+	case "gitea":
+		return runAddonInstallGitea(cmd)
 	case "nginx":
 		return runAddonInstallNginx(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, nginx)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -4979,7 +5065,7 @@ func runAddonList(showPassword bool) error {
 					}
 				}
 				if sc.FilerDSN != "" {
-					fmt.Printf("    Filer store: postgres %s\n", filerDBDisplay(sc.FilerDSN))
+					fmt.Printf("    Filer store: postgres %s\n", dsnDisplay(sc.FilerDSN))
 				}
 			}
 			fmt.Printf("    Listen:      %s\n", sc.Listen)
@@ -5299,6 +5385,50 @@ func runAddonList(showPassword bool) error {
 		fmt.Println("  (none)")
 	}
 
+	// gitea (self-hosted Git service — top-level, one container, persistent data dir)
+	fmt.Println()
+	fmt.Println("Web add-ons (gitea):")
+	hasGitea := false
+	if gm, err := podman.NewGiteaManager(cfg); err == nil {
+		for _, name := range sortedAddonNames(cfg.Addons.Gitea) {
+			gc := cfg.Addons.Gitea[name]
+			hasGitea = true
+			status := "stopped"
+			if running, err := gm.ContainerRunning(gc.ContainerName); err == nil && running {
+				status = "running"
+			}
+			fmt.Printf("  %s (name: %s)\n", "gitea", name)
+			fmt.Printf("    Status:      %s\n", status)
+			fmt.Printf("    Web URL:     http://%s:%d/\n", podman.GiteaDisplayHost(gc.Listen), gc.HostPort)
+			if gc.SSH {
+				fmt.Printf("    Git SSH:     ssh://git@%s:%d/\n", podman.GiteaDisplayHost(gc.Listen), gc.SSHPort)
+			}
+			if gc.Dsn != "" {
+				fmt.Printf("    Database:    external PostgreSQL (%s)\n", dsnDisplay(gc.Dsn))
+			}
+			fmt.Printf("    Login user:  %s\n", gc.AdminUser)
+			if showPassword && gc.Password != "" {
+				fmt.Printf("    Login password: %s\n", gc.Password)
+			}
+			fmt.Printf("    Data:        %s\n", gm.DataDir(&gc))
+			fmt.Printf("    Image:       %s\n", gc.ImageTag)
+			fmt.Printf("    Container:   %s\n", gc.ContainerName)
+		}
+	} else if len(cfg.Addons.Gitea) > 0 {
+		// Configured but the manager is unavailable (podman missing): still show them.
+		for _, name := range sortedAddonNames(cfg.Addons.Gitea) {
+			gc := cfg.Addons.Gitea[name]
+			hasGitea = true
+			fmt.Printf("  %s (name: %s)\n", "gitea", name)
+			fmt.Printf("    Status:      n/a (%v)\n", err)
+			fmt.Printf("    Web URL:     http://%s:%d/\n", podman.GiteaDisplayHost(gc.Listen), gc.HostPort)
+			fmt.Printf("    Container:   %s\n", gc.ContainerName)
+		}
+	}
+	if !hasGitea {
+		fmt.Println("  (none)")
+	}
+
 	// nginx (HTTP reverse proxy, top-level addon; Linux + macOS)
 	fmt.Println()
 	fmt.Println("Web add-ons (nginx):")
@@ -5404,6 +5534,14 @@ func addonPasswords(cfg *config.Config) map[string]string {
 	for name, gc := range cfg.Addons.Grafana {
 		out["grafana:"+name] = gc.Password
 	}
+	// Gitea's stored password is the one pgcli created the admin account with
+	// (see runAddonInstallGitea) — a real login for a fresh install, but only
+	// informational on a revived store whose admin pre-dates this pgcli
+	// config entry (rotate it inside the container with `gitea admin user
+	// change-password` in that case).
+	for name, gc := range cfg.Addons.Gitea {
+		out["gitea:"+name] = gc.Password
+	}
 	return out
 }
 
@@ -5496,12 +5634,14 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemovePrometheus(cmd)
 	case "alertmanager":
 		return runAddonRemoveAlertmanager(cmd)
+	case "gitea":
+		return runAddonRemoveGitea(cmd)
 	case "nginx":
 		return runAddonRemoveNginx(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, nginx)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -5810,10 +5950,12 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartPrometheus(cmd)
 	case "alertmanager":
 		return runAddonStartAlertmanager(cmd)
+	case "gitea":
+		return runAddonStartGitea(cmd)
 	case "nginx":
 		return runAddonStartNginx(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, nginx)", addonName)
 	}
 }
 
@@ -5851,10 +5993,12 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopPrometheus(cmd)
 	case "alertmanager":
 		return runAddonStopAlertmanager(cmd)
+	case "gitea":
+		return runAddonStopGitea(cmd)
 	case "nginx":
 		return runAddonStopNginx(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, nginx)", addonName)
 	}
 }
 
@@ -7220,6 +7364,348 @@ func runAddonStopGrafana(cmd *cobra.Command) error {
 		return err
 	}
 	fmt.Printf("✓ Grafana %q stopped\n", name)
+	return nil
+}
+
+// runAddonRemoveGitea removes a Gitea container. The data dir (repos, app.ini
+// with Gitea's self-generated crypto secrets, and the default SQLite DB) is
+// kept unless --clean-data, so remove+reinstall revives everything — including
+// the admin login, which is why a reinstall prints an inert-password NOTE
+// rather than silently "changing" it.
+func runAddonRemoveGitea(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "gitea"
+	}
+	cleanData, _ := cmd.Flags().GetBool("clean-data")
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.Gitea == nil {
+		return fmt.Errorf("no Gitea add-ons configured")
+	}
+	gc, ok := cfg.Addons.Gitea[name]
+	if !ok {
+		return fmt.Errorf("Gitea %q not found", name)
+	}
+
+	gm, err := podman.NewGiteaManager(cfg)
+	if err != nil {
+		return fmt.Errorf("Gitea manager: %w", err)
+	}
+
+	fmt.Printf("-> Removing Gitea %q...\n", name)
+	if err := gm.Remove(&gc, cleanData); err != nil {
+		return err
+	}
+
+	delete(cfg.Addons.Gitea, name)
+	if len(cfg.Addons.Gitea) == 0 {
+		cfg.Addons.Gitea = nil
+	}
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	fmt.Printf("✓ Gitea %q removed\n", name)
+	if !cleanData {
+		fmt.Printf("  (data dir kept — reinstall the same name revives repos and settings; --clean-data to delete it. With --dsn the external database is never touched either way.)\n")
+	}
+	return nil
+}
+
+func runAddonStartGitea(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "gitea"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	if cfg.Addons.Gitea == nil {
+		return fmt.Errorf("no Gitea add-ons configured (run 'pg addon install gitea')")
+	}
+	gc, ok := cfg.Addons.Gitea[name]
+	if !ok {
+		return fmt.Errorf("Gitea %q not found (run 'pg addon install gitea --name %s')", name, name)
+	}
+	if err := ensureProxyBridge(cfg); err != nil {
+		return err
+	}
+	gm, err := podman.NewGiteaManager(cfg)
+	if err != nil {
+		return fmt.Errorf("Gitea manager: %w", err)
+	}
+	fmt.Printf("-> Starting Gitea %q...\n", name)
+	return gm.StartContainer(&gc)
+}
+
+func runAddonStopGitea(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "gitea"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	gc, ok := cfg.Addons.Gitea[name]
+	if !ok {
+		return fmt.Errorf("Gitea %q not found", name)
+	}
+	gm, err := podman.NewGiteaManager(cfg)
+	if err != nil {
+		return fmt.Errorf("Gitea manager: %w", err)
+	}
+	running, _ := gm.ContainerRunning(gc.ContainerName)
+	if !running {
+		fmt.Printf("Gitea %q is not running\n", name)
+		return nil
+	}
+	fmt.Printf("-> Stopping Gitea %q...\n", name)
+	if _, err := gm.Stop(gc.ContainerName); err != nil {
+		return err
+	}
+	fmt.Printf("✓ Gitea %q stopped\n", name)
+	return nil
+}
+
+// runAddonInstallGitea installs a Gitea container — the self-hosted Git
+// service — from the official docker.io/gitea image. Like Grafana it is a
+// top-level-only addon (addons.gitea.<name>, key defaults to "gitea") with a
+// web login and a persistent data dir; configuration is env-only through the
+// image's GITEA__<section>__<KEY> mechanism (the same shape as Grafana's GF_*,
+// folded into app.ini at every boot by the image's environment-to-ini).
+//
+// Two divergences from the Grafana template shape the install flow:
+//   - The admin LOGIN is not an env var. INSTALL_LOCK=true skips the web setup
+//     wizard (an empty instance boots straight to the sign-in page), and the
+//     account is created afterwards via `gitea admin user create` inside the
+//     running container (GiteaManager.CreateAdmin) — so install waits for the
+//     first-boot migrations, then creates the admin. Password is generated
+//     here when empty, never in ApplyDefaults (which must stay deterministic).
+//     On a revived store (or when --dsn points at a database that already has
+//     the account) creation is skipped and the printed login stays what the
+//     store carries — same inert-password caveat as Grafana, detected with
+//     AdminExists instead of the SQLite file stat because a --dsn store is not
+//     visible from the host.
+//   - SECRET_KEY/INTERNAL_TOKEN are deliberately never injected: env
+//     re-application into the PERSISTED app.ini would re-key a surviving
+//     database's encrypted 2FA seeds/OAuth secrets on every reinstall —
+//     silent, unrecoverable. The volume owns crypto state; pgcli owns only
+//     the admin login printed below.
+func runAddonInstallGitea(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "gitea"
+	}
+	imageTag, _ := cmd.Flags().GetString("image")
+	dataDir, _ := cmd.Flags().GetString("data-dir")
+	port, _ := cmd.Flags().GetInt("port")
+	sshPort, _ := cmd.Flags().GetInt("ssh-port")
+	listenAddr, _ := cmd.Flags().GetString("listen")
+	adminUser, _ := cmd.Flags().GetString("admin-user")
+	password, _ := cmd.Flags().GetString("password")
+	dsn, _ := cmd.Flags().GetString("dsn")
+	force, _ := cmd.Flags().GetBool("force")
+
+	// --dsn is validated BEFORE anything is written: an unparseable DSN would
+	// otherwise land in pg.yaml and boot a Gitea that cannot reach its
+	// database (the podmanArgs builder logs-and-falls-back-to-SQLite as a last
+	// resort, which is exactly the silent surprise to prevent here). The
+	// database itself must already exist — pgcli does not create it, Gitea
+	// creates its schema on first boot (same contract as PostgREST --dsn).
+	if dsn != "" {
+		if _, _, _, _, _, err := podman.ParseDSN(dsn); err != nil {
+			return fmt.Errorf("invalid --dsn for Gitea: %w", err)
+		}
+	}
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.Gitea == nil {
+		cfg.Addons.Gitea = make(map[string]config.GiteaConfig)
+	}
+	existing, ok := cfg.Addons.Gitea[name]
+	if !ok {
+		existing = config.GiteaConfig{
+			ContainerName: "pgcli-gitea" + nsSuffixCLI(cfg.Namespace) + "-" + name,
+			Name:          name,
+		}
+	}
+	if dataDir != "" {
+		existing.DataDir = dataDir
+	}
+	if cmd.Flags().Changed("port") {
+		existing.HostPort = port
+	}
+	if cmd.Flags().Changed("ssh-port") {
+		// --ssh-port N (N>0) makes the listener live: git-over-ssh clones on
+		// host port N. 0 disables live cloning — but the image's s6 sshd is
+		// never turn-off-able, so the port is not cleared here either; it just
+		// becomes where that always-running sshd parks instead. An unchanged
+		// config entry keeps its stored value (so a plain re-install does not
+		// silently drop SSH), and a stored SSHPort==0 gets a pool assignment
+		// from ApplyDefaults below.
+		existing.SSHPort = sshPort
+		existing.SSH = sshPort > 0
+	}
+	if listenAddr != "" {
+		existing.Listen = listenAddr
+	}
+	if adminUser != "" {
+		existing.AdminUser = adminUser
+	}
+	if password != "" {
+		existing.Password = password
+	}
+	if dsn != "" {
+		existing.Dsn = dsn
+	}
+	if imageTag != "" {
+		existing.ImageTag = imageTag
+	}
+	// NB: SSHPort is deliberately NOT zeroed when SSH is off. The image's s6
+	// sshd always runs, so an SSH-off instance still needs a port to park it on
+	// (off 22); ApplyDefaults below allocates one for every gitea instance.
+	cfg.Addons.Gitea[name] = existing
+
+	// ApplyDefaults fills ContainerName/Listen/AdminUser and assigns HostPort
+	// (plus SSHPort from the second pool, for every instance — SSH on gets a
+	// live listener, SSH off gets an idle parked sshd) from the
+	// gitea_start_port / gitea_ssh_start_port pools. Password is NOT managed
+	// there — it is a secret the install path owns.
+	cfg.ApplyDefaults()
+	gc := cfg.Addons.Gitea[name]
+
+	if err := ensureProxyBridge(cfg); err != nil {
+		return err
+	}
+
+	gm, err := podman.NewGiteaManager(cfg)
+	if err != nil {
+		return fmt.Errorf("Gitea manager: %w", err)
+	}
+
+	// Reuse semantics identical to Grafana: a live container is left alone, a
+	// stopped one is started, and only --force recreates it so changed
+	// port/listen/admin-user/ssh/dsn take effect.
+	exists, err := gm.ContainerExists(gc.ContainerName)
+	if err != nil {
+		return err
+	}
+	skipped := false
+	if exists && !force {
+		skipped = true
+		if running, _ := gm.ContainerRunning(gc.ContainerName); running {
+			fmt.Printf("-> Gitea container %q already running; skipping creation\n", gc.ContainerName)
+		} else {
+			fmt.Printf("-> Gitea container %q exists but is stopped; starting it\n", gc.ContainerName)
+			if err := gm.StartContainer(&gc); err != nil {
+				return err
+			}
+		}
+	} else {
+		// Fresh install, or a reinstall after a `remove` that kept the data
+		// dir. Generate the login password when none is stored. The revive
+		// check is the DB the INSTANCE reports, not a host-side file stat:
+		// with --dsn the metadata lives in the external Postgres where
+		// GiteaStoreExists cannot see. Ask the container after it is up
+		// (AdminExists below) — but the password must already be decided to
+		// create the admin with, so on a revive the printed login simply
+		// stops being this one, same note as Grafana's.
+		if gc.Password == "" {
+			pw, err := generatePassword(20)
+			if err != nil {
+				return fmt.Errorf("generating Gitea password: %w", err)
+			}
+			gc.Password = pw
+		}
+		// SQLite-only cheap pre-check, kept for the NOTE wording parity on a
+		// revived local store; the authoritative gate is AdminExists below.
+		revived := gc.Dsn == "" && podman.GiteaStoreExists(gm.DataDir(&gc))
+		fmt.Printf("-> Preparing Gitea image %s...\n", gc.ImageTag)
+		if err := gm.EnsureImage(gc.ImageTag); err != nil {
+			return err
+		}
+		if revived {
+			fmt.Println("-> NOTE: reviving an existing Gitea data dir — its stored admin login still applies; the password below only takes effect if that account does not exist (change it inside the container with `gitea admin user change-password`).")
+		}
+		fmt.Println("-> Starting Gitea container...")
+		if err := gm.EnsureContainer(&gc); err != nil {
+			return err
+		}
+		// First boot runs migrations (app.ini keys, SQLite DB or Postgres
+		// schema) before the CLI answers; CreateAdmin must wait for that.
+		fmt.Println("-> Waiting for Gitea to initialize...")
+		if err := gm.WaitForReady(&gc, 2*time.Minute); err != nil {
+			return err
+		}
+		adminExists, err := gm.AdminExists(&gc)
+		if err != nil {
+			return fmt.Errorf("checking Gitea admin user: %w", err)
+		}
+		if !adminExists {
+			fmt.Printf("-> Creating admin user %q...\n", gc.AdminUser)
+			if err := gm.CreateAdmin(&gc); err != nil {
+				return err
+			}
+		}
+	}
+
+	cfg.Addons.Gitea[name] = gc
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	fmt.Println()
+	if skipped {
+		fmt.Printf("✓ Gitea already present: %q\n", name)
+	} else {
+		fmt.Printf("✓ Gitea installed: %q\n", name)
+	}
+	fmt.Printf("  Container:  %s\n", gc.ContainerName)
+	fmt.Printf("  Image:      %s\n", gc.ImageTag)
+	fmt.Printf("  Data:       %s\n", gm.DataDir(&gc))
+	if gc.Dsn != "" {
+		fmt.Printf("  Database:   %s (external PostgreSQL via dsn)\n", dsnDisplay(gc.Dsn))
+	}
+	fmt.Printf("  Web URL:    http://%s:%d/\n", podman.GiteaDisplayHost(gc.Listen), gc.HostPort)
+	if gc.SSH {
+		fmt.Printf("  Git SSH:    ssh://git@%s:%d/<owner>/<repo>.git\n", podman.GiteaDisplayHost(gc.Listen), gc.SSHPort)
+	} else {
+		fmt.Println("  Git SSH:    disabled (HTTP clone/push only; enable with --ssh-port N --force)")
+	}
+	fmt.Println()
+	fmt.Printf("  Login user:     %s\n", gc.AdminUser)
+	fmt.Printf("  Login password: %s\n", gc.Password)
+	fmt.Println("  (Web login only — not a PostgreSQL password. Retrieve it later with `pg addon password gitea`.)")
+	fmt.Println()
+	fmt.Println("  Create your first org/repo in the web UI; the admin above has site-admin rights.")
+	if gc.Listen == "0.0.0.0" {
+		fmt.Println("  NOTE: listening on every interface (a Git host is usually reached from other machines); the login above and closed self-registration are the only gate.")
+		fmt.Printf("        loopback-only: pg addon install gitea --name %s --listen 127.0.0.1 --force\n", name)
+	}
 	return nil
 }
 

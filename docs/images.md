@@ -33,6 +33,7 @@ pgcli 使用的容器镜像及其默认 tag。
 | `docker.io/grafana/grafana` | `13.2.4` | Grafana（开源可观测性面板），纯上游官方镜像无 wrapper；自 12.4.0 起 `grafana-oss` 仓库冻结，OSS 构建就发在这个仓库里；默认 Alpine base，双架构 manifest list | `config.go:578`（`DefaultGrafanaImageTag`） |
 | `docker.io/prom/prometheus` | `v3.15.0` | Prometheus（指标采集后端，Grafana 的数据源），纯上游官方镜像无 wrapper；无后缀 tag 即 busybox 变体（带 shell），双架构 manifest list | `config.go:591`（`DefaultPrometheusImageTag`） |
 | `docker.io/prom/alertmanager` | `v0.34.1` | Alertmanager（Prometheus 下游的告警去重/分组/路由端），纯上游官方镜像无 wrapper；无后缀 tag 即 busybox 变体（带 `amtool`），多架构 manifest list | `config.go:603`（`DefaultAlertmanagerImageTag`） |
+| `docker.io/gitea/gitea` | `28.1.0` | Gitea（自托管 Git 服务），纯上游官方镜像无 wrapper；pin 的是 **rootful** 构建（`-rootless` 变体数据布局互不兼容，pgcli 永不选用）；多架构 manifest list（amd64 + arm64 + riscv64） | `config.go:619`（`DefaultGiteaImageTag`） |
 
 ## 镜像导出
 
@@ -109,6 +110,10 @@ podman save -o "$TARGET/prometheus_v3.15.0.tar" docker.io/prom/prometheus:v3.15.
 # alertmanager 上游镜像同样是多架构 manifest list，先按 amd64 pull 再 save
 podman pull --platform linux/amd64 docker.io/prom/alertmanager:v0.34.1
 podman save -o "$TARGET/alertmanager_v0.34.1.tar" docker.io/prom/alertmanager:v0.34.1
+
+# gitea 上游镜像同样是多架构 manifest list，先按 amd64 pull 再 save
+podman pull --platform linux/amd64 docker.io/gitea/gitea:28.1.0
+podman save -o "$TARGET/gitea_28.1.0.tar" docker.io/gitea/gitea:28.1.0
 ```
 
 ### rustfs（双架构 manifest 不能直接 save）
@@ -209,10 +214,21 @@ done
   **在镜像里关不掉**（不像 prometheus 的 `--web.enable-lifecycle` 可不设即隐去）——
   pgcli 走 SIGHUP、不依赖该端点，但路由照样敞开，故暴露面比 prometheus 更危险（可达即
   可创建 silence 静音 oncall）
+- **gitea**：纯上游官方 `docker.io/gitea/gitea`，无 wrapper。注意版本线：Gitea 于
+  2026 年底把历史 `1.` 前缀去掉，原 1.28.0 即 `28.0.0`，pin 的是当前 stable
+  `28.1.0`（2026-10-15 在 Docker Hub 核实），多架构 manifest list（amd64 + arm64 +
+  riscv64）。镜像有 **rootful / rootless 两套构建**，二者数据布局互不兼容、选定后不可
+  切换（`-rootless` 是 tag 后缀）；pgcli 一律 pin rootful（无后缀）并预 chown 宿主数据
+  目录。rootful 构建以 `git` 用户跑，默认 uid/gid **1000**（经 `USER_UID`/`USER_GID`
+  重新传入以钉死，宿主预 chown 无从漂移）——与 grafana 的 uid 472、prometheus 的
+  65534 同属"镜像固化用户、entrypoint 不修复既有挂载属主"的形态，所以 pgcli 在创建容器
+  前于宿主 chown（rootless 下 `podman unshare chown 1000:1000`，rootful+root 下直接
+  `chown`）。配置只经 env（`GITEA__*` 每次启动折叠进持久化的 app.ini），且
+  `SECRET_KEY`/`INTERNAL_TOKEN` 刻意**不注入**（否则重装会静默重设幸存数据库的密钥）
 - **pgbouncer** / **postgrest** / **haproxy** / **etcd** / **pgdog**：上游官方或社区维护的稳定版本
 
 ---
 
-**最后更新**：2026-10-15（新增 alertmanager 插件镜像；此前 grafana 与 prometheus
-于 2026-10-14 合入时补录，再往前 garage 与 seaweedfs 分别于 2026-10-12 /
-2026-10-14 合入时补录）
+**最后更新**：2026-10-16（新增 gitea 插件镜像；此前 alertmanager 于 2026-10-15
+合入时补录，grafana 与 prometheus 于 2026-10-14 合入时补录，再往前 garage 与
+seaweedfs 分别于 2026-10-12 / 2026-10-14 合入时补录）

@@ -57,6 +57,7 @@ pgcli 在 Linux 和 macOS 上都是驱动 [Podman](https://podman.io) 容器运�
 | 插件 —— **Grafana** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
 | 插件 —— **Prometheus** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
 | 插件 —— **Alertmanager** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
+| 插件 —— **Gitea** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
 | 插件 —— **nginx** | ✅ host 网络 | ✅ bridge，发布端口（轻度实测） |
 | 客户端 —— **`pg mc`**（MinIO 客户端） | ✅ host 网络 | ✅ bridge（见下） |
 | 高可用 —— **Patroni**（`pg ha`） | ✅ 含跨主机 | ❌ 仅 Linux |
@@ -162,6 +163,22 @@ macOS 上这些都是**单主机**：跨主机副本、跨多机的连接池属�
   尖锐的暴露面上：`Listen` 默认 `0.0.0.0` 且**完全无鉴权**，能连到端口即可**创建
   silence**——悄悄压掉 oncall 期待的每一条通知。macOS 上加入 `pgcli-net` 并发布
   端口 —— 同一条 bridge 路径，代码完备但尚未在 Mac 上跑过。
+- **[Gitea](/docs/addon/gitea/)** —— **Linux；macOS 代码完备、未实测**。自托管
+  Git 服务，跑纯上游 `docker.io/gitea/gitea` 镜像（rootful 构建——rootless 变体的
+  数据布局互不兼容，pgcli 永不选它）。属主形态与 Grafana 同构只是数字不同：守护
+  进程 su-exec 降到固化的 `git` 用户，uid/gid `1000`（经 `USER_UID`/`USER_GID`
+  钉死，宿主预 chown 无从漂移），不带 `--user` flag；pgcli 同样预 chown 宿主
+  `/data` 目录。配置只经环境变量（`GITEA__*` 每次启动折叠进**持久化**的
+  `app.ini`）——这也正是 `SECRET_KEY`/`INTERNAL_TOKEN` 绝不注入的原因：重新生成的
+  secret 会在重装时静默重设幸存数据库的密钥。安装免向导（`INSTALL_LOCK`），admin
+  随后经容器内 CLI 创建。单端口惯例之外有两张可选面孔：`--dsn` 把元数据搬到外置
+  PostgreSQL（pgcli 从不建库也从不删库）；git-over-ssh 跑在镜像自带的 OpenSSH
+  `sshd` 上，而这个 sshd 在**每个**实例上都无条件在跑（s6 服务关不掉）。
+  `--ssh-port N` 让它变成 N 端口上的活克隆端点；默认关时它只是 parked 在池端口上
+  ——但无论如何都得给它 park 个地方：宿主网络下若留在 22 就会永远跟宿主 sshd 死磕。`Listen` 默认
+  `0.0.0.0`（Git 服务天然要给别的机器克隆），由自动生成的 admin 密码与关闭自助
+  注册兜底。macOS 上加入 `pgcli-net` 并发布 Web 端口、以及启用 SSH 时的 SSH
+  端口；代码完备但尚未在 Mac 上跑过。
 - **[nginx](/docs/addon/nginx/)** —— **两个平台都支持（macOS 轻度实测）**。HTTP
   反向代理，Linux 上走 host 网络；macOS 上加入 `pgcli-net` 并发布端口，与对象
   存储同一条 bridge 路径 —— 已跑通过但未经负载考验。上游镜像多架构

@@ -61,6 +61,7 @@ across machines, or that depend on Linux-only container internals, stay
 | Addon — **Grafana** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
 | Addon — **Prometheus** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
 | Addon — **Alertmanager** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
+| Addon — **Gitea** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
 | Addon — **nginx** | ✅ host network | ✅ bridge, published ports (lightly tested) |
 | Client — **`pg mc`** (MinIO client) | ✅ host network | ✅ bridge (see below) |
 | HA — **Patroni** (`pg ha`) | ✅ incl. cross-host | ❌ Linux only |
@@ -187,6 +188,28 @@ Addon networking differs per component:
   reaching the port lets anyone **create silences** — silently muting every
   notification the on-call expects. On macOS it joins `pgcli-net` with the port
   published — the same bridge path, code-complete but not yet exercised on a Mac.
+- **[Gitea](/docs/addon/gitea/)** — **Linux; macOS code-complete, untested.** The
+  self-hosted Git service runs from the plain upstream `docker.io/gitea/gitea`
+  image (rootful build — the rootless variant's data layout is incompatible and
+  pgcli never selects it). Ownership is Grafana's shape with a different number:
+  the daemon drops to the baked `git` user, uid/gid `1000` (pinned via
+  `USER_UID`/`USER_GID` so a host pre-chown cannot drift), no `--user` flag;
+  pgcli pre-chowns the host `/data` dir the same way. Config is env-only
+  (`GITEA__*` folded into the persisted `app.ini` on every boot) — which is
+  exactly why `SECRET_KEY`/`INTERNAL_TOKEN` are never injected: a regenerated
+  secret would silently re-key a surviving database on reinstall. The install is
+  no-wizard (`INSTALL_LOCK`) and the admin is created afterwards through the
+  in-container CLI. Two optional faces beyond the single-port norm: `--dsn`
+  moves the metadata to an external PostgreSQL (never created or dropped by
+  pgcli), and git-over-ssh rides the image's OpenSSH `sshd`, which runs on
+  *every* instance (the s6 service is unconditional). `--ssh-port N` makes that
+  sshd the live clone endpoint on host port N; off by default it is just parked
+  on a pool port — but it must be parked somewhere, because on the host network
+  an sshd left on 22 would fight the host sshd forever.
+  `Listen` defaults to `0.0.0.0` (a Git host is cloned from other machines),
+  guarded by the generated admin password and closed self-registration. On
+  macOS it joins `pgcli-net` with the web port — and, when SSH is enabled, the
+  SSH port — published; code-complete but not yet exercised on a Mac.
 - **[nginx](/docs/addon/nginx/)** — **both platforms (macOS lightly
   tested).** The HTTP reverse proxy joins `pgcli-net` on macOS with its ports
   published — the same bridge path the object stores use; it has been exercised

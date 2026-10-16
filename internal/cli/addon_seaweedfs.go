@@ -380,7 +380,7 @@ func runAddonInstallSeaweedfs(cmd *cobra.Command) error {
 	if sc.Clustered() {
 		fmt.Printf("  Cluster:       %s (replication %s, advertise %s)\n", sc.Cluster, sc.Replication, sc.AdvertiseHost)
 		fmt.Printf("  Peers:         %s\n", podman.SeaweedfsPeersFlag(&sc))
-		fmt.Printf("  Filer store:   postgres %s\n", filerDBDisplay(sc.FilerDSN))
+		fmt.Printf("  Filer store:   postgres %s\n", dsnDisplay(sc.FilerDSN))
 	}
 	fmt.Println()
 	fmt.Printf("  Access key:    %s\n", sc.RootUser)
@@ -437,9 +437,11 @@ func seedSeaweedfsBucket(sc *config.SeaweedfsConfig) error {
 	return mcm.Run([]string{"mb", "--ignore-existing", alias + "/" + sc.Bucket})
 }
 
-// filerDBDisplay renders a DSN as host:port/db with the password hidden, for
-// the install summary and `pg addon list`.
-func filerDBDisplay(dsn string) string {
+// dsnDisplay renders a DSN as host:port/db with the password hidden, for
+// the install summary and `pg addon list`. Shared by every addon that stores
+// an external-database DSN (seaweedfs's filer, gitea's metadata db) so a
+// credential never reaches terminal scrollback through a listing.
+func dsnDisplay(dsn string) string {
 	host, port, _, _, db, err := podman.ParseDSN(dsn)
 	if err != nil {
 		return "(unparseable dsn)"
@@ -487,7 +489,7 @@ func runAddonRemoveSeaweedfs(cmd *cobra.Command) error {
 		return err
 	}
 	if sc.FilerDSN != "" {
-		fmt.Printf("  [i] The filer metadata database (%s) was KEPT — pgcli never drops databases; drop it yourself if the data is disposable.\n", filerDBDisplay(sc.FilerDSN))
+		fmt.Printf("  [i] The filer metadata database (%s) was KEPT — pgcli never drops databases; drop it yourself if the data is disposable.\n", dsnDisplay(sc.FilerDSN))
 	}
 
 	delete(cfg.Addons.Seaweedfs, name)

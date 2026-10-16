@@ -41,6 +41,7 @@ pgcli 支持通过插件系统扩展 PostgreSQL 功能。插件是独立的容�
 | [`grafana`](./grafana/) | Grafana——开源可观测性面板，单容器直接跑官方上游镜像；Web 登录自动生成，`Listen` 默认 `0.0.0.0`（关闭自助注册），v1 只经环境变量（`GF_*`）配置、无 provisioning；独立端口池（Linux；macOS 代码完备、未实测） |
 | [`prometheus`](./prometheus/) | Prometheus——Grafana 读取的指标采集后端，单容器直接跑官方 `docker.io/prom/prometheus` 镜像；渲染 `prometheus.yml`（自带自监控 job + 每个 `--scrape` JOB 一个 job，该 job 声明的 target 全部并入其中；`--scrape-append` 增量合并；`--alertmanager-url` 转发已触发告警并附带对应的抓取 job；`--rule-file` 拷贝并加载告警规则）或用自己的 `--conf-file`，`pg addon prometheus reload` 经 SIGHUP 热加载；**无 Web 登录**——`Listen` 默认 `0.0.0.0` 仅靠网络边界保护（仅本机访问用 `--listen 127.0.0.1`）；独立端口池（Linux；macOS 代码完备、未实测） |
 | [`alertmanager`](./alertmanager/) | Alertmanager——Prometheus 体系的告警去重/分组/路由端，单容器直接跑官方 `docker.io/prom/alertmanager` 镜像；渲染 `alertmanager.yml`（一条最小路由指向 no-op 或 `--webhook-url` 的 `web.hook` receiver）或用自己的 `--conf-file`，`pg addon alertmanager reload` 经 SIGHUP 热加载；HA 集群 gossip 已禁用（`9094` 永不开）；**无 Web 登录**——`Listen` 默认 `0.0.0.0` 仅靠网络边界保护，而可触达即意味着任何人能创建 silence（静音 on-call），仅本机访问用 `--listen 127.0.0.1`；与 Prometheus 的衔接在 Prometheus 侧完成（`pg addon install prometheus --alertmanager-url`）；独立端口池（Linux；macOS 代码完备、未实测） |
+| [`gitea`](./gitea/) | Gitea——自托管 Git 服务，单容器直接跑官方 `docker.io/gitea/gitea` 镜像（rootful 构建，以 uid 1000 运行）；免向导安装（`INSTALL_LOCK`）+ 自动创建的 admin，其 Web 登录自动生成、打印一次、可用 `pg addon password gitea` 取回；默认内嵌 SQLite，或用 `--dsn` 接外置 PostgreSQL（Gitea 自建 schema，pgcli 从不建库/删库）；可选经 `--ssh-port` 启用内建 OpenSSH 支持 `ssh://` 克隆（独立第二端口池；默认关闭——宿主网络下监听器绑的是宿主端口，而 22 是别人的 sshd）；加密 secret（`SECRET_KEY`/`INTERNAL_TOKEN`）刻意永不注入——它们归持久 volume 所有，以免重装静默重设密钥锁死幸存数据库；`Listen` 默认 `0.0.0.0`（关闭注册），配置只经环境变量（`GITEA__*`）交付；独立端口池（Linux；macOS 代码完备、未实测） |
 
 每个插件都有独立页面，包含命令、参数与故障排除说明。
 
@@ -69,4 +70,4 @@ pg addon remove <addon> [flags]     # 移除插件、容器与数据
 ```
 
 各插件的具体参数与示例见其独立页面：
-[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [PostgREST](./postgrest/) · [HAProxy](./haproxy/) · [MinIO](./minio/) · [Silo](./silo/) · [rustfs](./rustfs/) · [Garage](./garage/) · [SeaweedFS](./seaweedfs/) · [Redis](./redis/) · [Predixy](./predixy/) · [pgAdmin 4](./pgadmin/) · [nginx](./nginx/) · [Grafana](./grafana/) · [Prometheus](./prometheus/) · [Alertmanager](./alertmanager/)。Patroni 相关页面见 [HA 集群](../ha-cluster/)。
+[Pgbouncer](./pgbouncer/) · [etcd](./etcd/) · [PgDog](./pgdog/) · [PostgREST](./postgrest/) · [HAProxy](./haproxy/) · [MinIO](./minio/) · [Silo](./silo/) · [rustfs](./rustfs/) · [Garage](./garage/) · [SeaweedFS](./seaweedfs/) · [Redis](./redis/) · [Predixy](./predixy/) · [pgAdmin 4](./pgadmin/) · [nginx](./nginx/) · [Grafana](./grafana/) · [Prometheus](./prometheus/) · [Alertmanager](./alertmanager/) · [Gitea](./gitea/)。Patroni 相关页面见 [HA 集群](../ha-cluster/)。

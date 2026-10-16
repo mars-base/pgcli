@@ -75,8 +75,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartNginx(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --nginx)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartGitea(c) && !hasAutostartNginx(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --gitea / --nginx)")
 		return nil
 	}
 
@@ -224,6 +224,14 @@ func startAutostart() error {
 	// the natural companion to the collector above (v1 does not wire the two
 	// together, but boot order anticipates a future link-up).
 	if err := startAutostartAlertmanager(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// Gitea instances (top-level web addon, self-hosted Git). Started after the
+	// monitoring stack and before nginx: it is a plausible reverse-proxy
+	// backend, and with --dsn its external PostgreSQL (a managed instance, or
+	// any reachable server) comes up earlier in this pass anyway.
+	if err := startAutostartGitea(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -994,6 +1002,52 @@ func startAutostartAlertmanager(c *config.Config) error {
 		ac := c.Addons.Alertmanager[name]
 		if err := am.StartContainer(&ac); err != nil {
 			fmt.Printf("  [X] alertmanager autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartGitea reports whether any Gitea instance is autostart-enabled.
+func hasAutostartGitea(c *config.Config) bool {
+	for _, gc := range c.Addons.Gitea {
+		if gc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartGitea starts each autostart-enabled Gitea instance. Start-only
+// like Grafana's: the container comes up reading the app.ini already rendered
+// into its /data volume, recreating the container if it was removed — install
+// first. The data dir was pre-chowned to the image's git uid/gid 1000 at create
+// time (a plain `podman start` of an existing container needs none), so the
+// boot-time start needs the same podman access as install. Order is sorted by
+// instance name for deterministic boot logs.
+func startAutostartGitea(c *config.Config) error {
+	var names []string
+	for name, gc := range c.Addons.Gitea {
+		if gc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	gm, err := podman.NewGiteaManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		gc := c.Addons.Gitea[name]
+		if err := gm.StartContainer(&gc); err != nil {
+			fmt.Printf("  [X] gitea autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}

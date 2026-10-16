@@ -36,6 +36,8 @@ type Config struct {
 	GrafanaStartPort        int                       `yaml:"grafana_start_port,omitempty"`         // starting Grafana web host port, default 3000
 	PrometheusStartPort     int                       `yaml:"prometheus_start_port,omitempty"`      // starting Prometheus web host port, default 9090
 	AlertmanagerStartPort   int                       `yaml:"alertmanager_start_port,omitempty"`    // starting Alertmanager web host port, default 9093
+	GiteaStartPort          int                       `yaml:"gitea_start_port,omitempty"`           // starting Gitea web host port, default 3080 (Gitea's own default 3000 belongs to the Grafana pool here)
+	GiteaSSHStartPort       int                       `yaml:"gitea_ssh_start_port,omitempty"`       // starting Gitea OpenSSH host port, default 2222 (allocated for every gitea instance — the image's sshd always runs, so even SSH-off needs a port to park it on, off 22)
 	NginxStartPort          int                       `yaml:"nginx_start_port,omitempty"`           // starting nginx HTTP host port, default 8080 (HTTPS takes the next free port)
 	GarageStartPort         int                       `yaml:"garage_start_port,omitempty"`          // starting Garage S3 API host port, default 3900 (RPC, web, admin take the next three free ports)
 	SeaweedfsStartPort      int                       `yaml:"seaweedfs_start_port,omitempty"`       // starting SeaweedFS master host port, default 8400 (volume, filer, s3 take the next three free ports; gRPC twins at +10000 are reserved)
@@ -106,6 +108,7 @@ type TopAddonsConfig struct {
 	Grafana      map[string]GrafanaConfig        `yaml:"grafana,omitempty"`
 	Prometheus   map[string]PrometheusConfig     `yaml:"prometheus,omitempty"`
 	Alertmanager map[string]AlertmanagerConfig   `yaml:"alertmanager,omitempty"`
+	Gitea        map[string]GiteaConfig          `yaml:"gitea,omitempty"`
 	Nginx        map[string]NginxConfig          `yaml:"nginx,omitempty"`
 }
 
@@ -601,6 +604,19 @@ const DefaultPrometheusImageTag = "docker.io/prom/prometheus:v3.15.0"
 // mounts — see internal/podman.AlertmanagerManager for how pgcli makes a
 // bind-mounted /alertmanager writable by 65534. Keep this in sync when bumping.
 const DefaultAlertmanagerImageTag = "docker.io/prom/alertmanager:v0.34.1"
+
+// DefaultGiteaImageTag pins the Gitea image. gitea/gitea is the official
+// multi-arch image on docker.io (pull-only — pgcli never builds it). Note the
+// version line: Gitea DROPPED the historical "1." prefix in late 2026, so the
+// release that would have been 1.28.0 is 28.0.0; 28.1.0 is the current latest
+// (verified on Docker Hub 2026-10-15). pgcli pins the ROOTFUL build (no
+// suffix): a -rootless variant exists but the two data layouts are mutually
+// incompatible, so the flavor must never flip across reinstalls. The rootful
+// image runs its gitea process as the `git` user, default uid/gid 1000 (the
+// entrypoint takes USER_UID/USER_GID), and expects /data owned by that uid —
+// see internal/podman.GiteaManager for how pgcli pre-chowns the bind-mounted
+// data dir. Keep this in sync when bumping.
+const DefaultGiteaImageTag = "docker.io/gitea/gitea:28.1.0"
 
 // DefaultRedisMajor is the Redis major version installed when --version is not
 // given: "8", the current stable line upstream (docker.io/library/redis).
@@ -1415,7 +1431,7 @@ type PrometheusConfig struct {
 	// config wires it up automatically; a conf-file owner decides itself whether
 	// to point its own rule_files at /etc/prometheus/rules.
 	RuleFiles []string `yaml:"rule_files,omitempty"`
-	ConfFile       string   `yaml:"conf_file,omitempty"`       // optional host path to the user's own prometheus.yml; when set pgcli skips rendering and copies this file into the managed path to mount (mutually exclusive with Scrape/ScrapeInterval)
+	ConfFile  string   `yaml:"conf_file,omitempty"` // optional host path to the user's own prometheus.yml; when set pgcli skips rendering and copies this file into the managed path to mount (mutually exclusive with Scrape/ScrapeInterval)
 	// Autostart brings this container up on host boot via the boot service
 	// (pg autostart enable --prometheus). Start-only: it starts the existing
 	// container, so install first.
@@ -1454,6 +1470,49 @@ type AlertmanagerConfig struct {
 	ConfFile      string   `yaml:"conf_file,omitempty"` // optional host path to the user's own alertmanager.yml; when set pgcli skips rendering and copies this file into the managed path to mount (mutually exclusive with Webhook)
 	// Autostart brings this container up on host boot via the boot service
 	// (pg autostart enable --alertmanager). Start-only: it starts the existing
+	// container, so install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// GiteaConfig holds a standalone Gitea addon — the self-hosted Git service
+// (https://about.gitea.com/). Shape mirrors GrafanaConfig: a web UI on one
+// host port, env-only config (GITEA__<section>__<KEY> variables the image's
+// environment-to-ini folds into app.ini at every boot), an auto-generated
+// admin login, and a persistent /data dir outliving the container.
+//
+// Two deliberate divergences from the Grafana template:
+//
+//   - The crypto secrets (SECRET_KEY / INTERNAL_TOKEN) are NEVER pgcli-
+//     injected. The image re-applies GITEA__* env into the PERSISTED
+//     <data>/gitea/conf/app.ini on every boot, so a per-install regenerated
+//     secret would silently re-key a surviving database whose 2FA seeds and
+//     OAuth client secrets were encrypted under the old one — unrecoverable,
+//     with no error. Gitea generates them itself on first boot; the volume
+//     owns crypto state, pgcli owns only the admin web login.
+//   - Non-interactive boot: INSTALL_LOCK=true via env skips the web setup
+//     wizard, and the admin account is created afterward with
+//     `gitea admin user create` executed inside the container (see
+//     podman.GiteaManager.CreateAdmin), generated-password semantics otherwise
+//     identical to Grafana's (only honoured against a fresh store).
+//
+// Ownership: the rootful image runs as the `git` user, default uid/gid 1000,
+// and its entrypoint expects /data owned by it. pgcli pre-chowns the host data
+// dir to 1000:1000 (podman unshare chown under rootless, direct chown as root
+// on a rootful host — same contract as Grafana/Prometheus, different uid).
+type GiteaConfig struct {
+	ContainerName string `yaml:"container_name"`       // pgcli-gitea<ns>-<name>
+	Name          string `yaml:"name,omitempty"`       // addon key, defaults to the map key
+	ImageTag      string `yaml:"image_tag,omitempty"`  // docker.io/gitea/gitea:28.1.0 (default)
+	HostPort      int    `yaml:"host_port,omitempty"`  // web host port, 3080+ auto-assigned
+	Listen        string `yaml:"listen,omitempty"`     // bind address, default 0.0.0.0 (see ApplyDefaults walk for rationale)
+	AdminUser     string `yaml:"admin_user,omitempty"` // web login username, default gitea (distinct from the container's OS user git)
+	Password      string `yaml:"password,omitempty"`   // admin password; generated when empty. A secret — never defaulted to a literal. Only takes effect on first startup against a fresh store; a revived instance keeps its own login (see podman.GiteaStoreExists).
+	DataDir       string `yaml:"data_dir,omitempty"`   // host dir mounted at /data (repos, app.ini, SQLite, ssh keys); default <base>/addon/gitea/<name>/data
+	SSH           bool   `yaml:"ssh,omitempty"`        // live git-over-ssh: DISABLE_SSH=false so Gitea writes the git user's authorized_keys for the image's sshd (clone over ssh:// in addition to HTTP). Off by default — but that only stops *live* cloning, not the sshd process itself: the official image runs s6 sshd unconditionally, so even an SSH-off instance parks it on SSHPort below.
+	SSHPort       int    `yaml:"ssh_port,omitempty"`   // host port the image's s6 sshd binds (via the bare SSH_LISTEN_PORT/SSH_PORT env it actually reads). Allocated from the gitea_ssh_start_port pool for EVERY instance, SSH on or off — parking the always-on sshd off 22 is the whole point. When SSH is on it is a live listener mirrored into the clone URLs; when off it is an idle listener nothing connects to. 0 = auto.
+	Dsn           string `yaml:"dsn,omitempty"`        // optional postgres://user:pass@host:port/db for Gitea's metadata database (rendered into GITEA__database__*); empty = embedded SQLite inside /data. The database must already exist — Gitea creates its own schema on first boot.
+	// Autostart brings this container up on host boot via the boot service
+	// (pg autostart enable --gitea). Start-only: it starts the existing
 	// container, so install first.
 	Autostart bool `yaml:"autostart,omitempty"`
 }
@@ -1557,6 +1616,8 @@ func Default() *Config {
 		GrafanaStartPort:        3000,
 		PrometheusStartPort:     9090,
 		AlertmanagerStartPort:   9093,
+		GiteaStartPort:          3080,
+		GiteaSSHStartPort:       2222,
 		NginxStartPort:          8080,
 		GarageStartPort:         3900,
 		SeaweedfsStartPort:      8400,
@@ -1764,6 +1825,8 @@ type displayConfig struct {
 	GrafanaStartPort        int                       `yaml:"grafana_start_port,omitempty"`
 	PrometheusStartPort     int                       `yaml:"prometheus_start_port,omitempty"`
 	AlertmanagerStartPort   int                       `yaml:"alertmanager_start_port,omitempty"`
+	GiteaStartPort          int                       `yaml:"gitea_start_port,omitempty"`
+	GiteaSSHStartPort       int                       `yaml:"gitea_ssh_start_port,omitempty"`
 	NginxStartPort          int                       `yaml:"nginx_start_port,omitempty"`
 	GarageStartPort         int                       `yaml:"garage_start_port,omitempty"`
 	SeaweedfsStartPort      int                       `yaml:"seaweedfs_start_port,omitempty"`
@@ -1796,6 +1859,8 @@ func (c *Config) Display() displayConfig {
 		GrafanaStartPort:        c.GrafanaStartPort,
 		PrometheusStartPort:     c.PrometheusStartPort,
 		AlertmanagerStartPort:   c.AlertmanagerStartPort,
+		GiteaStartPort:          c.GiteaStartPort,
+		GiteaSSHStartPort:       c.GiteaSSHStartPort,
 		NginxStartPort:          c.NginxStartPort,
 		GarageStartPort:         c.GarageStartPort,
 		SeaweedfsStartPort:      c.SeaweedfsStartPort,
@@ -1905,6 +1970,12 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.AlertmanagerStartPort == 0 {
 		c.AlertmanagerStartPort = d.AlertmanagerStartPort
+	}
+	if c.GiteaStartPort == 0 {
+		c.GiteaStartPort = d.GiteaStartPort
+	}
+	if c.GiteaSSHStartPort == 0 {
+		c.GiteaSSHStartPort = d.GiteaSSHStartPort
 	}
 	if c.NginxStartPort == 0 {
 		c.NginxStartPort = d.NginxStartPort
@@ -2543,6 +2614,36 @@ func (c *Config) ApplyDefaults() {
 			addon.Listen = "0.0.0.0"
 		}
 		c.Addons.Alertmanager[name] = addon
+	}
+
+	// Top-level addons defaults (Gitea). Same shape as Grafana above: Listen
+	// defaults to 0.0.0.0 (a git host is cloned from other machines), and
+	// Password is deliberately NOT defaulted here — ApplyDefaults must stay
+	// deterministic and a login password must never be a hardcoded literal;
+	// the CLI install handler generates one when empty, and it only ever takes
+	// effect against a fresh store (see podman.GiteaStoreExists). AdminUser
+	// defaults to "gitea" on purpose: "git" is the container's OS user that
+	// ssh clone authenticates AS, keeping the web admin distinct avoids two
+	// different "git"s in every clone URL and error message. SSH/SSHPort/Dsn
+	// are never defaulted — zero/empty means "built-in SSH listener off /
+	// embedded SQLite", which are the rendered configurations, not gaps.
+	for name, addon := range c.Addons.Gitea {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-gitea" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultGiteaImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "0.0.0.0"
+		}
+		if addon.AdminUser == "" {
+			addon.AdminUser = "gitea"
+		}
+		c.Addons.Gitea[name] = addon
 	}
 
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
@@ -3253,6 +3354,88 @@ func (c *Config) autoAssignPorts() {
 				next = addon.HostPort + 1
 			}
 			c.Addons.Alertmanager[name] = addon
+		}
+	}
+
+	// Allocate ports for Gitea addons — TWO pools, because a Gitea instance
+	// listens twice at most: the web UI/API (gitea_start_port, default 3080)
+	// and the built-in OpenSSH listener (gitea_ssh_start_port, default 2222).
+	// 3080 rather than Gitea's stock 3000 because 3000 is the Grafana pool's
+	// base here; a separate SSH cursor matters because host networking means
+	// the listener binds HOST ports directly — the classic 222 mapping would
+	// collide with a host sshd on 22's sibling conventions, and the pool skips
+	// anything already taken. The SSH cursor only advances for instances that
+	// ENABLED ssh (SSH=false allocates nothing; a stock-disabled Gitea is one
+	// port, like every other web addon). Both blocks follow the alertmanager
+	// shape one-for-one otherwise.
+	{
+		giteaBase := c.GiteaStartPort
+		assignedGitea := map[int]bool{}
+		for _, addon := range c.Addons.Gitea {
+			if addon.HostPort != 0 {
+				assignedGitea[addon.HostPort] = true
+			}
+		}
+		next := giteaBase
+		nextFreeGitea := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedGitea[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.Gitea))
+		for name := range c.Addons.Gitea {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.Gitea[name]
+			if addon.HostPort == 0 && giteaBase > 0 {
+				addon.HostPort = nextFreeGitea()
+			} else if addon.HostPort >= next {
+				next = addon.HostPort + 1
+			}
+			c.Addons.Gitea[name] = addon
+		}
+	}
+	{
+		// The image's s6 sshd always runs, so EVERY instance — SSH on or off —
+		// needs its own port to park that sshd on (off 22, off the host sshd,
+		// and off the other instances' parked sshds, since host networking puts
+		// them all in one netns). The SSH pool therefore advances for every
+		// gitea instance, not only the SSH-enabled ones; gc.SSH still decides
+		// whether that port is a live clone listener or an idle one.
+		sshBase := c.GiteaSSHStartPort
+		assignedGiteaSSH := map[int]bool{}
+		for _, addon := range c.Addons.Gitea {
+			if addon.SSHPort != 0 {
+				assignedGiteaSSH[addon.SSHPort] = true
+			}
+		}
+		next := sshBase
+		nextFreeGiteaSSH := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedGiteaSSH[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.Gitea))
+		for name := range c.Addons.Gitea {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.Gitea[name]
+			if addon.SSHPort == 0 && sshBase > 0 {
+				addon.SSHPort = nextFreeGiteaSSH()
+			} else if addon.SSHPort >= next {
+				next = addon.SSHPort + 1
+			}
+			c.Addons.Gitea[name] = addon
 		}
 	}
 
