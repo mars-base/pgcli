@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -1565,23 +1566,33 @@ type GiteaConfig struct {
 //     meta/storage speak, and a gRPC port (default 8010) that the modern
 //     `beegfs` CLI connects to. Both are movable via --beemsg-port/--grpc-port.
 //   - meta: the metadata service. Owns a metadata target directory.
-//   - storage: a data service. Owns one storage target directory. (v1 is a
-//     single meta + single storage pair; multi-target striping is v2.)
+//   - storage: a data service. Owns one or more storage target directories
+//     (StorageTargetDirs) — several disks each become a target in the ONE
+//     storage container, which is how a host exposes per-disk bandwidth.
+//
+// Roles selects which of these THIS host runs; empty means all three (the v1
+// converged single-host cluster). v2 cross-host clusters set Roles to a subset
+// on each host and give the non-mgmtd hosts a MgmtdHost to register against —
+// every host runs its own local `pg` command, since BeeGFS daemons
+// self-register over the network (pgcli never SSHes; this mirrors how Patroni
+// cross-host members work).
 //
 // Unlike every web addon, there is no "host port" to publish: the services run
 // on the host network (BeeGFS speaks its own protocol, not HTTP), so the four
 // ports below are the ACTUAL listener ports on the host. In 8.4 only the mgmtd
 // pair can be moved; meta (8005) and storage (8003) have no supported
-// listen-port override at all, which is why v1 is strictly ONE filesystem per
-// host on the stock ports — see the note at the end of autoAssignPorts and the
-// field comments below.
+// listen-port override at all, which is why pgcli still runs ONE filesystem per
+// host (a second would collide on the fixed ports) — spreading a single
+// filesystem across hosts via Roles is the cross-host answer. See the note at
+// the end of autoAssignPorts and the field comments below.
 //
 // The client is a kernel module (DKMS) and is deliberately out of scope —
 // pgcli neither installs nor mounts it; docs/beegfs explains client setup.
-// Likewise a BeeGFS "license" is a system-specific registration key the user
-// must obtain; pgcli never generates or injects one. With no license the 8.4
-// management daemon logs a quota warning at registration time but the
-// filesystem still functions for community-scale use.
+// A BeeGFS "license" is a system-specific registration the user obtains from
+// ThinkParQ; pgcli never generates one but can CARRY a license file the user
+// downloaded (BeeGFSConfig.License → the mgmtd container's
+// BEEGFS_LICENSE_FILE_DATA). With no license the 8.4 management daemon warns
+// on every command and caps client mounts at five.
 //
 // Ownership: the three images run as root, so the bind-mounted dirs need no
 // chown (unlike Gitea's uid-1000 or Grafana's uid-472 dance).
@@ -1614,6 +1625,14 @@ type BeeGFSConfig struct {
 	// services (and clients) must all agree on. Generated on install when
 	// empty and stored here — a secret, never defaulted to a literal.
 	ConnAuth string `yaml:"conn_auth,omitempty"`
+	// License is the CONTENT of a ThinkParQ license certificate (PEM), carried
+	// to the mgmtd container as BEEGFS_LICENSE_FILE_DATA (the official image's
+	// init.py writes it to /etc/beegfs/license.pem; only mgmtd ships
+	// libbeegfs_license.so, so only the host running mgmtd stores this).
+	// pgcli never generates a license — the user obtains one out of band
+	// (`beegfs license --get` prints the system-bound URL); Validate only
+	// sanity-checks the PEM shape to catch a wrong file.
+	License string `yaml:"license,omitempty"`
 	// The three service data directories, each bind-mounted into its own
 	// container and surviving across container recreation. Empty means
 	// <base>/addon/beegfs/<name>/{mgmtd,meta,storage}; the manager resolves
@@ -1621,6 +1640,28 @@ type BeeGFSConfig struct {
 	MgmtdDataDir   string `yaml:"mgmtd_data_dir,omitempty"`
 	MetaDataDir    string `yaml:"meta_data_dir,omitempty"`
 	StorageDataDir string `yaml:"storage_data_dir,omitempty"`
+	// Roles is the subset of {mgmtd,meta,storage} THIS host runs (v2 cross-host
+	// model: every host runs its own local `pg` command with its role subset and
+	// the daemons self-register into mgmtd over the network — pgcli never SSHes
+	// anywhere). Empty means all three, the v1 converged single-host cluster.
+	// ApplyDefaults normalises it to deduped canonical order.
+	Roles []string `yaml:"roles,omitempty"`
+	// MgmtdHost is the address meta/storage dial to reach the management daemon.
+	// Empty falls back to this host's own Listen (correct when mgmtd runs here);
+	// a JOIN host (Roles without mgmtd) must set it, enforced by Validate.
+	MgmtdHost string `yaml:"mgmtd_host,omitempty"`
+	// NodeID is the BeeGFS per-service-type node number this host's meta/storage
+	// services register under (-s <id>). NodeIDs are namespaced by service type,
+	// so a meta on host A and a storage on host B can both be 1. 0 → 1 (v1).
+	// Target IDs derive as NodeID*100 + ordinal, so v1's storage target 101 is
+	// exactly node 1 target 1.
+	NodeID int `yaml:"node_id,omitempty"`
+	// StorageTargetDirs lists one host directory PER storage target on this host
+	// (v2: several disks, each a target, all in the one storage container).
+	// Empty means the single StorageDataDir — the v1 shape. The manager emits one
+	// beegfs_setup_N + one bind mount per entry and joins them for
+	// storeStorageDirectory (init.py's invariant: setups == targets).
+	StorageTargetDirs []string `yaml:"storage_target_dirs,omitempty"`
 	// Autostart brings the whole filesystem up on host boot via the boot
 	// service (pg autostart enable --beegfs), starting the three containers in
 	// dependency order. Start-only: it starts existing containers, install first.
@@ -1631,6 +1672,59 @@ type BeeGFSConfig struct {
 // plus the role suffix (pgcli-beegfs<ns>-<name>-mgmtd / -meta / -storage).
 func (b *BeeGFSConfig) ContainerName(role string) string {
 	return b.ContainerPrefix + "-" + role
+}
+
+// RolesInOrder returns the services this host runs, in startup dependency order
+// (mgmtd → meta → storage). An empty Roles (v1 converged) yields all three;
+// otherwise the stored Roles filtered to the known set and reordered canonically
+// so callers never depend on the user's flag order.
+func (b *BeeGFSConfig) RolesInOrder() []string {
+	return orderBeeGFSServices(b.Roles)
+}
+
+// RunsService reports whether this host runs the given service role.
+func (b *BeeGFSConfig) RunsService(role string) bool {
+	return slices.Contains(b.RolesInOrder(), role)
+}
+
+// RunsMgmtd reports whether mgmtd lives on this host — the gate that decides
+// whether a fresh install generates a connection-auth secret (only the mgmtd
+// host owns it) or must be handed one via --password.
+func (b *BeeGFSConfig) RunsMgmtd() bool { return b.RunsService(BeeGFSServiceMgmtd) }
+
+// BeeGFS storage service roles, mirrored in the CLI flag help. These live in
+// config so both config normalisation and the podman manager share one source.
+const (
+	BeeGFSServiceMgmtd   = "mgmtd"
+	BeeGFSServiceMeta    = "meta"
+	BeeGFSServiceStorage = "storage"
+)
+
+// allBeeGFSServices is the canonical startup order a full filesystem uses.
+var allBeeGFSServices = []string{BeeGFSServiceMgmtd, BeeGFSServiceMeta, BeeGFSServiceStorage}
+
+// orderBeeGFSServices dedupes roles and returns them in canonical order,
+// dropping nothing unknown (validation rejects those separately).
+func orderBeeGFSServices(roles []string) []string {
+	if len(roles) == 0 {
+		return allBeeGFSServices
+	}
+	set := make(map[string]bool, len(roles))
+	for _, r := range roles {
+		set[r] = true
+	}
+	out := make([]string, 0, len(set))
+	for _, s := range allBeeGFSServices {
+		if set[s] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// ValidBeeGFSService reports whether s is one of the three known roles.
+func ValidBeeGFSService(s string) bool {
+	return s == BeeGFSServiceMgmtd || s == BeeGFSServiceMeta || s == BeeGFSServiceStorage
 }
 
 // PostgresConfig holds PostgreSQL connection settings.
@@ -2022,6 +2116,35 @@ func (c *Config) Validate() error {
 	}
 	if c.PITR.Enabled && c.PITR.PgBackRestStanza == "" {
 		return fmt.Errorf("pitr.pgbackrest_stanza must not be empty (PITR is enabled)")
+	}
+	// BeeGFS v2 cross-host entries: a hand-edited pg.yaml can pin a role list
+	// the manager cannot build containers for, a node id that would collide
+	// with derived target ids, or a join host with no mgmtd to join.
+	for name, bc := range c.Addons.BeeGFS {
+		for _, role := range bc.Roles {
+			if !ValidBeeGFSService(role) {
+				return fmt.Errorf("addons.beegfs.%s.roles: unknown service %q (valid: mgmtd, meta, storage)", name, role)
+			}
+		}
+		if bc.NodeID < 0 || bc.NodeID > 655 {
+			return fmt.Errorf("addons.beegfs.%s.node_id must be 1-655 (target ids derive as node_id*100+N), got %d", name, bc.NodeID)
+		}
+		if len(bc.Roles) > 0 && !bc.RunsService(BeeGFSServiceMgmtd) && bc.MgmtdHost == "" {
+			return fmt.Errorf("addons.beegfs.%s.mgmtd_host must be set when roles %v do not include mgmtd — this host joins an existing filesystem and must know where its management daemon lives", name, bc.Roles)
+		}
+		// A license is verified by mgmtd alone (only its image ships
+		// libbeegfs_license.so) — storing one on a join host would silently
+		// never load, so refuse the drift. Shape check is deliberately shallow:
+		// cryptographic validity is mgmtd's job, this only catches feeding pg
+		// the wrong file.
+		if bc.License != "" {
+			if !bc.RunsService(BeeGFSServiceMgmtd) {
+				return fmt.Errorf("addons.beegfs.%s.license is only valid on the host whose roles include mgmtd — the management daemon verifies the certificate", name)
+			}
+			if !strings.Contains(bc.License, "BEGIN") || !strings.Contains(bc.License, "END") {
+				return fmt.Errorf("addons.beegfs.%s.license does not look like a PEM certificate (no BEGIN/END block) — expected the ThinkParQ license .pem file", name)
+			}
+		}
 	}
 	return nil
 }
@@ -2798,6 +2921,15 @@ func (c *Config) ApplyDefaults() {
 		}
 		if addon.StoragePort == 0 {
 			addon.StoragePort = DefaultBeeGFSStoragePort
+		}
+		// v2 normalization: canonical role order (empty = the full v1 trio),
+		// node id 0 → 1 (v1 compat), and the storage target list defaulting to
+		// the single StorageDataDir — but only resolved lazily in the manager,
+		// since StorageDataDir itself has no default here (same contract as the
+		// other dirs: empty means "derive under base_dir").
+		addon.Roles = orderBeeGFSServices(addon.Roles)
+		if addon.NodeID == 0 {
+			addon.NodeID = 1
 		}
 		c.Addons.BeeGFS[name] = addon
 	}

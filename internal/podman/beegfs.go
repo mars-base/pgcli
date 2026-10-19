@@ -17,12 +17,18 @@ import (
 
 // BeeGFSManager manages one BeeGFS filesystem — pgcli's FIRST multi-container
 // addon. A single config.BeeGFSConfig entry describes a whole filesystem, and
-// this manager brings up, tears down, and reports on three ordered containers
-// that together form a converged (single-host) BeeGFS cluster:
+// this manager brings up, tears down, and reports on the ordered containers
+// THIS host runs (bc.Roles — all three on a v1 converged host, a subset on a
+// v2 cross-host member):
 //
 //	pgcli-beegfs<ns>-<name>-mgmtd   → management daemon (node/target registry)
 //	pgcli-beegfs<ns>-<name>-meta    → metadata service
-//	pgcli-beegfs<ns>-<name>-storage → storage service
+//	pgcli-beegfs<ns>-<name>-storage → storage service (one or more targets)
+//
+// v2 cross-host: pgcli NEVER SSHes anywhere. Each host runs its own local
+// `pg addon install beegfs --roles <subset> --mgmtd-host <ip>` and the daemons
+// self-register into mgmtd over the network (mgmtd IS the shared registry).
+// A host may give its storage container several target dirs (one disk each).
 //
 // The three official images (ghcr.io/thinkparq/beegfs-{mgmtd,meta,storage},
 // config.BeeGFSImageRepo + DefaultBeeGFSVersion) share one mechanism: their
@@ -31,7 +37,8 @@ import (
 // only (idempotency marker <target>/alreadyInitByContainer in the bind mount),
 // then execs the daemon with the remaining container args. init.py's invariant
 // "number of setup commands == number of targets" is satisfied by construction
-// here — every service is given exactly one target dir and one setup command.
+// here — the storage builder emits exactly one setup env and one mount per
+// target dir.
 //
 // Three load-bearing divergences from every single-container addon:
 //
@@ -43,7 +50,9 @@ import (
 //     NO listen-port override (connPortsList/connTcpPort are rejected as
 //     invalid, and connMetaPort is accepted but breaks registration), so a
 //     second filesystem on the same host could never exist regardless of what
-//     pgcli allocated. EnsureCluster enforces that one-filesystem rule.
+//     pgcli allocated. EnsureCluster enforces that one-filesystem rule; a
+//     single filesystem spanning hosts is fine because each host binds its own
+//     copies of the fixed ports.
 //   - No privileged mode, no capability additions, no chown. Pure
 //     `--network host` + `:z` bind mounts, verified end-to-end on vm01
 //     (no RDMA in v1). The images run as root and own their data dirs —
@@ -53,14 +62,19 @@ import (
 //     only mgmtd's image can meaningfully run it against itself). meta and
 //     storage each log "Registration ... complete" once they have reached
 //     mgmtd — that line doubles as "mgmtd is up AND this service joined the
-//     cluster", which is exactly the ordering gate EnsureCluster needs.
+//     cluster", which is exactly the ordering gate EnsureCluster needs. A
+//     join rejected for a wrong secret shows up as a hard disconnect during
+//     its Register* handshake (the "wrong secret" line itself is only in the
+//     mgmtd's log), which waitForLog turns into a fast, actionable error.
 //
 // TLS and licensing: the mgmtd daemon enforces gRPC TLS by default; v1 passes
 // --tls-disable true (operator's explicit choice — the cluster is only usable
 // with a matching --tls-disable on the client side too). A BeeGFS license is a
-// system-specific registration the user must obtain; pgcli never generates or
-// injects one. An unlicensed 8.4 mgmtd logs a quota warning but the
-// filesystem still functions for community-scale use.
+// system-specific registration the user obtains from ThinkParQ; pgcli never
+// generates one but carries the user's PEM (BeeGFSConfig.License) to the mgmtd
+// container as BEEGFS_LICENSE_FILE_DATA — mgmtd alone ships
+// libbeegfs_license.so. An unlicensed 8.4 mgmtd warns on every command and
+// caps client mounts at five.
 type BeeGFSManager struct {
 	cfg     *config.Config
 	podman  string // podman binary path
@@ -68,11 +82,13 @@ type BeeGFSManager struct {
 }
 
 // BeeGFS service roles. The constants are also the container-name suffixes and
-// the --service values of `pg logs addon beegfs`.
+// the --service values of `pg logs addon beegfs`. The canonical definitions
+// live in config (the Roles field validates against them); these aliases keep
+// the podman-side call sites unchanged.
 const (
-	BeeGFSServiceMgmtd   = "mgmtd"
-	BeeGFSServiceMeta    = "meta"
-	BeeGFSServiceStorage = "storage"
+	BeeGFSServiceMgmtd   = config.BeeGFSServiceMgmtd
+	BeeGFSServiceMeta    = config.BeeGFSServiceMeta
+	BeeGFSServiceStorage = config.BeeGFSServiceStorage
 )
 
 const (
@@ -91,6 +107,16 @@ const (
 	// makes per-role mgmtd probes unnecessary).
 	beegfsMgmtdReadyLog     = "Waiting for shutdown signal"
 	beegfsRegisteredLogMark = "Registration and management info download complete"
+
+	// Join-rejection signature, verified on a real cross-host wrong-secret join
+	// (vm02 -> vm01): the JOINING daemon logs a hard disconnect (connection
+	// reset by mgmtd) while its Register/RegisterTarget message is in flight —
+	// the "tried to authenticate stream with wrong secret" line itself appears
+	// only in the *mgmtd's* log, which a join host cannot read. waitForLog
+	// greps the joiner's own log for the two markers so a wrong secret fails in
+	// seconds with the fix, instead of the 60 s timeout.
+	beegfsJoinRejectedDisc = "Hard disconnect"
+	beegfsJoinRejectedMsg  = "Message type: Regis"
 
 	// beegfsSetupTimeout bounds one service's registration wait inside
 	// EnsureCluster. Registration needs only seconds; the ceiling exists so a
@@ -143,12 +169,27 @@ func mgmtdHost(listen string) string {
 // --- Pure argv builders ---------------------------------------------------
 //
 // All three share the same skeleton: run detached with a role-suffixed name,
-// host network, two -e flags (the setup command and the shared connection-auth
-// secret), one :z bind mount of the service data dir, --restart
-// unless-stopped, then the image ref followed by the daemon args — exactly the
-// vm01-proven invocation (podman stops flag parsing at the image, so the
-// mgmtd `--db-file ...` and meta/storage `key=value ...` tokens become the
-// container command with no separator).
+// host network, the setup env var(s) plus the shared connection-auth secret,
+// one :z bind mount per target dir, --restart unless-stopped, then the image
+// ref followed by the daemon args — exactly the vm01-proven invocation (podman
+// stops flag parsing at the image, so the mgmtd `--db-file ...` and
+// meta/storage `key=value ...` tokens become the container command with no
+// separator).
+
+// beegfsNodeID is the effective -s node id (0 normalises to 1, the v1 value).
+func beegfsNodeID(bc *config.BeeGFSConfig) int {
+	if bc.NodeID == 0 {
+		return 1
+	}
+	return bc.NodeID
+}
+
+// beegfsTargetID derives the i-th (1-based) storage target id from the node
+// id: nodeID*100 + i. v1's fixed 101 is exactly node 1 target 1, and BeeGFS
+// target ids are max 65535, which config.Validate bounds nodeID 1..655 for.
+func beegfsTargetID(nodeID, i int) int {
+	return nodeID*100 + i
+}
 
 // beegfsMgmtdArgsAndEnv builds the `podman run` argv for the management
 // daemon. bc.ImageTag carries the version; the baked CONN_AUTH_FILE_DATA env is
@@ -165,60 +206,104 @@ func beegfsMgmtdArgsAndEnv(bc *config.BeeGFSConfig, dataDir string) []string {
 	if bc.MgmtdGRPCPort != 0 && bc.MgmtdGRPCPort != config.DefaultBeeGFSMgmtdGRPCPort {
 		daemonArgs = append(daemonArgs, "--grpc-port", strconv.Itoa(bc.MgmtdGRPCPort))
 	}
-	return beegfsRunArgs(bc, BeeGFSServiceMgmtd, dataDir, setup, daemonArgs)
+	return beegfsRunArgs(bc, BeeGFSServiceMgmtd, []string{dataDir}, []string{beegfsContainerDataRoot + "/" + BeeGFSServiceMgmtd}, []string{setup}, daemonArgs)
 }
 
 // beegfsMetaArgsAndEnv builds the meta service argv. NodeIDs are a per
 // service-type namespace (verified on vm01: meta -s 1 and storage -s 1 coexist
-// as node_meta_1 and node_storage_1), so both use 1. The daemon args speak
-// key=value config overrides: sysMgmtdHost points at mgmtd, and a non-default
-// beemsg port is followed by connMgmtdPort — verified on vm01 to actually
-// re-target registration.
+// as node_meta_1 and node_storage_1), so a single-host v1 uses 1 and v2
+// defaults there too; bc.NodeID overrides per host. The daemon args speak
+// key=value config overrides: sysMgmtdHost points at mgmtd — MgmtdHost when the
+// daemon lives on another host (v2 join), else this host's own Listen — and a
+// non-default beemsg port is followed by connMgmtdPort, which matters even
+// MORE cross-host (the join host must dial the moved port on the remote).
 func beegfsMetaArgsAndEnv(bc *config.BeeGFSConfig, dataDir string) []string {
 	const tgt = beegfsContainerDataRoot + "/" + BeeGFSServiceMeta
-	setup := fmt.Sprintf("beegfs-setup-meta -C -p %s -s 1", tgt)
+	nodeID := beegfsNodeID(bc)
+	setup := fmt.Sprintf("beegfs-setup-meta -C -p %s -s %d", tgt, nodeID)
 	daemonArgs := []string{
-		"sysMgmtdHost=" + mgmtdHost(bc.Listen),
+		"sysMgmtdHost=" + beegfsMgmtdTarget(bc),
 		"storeAllowFirstRunInit=false",
 		"storeMetaDirectory=" + tgt,
 	}
 	if bc.MgmtdPort != 0 && bc.MgmtdPort != config.DefaultBeeGFSMgmtdPort {
 		daemonArgs = append(daemonArgs, "connMgmtdPort="+strconv.Itoa(bc.MgmtdPort))
 	}
-	return beegfsRunArgs(bc, BeeGFSServiceMeta, dataDir, setup, daemonArgs)
+	return beegfsRunArgs(bc, BeeGFSServiceMeta, []string{dataDir}, []string{tgt}, []string{setup}, daemonArgs)
 }
 
-// beegfsStorageArgsAndEnv builds the storage service argv — same shape as
-// meta with a target id (-i 101; target numbering is independent of node ids,
-// a fixed 101 keeps it distinguishable in `beegfs` output).
-func beegfsStorageArgsAndEnv(bc *config.BeeGFSConfig, dataDir string) []string {
-	const tgt = beegfsContainerDataRoot + "/" + BeeGFSServiceStorage
-	setup := fmt.Sprintf("beegfs-setup-storage -C -p %s -s 1 -i 101", tgt)
+// beegfsStorageArgsAndEnv builds the storage service argv — one container,
+// one setup command PER target (init.py's invariant is setups == targets, and
+// the official docs show exactly this beegfs_setup_1/-2 shape). hostDirs is
+// the resolved per-target host dir list (length 1 = the v1 single-target
+// shape). Container paths: a single target keeps /data/storage EXACTLY as v1
+// mounted it — the target dir records its own path internally, so a revived
+// v1 store must see the same mount point — while a multi-target host mounts
+// each at /data/storage/<targetID> (only ever seen on v2-created stores).
+// Target ids derive as nodeID*100+ordinal, so v1's single target is still 101.
+func beegfsStorageArgsAndEnv(bc *config.BeeGFSConfig, hostDirs []string) []string {
+	nodeID := beegfsNodeID(bc)
+	var setups, contDirs []string
+	for i := range hostDirs {
+		cont := beegfsContainerDataRoot + "/" + BeeGFSServiceStorage
+		if len(hostDirs) > 1 {
+			cont = fmt.Sprintf("%s/%d", cont, beegfsTargetID(nodeID, i+1))
+		}
+		contDirs = append(contDirs, cont)
+		setups = append(setups, fmt.Sprintf("beegfs-setup-storage -C -p %s -s %d -i %d", cont, nodeID, beegfsTargetID(nodeID, i+1)))
+	}
 	daemonArgs := []string{
-		"sysMgmtdHost=" + mgmtdHost(bc.Listen),
+		"sysMgmtdHost=" + beegfsMgmtdTarget(bc),
 		"storeAllowFirstRunInit=false",
-		"storeStorageDirectory=" + tgt,
+		"storeStorageDirectory=" + strings.Join(contDirs, ","),
 	}
 	if bc.MgmtdPort != 0 && bc.MgmtdPort != config.DefaultBeeGFSMgmtdPort {
 		daemonArgs = append(daemonArgs, "connMgmtdPort="+strconv.Itoa(bc.MgmtdPort))
 	}
-	return beegfsRunArgs(bc, BeeGFSServiceStorage, dataDir, setup, daemonArgs)
+	return beegfsRunArgs(bc, BeeGFSServiceStorage, hostDirs, contDirs, setups, daemonArgs)
 }
 
 // beegfsRunArgs is the shared argv skeleton the three builders feed.
-func beegfsRunArgs(bc *config.BeeGFSConfig, role, dataDir, setup string, daemonArgs []string) []string {
+// hostDirs/contDirs/setupCmds are parallel lists (length 1 for mgmtd/meta, N
+// for a multi-target storage host): one -v and one beegfs_setup_<i> each,
+// numbered from 1 exactly like the official env-var scheme.
+func beegfsRunArgs(bc *config.BeeGFSConfig, role string, hostDirs, contDirs, setupCmds, daemonArgs []string) []string {
 	args := []string{
 		"run", "-d",
 		"--name", bc.ContainerName(role),
 		"--network", "host",
-		"-e", "beegfs_setup_1=" + setup,
-		"-e", "CONN_AUTH_FILE_DATA=" + bc.ConnAuth,
-		"-v", fmt.Sprintf("%s:%s/%s:z", hostMountPath(dataDir), beegfsContainerDataRoot, role),
+	}
+	for i, setup := range setupCmds {
+		args = append(args, "-e", fmt.Sprintf("beegfs_setup_%d=%s", i+1, setup))
+	}
+	args = append(args,
+		"-e", "CONN_AUTH_FILE_DATA="+bc.ConnAuth,
+	)
+	// The license rides only to mgmtd: its image is the only one shipping
+	// libbeegfs_license.so, and its start.sh wires BEEGFS_LICENSE_FILE_DATA →
+	// /etc/beegfs/license.pem → --license-cert-file for beegfs-mgmtd alone.
+	if role == BeeGFSServiceMgmtd && bc.License != "" {
+		args = append(args, "-e", "BEEGFS_LICENSE_FILE_DATA="+bc.License)
+	}
+	for i := range hostDirs {
+		args = append(args, "-v", hostMountPath(hostDirs[i])+":"+contDirs[i]+":z")
+	}
+	args = append(args,
 		"--http-proxy=false",
 		"--restart", "unless-stopped",
 		beegfsImageRef(role, bc.ImageTag),
-	}
+	)
 	return append(args, daemonArgs...)
+}
+
+// beegfsMgmtdTarget is the sysMgmtdHost value meta/storage dial: the stored
+// MgmtdHost for a v2 join host, otherwise this host's self-reference (loopback
+// for a wildcard Listen — unchanged v1 behavior when mgmtd runs here).
+func beegfsMgmtdTarget(bc *config.BeeGFSConfig) string {
+	if bc.MgmtdHost != "" {
+		return bc.MgmtdHost
+	}
+	return mgmtdHost(bc.Listen)
 }
 
 // --- Data dir resolution --------------------------------------------------
@@ -237,16 +322,48 @@ func (m *BeeGFSManager) resolveDataDir(bc *config.BeeGFSConfig, role string) str
 		}
 		return filepath.Join(base, BeeGFSServiceMeta)
 	default:
-		if bc.StorageDataDir != "" {
-			return bc.StorageDataDir
-		}
-		return filepath.Join(base, BeeGFSServiceStorage)
+		return m.storageTargetHostDirs(bc)[0]
 	}
+}
+
+// storageTargetHostDirs resolves the host dir of every storage target on this
+// host: bc.StorageTargetDirs with empty entries defaulted (the single-target
+// default is the v1 base/storage dir exactly; extra targets get base/storage-N
+// — a list with multiple entries can only come from v2 flags anyway). Empty
+// list defaults to one dir, keeping the v1 shape.
+func (m *BeeGFSManager) storageTargetHostDirs(bc *config.BeeGFSConfig) []string {
+	base := filepath.Join(m.dataDir, "addon", "beegfs", bc.Name)
+	dirs := bc.StorageTargetDirs
+	if len(dirs) == 0 {
+		dirs = []string{bc.StorageDataDir}
+	}
+	out := make([]string, 0, len(dirs))
+	for i, d := range dirs {
+		if d != "" {
+			out = append(out, d)
+			continue
+		}
+		if i == 0 {
+			out = append(out, filepath.Join(base, BeeGFSServiceStorage))
+		} else {
+			out = append(out, filepath.Join(base, fmt.Sprintf("%s-%d", BeeGFSServiceStorage, i+1)))
+		}
+	}
+	return out
 }
 
 // DataDir returns one service's resolved host data directory (for display).
 func (m *BeeGFSManager) DataDir(bc *config.BeeGFSConfig, role string) string {
 	return m.resolveDataDir(bc, role)
+}
+
+// DataDirs returns every host data directory of one service — one for
+// mgmtd/meta, N for a multi-target storage host (display + removal).
+func (m *BeeGFSManager) DataDirs(bc *config.BeeGFSConfig, role string) []string {
+	if role == BeeGFSServiceStorage {
+		return m.storageTargetHostDirs(bc)
+	}
+	return []string{m.resolveDataDir(bc, role)}
 }
 
 // MgmtdStoreExists reports whether a mgmtd data dir already holds the SQLite
@@ -262,11 +379,12 @@ func MgmtdStoreExists(dataDir string) bool {
 
 // --- Cluster lifecycle ----------------------------------------------------
 
-// EnsureImage pulls the three service images if missing (pull-only public
-// ghcr images). All three are pulled up front so a mid-cluster network
-// failure never leaves a half-registered filesystem.
+// EnsureImage pulls this host's role images if missing (pull-only public ghcr
+// images). All needed images are pulled up front so a mid-cluster network
+// failure never leaves a half-registered filesystem. A join host only pulls the
+// roles it runs, not mgmtd.
 func (m *BeeGFSManager) EnsureImage(bc *config.BeeGFSConfig) error {
-	for _, role := range []string{BeeGFSServiceMgmtd, BeeGFSServiceMeta, BeeGFSServiceStorage} {
+	for _, role := range bc.RolesInOrder() {
 		ref := beegfsImageRef(role, bc.ImageTag)
 		exists, err := m.imageExists(ref)
 		if err != nil {
@@ -296,52 +414,49 @@ func (m *BeeGFSManager) EnsureCluster(bc *config.BeeGFSConfig) error {
 		return err
 	}
 
-	fmt.Println("-> Starting BeeGFS management service (mgmtd)...")
-	if err := m.createService(bc, BeeGFSServiceMgmtd); err != nil {
-		return err
-	}
-	if err := m.waitForLog(bc, BeeGFSServiceMgmtd, beegfsMgmtdReadyLog); err != nil {
-		return err
-	}
-
-	fmt.Println("-> Starting BeeGFS metadata service (meta)...")
-	if err := m.createService(bc, BeeGFSServiceMeta); err != nil {
-		return err
-	}
-	if err := m.waitForLog(bc, BeeGFSServiceMeta, beegfsRegisteredLogMark); err != nil {
-		return err
-	}
-
-	fmt.Println("-> Starting BeeGFS storage service (storage)...")
-	if err := m.createService(bc, BeeGFSServiceStorage); err != nil {
-		return err
-	}
-	if err := m.waitForLog(bc, BeeGFSServiceStorage, beegfsRegisteredLogMark); err != nil {
-		return err
+	// Bring up exactly the roles THIS host runs (v2): the full set is the v1
+	// mgmtd → meta → storage sequence; a join host skips the earlier stages
+	// and just registers its own services against the remote mgmtd. Each
+	// meta/storage gate (the registration log line) doubles as "mgmtd is
+	// reachable AND this service joined", so no separate mgmtd probe is needed.
+	for _, role := range bc.RolesInOrder() {
+		fmt.Printf("-> Starting BeeGFS %s service...\n", role)
+		if err := m.createService(bc, role); err != nil {
+			return err
+		}
+		marker := beegfsRegisteredLogMark
+		if role == BeeGFSServiceMgmtd {
+			marker = beegfsMgmtdReadyLog
+		}
+		if err := m.waitForLog(bc, role, marker); err != nil {
+			return err
+		}
 	}
 
-	fmt.Println("  [OK] BeeGFS cluster up: mgmtd + meta + storage registered")
+	fmt.Printf("  [OK] BeeGFS %s up on this host (roles: %s)\n", bc.Name, strings.Join(bc.RolesInOrder(), ","))
 	return nil
 }
 
 // guardSingleFilesystem rejects a second filesystem on this host: meta and
 // storage daemons have no listen-port override (verified on vm01), so a second
-// one would collide on the fixed 8005/8003 and crash-loop. The guard compares
-// the persisted config map so a stale config cannot sneak a second entry in;
-// re-ensuring the SAME filesystem name (recreate/revive) is allowed.
+// one would collide on the fixed 8005/8003 and crash-loop. Cross-host scaling is
+// the answer — spread roles across hosts with --roles, not a second filesystem
+// here. The guard compares the persisted config map so a stale config cannot
+// sneak a second entry in; re-ensuring the SAME filesystem name is allowed.
 func (m *BeeGFSManager) guardSingleFilesystem(bc *config.BeeGFSConfig) error {
 	for name, other := range m.cfg.Addons.BeeGFS {
 		if name == bc.Name || other.Name == bc.Name {
 			continue
 		}
-		return fmt.Errorf("a BeeGFS filesystem already exists on this host (%q): BeeGFS 8.4's meta and storage daemons bind fixed ports 8005/8003 with no supported override, so pgcli supports exactly one filesystem per host (multiple ones need separate hosts or containers with host-port collisions)", name)
+		return fmt.Errorf("a BeeGFS filesystem already exists on this host (%q): BeeGFS 8.4's meta and storage daemons bind fixed ports 8005/8003 with no supported override, so pgcli supports exactly one filesystem per host — to grow, add roles on ANOTHER host (pg addon install beegfs --name <fs> --roles storage --mgmtd-host <ip> --node-id <n> --password <conn-auth>), or remove the first here", name)
 	}
 	return nil
 }
 
 // createService (re)creates one service container: an existing container is
 // stopped and removed first so updated config always takes effect (install
-// semantics). The data dir is created if missing, never deleted here.
+// semantics). Every target dir it will mount is created if missing, never
+// deleted here.
 func (m *BeeGFSManager) createService(bc *config.BeeGFSConfig, role string) error {
 	name := bc.ContainerName(role)
 	if exists, err := m.containerExists(name); err != nil {
@@ -351,18 +466,28 @@ func (m *BeeGFSManager) createService(bc *config.BeeGFSConfig, role string) erro
 			return fmt.Errorf("removing stale BeeGFS container %s: %w", name, err)
 		}
 	}
-	dataDir := m.resolveDataDir(bc, role)
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		return fmt.Errorf("creating BeeGFS data dir %s: %w", dataDir, err)
-	}
 	var args []string
 	switch role {
 	case BeeGFSServiceMgmtd:
-		args = beegfsMgmtdArgsAndEnv(bc, dataDir)
+		dir := m.resolveDataDir(bc, role)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("creating BeeGFS data dir %s: %w", dir, err)
+		}
+		args = beegfsMgmtdArgsAndEnv(bc, dir)
 	case BeeGFSServiceMeta:
-		args = beegfsMetaArgsAndEnv(bc, dataDir)
+		dir := m.resolveDataDir(bc, role)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("creating BeeGFS data dir %s: %w", dir, err)
+		}
+		args = beegfsMetaArgsAndEnv(bc, dir)
 	case BeeGFSServiceStorage:
-		args = beegfsStorageArgsAndEnv(bc, dataDir)
+		dirs := m.storageTargetHostDirs(bc)
+		for _, dir := range dirs {
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return fmt.Errorf("creating BeeGFS data dir %s: %w", dir, err)
+			}
+		}
+		args = beegfsStorageArgsAndEnv(bc, dirs)
 	default:
 		return fmt.Errorf("unknown BeeGFS service %q", role)
 	}
@@ -398,15 +523,34 @@ func (m *BeeGFSManager) startService(bc *config.BeeGFSConfig, role string) error
 	return m.createService(bc, role)
 }
 
-// StartCluster starts the three containers in dependency order
+// RestartRole recreates ONE role's container from the CURRENT config — the
+// license hot-swap path: the env only lands on a container at creation, so
+// swapping the certificate means rebuilding mgmtd. The data dirs and the
+// idempotent setup markers make a recreate cheap, and every other daemon
+// re-registers on its own (BeeGFS services retry mgmtd contact indefinitely),
+// so one role can be bounced without touching the rest of the cluster.
+func (m *BeeGFSManager) RestartRole(bc *config.BeeGFSConfig, role string) error {
+	if err := m.createService(bc, role); err != nil {
+		return err
+	}
+	marker := beegfsRegisteredLogMark
+	if role == BeeGFSServiceMgmtd {
+		marker = beegfsMgmtdReadyLog
+	}
+	return m.waitForLog(bc, role, marker)
+}
+
+// StartCluster starts this host's role containers in dependency order
 // (mgmtd → meta → storage). Unlike EnsureCluster it does not recreate running
 // services or block on registration logs — autostart must be quick, and the
-// services' own retries cover an mgmtd that takes a moment longer.
+// services' own retries cover an mgmtd that takes a moment longer (including a
+// REMOTE one on a v2 join host, which is exactly why registration waiting is
+// skipped here).
 func (m *BeeGFSManager) StartCluster(bc *config.BeeGFSConfig) error {
 	if platform.Detect() != platform.Linux {
 		return hostNetUnsupported()
 	}
-	for _, role := range []string{BeeGFSServiceMgmtd, BeeGFSServiceMeta, BeeGFSServiceStorage} {
+	for _, role := range bc.RolesInOrder() {
 		if err := m.startService(bc, role); err != nil {
 			return err
 		}
@@ -414,12 +558,14 @@ func (m *BeeGFSManager) StartCluster(bc *config.BeeGFSConfig) error {
 	return nil
 }
 
-// StopCluster stops the three containers in reverse dependency order
+// StopCluster stops this host's services in reverse dependency order
 // (storage → meta → mgmtd): the data services are the ones with in-flight
 // traffic, and a graceful shutdown keeps their targets cleanly GOOD.
 func (m *BeeGFSManager) StopCluster(bc *config.BeeGFSConfig) error {
 	var firstErr error
-	for _, role := range []string{BeeGFSServiceStorage, BeeGFSServiceMeta, BeeGFSServiceMgmtd} {
+	roles := bc.RolesInOrder()
+	for i := len(roles) - 1; i >= 0; i-- {
+		role := roles[i]
 		name := bc.ContainerName(role)
 		if _, err := m.run("stop", name); err != nil {
 			slog.Warn("beegfs: stop service failed", "service", role, "err", err)
@@ -431,12 +577,14 @@ func (m *BeeGFSManager) StopCluster(bc *config.BeeGFSConfig) error {
 	return firstErr
 }
 
-// RemoveCluster removes the three containers in reverse order. Data dirs are
-// kept by default (the SQLite DB and both targets outlive the containers — a
+// RemoveCluster removes this host's containers in reverse order. Data dirs are
+// kept by default (the SQLite DB and every target outlive the containers — a
 // reinstall under the same name revives the filesystem); cleanData also deletes
-// all three, refusing any that is still a mount point.
+// them all, refusing any that is still a mount point.
 func (m *BeeGFSManager) RemoveCluster(bc *config.BeeGFSConfig, cleanData bool) error {
-	for _, role := range []string{BeeGFSServiceStorage, BeeGFSServiceMeta, BeeGFSServiceMgmtd} {
+	roles := bc.RolesInOrder()
+	for i := len(roles) - 1; i >= 0; i-- {
+		role := roles[i]
 		name := bc.ContainerName(role)
 		_, _ = m.run("stop", name)
 		if _, err := m.run("rm", "-f", name); err != nil {
@@ -444,25 +592,26 @@ func (m *BeeGFSManager) RemoveCluster(bc *config.BeeGFSConfig, cleanData bool) e
 		}
 		fmt.Printf("  [OK] Removed BeeGFS container %s\n", name)
 	}
-	for _, role := range []string{BeeGFSServiceMgmtd, BeeGFSServiceMeta, BeeGFSServiceStorage} {
-		dataDir := m.resolveDataDir(bc, role)
-		if !cleanData {
-			fmt.Printf("  [OK] Data directory kept: %s\n", dataDir)
-			continue
-		}
-		if isMountpoint(dataDir) {
-			fmt.Printf("  [!] Refusing to delete %s: it is still a mount point — unmount it first if the data below is really disposable\n", dataDir)
-			continue
-		}
-		// The images run as root, so under rootful podman a plain os.RemoveAll
-		// clears these; under rootless the dirs carry subordinate-uid files and
-		// removeHostDir falls back to `podman unshare rm` (its last-resort temp
-		// container is never reached here, same as every other root-image addon).
-		img := beegfsImageRef(BeeGFSServiceMgmtd, bc.ImageTag)
-		if err := removeHostDir(m.podman, img, dataDir); err != nil && !os.IsNotExist(err) {
-			fmt.Printf("  [!] Warning: removing data dir %s: %v\n", dataDir, err)
-		} else {
-			fmt.Printf("  [OK] Data directory removed: %s\n", dataDir)
+	for _, role := range roles {
+		for _, dataDir := range m.DataDirs(bc, role) {
+			if !cleanData {
+				fmt.Printf("  [OK] Data directory kept: %s\n", dataDir)
+				continue
+			}
+			if isMountpoint(dataDir) {
+				fmt.Printf("  [!] Refusing to delete %s: it is still a mount point — unmount it first if the data below is really disposable\n", dataDir)
+				continue
+			}
+			// The images run as root, so under rootful podman a plain os.RemoveAll
+			// clears these; under rootless the dirs carry subordinate-uid files and
+			// removeHostDir falls back to `podman unshare rm` (its last-resort temp
+			// container is never reached here, same as every other root-image addon).
+			img := beegfsImageRef(BeeGFSServiceMgmtd, bc.ImageTag)
+			if err := removeHostDir(m.podman, img, dataDir); err != nil && !os.IsNotExist(err) {
+				fmt.Printf("  [!] Warning: removing data dir %s: %v\n", dataDir, err)
+			} else {
+				fmt.Printf("  [OK] Data directory removed: %s\n", dataDir)
+			}
 		}
 	}
 	if cleanData {
@@ -474,37 +623,69 @@ func (m *BeeGFSManager) RemoveCluster(bc *config.BeeGFSConfig, cleanData bool) e
 
 // --- Status / check -------------------------------------------------------
 
-// ClusterState is the aggregate view of one filesystem's three containers.
+// ClusterState is the aggregate view of one filesystem's containers PRESENT ON
+// THIS HOST (v2: a join host only has its own roles; a v1 host has all three).
+// The bc pointer carries which roles those are; a zero/nil-bc state (hand-built
+// in tests or legacy callers) covers the full trio.
 type ClusterState struct {
 	MgmtdUp   bool
 	MetaUp    bool
 	StorageUp bool
+	bc        *config.BeeGFSConfig
 }
 
-// String renders the aggregate the list/summary layers print: all up →
-// "running", none → "stopped", anything between → "partial (mgmtd,meta)".
-func (s ClusterState) String() string {
-	switch {
-	case s.AllUp():
-		return "running"
-	case s.AllDown():
-		return "stopped"
+// present returns the roles this state covers.
+func (s ClusterState) present() []string {
+	if s.bc != nil {
+		return s.bc.RolesInOrder()
 	}
+	return []string{BeeGFSServiceMgmtd, BeeGFSServiceMeta, BeeGFSServiceStorage}
+}
+
+// Up reports whether the given present role's container is running.
+func (s ClusterState) Up(role string) bool {
+	switch role {
+	case BeeGFSServiceMgmtd:
+		return s.MgmtdUp
+	case BeeGFSServiceMeta:
+		return s.MetaUp
+	default:
+		return s.StorageUp
+	}
+}
+
+// upOrder lists the running services in canonical order.
+func (s ClusterState) upOrder() []string {
 	var up []string
-	if s.MgmtdUp {
-		up = append(up, BeeGFSServiceMgmtd)
+	for _, role := range s.present() {
+		if s.Up(role) {
+			up = append(up, role)
+		}
 	}
-	if s.MetaUp {
-		up = append(up, BeeGFSServiceMeta)
-	}
-	if s.StorageUp {
-		up = append(up, BeeGFSServiceStorage)
+	return up
+}
+
+// String renders the aggregate the list/summary layers print, counting only
+// the roles present on this host: all up → "running", none → "stopped",
+// anything between → "partial (mgmtd,meta)".
+func (s ClusterState) String() string {
+	up := s.upOrder()
+	switch {
+	case len(up) == 0:
+		return "stopped"
+	case len(up) == len(s.present()):
+		return "running"
 	}
 	return "partial (" + strings.Join(up, ",") + ")"
 }
 
-func (s ClusterState) AllUp() bool   { return s.MgmtdUp && s.MetaUp && s.StorageUp }
-func (s ClusterState) AllDown() bool { return !s.MgmtdUp && !s.MetaUp && !s.StorageUp }
+// AllUp/AllDown compare against the roles this host runs — on a v1 host that is
+// the full trio, so v1 semantics are unchanged; a join host is "running" when
+// exactly its own services are up.
+func (s ClusterState) AllUp() bool {
+	return len(s.upOrder()) == len(s.present()) && len(s.present()) > 0
+}
+func (s ClusterState) AllDown() bool { return len(s.upOrder()) == 0 }
 
 // ContainerExists reports whether one of the filesystem's containers is
 // present (running or not) — the CLI's "complete cluster → start, incomplete →
@@ -513,9 +694,9 @@ func (m *BeeGFSManager) ContainerExists(name string) (bool, error) {
 	return m.containerExists(name)
 }
 
-// ClusterStatus reports which of the three containers are running.
+// ClusterStatus reports which of THIS host's role containers are running.
 func (m *BeeGFSManager) ClusterStatus(bc *config.BeeGFSConfig) (ClusterState, error) {
-	var st ClusterState
+	st := ClusterState{bc: bc}
 	var err error
 	if st.MgmtdUp, err = m.containerRunning(bc.ContainerName(BeeGFSServiceMgmtd)); err != nil {
 		return st, err
@@ -542,8 +723,8 @@ func (m *BeeGFSManager) CheckServers(bc *config.BeeGFSConfig) (string, error) {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "BeeGFS %s: %s\n", bc.Name, st)
-	for _, role := range []string{BeeGFSServiceMgmtd, BeeGFSServiceMeta, BeeGFSServiceStorage} {
-		up, _ := m.containerRunning(bc.ContainerName(role))
+	for _, role := range bc.RolesInOrder() {
+		up := st.Up(role)
 		reg := "no"
 		// podman's --tail takes an INT only (docker's `all` is invalid syntax
 		// here), and there is no "everything" sentinel — a plain `logs` dump of
@@ -570,12 +751,24 @@ func (m *BeeGFSManager) CheckServers(bc *config.BeeGFSConfig) (string, error) {
 	return b.String(), nil
 }
 
+// RoleLogs returns one role container's combined logs (bounded by podman's
+// default tail) — what `pg addon beegfs license` greps for the certificate
+// verification lines mgmtd logs at startup.
+func (m *BeeGFSManager) RoleLogs(bc *config.BeeGFSConfig, role string) (string, error) {
+	return m.runCombined("logs", bc.ContainerName(role))
+}
+
 // --- Internal helpers -----------------------------------------------------
 
-// waitForLog polls one service container's logs for a readiness marker,
-// failing fast if the container dies (a crashed daemon cannot become ready).
+// waitForLog polls one service container's logs for a readiness marker, failing
+// fast if the container dies (a crashed daemon cannot become ready) or logs a
+// conn-auth mismatch (a join host whose --password differs from the mgmtd's is
+// a config mistake, not something to wait out — report it in seconds with the
+// fix, since the daemon retries silently and the 60 s timeout would otherwise
+// be the only signal).
 func (m *BeeGFSManager) waitForLog(bc *config.BeeGFSConfig, role, marker string) error {
 	name := bc.ContainerName(role)
+	watchJoin := marker == beegfsRegisteredLogMark
 	deadline := time.Now().Add(beegfsSetupTimeout)
 	for {
 		// Re-read the log each tick — via runCombined (the daemons' output is
@@ -586,6 +779,10 @@ func (m *BeeGFSManager) waitForLog(bc *config.BeeGFSConfig, role, marker string)
 		logs, err := m.runCombined("logs", name)
 		if err == nil && strings.Contains(logs, marker) {
 			return nil
+		}
+		if watchJoin && err == nil && strings.Contains(logs, beegfsJoinRejectedDisc) &&
+			strings.Contains(logs, beegfsJoinRejectedMsg) {
+			return fmt.Errorf("BeeGFS %s was rejected by mgmtd: it connected and its registration was reset, which means the connection-auth secret does not match — retrieve the cluster's value on the mgmtd host with `pg addon password beegfs --name %s` and reinstall with --password", role, bc.Name)
 		}
 		if running, rerr := m.containerRunning(name); rerr == nil && !running {
 			tail := logs

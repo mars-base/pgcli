@@ -208,21 +208,32 @@ Infra addons (shared, not tied to one instance):
   pg addon install beegfs
           Stored under top-level addons.beegfs in config (Linux only).
           BeeGFS — the scale-out parallel filesystem — pgcli's first
-          MULTI-container addon: one filesystem = three containers (mgmtd →
-          meta → storage) from ghcr.io/thinkparq/beegfs, started in dependency
-          order by one install. v1 is a converged SINGLE-HOST cluster on the
-          stock protocol ports (mgmtd 8008/8010, meta 8005, storage 8003);
+          MULTI-container addon: one filesystem = the mgmtd → meta → storage
+          services from ghcr.io/thinkparq/beegfs, started in dependency order
+          by one install. By default THIS host runs all three (the converged
+          single-host filesystem); --roles mgmtd,meta / --roles storage scopes
+          it to a subset, and a subset without mgmtd points at the cluster with
+          --mgmtd-host <ip> + --node-id <n> + --password <conn-auth> — every
+          host runs its own pgcli install and the daemons self-register into
+          mgmtd (pgcli never SSHes). --storage-target repeats for multiple
+          storage targets/disks on one host (target IDs derive from --node-id).
+          Stock protocol ports (mgmtd 8008/8010, meta 8005, storage 8003);
           meta and storage have no listen-port override in 8.4, so exactly one
           filesystem can exist per host (enforced). Only mgmtd's two ports move,
           via --beegfs-mgmtd-port/--beegfs-mgmtd-grpc-port. Host networking, no
           privileged mode; the images run as root and own their data dirs. The
-          daemons share a generated connection-auth secret ("pg addon password
-          beegfs"); mgmtd runs with TLS disabled (clients need --tls-disable
-          too). The CLIENT is a kernel module — pgcli never installs or mounts
-          it; "pg addon beegfs mount-hint" prints the exact client config, and
-          "pg addon beegfs check" reports cluster health from the daemons' logs.
-          An unlicensed build logs a quota warning but works; a license is a
-          registration you obtain from ThinkParQ, never generated here.
+          daemons share a connection-auth secret ("pg addon password beegfs";
+          generated on the host that runs mgmtd); mgmtd runs with TLS disabled
+          (clients need --tls-disable too). The CLIENT is a kernel module —
+          pgcli never installs or mounts it; "pg addon beegfs mount-hint"
+          prints the exact client config, "pg addon beegfs join-hint" the
+          per-host join commands, and "pg addon beegfs check" reports cluster
+          health from the daemons' logs. An unlicensed build logs a quota
+          warning and caps client mounts at five; a license is a registration
+          you obtain from ThinkParQ (never generated here), and pgcli CARRIES a
+          downloaded PEM ("--license-file <pem>" at install, or "pg addon beegfs
+          license --set <pem>" / "--clear" to hot-swap; the PEM is stored in the
+          config and reaches the mgmtd container only — mgmtd alone verifies it).
 
 Commands:
   pg addon install <addon>    install an add-on
@@ -260,7 +271,7 @@ Currently supported add-ons:
   prometheus  Prometheus — the metrics collection backend Grafana reads from (single container from docker.io/prom/prometheus; rendered prometheus.yml or --conf-file, --scrape targets, --alertmanager-url to forward alerts + watch Alertmanager, --rule-file to load alerting rules, SIGHUP reload; NO web login — defaults to 0.0.0.0 guarded only by the network, use --listen 127.0.0.1 for loopback; Linux host network, macOS bridge)
   alertmanager Alertmanager — the alert dedup/grouping/routing frontend of the Prometheus stack (single container from docker.io/prom/alertmanager; rendered alertmanager.yml with a no-op or --webhook-url web.hook receiver, or --conf-file; SIGHUP reload; cluster gossip disabled; NO web login — defaults to 0.0.0.0 guarded only by the network, and silences are dangerous, use --listen 127.0.0.1 for loopback; wired to Prometheus from the Prometheus side via --alertmanager-url; Linux host network, macOS bridge)
   gitea       Gitea — the self-hosted Git service (single container from docker.io/gitea/gitea; web login auto-generated and created via "gitea admin user create"; optional --ssh-port for clone/push over SSH; SQLite by default or --dsn to put its metadata in a PostgreSQL you already run; defaults to 0.0.0.0 since a Git host is reached from other machines; Linux host network, macOS bridge)
-  beegfs      BeeGFS — the scale-out parallel filesystem (THREE containers from ghcr.io/thinkparq/beegfs-{mgmtd,meta,storage} — mgmtd → meta → storage — brought up as one converged single-host filesystem; fixed protocol ports 8008/8010/8005/8003, meta/storage cannot move so one filesystem per host; shared generated conn-auth secret, mgmtd TLS disabled; the kernel-module client is never installed — "pg addon beegfs mount-hint" prints its config; Linux host network only)
+  beegfs      BeeGFS — the scale-out parallel filesystem (mgmtd/meta/storage services from ghcr.io/thinkparq/beegfs — brought up in dependency order by one install; by default all three on this host = a converged single-host filesystem, --roles scopes it to a subset and a --roles-without-mgmtd host joins an existing cluster via --mgmtd-host/--node-id/--password — every host runs its own pgcli, pgcli never SSHes; --storage-target repeats for multiple disks/targets; fixed protocol ports 8008/8010/8005/8003, meta/storage cannot move so one filesystem per host; shared conn-auth secret (generated on the mgmtd host), mgmtd TLS disabled; an unlicensed build caps client mounts at five — pgcli never generates a license but CARRIES a ThinkParQ PEM via --license-file / "pg addon beegfs license" (mgmtd-only); the kernel-module client is never installed — "pg addon beegfs mount-hint" prints its config, "join-hint" the per-host join commands; Linux host network only)
   nginx       HTTP reverse proxy in front of web services (path-based routing, optional TLS termination; single container from docker.io/library/nginx; Linux host network, macOS bridge)
 
 Two modes (pgbouncer, postgrest):
@@ -695,6 +706,8 @@ Examples:
   pg addon install beegfs                                                   # converged single-host filesystem: mgmtd+meta+storage, fixed ports
   pg addon install beegfs --name fs1 --listen 10.0.0.11                     # advertise that address as sysMgmtdHost (clients mount it)
   pg addon install beegfs --name fs1 --beegfs-mgmtd-port 18008 --beegfs-mgmtd-grpc-port 18010   # move mgmtd's two ports (meta/storage re-target automatically)
+  pg addon install beegfs --name fs1 --roles storage --mgmtd-host 10.0.0.11 --node-id 2 --password <conn-auth> --storage-target /mnt/d1 --storage-target /mnt/d2  # cross-host: add a 2-target storage node (run ON that host; conn-auth from "pg addon beegfs join-hint")
+  pg addon install beegfs --license-file license.pem                        # carry a ThinkParQ license PEM into mgmtd (mgmtd host only; hot-swap later with "pg addon beegfs license --set")
   pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050
   pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050 --upstream name=postgrest,path=/api,backend=127.0.0.1:3000 --tls`,
 	Args: cobra.ExactArgs(1),
@@ -770,7 +783,7 @@ For remote add-ons, use --pg-name to specify the pooler name.
 
 Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/beegfs) use --name.
 Remove keeps the data directory; pass --clean-data for object-storage/KV/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea/BeeGFS
-data to go too. For beegfs the unit is the whole filesystem — all three containers go, and --clean-data deletes all three data dirs.
+data to go too. For beegfs the unit is the filesystem on THIS host — its role containers (all three on a converged host, the configured subset on a cross-host member) go, and --clean-data deletes their data dirs.
 
 Examples:
   pg addon remove pgbouncer -i proj01
@@ -825,7 +838,7 @@ Supported add-ons:
   prometheus pg addon start prometheus [--name prometheus]
   alertmanager pg addon start alertmanager [--name alertmanager]
   gitea      pg addon start gitea [--name gitea]
-  beegfs     pg addon start beegfs [--name fs1]   (starts the whole 3-container cluster, mgmtd → meta → storage)
+  beegfs     pg addon start beegfs [--name fs1]   (starts this host's roles in dependency order — mgmtd → meta → storage, or the subset a cross-host member runs)
   nginx      pg addon start nginx [--name proxy]
   pgbouncer  pg addon start pgbouncer -i <instance>
              pg addon start pgbouncer --pg-name <remote-name>
@@ -879,7 +892,7 @@ Supported add-ons:
   prometheus pg addon stop prometheus [--name prometheus]
   alertmanager pg addon stop alertmanager [--name alertmanager]
   gitea      pg addon stop gitea [--name gitea]
-  beegfs     pg addon stop beegfs [--name fs1]   (stops the whole cluster, storage → meta → mgmtd)
+  beegfs     pg addon stop beegfs [--name fs1]   (stops this host's roles in reverse order — storage → meta → mgmtd)
   nginx      pg addon stop nginx [--name proxy]
   pgbouncer  pg addon stop pgbouncer -i <instance>
              pg addon stop pgbouncer --pg-name <remote-name>
@@ -1038,7 +1051,7 @@ func init() {
 
 	// redis flags (top-level standalone KV store — the first version-selectable addon)
 	addonInstallCmd.Flags().String("version", "", "Redis major version to install: 7 or 8 (default \"8\"); each maps to a pinned upstream docker.io/library/redis tag. Ignored for every other addon")
-	addonInstallCmd.Flags().String("password", "", "Redis requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls) / Predixy proxy password (REQUIRED, never generated: it must be the proxied cluster's requirepass — read it with `pg addon password redis --name <member>`) / pgAdmin, Grafana or Gitea WEB login password (generated on first install if omitted — not a PostgreSQL password; retrieve it with `pg addon password pgadmin`/`grafana`/`gitea`. For Grafana it only takes effect while grafana.db is absent; for Gitea the stored password is the one pgcli CREATES the admin account with, so it is inert on a revived store whose admin already exists) / BeeGFS connection-auth secret (generated on first install if omitted; the shared value all three daemons and every client's conn.auth must carry — pin it to keep one value across reinstalls, retrieve it with `pg addon password beegfs`)")
+	addonInstallCmd.Flags().String("password", "", "Redis requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls) / Predixy proxy password (REQUIRED, never generated: it must be the proxied cluster's requirepass — read it with `pg addon password redis --name <member>`) / pgAdmin, Grafana or Gitea WEB login password (generated on first install if omitted — not a PostgreSQL password; retrieve it with `pg addon password pgadmin`/`grafana`/`gitea`. For Grafana it only takes effect while grafana.db is absent; for Gitea the stored password is the one pgcli CREATES the admin account with, so it is inert on a revived store whose admin already exists) / BeeGFS connection-auth secret (generated on first install ONLY on a host running mgmtd; REQUIRED on a cross-host join (--roles without mgmtd) and must equal the cluster's value — retrieve it with `pg addon password beegfs` or `pg addon beegfs join-hint`)")
 	addonInstallCmd.Flags().String("admin-user", "", "Grafana WEB login user (GF_SECURITY_ADMIN_USER; default \"admin\") / Gitea WEB login user (created via `gitea admin user create`; default \"gitea\" — deliberately NOT the container's OS user \"git\") — the account you sign into the web UI with, unrelated to any PostgreSQL role")
 	addonInstallCmd.Flags().Bool("allow-registration", false, "Gitea: open self-service signup (GITEA__service__DISABLE_REGISTRATION=false; the web UI shows a Register entry). Closed by default — it is one of the two guards on the default 0.0.0.0 listen. Signups always create NORMAL users: Gitea offers no way for the register form to produce an admin, so this opens account spam, not takeover. The toggle needs --force to reach the live container; close it again with --allow-registration=false --force")
 	addonInstallCmd.Flags().String("email", "", "pgAdmin WEB login email (PGADMIN_DEFAULT_EMAIL; default \"admin@pgcli.lan\") — the account you sign into the web UI with, unrelated to any PostgreSQL role; the image rejects reserved TLDs such as .local")
@@ -5497,7 +5510,12 @@ func runAddonList(showPassword bool) error {
 			}
 			fmt.Printf("  %s (name: %s)\n", "beegfs", name)
 			fmt.Printf("    Status:      %s\n", status)
-			fmt.Printf("    Mgmtd:       %s:%d (BeeMsg) / %s:%d (gRPC)\n", beegfsDisplayHost(bc.Listen), bc.MgmtdPort, beegfsDisplayHost(bc.Listen), bc.MgmtdGRPCPort)
+			fmt.Printf("    Roles:       %s (on this host)\n", strings.Join(bc.RolesInOrder(), ", "))
+			if bc.MgmtdHost != "" {
+				fmt.Printf("    Mgmtd:       %s:%d (BeeMsg) / %s:%d (gRPC) (remote — this host joins it)\n", bc.MgmtdHost, bc.MgmtdPort, bc.MgmtdHost, bc.MgmtdGRPCPort)
+			} else {
+				fmt.Printf("    Mgmtd:       %s:%d (BeeMsg) / %s:%d (gRPC)\n", beegfsDisplayHost(bc.Listen), bc.MgmtdPort, beegfsDisplayHost(bc.Listen), bc.MgmtdGRPCPort)
+			}
 			fmt.Printf("    Ports:       meta %d, storage %d (fixed)\n", bc.MetaPort, bc.StoragePort)
 			auth := "none"
 			if bc.ConnAuth != "" {
@@ -5507,19 +5525,30 @@ func runAddonList(showPassword bool) error {
 			if showPassword && bc.ConnAuth != "" {
 				fmt.Printf("    Conn-auth:   %s\n", bc.ConnAuth)
 			}
-			fmt.Printf("    Image:       %s-{mgmtd,meta,storage}:%s\n", config.BeeGFSImageRepo, bc.ImageTag)
-			fmt.Printf("    Data:        %s, %s, %s\n", bm.DataDir(&bc, podman.BeeGFSServiceMgmtd), bm.DataDir(&bc, podman.BeeGFSServiceMeta), bm.DataDir(&bc, podman.BeeGFSServiceStorage))
-			fmt.Printf("    Containers:  %s, %s, %s\n", bc.ContainerName(podman.BeeGFSServiceMgmtd), bc.ContainerName(podman.BeeGFSServiceMeta), bc.ContainerName(podman.BeeGFSServiceStorage))
+			fmt.Printf("    Image:       %s-{%s}:%s\n", config.BeeGFSImageRepo, strings.Join(bc.RolesInOrder(), ","), bc.ImageTag)
+			dataDirs := make([]string, 0, 4)
+			containers := make([]string, 0, 3)
+			for _, role := range bc.RolesInOrder() {
+				containers = append(containers, bc.ContainerName(role))
+				dataDirs = append(dataDirs, bm.DataDirs(&bc, role)...)
+			}
+			fmt.Printf("    Data:        %s\n", strings.Join(dataDirs, ", "))
+			fmt.Printf("    Containers:  %s\n", strings.Join(containers, ", "))
 		}
 	} else if len(cfg.Addons.BeeGFS) > 0 {
 		// Configured but the manager is unavailable (podman missing): still show them.
 		for _, name := range sortedAddonNames(cfg.Addons.BeeGFS) {
 			bc := cfg.Addons.BeeGFS[name]
 			hasBeeGFS = true
+			containers := make([]string, 0, 3)
+			for _, role := range bc.RolesInOrder() {
+				containers = append(containers, bc.ContainerName(role))
+			}
 			fmt.Printf("  %s (name: %s)\n", "beegfs", name)
 			fmt.Printf("    Status:      n/a (manager unavailable)\n")
+			fmt.Printf("    Roles:       %s (on this host)\n", strings.Join(bc.RolesInOrder(), ", "))
 			fmt.Printf("    Mgmtd:       %s:%d (BeeMsg)\n", beegfsDisplayHost(bc.Listen), bc.MgmtdPort)
-			fmt.Printf("    Containers:  %s, %s, %s\n", bc.ContainerName(podman.BeeGFSServiceMgmtd), bc.ContainerName(podman.BeeGFSServiceMeta), bc.ContainerName(podman.BeeGFSServiceStorage))
+			fmt.Printf("    Containers:  %s\n", strings.Join(containers, ", "))
 		}
 	}
 	if !hasBeeGFS {

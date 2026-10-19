@@ -129,7 +129,7 @@ func TestBeeGFSMetaArgs(t *testing.T) {
 
 func TestBeeGFSStorageArgs(t *testing.T) {
 	bc := beegfsTestConfig()
-	args := beegfsStorageArgsAndEnv(bc, "/base/addon/beegfs/fs1/storage")
+	args := beegfsStorageArgsAndEnv(bc, []string{"/base/addon/beegfs/fs1/storage"})
 	assertBeeGFSCommon(t, args, BeeGFSServiceStorage, "/base/addon/beegfs/fs1/storage")
 
 	var setup string
@@ -164,7 +164,7 @@ func TestBeeGFSMgmtdPortOverrideThreads(t *testing.T) {
 	}
 	for _, args := range [][]string{
 		beegfsMetaArgsAndEnv(bc, "/d/meta"),
-		beegfsStorageArgsAndEnv(bc, "/d/storage"),
+		beegfsStorageArgsAndEnv(bc, []string{"/d/storage"}),
 	} {
 		joined := strings.Join(args, " ")
 		if !strings.Contains(joined, "connMgmtdPort=19008") {
@@ -187,6 +187,124 @@ func TestBeeGFSSysMgmtdHostExplicitListen(t *testing.T) {
 	}
 }
 
+// v2 join host: MgmtdHost overrides everything (it must NEVER fall back to
+// loopback — the mgmtd is on another machine), the node ID reaches both
+// daemons' -s, and a moved BeeMsg port still threads connMgmtdPort so the
+// joiner dials the remote's moved port.
+func TestBeeGFSJoinHostArgs(t *testing.T) {
+	bc := beegfsTestConfig()
+	bc.Roles = []string{config.BeeGFSServiceStorage}
+	bc.MgmtdHost = "10.241.20.147"
+	bc.NodeID = 2
+	args := beegfsStorageArgsAndEnv(bc, []string{"/d/t1"})
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "sysMgmtdHost=10.241.20.147") {
+		t.Errorf("join host must dial the stored mgmtd address: %s", joined)
+	}
+	if strings.Contains(joined, "sysMgmtdHost=127.0.0.1") {
+		t.Errorf("MgmtdHost must never fall back to loopback on a join host: %s", joined)
+	}
+	setup := args[slices.IndexFunc(args, func(a string) bool { return strings.HasPrefix(a, "beegfs_setup_1=") })]
+	if !strings.Contains(setup, "-s 2") || !strings.Contains(setup, "-i 201") {
+		t.Errorf("join storage setup must carry node id 2 / target id 201: %s", setup)
+	}
+
+	bc2 := beegfsTestConfig()
+	bc2.MgmtdHost = "10.0.0.9"
+	bc2.MgmtdPort = 18008
+	meta := strings.Join(beegfsMetaArgsAndEnv(bc2, "/d/meta"), " ")
+	for _, want := range []string{"sysMgmtdHost=10.0.0.9", "connMgmtdPort=18008"} {
+		if !strings.Contains(meta, want) {
+			t.Errorf("join meta missing %q: %s", want, meta)
+		}
+	}
+}
+
+// v2 multi-target storage: one container, N setups numbered like the official
+// beegfs_setup_N scheme, one -v per target at /data/storage/<targetID>, and a
+// comma-joined storeStorageDirectory.
+func TestBeeGFSStorageMultiTarget(t *testing.T) {
+	bc := beegfsTestConfig()
+	bc.NodeID = 2
+	args := beegfsStorageArgsAndEnv(bc, []string{"/mnt/d1", "/mnt/d2"})
+	joined := strings.Join(args, " ")
+
+	var setups []string
+	for _, a := range args {
+		if strings.HasPrefix(a, "beegfs_setup_") {
+			setups = append(setups, a)
+		}
+	}
+	if len(setups) != 2 {
+		t.Fatalf("want 2 setup envs, got %v", setups)
+	}
+	if !strings.HasPrefix(setups[0], "beegfs_setup_1=beegfs-setup-storage -C -p /data/storage/201 -s 2 -i 201") {
+		t.Errorf("setup_1 wrong: %s", setups[0])
+	}
+	if !strings.HasPrefix(setups[1], "beegfs_setup_2=beegfs-setup-storage -C -p /data/storage/202 -s 2 -i 202") {
+		t.Errorf("setup_2 wrong: %s", setups[1])
+	}
+	for _, want := range []string{"/mnt/d1:/data/storage/201:z", "/mnt/d2:/data/storage/202:z"} {
+		if !slices.Contains(args, want) {
+			t.Errorf("missing per-target bind %q: %v", want, args)
+		}
+	}
+	if !strings.Contains(joined, "storeStorageDirectory=/data/storage/201,/data/storage/202") {
+		t.Errorf("storeStorageDirectory must list every target dir: %s", joined)
+	}
+}
+
+// The single-target container path must stay EXACTLY /data/storage — the v1
+// target dir records its own path internally, so a revived v1 store breaks if
+// this ever moves.
+func TestBeeGFSStorageSingleTargetPathIsV1(t *testing.T) {
+	bc := beegfsTestConfig()
+	args := beegfsStorageArgsAndEnv(bc, []string{"/d/storage"})
+	if !slices.Contains(args, "/d/storage:/data/storage:z") {
+		t.Errorf("single target must mount at the v1 path /data/storage: %v", args)
+	}
+}
+
+// The license env rides ONLY to mgmtd (its image alone ships
+// libbeegfs_license.so, and its start.sh wires the env to
+// --license-cert-file). The exact argv entry must be the raw PEM — init.py
+// writes the env value verbatim to /etc/beegfs/license.pem — and meta/storage
+// must never see it even when the config carries one.
+func TestBeeGFSLicenseEnvIsMgmtdOnly(t *testing.T) {
+	const pem = "-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----"
+	bc := beegfsTestConfig()
+	bc.License = pem
+
+	mg := beegfsMgmtdArgsAndEnv(bc, "/d/mgmtd")
+	if !hasFlagValue(mg, "-e", "BEEGFS_LICENSE_FILE_DATA="+pem) {
+		t.Errorf("mgmtd args missing the exact license env: %v", mg)
+	}
+	for name, args := range map[string][]string{
+		"meta":    beegfsMetaArgsAndEnv(bc, "/d/meta"),
+		"storage": beegfsStorageArgsAndEnv(bc, []string{"/d/storage"}),
+	} {
+		if strings.Contains(strings.Join(args, " "), "BEEGFS_LICENSE_FILE_DATA") {
+			t.Errorf("%s must never receive the license env: %v", name, args)
+		}
+	}
+
+	// No license → no empty env either.
+	bc.License = ""
+	if strings.Contains(strings.Join(beegfsMgmtdArgsAndEnv(bc, "/d/mgmtd"), " "), "BEEGFS_LICENSE_FILE_DATA") {
+		t.Error("unlicensed mgmtd must not carry the env at all")
+	}
+}
+
+// hasFlagValue reports whether flag is immediately followed by value.
+func hasFlagValue(args []string, flag, value string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
 func TestBeeGFSImageRefsDistinct(t *testing.T) {
 	seen := map[string]bool{}
 	for _, role := range []string{BeeGFSServiceMgmtd, BeeGFSServiceMeta, BeeGFSServiceStorage} {
@@ -207,7 +325,7 @@ func TestBeeGFSClusterState(t *testing.T) {
 		st   ClusterState
 		want string
 	}{
-		{ClusterState{true, true, true}, "running"},
+		{ClusterState{MgmtdUp: true, MetaUp: true, StorageUp: true}, "running"},
 		{ClusterState{}, "stopped"},
 		{ClusterState{MgmtdUp: true}, "partial (mgmtd)"},
 		{ClusterState{MgmtdUp: true, MetaUp: true}, "partial (mgmtd,meta)"},
@@ -218,10 +336,34 @@ func TestBeeGFSClusterState(t *testing.T) {
 			t.Errorf("ClusterState(%+v) = %q, want %q", c.st, got, c.want)
 		}
 	}
-	if !(ClusterState{true, true, true}).AllUp() || (ClusterState{MgmtdUp: true}).AllUp() {
+	full := ClusterState{MgmtdUp: true, MetaUp: true, StorageUp: true}
+	if !full.AllUp() || (ClusterState{MgmtdUp: true}).AllUp() {
 		t.Error("AllUp wrong")
 	}
 	if !(ClusterState{}).AllDown() || (ClusterState{StorageUp: true}).AllDown() {
 		t.Error("AllDown wrong")
+	}
+}
+
+// v2: a state built from a config counts only the roles THAT host runs — a
+// storage-only member is "running" with just its own container up, and a
+// hand-built zero state keeps the legacy full-trio semantics.
+func TestBeeGFSClusterStateRolesAware(t *testing.T) {
+	storageOnly := &config.BeeGFSConfig{Roles: []string{config.BeeGFSServiceStorage}}
+	st := ClusterState{bc: storageOnly, StorageUp: true}
+	if got := st.String(); got != "running" {
+		t.Errorf("storage-only host with storage up = %q, want running", got)
+	}
+	if !st.AllUp() {
+		t.Error("storage-only host with storage up must be AllUp")
+	}
+	if (ClusterState{bc: storageOnly}).AllUp() || !(ClusterState{bc: storageOnly}).AllDown() {
+		t.Error("storage-only host with nothing up must be AllDown, not AllUp")
+	}
+	// A stopped meta on a host running meta+storage is partial, counted over
+	// exactly its own roles.
+	join := &config.BeeGFSConfig{Roles: []string{config.BeeGFSServiceMeta, config.BeeGFSServiceStorage}}
+	if got := (ClusterState{bc: join, StorageUp: true}).String(); got != "partial (storage)" {
+		t.Errorf("meta+storage host, storage up only = %q, want partial (storage)", got)
 	}
 }
