@@ -130,9 +130,33 @@ quota 属企业功能，需要 license，也不在 v1 的接线范围内。
 
 ## 挂载客户端
 
-客户端是宿主**内核模块**——pgcli 不装。在 Linux 主机上添加 ThinkParQ apt 仓
-库、安装 `beegfs-client beegfs-utils`（DKMS 会对着 `linux-headers-$(uname -r)`
-编译模块），然后照抄 `pg addon beegfs mount-hint` 的输出。它逐字渲染三个文件：
+客户端是宿主**内核模块**——pgcli 不装。要在 Debian/Ubuntu 主机上挂载文件系统，
+需自行添加 ThinkParQ apt 仓库并安装客户端包。8.4 + Debian 12（bookworm）的完整
+命令（已在测试机实测）：
+
+```bash
+# 1. BeeGFS 签名 key（指纹 0683 AF2B 9AC5 BC7D 59B2 D623 40CE 4E24 3CD5 0804）
+wget https://www.beegfs.io/release/beegfs_8.4/gpg/GPG-KEY-beegfs -O /etc/apt/trusted.gpg.d/beegfs.asc
+# 2. repo 文件（bookworm = Debian 12；Debian 13 用 beegfs-trixie.list，
+#    Ubuntu 用 beegfs-jammy/noble.list，……）
+wget https://www.beegfs.io/release/beegfs_8.4/dists/beegfs-bookworm.list -O /etc/apt/sources.list.d/beegfs.list
+apt update
+# 3. 客户端 + 工具；内核模块由 DKMS 编译
+apt install beegfs-client beegfs-utils beegfs-tools linux-headers-$(uname -r)
+```
+
+RHEL 系主机上同一仓库以 `.repo` 文件发布于
+`https://www.beegfs.io/release/beegfs_8.4/dists/` 下（`rpm --import
+…/GPG-KEY-beegfs` + `wget …/beegfs-rhel9.repo -O
+/etc/yum.repos.d/beegfs.repo`）。URL 一律以 [ThinkParQ 下载
+页](https://www.beegfs.io/download/) 上*你的* BeeGFS 版本 + 发行版对应的为准——
+服务端 pin 在 8.4，客户端就应挂对应 8.4 的仓库。
+
+`beegfs-client` 依赖 `build-essential`、推荐内核头文件——DKMS 在安装时对着
+`linux-headers-$(uname -r)` 编译 `beegfs` 模块，所以运行中内核的头文件必须就位，
+且每次内核升级都会重新编译。
+
+然后照抄 `pg addon beegfs mount-hint` 的输出——它逐字渲染三个文件：
 
 ```bash
 pg addon beegfs mount-hint --name fs1
@@ -146,12 +170,25 @@ pg addon beegfs mount-hint --name fs1
      /mnt/beegfs fs1@<mgmtd-host>:/ _sysName=<client-name>
 ```
 
-然后 `systemctl restart beegfs-client` 触发挂载，用 `df -h /mnt/beegfs` 加一
-次写读往返验证。由于集群关着 TLS，每个 `beegfs` CLI 调用都要带关 TLS 的形态、
-指向 gRPC 口：
+> **conn.auth 的坑：** 客户端的连接认证文件必须以换行符结尾。
+> `echo <secret> > /etc/beegfs/conn.auth` 可以；`printf <secret> > …`（无行尾换
+> 行）会被拒为 `tried to authenticate stream with wrong secret`——尾部那个字节
+> 是两侧比对内容的一部分。
+
+挂载与验证：
 
 ```bash
-beegfs --tls-disable --mgmtd-addr=<mgmtd-host>:8010 node list --type client
+systemctl restart beegfs-client            # 读 beegfs-mounts.conf 并挂载
+df -h /mnt/beegfs
+echo hi > /mnt/beegfs/t && cat /mnt/beegfs/t   # 端到端写读
+```
+
+由于集群关着 TLS，每个 `beegfs` CLI 调用都要带关 TLS 的形态、指向 gRPC 口；
+`node list` 会列出全部四类节点（management、meta、storage，以及挂载成功后的本客
+户端）：
+
+```bash
+beegfs --tls-disable --mgmtd-addr=<mgmtd-host>:8010 node list
 ```
 
 `mount-hint` 是纯本地渲染——从不碰 podman，客户端本就不归 pgcli 管。

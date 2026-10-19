@@ -151,10 +151,37 @@ need a license and are outside pgcli's v1 wiring.
 
 ## Mounting a client
 
-The client is a host **kernel module** — pgcli does not install it. On a Linux
-host, add the ThinkParQ apt repo, install `beegfs-client beegfs-utils` (DKMS
-builds the module against `linux-headers-$(uname -r)`), then copy the config
-`pg addon beegfs mount-hint` prints. It renders the three files verbatim:
+The client is a host **kernel module** — pgcli does not install it. To mount a
+filesystem from a Debian/Ubuntu host, add ThinkParQ's apt repository and install
+the client packages yourself. For 8.4 on Debian 12 (bookworm) — the exact
+commands, verified on a test host:
+
+```bash
+# 1. the BeeGFS signing key (fingerprint 0683 AF2B 9AC5 BC7D 59B2 D623 40CE 4E24 3CD5 0804)
+wget https://www.beegfs.io/release/beegfs_8.4/gpg/GPG-KEY-beegfs -O /etc/apt/trusted.gpg.d/beegfs.asc
+# 2. the repo file (bookworm = Debian 12; use beegfs-trixie.list for Debian 13,
+#    beegfs-jammy/noble.list for Ubuntu, …)
+wget https://www.beegfs.io/release/beegfs_8.4/dists/beegfs-bookworm.list -O /etc/apt/sources.list.d/beegfs.list
+apt update
+# 3. client + tools; the module is DKMS-built against the kernel headers
+apt install beegfs-client beegfs-utils beegfs-tools linux-headers-$(uname -r)
+```
+
+On RHEL-family hosts the same repo lives under
+`https://www.beegfs.io/release/beegfs_8.4/dists/` as an `.repo` file
+(`rpm --import …/GPG-KEY-beegfs` + `wget …/beegfs-rhel9.repo -O
+/etc/yum.repos.d/beegfs.repo`). Always take the URLs for *your* BeeGFS version
+and distribution from the [ThinkParQ download
+page](https://www.beegfs.io/download/) — pinning the server to 8.4 means clients
+should mount from the matching 8.4 repo.
+
+`beegfs-client` depends on `build-essential` and recommends kernel headers —
+DKMS compiles the `beegfs` module against `linux-headers-$(uname -r)` at install
+time, so it needs the running kernel's headers present and will rebuild on every
+kernel update.
+
+Then write the config `pg addon beegfs mount-hint` prints — it renders the three
+files verbatim:
 
 ```bash
 pg addon beegfs mount-hint --name fs1
@@ -168,13 +195,25 @@ pg addon beegfs mount-hint --name fs1
      /mnt/beegfs fs1@<mgmtd-host>:/ _sysName=<client-name>
 ```
 
-Then `systemctl restart beegfs-client` to trigger the mount, and verify with
-`df -h /mnt/beegfs` plus a write/read round-trip. Because the cluster runs with
-TLS disabled, every `beegfs` CLI call needs the disabled-TLS form pointed at
-the gRPC port:
+> **conn.auth gotcha:** the client's connection-auth file must end in a
+> newline. `echo <secret> > /etc/beegfs/conn.auth` works; `printf <secret> > …`
+> (no trailing newline) is rejected with `tried to authenticate stream with
+> wrong secret` — the trailing byte is part of what both sides compare.
+
+Then mount and verify:
 
 ```bash
-beegfs --tls-disable --mgmtd-addr=<mgmtd-host>:8010 node list --type client
+systemctl restart beegfs-client            # reads beegfs-mounts.conf and mounts
+df -h /mnt/beegfs
+echo hi > /mnt/beegfs/t && cat /mnt/beegfs/t   # end-to-end write/read
+```
+
+Because the cluster runs with TLS disabled, every `beegfs` CLI call needs the
+disabled-TLS form pointed at the gRPC port; `node list` shows all four node
+types (management, meta, storage, and this client once mounted):
+
+```bash
+beegfs --tls-disable --mgmtd-addr=<mgmtd-host>:8010 node list
 ```
 
 `mount-hint` is pure local rendering — it never touches podman, since the client

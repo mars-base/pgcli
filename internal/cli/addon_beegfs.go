@@ -438,7 +438,7 @@ func runAddonBeeGFSMountHint(cmd *cobra.Command) error {
 	if wildcard {
 		mgmtdAddr = "<mgmtd-host-ip>:" + fmt.Sprint(bc.MgmtdGRPCPort)
 	}
-	fmt.Println("Server-side view (beegfs-tools, TLS-disabled form):  beegfs --tls-disable --mgmtd-addr=" + mgmtdAddr + " node list --type client")
+	fmt.Println("Server-side view (beegfs-tools, TLS-disabled form; lists every node incl. clients):  beegfs --tls-disable --mgmtd-addr=" + mgmtdAddr + " node list")
 	return nil
 }
 
