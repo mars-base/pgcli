@@ -210,6 +210,22 @@ Addon networking differs per component:
   guarded by the generated admin password and closed self-registration. On
   macOS it joins `pgcli-net` with the web port — and, when SSH is enabled, the
   SSH port — published; code-complete but not yet exercised on a Mac.
+- **[BeeGFS](/docs/addon/beegfs/)** — **Linux only; macOS installation is
+  refused.** The first multi-container addon: one config entry is one
+  converged single-host *filesystem* — three containers (`mgmtd` + `meta` +
+  `storage`) started in dependency order and managed as a unit. It is the only
+  addon with **no bridge path and no bridge fallback**: BeeGFS speaks its own
+  TCP/UDP protocol (not HTTP), so the daemons run on `--network host` and bind
+  their stock protocol ports directly — and because 8.4's meta (8005) and
+  storage (8003) have no listen-port override at all, exactly one filesystem can
+  exist per host (guarded, not pooled). No macOS equivalent exists to bridge
+  to: without host networking there is no correct BeeGFS topology, so
+  `pg addon install beegfs` fails fast on a Mac rather than half-working.
+  Ownership is the *inverse* of Gitea/Grafana: the images run as root and own
+  their bind-mounted dirs, so pgcli never chowns anything. The client side is a
+  kernel module (DKMS) that cannot be containerised — pgcli deliberately never
+  installs or mounts it and instead prints the exact client config via
+  `pg addon beegfs mount-hint`.
 - **[nginx](/docs/addon/nginx/)** — **both platforms (macOS lightly
   tested).** The HTTP reverse proxy joins `pgcli-net` on macOS with its ports
   published — the same bridge path the object stores use; it has been exercised

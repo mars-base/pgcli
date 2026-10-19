@@ -75,8 +75,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartGitea(c) && !hasAutostartNginx(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --gitea / --nginx)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartNginx(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --gitea / --beegfs / --nginx)")
 		return nil
 	}
 
@@ -232,6 +232,14 @@ func startAutostart() error {
 	// backend, and with --dsn its external PostgreSQL (a managed instance, or
 	// any reachable server) comes up earlier in this pass anyway.
 	if err := startAutostartGitea(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// BeeGFS filesystems (top-level infra addon — the only multi-container
+	// autostart): each filesystem's mgmtd → meta → storage come up in order.
+	// Placed after the web addons — nothing on this pass depends on the
+	// filesystem, and a client mount on this host re-attaches by itself.
+	if err := startAutostartBeeGFS(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -1048,6 +1056,51 @@ func startAutostartGitea(c *config.Config) error {
 		gc := c.Addons.Gitea[name]
 		if err := gm.StartContainer(&gc); err != nil {
 			fmt.Printf("  [X] gitea autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartBeeGFS reports whether any BeeGFS filesystem is autostart-enabled.
+func hasAutostartBeeGFS(c *config.Config) bool {
+	for _, bc := range c.Addons.BeeGFS {
+		if bc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartBeeGFS starts each autostart-enabled filesystem. The only
+// CLUSTER-granular autostart in pgcli: StartCluster brings one filesystem's
+// three containers up in dependency order (mgmtd → meta → storage), starting
+// existing containers and recreating only what is missing or broken. The
+// services retry their own registration, so a boot pass does not block on logs.
+// Order is sorted by filesystem name for deterministic boot logs.
+func startAutostartBeeGFS(c *config.Config) error {
+	var names []string
+	for name, bc := range c.Addons.BeeGFS {
+		if bc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	bm, err := podman.NewBeeGFSManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		bc := c.Addons.BeeGFS[name]
+		if err := bm.StartCluster(&bc); err != nil {
+			fmt.Printf("  [X] beegfs autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}

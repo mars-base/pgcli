@@ -179,6 +179,18 @@ macOS 上这些都是**单主机**：跨主机副本、跨多机的连接池属�
   `0.0.0.0`（Git 服务天然要给别的机器克隆），由自动生成的 admin 密码与关闭自助
   注册兜底。macOS 上加入 `pgcli-net` 并发布 Web 端口、以及启用 SSH 时的 SSH
   端口；代码完备但尚未在 Mac 上跑过。
+- **[BeeGFS](/docs/addon/beegfs/)** —— **仅 Linux；macOS 上直接拒绝安装**。
+  首个多容器插件：一条配置 = 一个单机收敛*文件系统*——三个容器（`mgmtd` +
+  `meta` + `storage`）按依赖顺序启动、以集群为单位管理。它是唯一**没有 bridge
+  路径、也没有 bridge 兜底**的插件：BeeGFS 说的是自家 TCP/UDP 协议（不是
+  HTTP），守护进程跑 `--network host`、直接绑协议原生端口——而 8.4 的
+  meta（8005）与 storage（8003）根本没有监听口覆盖手段，所以每台宿主只容得下
+  一个文件系统（守卫拦截，而非端口池）。macOS 没有可 bridge 过去的等价形态：
+  没有 host 网络就没有正确的 BeeGFS 拓扑，所以 Mac 上 `pg addon install beegfs`
+  快速失败而不是半可用。属主形态与 Gitea/Grafana **相反**：镜像以 root 运行并
+  自属 bind 挂载目录，pgcli 从不 chown 任何东西。客户端侧是内核模块（DKMS），
+  无法容器化——pgcli 刻意从不安装、从不挂载，改用 `pg addon beegfs mount-hint`
+  输出逐字的客户端配置。
 - **[nginx](/docs/addon/nginx/)** —— **两个平台都支持（macOS 轻度实测）**。HTTP
   反向代理，Linux 上走 host 网络；macOS 上加入 `pgcli-net` 并发布端口，与对象
   存储同一条 bridge 路径 —— 已跑通过但未经负载考验。上游镜像多架构

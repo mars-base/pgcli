@@ -205,6 +205,24 @@ Infra addons (shared, not tied to one instance):
           (uid/gid 1000) but does not chown an existing bind mount, so pgcli
           pre-chowns the data dir on the host (rootless via "podman unshare
           chown 1000:1000"; a rootful host running pgcli as root chowns directly).
+  pg addon install beegfs
+          Stored under top-level addons.beegfs in config (Linux only).
+          BeeGFS — the scale-out parallel filesystem — pgcli's first
+          MULTI-container addon: one filesystem = three containers (mgmtd →
+          meta → storage) from ghcr.io/thinkparq/beegfs, started in dependency
+          order by one install. v1 is a converged SINGLE-HOST cluster on the
+          stock protocol ports (mgmtd 8008/8010, meta 8005, storage 8003);
+          meta and storage have no listen-port override in 8.4, so exactly one
+          filesystem can exist per host (enforced). Only mgmtd's two ports move,
+          via --beegfs-mgmtd-port/--beegfs-mgmtd-grpc-port. Host networking, no
+          privileged mode; the images run as root and own their data dirs. The
+          daemons share a generated connection-auth secret ("pg addon password
+          beegfs"); mgmtd runs with TLS disabled (clients need --tls-disable
+          too). The CLIENT is a kernel module — pgcli never installs or mounts
+          it; "pg addon beegfs mount-hint" prints the exact client config, and
+          "pg addon beegfs check" reports cluster health from the daemons' logs.
+          An unlicensed build logs a quota warning but works; a license is a
+          registration you obtain from ThinkParQ, never generated here.
 
 Commands:
   pg addon install <addon>    install an add-on
@@ -242,6 +260,7 @@ Currently supported add-ons:
   prometheus  Prometheus — the metrics collection backend Grafana reads from (single container from docker.io/prom/prometheus; rendered prometheus.yml or --conf-file, --scrape targets, --alertmanager-url to forward alerts + watch Alertmanager, --rule-file to load alerting rules, SIGHUP reload; NO web login — defaults to 0.0.0.0 guarded only by the network, use --listen 127.0.0.1 for loopback; Linux host network, macOS bridge)
   alertmanager Alertmanager — the alert dedup/grouping/routing frontend of the Prometheus stack (single container from docker.io/prom/alertmanager; rendered alertmanager.yml with a no-op or --webhook-url web.hook receiver, or --conf-file; SIGHUP reload; cluster gossip disabled; NO web login — defaults to 0.0.0.0 guarded only by the network, and silences are dangerous, use --listen 127.0.0.1 for loopback; wired to Prometheus from the Prometheus side via --alertmanager-url; Linux host network, macOS bridge)
   gitea       Gitea — the self-hosted Git service (single container from docker.io/gitea/gitea; web login auto-generated and created via "gitea admin user create"; optional --ssh-port for clone/push over SSH; SQLite by default or --dsn to put its metadata in a PostgreSQL you already run; defaults to 0.0.0.0 since a Git host is reached from other machines; Linux host network, macOS bridge)
+  beegfs      BeeGFS — the scale-out parallel filesystem (THREE containers from ghcr.io/thinkparq/beegfs-{mgmtd,meta,storage} — mgmtd → meta → storage — brought up as one converged single-host filesystem; fixed protocol ports 8008/8010/8005/8003, meta/storage cannot move so one filesystem per host; shared generated conn-auth secret, mgmtd TLS disabled; the kernel-module client is never installed — "pg addon beegfs mount-hint" prints its config; Linux host network only)
   nginx       HTTP reverse proxy in front of web services (path-based routing, optional TLS termination; single container from docker.io/library/nginx; Linux host network, macOS bridge)
 
 Two modes (pgbouncer, postgrest):
@@ -673,6 +692,9 @@ Examples:
   pg addon install gitea --name git1 --dsn "postgres://gitea:pass@127.0.0.1:5432/giteadb"  # metadata in an existing PostgreSQL instead of SQLite
   pg addon install gitea --name local --listen 127.0.0.1                       # loopback-only instead of the 0.0.0.0 default
   pg addon install gitea --name git1 --allow-registration --force             # open self-service signup (web Register entry; signups are normal users)
+  pg addon install beegfs                                                   # converged single-host filesystem: mgmtd+meta+storage, fixed ports
+  pg addon install beegfs --name fs1 --listen 10.0.0.11                     # advertise that address as sysMgmtdHost (clients mount it)
+  pg addon install beegfs --name fs1 --beegfs-mgmtd-port 18008 --beegfs-mgmtd-grpc-port 18010   # move mgmtd's two ports (meta/storage re-target automatically)
   pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050
   pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050 --upstream name=postgrest,path=/api,backend=127.0.0.1:3000 --tls`,
 	Args: cobra.ExactArgs(1),
@@ -706,7 +728,7 @@ pg.yaml.`,
 // shaped for $(...) capture in scripts.
 var addonPasswordCmd = &cobra.Command{
 	Use:   "password <addon>",
-	Short: "Print an add-on's stored password (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin/Grafana/Gitea web login password)",
+	Short: "Print an add-on's stored password (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin/Grafana/Gitea web login password, BeeGFS conn-auth secret)",
 	Long: `Print the password stored for one add-on instance: the Redis
 requirepass (generated by pgcli), the Predixy proxy password (the
 operator-supplied copy of the proxied cluster's requirepass), the
@@ -714,7 +736,9 @@ MinIO/silo/rustfs root password or garage secret key (the access-key secret — 
 instance's Root user from "pg addon list"), or the pgAdmin, Grafana or Gitea web
 login password (the PGADMIN_DEFAULT_PASSWORD / GF_SECURITY_ADMIN_PASSWORD / Gitea
 admin-account password generated for the UI's sign-in form — not a PostgreSQL
-password).
+password), or the BeeGFS connection-auth secret (the shared CONN_AUTH_FILE_DATA
+value every daemon and client must carry — not a login, but the addon's only
+credential).
 
 The single value goes to stdout with no decoration, so it composes into
 scripts and app config:
@@ -744,9 +768,9 @@ var addonRemoveCmd = &cobra.Command{
 For local add-ons, use -i to specify the instance.
 For remote add-ons, use --pg-name to specify the pooler name.
 
-Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea) use --name.
-Remove keeps the data directory; pass --clean-data for object-storage/KV/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea
-data to go too.
+Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/beegfs) use --name.
+Remove keeps the data directory; pass --clean-data for object-storage/KV/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea/BeeGFS
+data to go too. For beegfs the unit is the whole filesystem — all three containers go, and --clean-data deletes all three data dirs.
 
 Examples:
   pg addon remove pgbouncer -i proj01
@@ -765,7 +789,9 @@ Examples:
   pg addon remove alertmanager
   pg addon remove alertmanager --clean-data
   pg addon remove gitea
-  pg addon remove gitea --clean-data`,
+  pg addon remove gitea --clean-data
+  pg addon remove beegfs
+  pg addon remove beegfs --clean-data`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonRemove(args[0], cmd)
@@ -799,6 +825,7 @@ Supported add-ons:
   prometheus pg addon start prometheus [--name prometheus]
   alertmanager pg addon start alertmanager [--name alertmanager]
   gitea      pg addon start gitea [--name gitea]
+  beegfs     pg addon start beegfs [--name fs1]   (starts the whole 3-container cluster, mgmtd → meta → storage)
   nginx      pg addon start nginx [--name proxy]
   pgbouncer  pg addon start pgbouncer -i <instance>
              pg addon start pgbouncer --pg-name <remote-name>
@@ -820,6 +847,7 @@ Examples:
   pg addon start prometheus
   pg addon start alertmanager
   pg addon start gitea
+  pg addon start beegfs
   pg addon start nginx --name proxy
   pg addon start pgbouncer -i proj01
   pg addon start postgrest --pg-name app-api`,
@@ -851,6 +879,7 @@ Supported add-ons:
   prometheus pg addon stop prometheus [--name prometheus]
   alertmanager pg addon stop alertmanager [--name alertmanager]
   gitea      pg addon stop gitea [--name gitea]
+  beegfs     pg addon stop beegfs [--name fs1]   (stops the whole cluster, storage → meta → mgmtd)
   nginx      pg addon stop nginx [--name proxy]
   pgbouncer  pg addon stop pgbouncer -i <instance>
              pg addon stop pgbouncer --pg-name <remote-name>
@@ -872,6 +901,7 @@ Examples:
   pg addon stop prometheus
   pg addon stop alertmanager
   pg addon stop gitea
+  pg addon stop beegfs
   pg addon stop nginx --name proxy
   pg addon stop pgbouncer -i proj01
   pg addon stop postgrest --pg-name app-api`,
@@ -947,7 +977,7 @@ func init() {
 	addonRemoveCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to remove")
 
 	// etcd flags (top-level shared-infrastructure addon)
-	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager or gitea instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"gitea\")")
+	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea or beegfs instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"gitea\"/\"beegfs\")")
 	addonInstallCmd.Flags().Int("client-port", 0, "etcd client host port (0=auto-assign from etcd_start_port)")
 	addonInstallCmd.Flags().Int("peer-port", 0, "etcd peer host port (0=auto-assign, next free port after client)")
 	addonInstallCmd.Flags().String("image", "", "override the addon image tag verbatim (etcd default quay.io/coreos/etcd:v3.5.30; redis default resolved from --version, e.g. docker.io/library/redis:8.10.2; predixy default ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine; pgadmin default docker.io/dpage/pgadmin4:9.18; grafana default docker.io/grafana/grafana:13.2.4; prometheus default docker.io/prom/prometheus:v3.15.0; alertmanager default docker.io/prom/alertmanager:v0.34.1; gitea default docker.io/gitea/gitea:28.1.0)")
@@ -961,10 +991,10 @@ func init() {
 	addonInstallCmd.Flags().Int("replication-factor", 0, "garage cluster only: object replication factor (garage.toml replication_factor; must be <= node count — a 3-node cluster with rf 3 tolerates losing 2; set it on EVERY member, the value is per-node config). Empty for garage = default 1 (single-node); etcd/redis ignore it")
 	addonInstallCmd.Flags().String("rpc-secret", "", "garage cluster only: the shared 64-hex cluster RPC secret (garage.toml rpc_secret) — generated by the bootstrap node and printed once; every joiner MUST pass the same value (pgcli never executes remotely, so you carry it). Invalid on a single-node install")
 	addonInstallCmd.Flags().Int("cluster-replicas", 0, "redis native-cluster only: per-master replica count for the --cluster create you will run (default 0 = masters-only). Only shapes the suggested assemble command and node-count guidance — which nodes become followers is decided by Redis at create time, not here; the whole group inherits the first member's value")
-	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs, garage, redis, pgAdmin, Grafana or Gitea instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; garage default <base_dir>/addon/garage/<name>/data (its metadata dir is a sibling .../meta); seaweedfs default <base_dir>/addon/seaweedfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data; pgadmin default <base_dir>/addon/pgadmin/<name>/data; grafana default <base_dir>/addon/grafana/<name>/data; prometheus default <base_dir>/addon/prometheus/<name>/data; alertmanager default <base_dir>/addon/alertmanager/<name>/data; gitea default <base_dir>/addon/gitea/<name>/data)")
+	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs, garage, redis, pgAdmin, Grafana or Gitea instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; garage default <base_dir>/addon/garage/<name>/data (its metadata dir is a sibling .../meta); seaweedfs default <base_dir>/addon/seaweedfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data; pgadmin default <base_dir>/addon/pgadmin/<name>/data; grafana default <base_dir>/addon/grafana/<name>/data; prometheus default <base_dir>/addon/prometheus/<name>/data; alertmanager default <base_dir>/addon/alertmanager/<name>/data; gitea default <base_dir>/addon/gitea/<name>/data; beegfs — ONE dir for the whole filesystem, its three services use <dir>/mgmtd, <dir>/meta and <dir>/storage, default root <base_dir>/addon/beegfs/<name>)")
 	addonInstallCmd.Flags().String("advertise-host", "", "peer-visible host: etcd member peer/client URLs, redis native-cluster --cluster-announce-ip, , garage cluster rpc_public_addr, and seaweedfs cluster weed -ip that peers dial (empty=127.0.0.1 single-host; set a LAN IP or FQDN for cross-host clusters — required on every garage or seaweedfs --cluster member)")
 	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.0.0.12:2379 (implies --initial-cluster-state existing; requires --advertise-host)")
-	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager or gitea instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"gitea\")")
+	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea or beegfs instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"gitea\"/\"beegfs\")")
 	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/garage/seaweedfs/redis/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea data directory (object storage / backup repository / key-value data / pgAdmin config+sessions, Grafana dashboards sqlite DB, Prometheus TSDB, Alertmanager silences+notification state, or Gitea repos + app.ini + its default SQLite DB) and pgcli-rendered files beside it; no-op for predixy, which is stateless. Never drops a seaweedfs filer metadata database or a Gitea --dsn PostgreSQL database")
 
 	// haproxy flags (top-level load balancer in front of a Patroni cluster)
@@ -996,7 +1026,7 @@ func init() {
 	// minio flags (top-level single-node S3-compatible object storage)
 	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo/rustfs S3 API host port (0=auto-assign from the shared minio_start_port pool); for garage, the S3 API port (0=auto from garage_start_port, default 3900 — garage takes four consecutive ports API/RPC/Web/Admin)")
 	addonInstallCmd.Flags().Int("console-port", 0, "MinIO/silo/rustfs web console host port (0=auto-assign, next free port)")
-	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo, rustfs, garage or seaweedfs server / PostgREST HTTP server / pgAdmin web server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network) — Redis, Predixy and Grafana default to \"0.0.0.0\" instead, since their password is always required (and a dashboard is meant to be viewed remotely); pass 127.0.0.1 to keep them loopback-only. Gitea also defaults to \"0.0.0.0\" — a Git host is pushed to from other machines, and its generated admin login plus closed self-registration are the gate. Prometheus and Alertmanager ALSO default to 0.0.0.0 but have NO auth at all — Alertmanager worse: anyone reaching its port can create silences (mute on-call). Both are guarded only by the network boundary, so pass 127.0.0.1 to keep them loopback-only")
+	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo, rustfs, garage or seaweedfs server / PostgREST HTTP server / pgAdmin web server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network) — Redis, Predixy and Grafana default to \"0.0.0.0\" instead, since their password is always required (and a dashboard is meant to be viewed remotely); pass 127.0.0.1 to keep them loopback-only. Gitea also defaults to \"0.0.0.0\" — a Git host is pushed to from other machines, and its generated admin login plus closed self-registration are the gate. Prometheus and Alertmanager ALSO default to 0.0.0.0 but have NO auth at all — Alertmanager worse: anyone reaching its port can create silences (mute on-call). Both are guarded only by the network boundary, so pass 127.0.0.1 to keep them loopback-only. BeeGFS is a different shape again: its daemons always bind the fixed protocol ports on the host network, so --listen does NOT gate anything there — it only picks the address the cluster self-references and clients dial for mgmtd (sysMgmtdHost), defaulting to \"0.0.0.0\" because a parallel filesystem is mounted from other machines")
 	addonInstallCmd.Flags().String("root-user", "", "MinIO/silo/rustfs root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config). For garage this is the seeded access key: omit it to auto-generate a GK-prefixed key (garage has no \"admin\" user). For seaweedfs it is the s3.json identity access key: omit it to auto-generate an SW-prefixed key on a SINGLE-NODE install only — under --cluster both it and --root-password are REQUIRED, since each node reads only its own s3.json and must present the identical identity")
 	addonInstallCmd.Flags().String("root-password", "", "MinIO/silo/rustfs root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand). For garage this is the seeded secret key; for seaweedfs the s3.json identity secret key — required (with --root-user) on every node of a --cluster install")
 	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO/silo/rustfs distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (MinIO/silo: path is the in-container export dir — /data with a plain --data-dir node, or /data1../dataN on a --drive node (MNMD); repeat for every node's every drive. rustfs: one endpoint per node — scheme://host:port, no path; it has no multi-node single-drive mode so --drive is required, and it derives the /data/rustfs0../rustfsN suffix itself. The list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
@@ -1004,11 +1034,11 @@ func init() {
 	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo/rustfs/seaweedfs: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo|rustfs>/<name>/, or the addon dir for seaweedfs; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Seaweedfs serves TLS natively: the S3 port becomes HTTPS-only (cleartext listener off). Changing this needs --force to recreate. NOT for garage: it has no native TLS (rejects --tls); front it with the nginx addon")
 	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo/rustfs: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt for MinIO/silo, rustfs_cert.pem for rustfs, cert.pem for seaweedfs). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
 	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo/rustfs: private key for --tls-cert (PEM; mounted read-only as private.key for MinIO/silo, rustfs_key.pem for rustfs, key.pem for seaweedfs). Must pair with the cert; both are required to enable BYO TLS")
-	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/PostgREST/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea container even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, a changed pgAdmin --email/--dsn/--pg-name, Grafana --admin-user or Gitea --admin-user/--ssh-port/--dsn seed/--allow-registration, or to force-recreate a Prometheus instance instead of hot-reloading its config)")
+	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/PostgREST/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea container (or, for BeeGFS, the whole 3-container filesystem cluster) even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, a changed pgAdmin --email/--dsn/--pg-name, Grafana --admin-user or Gitea --admin-user/--ssh-port/--dsn seed/--allow-registration, or to force-recreate a Prometheus instance instead of hot-reloading its config)")
 
 	// redis flags (top-level standalone KV store — the first version-selectable addon)
 	addonInstallCmd.Flags().String("version", "", "Redis major version to install: 7 or 8 (default \"8\"); each maps to a pinned upstream docker.io/library/redis tag. Ignored for every other addon")
-	addonInstallCmd.Flags().String("password", "", "Redis requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls) / Predixy proxy password (REQUIRED, never generated: it must be the proxied cluster's requirepass — read it with `pg addon password redis --name <member>`) / pgAdmin, Grafana or Gitea WEB login password (generated on first install if omitted — not a PostgreSQL password; retrieve it with `pg addon password pgadmin`/`grafana`/`gitea`. For Grafana it only takes effect while grafana.db is absent; for Gitea the stored password is the one pgcli CREATES the admin account with, so it is inert on a revived store whose admin already exists)")
+	addonInstallCmd.Flags().String("password", "", "Redis requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls) / Predixy proxy password (REQUIRED, never generated: it must be the proxied cluster's requirepass — read it with `pg addon password redis --name <member>`) / pgAdmin, Grafana or Gitea WEB login password (generated on first install if omitted — not a PostgreSQL password; retrieve it with `pg addon password pgadmin`/`grafana`/`gitea`. For Grafana it only takes effect while grafana.db is absent; for Gitea the stored password is the one pgcli CREATES the admin account with, so it is inert on a revived store whose admin already exists) / BeeGFS connection-auth secret (generated on first install if omitted; the shared value all three daemons and every client's conn.auth must carry — pin it to keep one value across reinstalls, retrieve it with `pg addon password beegfs`)")
 	addonInstallCmd.Flags().String("admin-user", "", "Grafana WEB login user (GF_SECURITY_ADMIN_USER; default \"admin\") / Gitea WEB login user (created via `gitea admin user create`; default \"gitea\" — deliberately NOT the container's OS user \"git\") — the account you sign into the web UI with, unrelated to any PostgreSQL role")
 	addonInstallCmd.Flags().Bool("allow-registration", false, "Gitea: open self-service signup (GITEA__service__DISABLE_REGISTRATION=false; the web UI shows a Register entry). Closed by default — it is one of the two guards on the default 0.0.0.0 listen. Signups always create NORMAL users: Gitea offers no way for the register form to produce an admin, so this opens account spam, not takeover. The toggle needs --force to reach the live container; close it again with --allow-registration=false --force")
 	addonInstallCmd.Flags().String("email", "", "pgAdmin WEB login email (PGADMIN_DEFAULT_EMAIL; default \"admin@pgcli.lan\") — the account you sign into the web UI with, unrelated to any PostgreSQL role; the image rejects reserved TLDs such as .local")
@@ -1022,14 +1052,14 @@ func init() {
 	addonInstallCmd.Flags().Int("replica-of-port", 0, "Redis: remote master's port, paired with --replica-of-host")
 
 	// start / stop flags
-	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager or gitea instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"gitea\")")
+	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea or beegfs instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"gitea\"/\"beegfs\")")
 	addonStartCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to start")
-	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager or gitea instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"gitea\")")
+	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea or beegfs instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"gitea\"/\"beegfs\")")
 	addonStopCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to stop")
 
 	// list / password flags
-	addonListCmd.Flags().Bool("show-password", false, "also print stored credentials (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin/Grafana/Gitea web login password) — off by default so the listing stays paste-safe")
-	addonPasswordCmd.Flags().String("name", "", "instance to reveal (redis/predixy/minio/silo/rustfs/garage/seaweedfs/pgadmin/grafana/gitea; default \"redis\"/\"predixy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"pgadmin\"/\"grafana\"/\"gitea\")")
+	addonListCmd.Flags().Bool("show-password", false, "also print stored credentials (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin/Grafana/Gitea web login password, BeeGFS conn-auth secret) — off by default so the listing stays paste-safe")
+	addonPasswordCmd.Flags().String("name", "", "instance to reveal (redis/predixy/minio/silo/rustfs/garage/seaweedfs/pgadmin/grafana/gitea/beegfs; default \"redis\"/\"predixy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"pgadmin\"/\"grafana\"/\"gitea\"/\"beegfs\")")
 	addonPasswordCmd.Flags().String("file", "", "write the password to this file (mode 0600) instead of stdout, keeping it out of shell history and scrollback")
 
 	// pgdog flags (top-level shared Postgres proxy addon)
@@ -1087,12 +1117,14 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallAlertmanager(cmd)
 	case "gitea":
 		return runAddonInstallGitea(cmd)
+	case "beegfs":
+		return runAddonInstallBeeGFS(cmd)
 	case "nginx":
 		return runAddonInstallNginx(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, nginx)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -5449,6 +5481,51 @@ func runAddonList(showPassword bool) error {
 		fmt.Println("  (none)")
 	}
 
+	// beegfs (parallel filesystem — top-level, THREE containers per filesystem;
+	// the list unit is the cluster, so its status is the aggregate of mgmtd +
+	// meta + storage, not one container's running flag)
+	fmt.Println()
+	fmt.Println("Infra add-ons (beegfs):")
+	hasBeeGFS := false
+	if bm, err := podman.NewBeeGFSManager(cfg); err == nil {
+		for _, name := range sortedAddonNames(cfg.Addons.BeeGFS) {
+			bc := cfg.Addons.BeeGFS[name]
+			hasBeeGFS = true
+			status := "n/a"
+			if st, err := bm.ClusterStatus(&bc); err == nil {
+				status = st.String()
+			}
+			fmt.Printf("  %s (name: %s)\n", "beegfs", name)
+			fmt.Printf("    Status:      %s\n", status)
+			fmt.Printf("    Mgmtd:       %s:%d (BeeMsg) / %s:%d (gRPC)\n", beegfsDisplayHost(bc.Listen), bc.MgmtdPort, beegfsDisplayHost(bc.Listen), bc.MgmtdGRPCPort)
+			fmt.Printf("    Ports:       meta %d, storage %d (fixed)\n", bc.MetaPort, bc.StoragePort)
+			auth := "none"
+			if bc.ConnAuth != "" {
+				auth = "set (connection-auth)"
+			}
+			fmt.Printf("    Auth:        %s\n", auth)
+			if showPassword && bc.ConnAuth != "" {
+				fmt.Printf("    Conn-auth:   %s\n", bc.ConnAuth)
+			}
+			fmt.Printf("    Image:       %s-{mgmtd,meta,storage}:%s\n", config.BeeGFSImageRepo, bc.ImageTag)
+			fmt.Printf("    Data:        %s, %s, %s\n", bm.DataDir(&bc, podman.BeeGFSServiceMgmtd), bm.DataDir(&bc, podman.BeeGFSServiceMeta), bm.DataDir(&bc, podman.BeeGFSServiceStorage))
+			fmt.Printf("    Containers:  %s, %s, %s\n", bc.ContainerName(podman.BeeGFSServiceMgmtd), bc.ContainerName(podman.BeeGFSServiceMeta), bc.ContainerName(podman.BeeGFSServiceStorage))
+		}
+	} else if len(cfg.Addons.BeeGFS) > 0 {
+		// Configured but the manager is unavailable (podman missing): still show them.
+		for _, name := range sortedAddonNames(cfg.Addons.BeeGFS) {
+			bc := cfg.Addons.BeeGFS[name]
+			hasBeeGFS = true
+			fmt.Printf("  %s (name: %s)\n", "beegfs", name)
+			fmt.Printf("    Status:      n/a (manager unavailable)\n")
+			fmt.Printf("    Mgmtd:       %s:%d (BeeMsg)\n", beegfsDisplayHost(bc.Listen), bc.MgmtdPort)
+			fmt.Printf("    Containers:  %s, %s, %s\n", bc.ContainerName(podman.BeeGFSServiceMgmtd), bc.ContainerName(podman.BeeGFSServiceMeta), bc.ContainerName(podman.BeeGFSServiceStorage))
+		}
+	}
+	if !hasBeeGFS {
+		fmt.Println("  (none)")
+	}
+
 	// nginx (HTTP reverse proxy, top-level addon; Linux + macOS)
 	fmt.Println()
 	fmt.Println("Web add-ons (nginx):")
@@ -5562,6 +5639,12 @@ func addonPasswords(cfg *config.Config) map[string]string {
 	for name, gc := range cfg.Addons.Gitea {
 		out["gitea:"+name] = gc.Password
 	}
+	// BeeGFS's entry is the connection-auth secret (CONN_AUTH_FILE_DATA) shared
+	// by the three daemons and every client — not a login, but the addon's only
+	// credential and the one thing re-installs must be able to reproduce.
+	for name, bc := range cfg.Addons.BeeGFS {
+		out["beegfs:"+name] = bc.ConnAuth
+	}
 	return out
 }
 
@@ -5656,12 +5739,14 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemoveAlertmanager(cmd)
 	case "gitea":
 		return runAddonRemoveGitea(cmd)
+	case "beegfs":
+		return runAddonRemoveBeeGFS(cmd)
 	case "nginx":
 		return runAddonRemoveNginx(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, nginx)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -5972,10 +6057,12 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartAlertmanager(cmd)
 	case "gitea":
 		return runAddonStartGitea(cmd)
+	case "beegfs":
+		return runAddonStartBeeGFS(cmd)
 	case "nginx":
 		return runAddonStartNginx(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, nginx)", addonName)
 	}
 }
 
@@ -6015,10 +6102,12 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopAlertmanager(cmd)
 	case "gitea":
 		return runAddonStopGitea(cmd)
+	case "beegfs":
+		return runAddonStopBeeGFS(cmd)
 	case "nginx":
 		return runAddonStopNginx(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, nginx)", addonName)
 	}
 }
 

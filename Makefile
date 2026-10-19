@@ -217,7 +217,10 @@ IMAGES := \
 	docker.io/grafana/grafana:13.2.4 \
 	docker.io/prom/prometheus:v3.15.0 \
 	docker.io/prom/alertmanager:v0.34.1 \
-	docker.io/gitea/gitea:28.1.0
+	docker.io/gitea/gitea:28.1.0 \
+	ghcr.io/thinkparq/beegfs-mgmtd:8.4.0 \
+	ghcr.io/thinkparq/beegfs-meta:8.4.0 \
+	ghcr.io/thinkparq/beegfs-storage:8.4.0
 
 container-images-export:
 	@mkdir -p images

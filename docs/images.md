@@ -34,6 +34,9 @@ pgcli 使用的容器镜像及其默认 tag。
 | `docker.io/prom/prometheus` | `v3.15.0` | Prometheus（指标采集后端，Grafana 的数据源），纯上游官方镜像无 wrapper；无后缀 tag 即 busybox 变体（带 shell），双架构 manifest list | `config.go:591`（`DefaultPrometheusImageTag`） |
 | `docker.io/prom/alertmanager` | `v0.34.1` | Alertmanager（Prometheus 下游的告警去重/分组/路由端），纯上游官方镜像无 wrapper；无后缀 tag 即 busybox 变体（带 `amtool`），多架构 manifest list | `config.go:603`（`DefaultAlertmanagerImageTag`） |
 | `docker.io/gitea/gitea` | `28.1.0` | Gitea（自托管 Git 服务），纯上游官方镜像无 wrapper；pin 的是 **rootful** 构建（`-rootless` 变体数据布局互不兼容，pgcli 永不选用）；多架构 manifest list（amd64 + arm64 + riscv64） | `config.go:619`（`DefaultGiteaImageTag`） |
+| `ghcr.io/thinkparq/beegfs-mgmtd` | `8.4.0` | BeeGFS 管理/注册服务（三容器之一），官方 ThinkParQ 镜像无 wrapper；root 运行、host 网络 | `BeeGFSImageRepo` + `DefaultBeeGFSVersion`（`config.go:629/635`） |
+| `ghcr.io/thinkparq/beegfs-meta` | `8.4.0` | BeeGFS 元数据服务（三容器之二），固定监听 8005 | 同上 |
+| `ghcr.io/thinkparq/beegfs-storage` | `8.4.0` | BeeGFS 数据目标（三容器之三），固定监听 8003 | 同上 |
 
 ## 镜像导出
 
@@ -114,6 +117,12 @@ podman save -o "$TARGET/alertmanager_v0.34.1.tar" docker.io/prom/alertmanager:v0
 # gitea 上游镜像同样是多架构 manifest list，先按 amd64 pull 再 save
 podman pull --platform linux/amd64 docker.io/gitea/gitea:28.1.0
 podman save -o "$TARGET/gitea_28.1.0.tar" docker.io/gitea/gitea:28.1.0
+
+# beegfs 三个服务端镜像（单文件系统 = mgmtd + meta + storage 三容器）
+for svc in mgmtd meta storage; do
+  podman pull --platform linux/amd64 ghcr.io/thinkparq/beegfs-${svc}:8.4.0
+  podman save -o "$TARGET/beegfs-${svc}_8.4.0.tar" ghcr.io/thinkparq/beegfs-${svc}:8.4.0
+done
 ```
 
 ### rustfs（双架构 manifest 不能直接 save）
@@ -225,10 +234,18 @@ done
   前于宿主 chown（rootless 下 `podman unshare chown 1000:1000`，rootful+root 下直接
   `chown`）。配置只经 env（`GITEA__*` 每次启动折叠进持久化的 app.ini），且
   `SECRET_KEY`/`INTERNAL_TOKEN` 刻意**不注入**（否则重装会静默重设幸存数据库的密钥）
+- **beegfs**：纯上游官方 ThinkParQ 镜像（`ghcr.io/thinkparq/beegfs-{mgmtd,meta,storage}`），
+  无 wrapper，三个镜像共用版本 pin `8.4.0`（`BeeGFSImageRepo` + `DefaultBeeGFSVersion`
+  拼出引用名，一个"文件系统"= 三容器）。与仓库里所有其他 addon 不同的两点：镜像内以
+  **root** 运行（宿主数据目录无需预 chown）；以 **host 网络**运行（BeeGFS 是自己的
+  TCP 协议、非 HTTP，不存在容器端口映射可分配——故没有端口池，meta/storage 在 8.4
+  根本没有可移动的监听口，每宿主仅一个文件系统）。没有 client 镜像：客户端是内核模块
+  （DKMS），无法容器化，pgcli 不安装
 - **pgbouncer** / **postgrest** / **haproxy** / **etcd** / **pgdog**：上游官方或社区维护的稳定版本
 
 ---
 
-**最后更新**：2026-10-16（新增 gitea 插件镜像；此前 alertmanager 于 2026-10-15
+**最后更新**：2026-10-19（新增 beegfs 三镜像；此前 gitea 于 2026-10-16
+合入时补录，alertmanager 于 2026-10-15
 合入时补录，grafana 与 prometheus 于 2026-10-14 合入时补录，再往前 garage 与
 seaweedfs 分别于 2026-10-12 / 2026-10-14 合入时补录）

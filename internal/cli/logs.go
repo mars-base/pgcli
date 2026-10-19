@@ -44,7 +44,8 @@ Examples:
   pg logs addon grafana                # Grafana dashboard logs
   pg logs addon prometheus             # Prometheus server logs
   pg logs addon alertmanager           # Alertmanager server logs
-  pg logs addon gitea                  # Gitea server logs`,
+  pg logs addon gitea                  # Gitea server logs
+  pg logs addon beegfs --service meta  # BeeGFS metadata-daemon logs (default service: mgmtd)`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		follow, _ := cmd.Flags().GetBool("follow")
 		tail, _ := cmd.Flags().GetInt("tail")
@@ -66,11 +67,11 @@ var logsAddonCmd = &cobra.Command{
 	Short: "Show addon console output logs",
 	Long: `Show addon console output logs.
 
-Requires the addon type (pgbouncer, postgrest, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, patroni).
+Requires the addon type (pgbouncer, postgrest, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, patroni).
 Use -i for local instance addons, --pg-name for remote addons,
 --name for an etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage,
-seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager or gitea instance, or Patroni member (default
-"etcd"/"pgdog"/"haproxy"/"minio"/"silo"/"rustfs"/"garage"/"seaweedfs"/"redis"/"predixy"/"pgadmin"/"grafana"/"prometheus"/"alertmanager"/"gitea"; Patroni members have
+seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea or beegfs instance, or Patroni member (default
+"etcd"/"pgdog"/"haproxy"/"minio"/"silo"/"rustfs"/"garage"/"seaweedfs"/"redis"/"predixy"/"pgadmin"/"grafana"/"prometheus"/"alertmanager"/"gitea"/"beegfs"; Patroni members have
 no default and also require --scope).
 
 Examples:
@@ -109,6 +110,9 @@ Examples:
   pg logs addon prometheus --name p1 -f
   pg logs addon alertmanager           # Alertmanager server logs
   pg logs addon gitea                  # Gitea server logs
+  pg logs addon beegfs                 # BeeGFS mgmtd logs (the registry; default service)
+  pg logs addon beegfs --service meta  # the metadata daemon's logs
+  pg logs addon beegfs --name fs1 --service storage -f
   pg logs addon patroni --scope app --name node1
   pg logs addon patroni --scope app --name node1 -f`,
 	Args: cobra.ExactArgs(1),
@@ -118,6 +122,7 @@ Examples:
 		pgName, _ := cmd.Flags().GetString("pg-name")
 		etcdName, _ := cmd.Flags().GetString("name")
 		scope, _ := cmd.Flags().GetString("scope")
+		service, _ := cmd.Flags().GetString("service")
 
 		addonType := args[0]
 
@@ -132,6 +137,9 @@ Examples:
 		}
 		if scope != "" && addonType != "patroni" {
 			return fmt.Errorf("--scope only applies to the patroni addon type")
+		}
+		if service != "" && addonType != "beegfs" {
+			return fmt.Errorf("--service only applies to the beegfs addon type (its one filesystem spans three containers)")
 		}
 
 		var containerName string
@@ -152,7 +160,7 @@ Examples:
 			if err != nil {
 				return err
 			}
-		case "etcd", "pgdog", "haproxy", "minio", "silo", "rustfs", "garage", "seaweedfs", "redis", "predixy", "pgadmin", "grafana", "prometheus", "alertmanager", "gitea", "nginx":
+		case "etcd", "pgdog", "haproxy", "minio", "silo", "rustfs", "garage", "seaweedfs", "redis", "predixy", "pgadmin", "grafana", "prometheus", "alertmanager", "gitea", "beegfs", "nginx":
 			// (patroni is handled above; it shares --name but requires --scope.)
 			if pgName != "" {
 				return fmt.Errorf("--pg-name selects a remote PgBouncer or PostgREST; use --name for an %s", addonType)
@@ -298,6 +306,26 @@ Examples:
 					return fmt.Errorf("gitea instance %q not found (use 'pg addon list' to see available)", name)
 				}
 				containerName = gtc.ContainerName
+			case "beegfs":
+				if cfg.Addons.BeeGFS == nil {
+					return fmt.Errorf("no beegfs addons configured")
+				}
+				bc, ok := cfg.Addons.BeeGFS[name]
+				if !ok {
+					return fmt.Errorf("beegfs filesystem %q not found (use 'pg addon list' to see available)", name)
+				}
+				// One filesystem = three containers; --service picks which
+				// daemon's logs to read (default mgmtd, the registry).
+				svc := service
+				if svc == "" {
+					svc = "mgmtd"
+				}
+				switch svc {
+				case "mgmtd", "meta", "storage": // podman.BeeGFSService* roles
+				default:
+					return fmt.Errorf("--service must be mgmtd, meta or storage, got %q", svc)
+				}
+				containerName = bc.ContainerName(svc)
 			case "nginx":
 				if cfg.Addons.Nginx == nil {
 					return fmt.Errorf("no nginx addons configured")
@@ -310,7 +338,7 @@ Examples:
 			}
 		case "pgbouncer":
 			if etcdName != "" {
-				return fmt.Errorf("--name selects an etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager or gitea instance, or Patroni member; use -i or --pg-name for PgBouncer")
+				return fmt.Errorf("--name selects an etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea or beegfs instance, or Patroni member; use -i or --pg-name for PgBouncer")
 			}
 			if pgName != "" {
 				// Remote mode
@@ -336,7 +364,7 @@ Examples:
 			}
 		case "postgrest":
 			if etcdName != "" {
-				return fmt.Errorf("--name selects an etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager or gitea instance, or Patroni member; use -i or --pg-name for PostgREST")
+				return fmt.Errorf("--name selects an etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea or beegfs instance, or Patroni member; use -i or --pg-name for PostgREST")
 			}
 			if pgName != "" {
 				// Remote mode
@@ -360,7 +388,7 @@ Examples:
 				containerName = inst.Addons.Postgrest.ContainerName
 			}
 		default:
-			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, nginx, patroni)", addonType)
+			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, nginx, patroni)", addonType)
 		}
 
 		return runPodmanLogs(containerName, tail, follow)
@@ -436,8 +464,9 @@ func init() {
 	logsAddonCmd.Flags().BoolP("follow", "f", false, "Stream logs continuously")
 	logsAddonCmd.Flags().IntP("tail", "n", 50, "Number of lines to show (0 = all)")
 	logsAddonCmd.Flags().String("pg-name", "", "Remote addon name (for remote PgBouncer or PostgREST)")
-	logsAddonCmd.Flags().String("name", "", "etcd member name, pgdog proxy name, haproxy instance name, minio/silo/rustfs/garage/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea instance name, or Patroni member name")
+	logsAddonCmd.Flags().String("name", "", "etcd member name, pgdog proxy name, haproxy instance name, minio/silo/rustfs/garage/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/beegfs instance name, or Patroni member name")
 	logsAddonCmd.Flags().String("scope", "", "Patroni cluster scope (required only with addon type patroni)")
+	logsAddonCmd.Flags().String("service", "", "beegfs only: which container of the filesystem to read — mgmtd, meta or storage (default \"mgmtd\")")
 
 	// Flags on ha subcommand
 	logsHaCmd.Flags().BoolP("follow", "f", false, "Stream logs continuously")

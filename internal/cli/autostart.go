@@ -25,7 +25,7 @@ func init() {
 		c.Flags().Bool("postgrest", false, "select the PostgREST addon (use with -i for a local one, --pg-name for a remote one)")
 		c.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST (top-level addons)")
 		c.Flags().Bool("etcd", false, "select an etcd member (top-level addons)")
-		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager or gitea instance, or Patroni member")
+		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea or beegfs instance, or Patroni member")
 		c.Flags().Bool("pgdog", false, "select a PgDog proxy (top-level addons)")
 		c.Flags().Bool("ha", false, "select Patroni HA members (top-level addons; requires --scope)")
 		c.Flags().Bool("haproxy", false, "select an HAProxy instance (top-level addons)")
@@ -41,6 +41,7 @@ func init() {
 		c.Flags().Bool("prometheus", false, "select a Prometheus instance (top-level addons)")
 		c.Flags().Bool("alertmanager", false, "select an Alertmanager instance (top-level addons)")
 		c.Flags().Bool("gitea", false, "select a Gitea instance (top-level addons)")
+		c.Flags().Bool("beegfs", false, "select a BeeGFS filesystem (top-level addons; autostart starts the whole 3-container cluster)")
 		c.Flags().Bool("nginx", false, "select an nginx instance (top-level addons)")
 		c.Flags().String("scope", "", "Patroni cluster scope (required only with --ha)")
 	}
@@ -59,7 +60,7 @@ Use 'pg autostart disable' to opt out.`,
 
 var autostartEnableCmd = &cobra.Command{
 	Use:   "enable",
-	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea instance, or a Patroni member",
+	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/beegfs instance, or a Patroni member",
 	Long: `Enable auto-start on boot for exactly one target:
 
   pg autostart enable -i myinst          # instance
@@ -83,6 +84,7 @@ var autostartEnableCmd = &cobra.Command{
   pg autostart enable --prometheus --name p1         # Prometheus (default name "prometheus")
   pg autostart enable --alertmanager --name am1      # Alertmanager (default name "alertmanager")
   pg autostart enable --gitea --name git1            # Gitea (default name "gitea")
+  pg autostart enable --beegfs --name fs1            # BeeGFS filesystem — starts the whole mgmtd+meta+storage cluster (default name "beegfs")
   pg autostart enable --ha --scope app --name node1  # Patroni member (one at a time)
 
 Etcd autostart only starts the member's existing container at boot; it never
@@ -140,6 +142,12 @@ a boot-time start needs no special host privileges; repos, the app.ini, and the
 login/settings DB persist across reboots. With --dsn, the external PostgreSQL
 must already be running (or be reachable at its own autostart time) for the
 first web request to succeed.
+BeeGFS autostart is the only cluster-granular one: it starts the filesystem's
+THREE existing containers in dependency order (mgmtd → meta → storage, pg
+addon install beegfs first). The data dirs are owned by the root-running images
+from creation, so a boot-time start needs no special host privileges; the mgmtd
+registry and both targets persist across reboots, and clients re-establish
+mounts on their own once the cluster is back.
 Patroni member autostart only brings that member's existing container up,
 reading the patroni.yml already on disk — create the member first (pg ha
 create). Start order relative to the DCS doesn't matter: Patroni retries until
@@ -219,6 +227,7 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	prometheusSel, _ := cmd.Flags().GetBool("prometheus")
 	alertmanagerSel, _ := cmd.Flags().GetBool("alertmanager")
 	giteaSel, _ := cmd.Flags().GetBool("gitea")
+	beegfsSel, _ := cmd.Flags().GetBool("beegfs")
 	nginxSel, _ := cmd.Flags().GetBool("nginx")
 	pgName, _ := cmd.Flags().GetString("pg-name")
 	addonName, _ := cmd.Flags().GetString("name")
@@ -287,17 +296,20 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	if giteaSel {
 		sel++
 	}
+	if beegfsSel {
+		sel++
+	}
 	if nginxSel {
 		sel++
 	}
 	if sel != 1 {
-		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --gitea, or --nginx")
+		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --gitea, --beegfs, or --nginx")
 	}
 	if pgName != "" && !pgbSel && !prSel {
 		return fmt.Errorf("--pg-name requires --pgbouncer or --postgrest")
 	}
-	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !garageSel && !seaweedfsSel && !redisSel && !predixySel && !pgadminSel && !grafanaSel && !prometheusSel && !alertmanagerSel && !giteaSel && !nginxSel {
-		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --gitea, or --nginx")
+	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !garageSel && !seaweedfsSel && !redisSel && !predixySel && !pgadminSel && !grafanaSel && !prometheusSel && !alertmanagerSel && !giteaSel && !beegfsSel && !nginxSel {
+		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --gitea, --beegfs, or --nginx")
 	}
 	if scope != "" && !haSel {
 		return fmt.Errorf("--scope requires --ha")
@@ -467,6 +479,18 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		gtc.Autostart = enable
 		cfg.Addons.Gitea[proxyName] = gtc
 		targetDesc = fmt.Sprintf("gitea instance %q", proxyName)
+	case beegfsSel:
+		proxyName := addonName
+		if proxyName == "" {
+			proxyName = "beegfs"
+		}
+		bc, ok := cfg.Addons.BeeGFS[proxyName]
+		if !ok {
+			return fmt.Errorf("beegfs filesystem %q not found in config", proxyName)
+		}
+		bc.Autostart = enable
+		cfg.Addons.BeeGFS[proxyName] = bc
+		targetDesc = fmt.Sprintf("beegfs filesystem %q", proxyName)
 	case nginxSel:
 		proxyName := addonName
 		if proxyName == "" {
@@ -707,6 +731,11 @@ func countAutostartTargets(c *config.Config) int {
 			n++
 		}
 	}
+	for _, bc := range c.Addons.BeeGFS {
+		if bc.Autostart {
+			n++
+		}
+	}
 	for _, nc := range c.Addons.Nginx {
 		if nc.Autostart {
 			n++
@@ -789,6 +818,9 @@ func runAutostartStatus(cmd *cobra.Command, args []string) error {
 	}
 	for name, gtc := range cfg.Addons.Gitea {
 		fmt.Printf("  gitea %-14s %s\n", name, onOff(gtc.Autostart))
+	}
+	for name, bc := range cfg.Addons.BeeGFS {
+		fmt.Printf("  beegfs %-13s %s\n", name, onOff(bc.Autostart))
 	}
 	for name, nc := range cfg.Addons.Nginx {
 		fmt.Printf("  nginx %-15s %s\n", name, onOff(nc.Autostart))

@@ -110,6 +110,7 @@ type TopAddonsConfig struct {
 	Alertmanager map[string]AlertmanagerConfig   `yaml:"alertmanager,omitempty"`
 	Gitea        map[string]GiteaConfig          `yaml:"gitea,omitempty"`
 	Nginx        map[string]NginxConfig          `yaml:"nginx,omitempty"`
+	BeeGFS       map[string]BeeGFSConfig         `yaml:"beegfs,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -617,6 +618,35 @@ const DefaultAlertmanagerImageTag = "docker.io/prom/alertmanager:v0.34.1"
 // see internal/podman.GiteaManager for how pgcli pre-chowns the bind-mounted
 // data dir. Keep this in sync when bumping.
 const DefaultGiteaImageTag = "docker.io/gitea/gitea:28.1.0"
+
+// BeeGFSImageRepo is the common ghcr prefix for the three BeeGFS server images
+// — thinkparq publishes one repo per service role (beegfs-mgmtd, beegfs-meta,
+// beegfs-storage) all sharing a version, so pgcli stores the version in
+// BeeGFSConfig.ImageTag and the manager builds each ref as
+// BeeGFSImageRepo + "-<role>:" + version. There is no client image: the BeeGFS
+// client is a kernel module and cannot be containerised. Keep the version
+// constant in sync when bumping.
+const BeeGFSImageRepo = "ghcr.io/thinkparq/beegfs"
+
+// DefaultBeeGFSVersion pins the BeeGFS server triad to a specific release.
+// 8.4.0 is the current latest stable (verified on ghcr 2026-10-19). The three
+// images run as root and need no bind-mount chown — see
+// internal/podman.BeeGFSManager.
+const DefaultBeeGFSVersion = "8.4.0"
+
+// The four fixed BeeGFS listener ports. These are stock protocol ports, not
+// pool-allocated: on the host network the daemons bind them directly, and in
+// 8.4 only mgmtd can be moved (--beemsg-port/--grpc-port) while meta and
+// storage have no supported listen-port knob (verified on vm01). The fields on
+// BeeGFSConfig exist so the plan/summary layer can print and validate them;
+// ApplyDefaults pins them to these constants and the CLI rejects a second
+// filesystem on the same host because it would collide on 8005/8003.
+const (
+	DefaultBeeGFSMgmtdPort     = 8008 // mgmtd classic BeeMsg port (meta/storage register here)
+	DefaultBeeGFSMgmtdGRPCPort = 8010 // mgmtd gRPC port (the `beegfs` CLI dials this)
+	DefaultBeeGFSMetaPort      = 8005 // metadata service
+	DefaultBeeGFSStoragePort   = 8003 // storage service
+)
 
 // DefaultRedisMajor is the Redis major version installed when --version is not
 // given: "8", the current stable line upstream (docker.io/library/redis).
@@ -1521,6 +1551,86 @@ type GiteaConfig struct {
 	// (pg autostart enable --gitea). Start-only: it starts the existing
 	// container, so install first.
 	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// BeeGFSConfig holds a standalone BeeGFS filesystem addon — the parallel
+// (scale-out) file system whose SERVER side is three cooperating services, not
+// one container. This is pgcli's first multi-container addon: a single map
+// entry describes a whole filesystem, and one manager brings up and tears down
+// three ordered containers sharing one connection-auth secret:
+//
+//   - mgmtd: the management daemon — node/target registry every other service
+//     and every client dials first. Owns an SQLite database (its data dir).
+//     Listens on TWO ports: the classic BeeMsg port (default 8008) that
+//     meta/storage speak, and a gRPC port (default 8010) that the modern
+//     `beegfs` CLI connects to. Both are movable via --beemsg-port/--grpc-port.
+//   - meta: the metadata service. Owns a metadata target directory.
+//   - storage: a data service. Owns one storage target directory. (v1 is a
+//     single meta + single storage pair; multi-target striping is v2.)
+//
+// Unlike every web addon, there is no "host port" to publish: the services run
+// on the host network (BeeGFS speaks its own protocol, not HTTP), so the four
+// ports below are the ACTUAL listener ports on the host. In 8.4 only the mgmtd
+// pair can be moved; meta (8005) and storage (8003) have no supported
+// listen-port override at all, which is why v1 is strictly ONE filesystem per
+// host on the stock ports — see the note at the end of autoAssignPorts and the
+// field comments below.
+//
+// The client is a kernel module (DKMS) and is deliberately out of scope —
+// pgcli neither installs nor mounts it; docs/beegfs explains client setup.
+// Likewise a BeeGFS "license" is a system-specific registration key the user
+// must obtain; pgcli never generates or injects one. With no license the 8.4
+// management daemon logs a quota warning at registration time but the
+// filesystem still functions for community-scale use.
+//
+// Ownership: the three images run as root, so the bind-mounted dirs need no
+// chown (unlike Gitea's uid-1000 or Grafana's uid-472 dance).
+type BeeGFSConfig struct {
+	Name string `yaml:"name,omitempty"` // addon key; the map key, defaults to it
+	// ContainerPrefix is shared by the three containers, which are named
+	// <prefix>-mgmtd / -meta / -storage. Default pgcli-beegfs<ns>-<name>.
+	ContainerPrefix string `yaml:"container_prefix,omitempty"`
+	// ImageTag stores only the VERSION (e.g. "8.4.0"); the manager combines it
+	// with BeeGFSImageRepo and each role. All three services run the same tag.
+	ImageTag string `yaml:"image_tag,omitempty"`
+	// Listen is the address clients and this host's own tooling dial mgmtd on.
+	// Host networking means the services actually bind all interfaces; this
+	// value is the self-reference used in sysMgmtdHost and mount hints.
+	// Default 0.0.0.0.
+	Listen string `yaml:"listen,omitempty"`
+	// The four listener ports. These are the daemons' ACTUAL host-network bind
+	// ports (BeeGFS speaks its own protocol, not HTTP, so there is no container
+	// port-mapping to allocate against). Only mgmtd's two can be moved in 8.4
+	// (via --beemsg-port/--grpc-port, emitted by the manager); meta and storage
+	// have no supported listen-port override, so v1 runs exactly one filesystem
+	// per host on the stock defaults (8008/8010/8005/8003) — the CLI rejects a
+	// second filesystem and any non-default meta/storage port. See the note at
+	// the end of autoAssignPorts.
+	MgmtdPort     int `yaml:"mgmtd_port,omitempty"`      // mgmtd BeeMsg port (default 8008, movable)
+	MgmtdGRPCPort int `yaml:"mgmtd_grpc_port,omitempty"` // mgmtd gRPC port for `beegfs` CLI (default 8010, movable)
+	MetaPort      int `yaml:"meta_port,omitempty"`       // meta service port (fixed 8005)
+	StoragePort   int `yaml:"storage_port,omitempty"`    // storage service port (fixed 8003)
+	// ConnAuth is the shared connection-authentication secret the three server
+	// services (and clients) must all agree on. Generated on install when
+	// empty and stored here — a secret, never defaulted to a literal.
+	ConnAuth string `yaml:"conn_auth,omitempty"`
+	// The three service data directories, each bind-mounted into its own
+	// container and surviving across container recreation. Empty means
+	// <base>/addon/beegfs/<name>/{mgmtd,meta,storage}; the manager resolves
+	// them (same contract as Gitea.DataDir).
+	MgmtdDataDir   string `yaml:"mgmtd_data_dir,omitempty"`
+	MetaDataDir    string `yaml:"meta_data_dir,omitempty"`
+	StorageDataDir string `yaml:"storage_data_dir,omitempty"`
+	// Autostart brings the whole filesystem up on host boot via the boot
+	// service (pg autostart enable --beegfs), starting the three containers in
+	// dependency order. Start-only: it starts existing containers, install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// ContainerName returns one service role's container name: the shared prefix
+// plus the role suffix (pgcli-beegfs<ns>-<name>-mgmtd / -meta / -storage).
+func (b *BeeGFSConfig) ContainerName(role string) string {
+	return b.ContainerPrefix + "-" + role
 }
 
 // PostgresConfig holds PostgreSQL connection settings.
@@ -2652,6 +2762,46 @@ func (c *Config) ApplyDefaults() {
 		c.Addons.Gitea[name] = addon
 	}
 
+	// Top-level addons defaults (BeeGFS). Listen defaults to 0.0.0.0 (a
+	// parallel filesystem is mounted from other hosts). ImageTag stores only a
+	// version and defaults to DefaultBeeGFSVersion. ConnAuth is deliberately
+	// NOT defaulted — it is a shared secret the CLI generates on install. The
+	// four ports default to the STOCK BeeGFS conventions (8008/8010/8005/8003):
+	// meta and storage have no supported listen-port override in 8.4, so v1
+	// runs exactly one filesystem per host on these fixed ports (see the
+	// note at the end of autoAssignPorts). A non-zero user-pinned port is kept
+	// as-is — the daemon flag is emitted for it — but only mgmtd's two can
+	// actually move; the install handler rejects the rest. The data dirs are
+	// never defaulted — the manager resolves them under base_dir, same
+	// contract as Gitea.DataDir. Autostart is a bool, no default.
+	for name, addon := range c.Addons.BeeGFS {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerPrefix == "" {
+			addon.ContainerPrefix = "pgcli-beegfs" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultBeeGFSVersion
+		}
+		if addon.Listen == "" {
+			addon.Listen = "0.0.0.0"
+		}
+		if addon.MgmtdPort == 0 {
+			addon.MgmtdPort = DefaultBeeGFSMgmtdPort
+		}
+		if addon.MgmtdGRPCPort == 0 {
+			addon.MgmtdGRPCPort = DefaultBeeGFSMgmtdGRPCPort
+		}
+		if addon.MetaPort == 0 {
+			addon.MetaPort = DefaultBeeGFSMetaPort
+		}
+		if addon.StoragePort == 0 {
+			addon.StoragePort = DefaultBeeGFSStoragePort
+		}
+		c.Addons.BeeGFS[name] = addon
+	}
+
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
 	c.autoAssignPorts()
 }
@@ -3597,4 +3747,14 @@ func (c *Config) autoAssignPorts() {
 			c.Addons.Seaweedfs[name] = addon
 		}
 	}
+
+	// No BeeGFS port pool, deliberately. BeeGFS daemons bind their ports on the
+	// host network, and only the mgmtd pair (8008/8010) accepts overrides
+	// (--beemsg-port/--grpc-port); the meta and storage services (8005/8003)
+	// have NO supported listen-port knob in 8.4 (verified on vm01: connPortsList
+	// and connTcpPort are rejected outright, and the connMetaPort key is
+	// accepted but breaks node registration). Two filesystems on one host would
+	// therefore always collide on 8005/8003 regardless of allocation, so v1 is
+	// one filesystem per host on the stock ports — the ApplyDefaults walk above
+	// pins the four port fields, and a second map entry is rejected at install.
 }
