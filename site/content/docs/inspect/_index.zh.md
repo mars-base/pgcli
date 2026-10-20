@@ -9,77 +9,45 @@ cascade:
 ---
 
 
-`pg inspect` 对 PostgreSQL 标准统计视图做一次单快照采样，产出一份确定性的健康报告：0-100 的健康分，加上按 CRITICAL / WARNING / NOTE / GOOD 分级的诊断条目，并可输出 queries、indexes、vacuum/tables、settings、sessions 各板块的原始表格。整体设计借鉴自开源项目 [pgbot](https://github.com/pgrundev/pgbot)（Apache-2.0）。
+`pg inspect` 用一条命令回答一个问题：**这个库健康吗，该先修什么？** 它对 PostgreSQL 标准统计视图做一次单快照采样，产出确定性报告——0-100 的健康分，加上按 CRITICAL / WARNING / NOTE / GOOD 分级的诊断条目，每条带证据、修复建议，以及防止"自信地给出错误建议"的限定说明。
 
-所有操作均为只读——每条语句都包在 `READ ONLY` 事务里执行。使用能读统计视图的监控角色（`pg_monitor`）即可。
+它严格只读：每条语句都包在 `READ ONLY` 事务里执行，绝不写入、除普通读取外不加任何锁，可随时对生产库运行。
 
-## 基本用法
+## 适用场景
+
+- **每周 / 值班例行检查** —— 对所有实例跑一遍，只看分数不到 100 的；有没有退化一目了然，不用盯仪表盘。
+- **"数据库感觉变慢了"** —— 在翻 EXPLAIN 计划之前，先拿到 30 秒全貌：缓存命中率、耗时 Top SQL（需 `pg_stat_statements`）、膨胀、会话堆积。
+- **安装 / 升级之后** —— 确认没有危险参数混进配置（比如 `fsync = off`），autovacuum 确实跟得上。
+- **容量决策之前** —— 看清哪些索引从未被扫描（删掉能回收多少空间）、连接数是否在逼近 `max_connections`。
+- **审计与交接** —— `--html` 生成单个自包含文件，可直接发邮件或归档；`--json` 喂给脚本和监控 agent。
+
+## 能提前发现的问题
+
+| 问题 | 不巡检你会错过什么 |
+|------|--------------------|
+| 事务 ID 年龄逼近冻结墙 | 一次被迫停机的 vacuum 紧急事故 |
+| 连接数逼近 `max_connections` | 高负载时登录失败 |
+| 缓存命中率低 | `shared_buffers` / `effective_cache_size` 配小了 |
+| 超过 1 MiB 的从未使用索引 | 空间浪费与写放大 |
+| 表膨胀、从未 vacuum 或关了 autovacuum 的表 | 扫描越来越慢，vacuum 风暴 |
+| 大表重顺序扫描 / 非 HOT 更新 | 缺索引和热点更新模式 |
+| 长事务与 idle in transaction 会话 | 清理被阻塞、锁等待 |
+| 偏离编译默认值的危险参数 override | 悄无声息的持久性或调优错误 |
+
+各项检查独立降级——没装 `pg_stat_statements` 的库照样出完整报告，只多一条说明该板块为空的 NOTE。
+
+## 用法
 
 ```bash
-# 巡检本地实例（摘要 + 健康分）
+# 本地实例：带健康分的终端摘要
 pg inspect -i myinst
 
-# 也可以用连接串巡检远程数据库
+# 远程数据库（输出中绝不显示密码）
 pg inspect --dsn postgres://user:pass@host:5432/db
 
-# 打印各板块原始表格，而不只是摘要
+# 各板块原始表格：queries、indexes、vacuum/tables、settings、sessions
 pg inspect -i myinst --full
 
-# 整个报告以 JSON 输出（供脚本 / agent 使用）
-pg inspect -i myinst --json | jq '.findings | length'
-
-# 写一份自包含 HTML 报告；只有加 --open 才尝试打开浏览器
-pg inspect -i myinst --html /tmp/report.html
+# 自包含 HTML 报告，可选用浏览器打开
 pg inspect -i myinst --html /tmp/report.html --open
 ```
-
-## 参数
-
-| 参数 | 默认 | 说明 |
-|------|------|------|
-| `--dsn` | — | 巡检远程数据库而不是本地实例 |
-| `--full` | 关 | 在终端打印各板块原始表格 |
-| `--json` | 关 | 整个报告以 JSON 输出（不再打印终端摘要） |
-| `--html <path>` | — | 写一份自包含 HTML 报告（零外部请求） |
-| `--open` | 关 | 配合 `--html`，尝试用浏览器打开报告（需要图形环境） |
-| `--interval` | `1s` | 计算速率所用的两次计数器采样之间的间隔 |
-| `--top` | `20` | `pg_stat_statements` 取多少行 |
-
-`--open` 必须搭配 `--html`；没有报告文件就无从打开。
-
-## 检查哪些内容
-
-- **健康分** —— 满分 100 起扣：CRITICAL 每个扣 10、WARNING 扣 3、NOTE 扣 1。
-- **事务 ID 回卷** —— xid / multixid 年龄对比冻结墙。
-- **连接数** —— 相对 `max_connections` 的饱和度。
-- **缓存命中率** —— 采样窗口内缓冲池命中 vs 物理读。
-- **回滚比例与死锁** —— 来自 `pg_stat_database` 的双采样。
-- **未使用索引** —— 零扫描、超过 1 MiB，且排除主键、约束支撑、unique、部分、表达式和副本标识索引（带限定说明而非直接建议删除）。
-- **膨胀 / 顺序扫描 / 热更新** —— 每表的死元组比例、顺序扫描占比、非 HOT 更新负载。
-- **Vacuum 与 analyze 卫生** —— 从未 vacuum/analyze 的表、按表关闭的 autovacuum。
-- **会话** —— 长事务、idle in transaction，来自 `pg_stat_activity`。
-- **参数设置** —— 危险调优值（如 `fsync = off`）以及偏离编译默认值的 override。
-
-每个板块独立降级：没装 `pg_stat_statements` 的库照样出完整报告，只多一条 NOTE 解释 queries 板块为空。要启用它，请用扩展管理命令正确安装（软件包 + `shared_preload_libraries`，自动重启）：
-
-```bash
-pg extension install pg_stat_statements -i myinst
-```
-
-## HTML 报告
-
-`--html` 生成的文件完全自包含：内联 CSS、内容全部转义、无 JavaScript、无外部请求——可以放心拷到任何地方离线打开。诊断条目按严重度分组，带证据行、修复建议和限定说明；每个板块渲染成可排序表格。
-
-## JSON 契约
-
-`--json` 以 snake_case 键输出报告：`server`、`version`、`target`、`interval_s`、`health`、`limits`、`rates`、`queries`、`indexes`、`tables`、`settings`、`activity`，以及 `findings`（每条含 `id`、`severity`、`title`、`detail`、`remediation`、`evidence`、`impact_score`、`caveats`）。
-
-## 安全说明
-
-- 所有诊断都跑在 `BEGIN TRANSACTION READ ONLY` 里——写入不可能成功。
-- `--dsn` 目标在所有输出中都会脱敏（只显示 host:port/db，绝不显示密码）。
-- queries 板块读取 `pg_stat_statements`，它可能暴露该实例上所有库的查询形态——用可信任能看到这些的角色执行 inspect，或者干脆不装该扩展。
-
-## 致谢
-
-collect → findings → report 的三层流水线、规则阈值和报告结构借鉴自 [pgbot](https://github.com/pgrundev/pgbot)（Apache-2.0），在此按其思想重新实现，不依赖其运行时组件。
