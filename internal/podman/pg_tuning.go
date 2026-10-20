@@ -3,6 +3,7 @@ package podman
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -46,10 +47,56 @@ var pgTuningParams = []string{
 }
 
 // pgRestartParams is the set of parameter names that require a PostgreSQL
-// restart (not just reload) to take effect.
+// restart (not just reload) to take effect. Mirrors the postmaster-level
+// subset of `pg tune` recommendations.
 var pgRestartParams = map[string]bool{
-	"shared_buffers": true,
-	"wal_buffers":    true,
+	"shared_buffers":       true,
+	"wal_buffers":          true,
+	"huge_pages":           true,
+	"max_connections":      true,
+	"max_worker_processes": true,
+	"max_parallel_workers": true,
+	"wal_level":            true,
+	"max_wal_senders":      true,
+}
+
+// tuneLine renders one parameter for the managed conf block.
+func tuneLine(name, value string) string {
+	return fmt.Sprintf("%s = %s", name, value)
+}
+
+// buildTuningLines merges the static pgcli defaults with any `pg tune --apply`
+// parameters recorded for this instance (tune values win on name conflicts).
+// The active instance is looked up via m.cfg.Instance; instances without a
+// recorded tune fall back to the static set unchanged.
+func (m *Manager) buildTuningLines() []string {
+	merged := map[string]string{}
+	var order []string
+	add := func(name, value string) {
+		if _, seen := merged[name]; !seen {
+			order = append(order, name)
+		}
+		merged[name] = value
+	}
+	for _, param := range pgTuningParams {
+		name, value, _ := strings.Cut(param, " = ")
+		add(name, value)
+	}
+	if inst, ok := m.cfg.Instances[m.cfg.Instance]; ok && inst.Tune != nil {
+		names := make([]string, 0, len(inst.Tune.Params))
+		for name := range inst.Tune.Params {
+			names = append(names, name)
+		}
+		sort.Strings(names) // deterministic block across starts
+		for _, name := range names {
+			add(name, inst.Tune.Params[name])
+		}
+	}
+	lines := make([]string, 0, len(order))
+	for _, name := range order {
+		lines = append(lines, tuneLine(name, merged[name]))
+	}
+	return lines
 }
 
 const (
@@ -108,10 +155,12 @@ func (m *Manager) ApplyPGTuning() (needsRestart bool, err error) {
 	// Detect parameters overridden via ALTER SYSTEM in postgresql.auto.conf.
 	autoKeys := m.readAutoConfKeys()
 
-	// Build new block, skipping params that are overridden in auto.conf.
+	// Merge static defaults with any `pg tune --apply` params, then build the
+	// managed block, skipping params overridden in auto.conf.
+	tuning := m.buildTuningLines()
 	lines := []string{pgTuningBegin}
-	for _, param := range pgTuningParams {
-		key := strings.SplitN(param, " ", 2)[0]
+	for _, param := range tuning {
+		key, _, _ := strings.Cut(param, " = ")
 		if autoKeys[key] {
 			continue // user override in auto.conf takes precedence
 		}
@@ -136,8 +185,8 @@ func (m *Manager) ApplyPGTuning() (needsRestart bool, err error) {
 	// Only consider params that are NOT overridden in auto.conf (those are
 	// skipped from the block, so the running value is from auto.conf — no
 	// restart triggered by our tuning).
-	for _, param := range pgTuningParams {
-		key := strings.SplitN(param, " ", 2)[0]
+	for _, param := range tuning {
+		key, _, _ := strings.Cut(param, " = ")
 		if autoKeys[key] {
 			continue // overridden — restart not our responsibility
 		}
@@ -193,7 +242,7 @@ func (m *Manager) ApplyPGTuning() (needsRestart bool, err error) {
 	}
 
 	if len(autoKeys) > 0 {
-		fmt.Printf("-> PostgreSQL performance tuning applied (skipping %d param(s) overridden by ALTER SYSTEM)\n", countOverridden(autoKeys))
+		fmt.Printf("-> PostgreSQL performance tuning applied (skipping %d param(s) overridden by ALTER SYSTEM)\n", countOverridden(tuning, autoKeys))
 	} else {
 		fmt.Println("-> PostgreSQL performance tuning applied")
 	}
@@ -201,11 +250,11 @@ func (m *Manager) ApplyPGTuning() (needsRestart bool, err error) {
 	return needsRestart, nil
 }
 
-// countOverridden returns how many of the tuning params are overridden in auto.conf.
-func countOverridden(autoKeys map[string]bool) int {
+// countOverridden returns how many tuning params are overridden in auto.conf.
+func countOverridden(tuning []string, autoKeys map[string]bool) int {
 	n := 0
-	for _, param := range pgTuningParams {
-		key := strings.SplitN(param, " ", 2)[0]
+	for _, param := range tuning {
+		key, _, _ := strings.Cut(param, " = ")
 		if autoKeys[key] {
 			n++
 		}

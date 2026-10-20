@@ -1231,7 +1231,7 @@ func (m *PatroniManager) ExecLeaderQuery(cluster *config.PatroniClusterConfig, d
 		"--network", "host",
 		"--entrypoint", "psql",
 		imageTag,
-		"--dbname=" + dsn, "-t", "-A", "-c", sql,
+		"--dbname=" + dsn, "-q", "-t", "-A", "-c", sql,
 	}
 	cmd := exec.Command(m.podman, podmanArgs...)
 	var stderr bytes.Buffer

@@ -79,6 +79,23 @@ type InstanceConfig struct {
 	// Autostart starts this instance automatically on host boot via the
 	// boot service (`pg autostart enable`). `pg stop` does not affect it.
 	Autostart bool `yaml:"autostart,omitempty"`
+	// Tune records the last `pg tune --apply`: the input specs (for display and
+	// reproducibility) and the postgresql.conf parameters actually written into
+	// the managed tuning block. Params are merged over pgcli's static tuning
+	// defaults on every start. Cleared by `pg tune --revert`.
+	Tune *TuneConfig `yaml:"tune,omitempty"`
+}
+
+// TuneConfig persists a `pg tune --apply` result for one target (an instance's
+// managed conf block, or a Patroni cluster's DCS parameters).
+type TuneConfig struct {
+	// Inputs echoes the hardware/workload specs the recommendation was
+	// computed from (type/hd/ram/cpus/db_size/conns/version).
+	Inputs map[string]string `yaml:"inputs,omitempty"`
+	// Params are the parameter name → value pairs actually applied, in
+	// conf-file form (e.g. "4GB", "off"). For Patroni they are the names set
+	// under postgresql.parameters in the DCS; --revert removes exactly these.
+	Params map[string]string `yaml:"params,omitempty"`
 }
 
 // AddonsConfig tracks optional sidecar components attached to an instance.
@@ -337,6 +354,11 @@ type PatroniClusterConfig struct {
 	// Passwords), not per-member: all members must share the same packages and
 	// shared_preload_libraries.
 	Extensions []string `yaml:"extensions,omitempty"`
+
+	// Tune records the last `pg tune --ha <scope> --apply`: input specs plus
+	// the postgresql.parameters set in the DCS. --revert removes exactly those
+	// parameter names from the cluster config.
+	Tune *TuneConfig `yaml:"tune,omitempty"`
 
 	Members map[string]PatroniMemberConfig `yaml:"members,omitempty"` // member name -> config (this host's only)
 }
