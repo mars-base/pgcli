@@ -1953,7 +1953,7 @@ func (m *Manager) ExecDSNQuery(dsn, sql string) (string, error) {
 		"run", "--rm", "--name", containerName,
 		"--network", "host",
 		imageTag,
-		"psql", "--dbname=" + dsn, "-t", "-A", "-c", sql,
+		"psql", "--dbname=" + dsn, "-q", "-t", "-A", "-c", sql,
 	}
 	cmd := podmanCommand(m.podman, podmanArgs...)
 	var stderr bytes.Buffer
