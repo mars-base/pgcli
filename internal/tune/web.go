@@ -56,9 +56,8 @@ const webTemplate = `<!DOCTYPE html>
 <body>
 <div class="wrap">
   <h1>pg tune</h1>
-  <p class="sub">Interactive PostgreSQL tuning — the same heuristics as
-    <code>pg tune</code> (le0pard/pgtune). Adjust the hardware and workload; the
-    parameters recompute live. This page is self-contained and offline.</p>
+  <p class="sub">Interactive PostgreSQL tuning. Adjust the hardware and workload;
+    the parameters recompute live. This page is self-contained and offline.</p>
   <div class="banner" id="banner"></div>
   <div class="cols">
     <div class="card">
@@ -203,9 +202,13 @@ function recommend(raw){
   var avwm = ""; { var th = 2*GBKB; var v = mwm >= th ? th : 0;
     if (i.os === "windows" && major <= 17 && v > 0) v = Math.min(v, 2*GBKB - MBKB);
     if (v > 0) avwm = formatValue(floorKb(v)); }
-  var ioMethod = major < 18 ? "" : (i.os === "linux" ? "io_uring" : "worker");
+  // io_uring deliberately not recommended (needs --with-liburing build + kernel
+  // support; mismatch is FATAL at startup) — worker is always available on PG18.
+  // var ioMethod = major < 18 ? "" : (i.os === "linux" ? "io_uring" : "worker");
+  var ioMethod = major < 18 ? "" : "worker";
   var ioWorkers = "";
-  if (major >= 18 && ioMethod !== "io_uring") { var iv = Math.min(32, Math.max(3, Math.floor(i.cpus/4))); if (iv > 3) ioWorkers = String(iv); }
+  // if (major >= 18 && ioMethod !== "io_uring") { var iv = Math.min(32, Math.max(3, Math.floor(i.cpus/4))); if (iv > 3) ioWorkers = String(iv); }
+  if (major >= 18) { var iv = Math.min(32, Math.max(3, Math.floor(i.cpus/4))); if (iv > 3) ioWorkers = String(iv); }
   var minw = ({web:1024, oltp:2048, dw:4096, desktop:100, mixed:1024}[i.type])*MBKB;
   var maxw = ({web:4096, oltp:8192, dw:16384, desktop:2048, mixed:4096}[i.type])*MBKB;
 
@@ -279,7 +282,9 @@ function fillForm(){
   document.getElementById("conns").value = PREFILL.conns || 0;
   var unit = "GB";
   document.getElementById("ramunit").value = unit;
-  document.getElementById("ram").value = PREFILL.ram_bytes ? (PREFILL.ram_bytes / GB) : "";
+  // Probed RAM is rarely a whole GB count (kernels reserve some); round the
+  // prefill so the number input shows a tidy integer instead of a long tail.
+  document.getElementById("ram").value = PREFILL.ram_bytes ? Math.round(PREFILL.ram_bytes / GB) : "";
 }
 function readForm(){
   var unit = document.getElementById("ramunit").value;
@@ -320,8 +325,10 @@ function render(){
               : active === "conf" ? confLines.join("\n")
               : r.rows.map(function(x){ return x[0] + " = " + x[1]; }).join("\n");
 }
-function esc(s){ return String(s).replace(/[&<>"]/g, function(c){
-  return ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]); }); }
+function esc(s){ s = String(s);
+  var pairs = ["&","&amp;","<","&lt;",">","&gt;","\"","&quot;"];
+  for (var k = 0; k < pairs.length; k += 2) { s = s.split(pairs[k]).join(pairs[k+1]); }
+  return s; }
 
 function showTab(name){
   ["table","conf","alter"].forEach(function(t){
@@ -382,7 +389,16 @@ func WebHTML(prefill Inputs) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	html := strings.ReplaceAll(webTemplate, "__FIXTURES__", string(fj))
+	// Minify the script before substituting the data: the embedded JSON stays
+	// byte-exact and the (comment-heavy) code becomes one compact line.
+	html := webTemplate
+	if open := strings.Index(html, "<script>"); open >= 0 {
+		if close := strings.Index(html[open:], "</script>"); close >= 0 {
+			body := html[open+len("<script>") : open+close]
+			html = html[:open] + "<script>" + minifyJS(body) + html[open+close:]
+		}
+	}
+	html = strings.ReplaceAll(html, "__FIXTURES__", string(fj))
 	html = strings.ReplaceAll(html, "__PREFILL__", string(pj))
 	return html, nil
 }

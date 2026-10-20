@@ -49,7 +49,7 @@ func TestWebHTMLPrefillDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	var pre webInputs
-	if err := json.Unmarshal([]byte(between(t, html, "var PREFILL = ", ";")), &pre); err != nil {
+	if err := json.Unmarshal([]byte(between(t, html, "var PREFILL=", ";")), &pre); err != nil {
 		t.Fatal(err)
 	}
 	if pre.Version != 180000 || pre.CPUs != 1 {
@@ -65,7 +65,7 @@ func TestWebHTMLPrefillDefaults(t *testing.T) {
 
 func mustFixtureJSON(t *testing.T, html string) []webFixture {
 	t.Helper()
-	raw := between(t, html, "var FIXTURES = ", ";")
+	raw := between(t, html, "var FIXTURES=", ";")
 	var fs []webFixture
 	if err := json.Unmarshal([]byte(raw), &fs); err != nil {
 		t.Fatalf("fixtures not valid JSON: %v\n%s", err, raw)

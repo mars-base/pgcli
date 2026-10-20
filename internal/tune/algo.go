@@ -81,7 +81,7 @@ func Recommend(in Inputs) ([]Param, error) {
 	}
 	if im := in.ioMethod(); im != "" {
 		out = append(out, Param{Name: "io_method", Value: im,
-			Reason: "asynchronous I/O method (PG18+)", Warning: in.ioMethodWarning()})
+			Reason: "asynchronous I/O method (PG18+)"})
 	}
 	if iw := in.ioWorkers(); iw != "" {
 		out = append(out, Param{Name: "io_workers", Value: iw,
@@ -335,21 +335,25 @@ func (in Inputs) ioMethod() string {
 	if in.major() < 18 {
 		return ""
 	}
-	if in.OS == OSLinux {
-		return "io_uring"
-	}
+	// io_uring deliberately not recommended: it needs a --with-liburing
+	// build plus kernel support, and a mismatch is a FATAL at startup.
+	// worker is the always-available PG18 AIO method. (web.go mirrors this.)
+	// if in.OS == OSLinux {
+	// 	return "io_uring"
+	// }
 	return "worker"
 }
 
-func (in Inputs) ioMethodWarning() string {
-	if in.ioMethod() == "io_uring" {
-		return "io_method = io_uring requires PostgreSQL built --with-liburing"
-	}
-	return ""
-}
+// ioMethodWarning guarded the io_uring recommendation; kept for reference:
+// func (in Inputs) ioMethodWarning() string {
+// 	if in.ioMethod() == "io_uring" {
+// 		return "io_method = io_uring requires PostgreSQL built --with-liburing"
+// 	}
+// 	return ""
+// }
 
 func (in Inputs) ioWorkers() string {
-	if in.major() < 18 || in.ioMethod() == "io_uring" {
+	if in.major() < 18 {
 		return ""
 	}
 	v := min(32.0, max(3.0, math.Floor(float64(in.CPUs)/4)))

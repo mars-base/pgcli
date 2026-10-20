@@ -1,6 +1,6 @@
 ---
 title: "Configuration Tuning"
-description: "pgtune-style postgresql.conf tuning for pgcli instances and Patroni clusters"
+description: "Hardware-aware postgresql.conf tuning for pgcli instances and Patroni clusters"
 weight: 86
 icon: fa-solid fa-sliders
 menus:
@@ -16,12 +16,10 @@ cascade:
 ---
 
 `pg tune` turns a machine's hardware specs and a workload class into a coherent set
-of `postgresql.conf` parameters — the same heuristics as
-[le0pard/pgtune](https://pgtune.leopard.in.ua/) (MIT), ported into pgcli and made
-target-aware. It works against both kinds of deployment pgcli manages: plain
-instances (written through the managed tuning block in `postgresql.conf`) and
-Patroni HA clusters (written to the DCS via `edit-config`, which rolls the change
-out to every member).
+of `postgresql.conf` parameters. It works against both kinds of deployment pgcli
+manages: plain instances (written through the managed tuning block in
+`postgresql.conf`) and Patroni HA clusters (written to the DCS via `edit-config`,
+which rolls the change out to every member).
 
 By default it **only prints a recommendation** — nothing is touched. `--apply`
 writes it; `--revert` removes a previously applied tune.
@@ -144,21 +142,22 @@ the two implementations ever disagree.
 
 ## How the numbers are derived
 
-The formulas are le0pard/pgtune's, reproduced faithfully (internal unit kB,
-floors where upstream floors):
+The formulas are faithful and deterministic (internal unit kB, flooring at each
+derivation step):
 
 - `shared_buffers` = RAM/4 (desktop: /16); `effective_cache_size` = 3/4 RAM.
 - `maintenance_work_mem` = RAM/16 (dw: /8), capped at 8 GB (2047 MB on Windows ≤PG17).
 - `work_mem` = (RAM − shared_buffers) / ((max_connections + max_worker_processes) × 3),
   then scaled by workload (dw/mixed ½, desktop ⅙) and db-size (fits ×1.3, larger ×0.9), floor 4 MB.
 - `wal_buffers` = 3% of shared_buffers, clamped to [32 kB, 16 MB].
-- `random_page_cost` 4 for hdd and for dw-on-SSD (with the upstream warning about
+- `random_page_cost` 4 for hdd and for dw-on-SSD (with a warning about
   catastrophic index scans), 1.1 otherwise; `effective_io_concurrency` by storage class (Linux only).
 - Parallelism from CPU count (omitted below 4 cores); `autovacuum_max_workers` at ≥16/≥32 cores;
-  version gates: `jit=off` ≥12, `wal_compression` on/lz4 ≥10/≥15, `io_method`/`io_workers` ≥18,
+  version gates: `jit=off` ≥12, `wal_compression` on/lz4 ≥10/≥15, `io_method`/`io_workers` ≥18
+  (`io_method` is always `worker` — `io_uring` additionally needs a `--with-liburing` build
+  and kernel support, and a mismatch makes the server fail to start, so it is not auto-recommended),
   desktop-only `wal_level=minimal` + `max_wal_senders=0`.
 
-Per-parameter caveats (lz4/liburing compile flags, the DW cost warning) are
+Per-parameter caveats (lz4 compile flag, the DW cost warning) are
 printed inline in the table; absurd machine sizes (<256 MB, >100 GB RAM) get a
-global warning. Credits: [le0pard/pgtune](https://github.com/le0pard/pgtune) for
-the model, timescaledb-tune for the recommend-then-apply interaction.
+global warning.

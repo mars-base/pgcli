@@ -66,11 +66,11 @@ func TestRecommend16GBMixedSSD(t *testing.T) {
 	if got := find(t, ps, "autovacuum_work_mem").Value; got != "2GB" {
 		t.Errorf("64GB autovacuum_work_mem = %q, want 2GB", got)
 	}
-	if p := find(t, ps, "io_workers"); p.Value != "" {
-		t.Errorf("io_workers must be omitted for io_method=io_uring, got %q", p.Value)
+	if got := find(t, ps, "io_method").Value; got != "worker" {
+		t.Errorf("io_method = %q, want worker (io_uring is deliberately not recommended)", got)
 	}
-	if p := find(t, ps, "io_method"); !strings.Contains(p.Warning, "--with-liburing") {
-		t.Errorf("io_method warning missing: %q", p.Warning)
+	if p := find(t, ps, "io_workers"); p.Value != "" {
+		t.Errorf("io_workers must be absent at 8 cpus, got %q", p.Value)
 	}
 	if p := find(t, ps, "wal_compression"); !strings.Contains(p.Warning, "--with-lz4") {
 		t.Errorf("wal_compression warning missing: %q", p.Warning)
@@ -326,8 +326,8 @@ func TestRecommendNormalizeDefaults(t *testing.T) {
 	if got := find(t, ps, "effective_io_concurrency").Value; got != "200" {
 		t.Errorf("default disk io_concurrency = %q, want 200 (ssd)", got)
 	}
-	if got := find(t, ps, "io_method").Value; got != "io_uring" {
-		t.Errorf("default version io_method = %q, want io_uring (PG18)", got)
+	if got := find(t, ps, "io_method").Value; got != "worker" {
+		t.Errorf("default version io_method = %q, want worker (PG18)", got)
 	}
 	if got := find(t, ps, "max_connections").Value; got != "100" {
 		t.Errorf("default type max_connections = %q, want 100 (mixed)", got)

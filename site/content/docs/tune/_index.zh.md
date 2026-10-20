@@ -1,6 +1,6 @@
 ---
 title: 配置调优
-description: pgcli 实例与 Patroni 集群的 pgtune 风格 postgresql.conf 调优
+description: pgcli 实例与 Patroni 集群的 postgresql.conf 硬件感知调优
 weight: 86
 icon: fa-solid fa-sliders
 cascade:
@@ -9,8 +9,7 @@ cascade:
 ---
 
 `pg tune` 把一台机器的硬件规格和一类工作负载，换算成一套自洽的 `postgresql.conf`
-参数——算法就是 [le0pard/pgtune](https://pgtune.leopard.in.ua/)（MIT）那一套，移植进
-pgcli 并做成目标感知。它同时服务 pgcli 纳管的两种部署：普通实例（写入
+参数——目标感知，移植进 pgcli 原生实现。它同时服务 pgcli 纳管的两种部署：普通实例（写入
 `postgresql.conf` 的托管调优块）和 Patroni 高可用集群（通过 `edit-config` 写入 DCS，
 由 Patroni 滚动下发到每个成员）。
 
@@ -116,20 +115,20 @@ CPU、连接数、存储、库大小），实时重算，postgresql.conf / ALTER
 
 ## 数值怎么来的
 
-公式严格照 le0pard/pgtune 复刻（内部以 kB 计算，上游取整处也取整）：
+公式忠实且确定（内部以 kB 计算，每步推导都取整）：
 
 - `shared_buffers` = RAM/4（desktop /16）；`effective_cache_size` = 3/4 RAM。
 - `maintenance_work_mem` = RAM/16（dw /8），封顶 8 GB（Windows ≤PG17 封顶 2047 MB）。
 - `work_mem` = (RAM − shared_buffers) / ((max_connections + max_worker_processes) × 3)，
   再按负载缩放（dw/mixed ½、desktop ⅙）与库大小缩放（装得下 ×1.3、远大于 ×0.9），下限 4 MB。
 - `wal_buffers` = shared_buffers 的 3%，夹在 [32 kB, 16 MB]。
-- `random_page_cost`：hdd 及 dw-on-SSD 取 4（并带上上游那条"会选到灾难性索引扫描"警告），
+- `random_page_cost`：hdd 及 dw-on-SSD 取 4（并带上"会选到灾难性索引扫描"的警告），
   其余 1.1；`effective_io_concurrency` 按存储类型（仅 Linux）。
 - 并行度按 CPU 数（<4 核不出并行块）；`autovacuum_max_workers` 在 ≥16/≥32 核才加；
-  版本门控：`jit=off` ≥12、`wal_compression` on/lz4 ≥10/≥15、`io_method`/`io_workers` ≥18、
+  版本门控：`jit=off` ≥12、`wal_compression` on/lz4 ≥10/≥15、`io_method`/`io_workers` ≥18
+  （`io_method` 恒推荐 `worker`——`io_uring` 额外要求 `--with-liburing` 编译支持加内核支持，
+  不满足会导致实例启动失败，故不自动推荐）、
   desktop 专属 `wal_level=minimal` + `max_wal_senders=0`。
 
-逐参数注意事项（lz4/liburing 编译开关、DW 代价警告）在表内就近打印；离谱的机器规格
-（<256 MB、>100 GB RAM）给全局警告。致谢：算法来自
-[le0pard/pgtune](https://github.com/le0pard/pgtune)，"先建议后应用"的交互思路来自
-timescaledb-tune。
+逐参数注意事项（lz4 编译开关、DW 代价警告）在表内就近打印；离谱的机器规格
+（<256 MB、>100 GB RAM）给全局警告。

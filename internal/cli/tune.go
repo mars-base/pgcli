@@ -48,10 +48,9 @@ func init() {
 var tuneCmd = &cobra.Command{
 	Use:   "tune",
 	Short: "Recommend (and optionally apply) postgresql.conf tuning from hardware specs",
-	Long: `tune computes a pgtune-style parameter set from the machine's hardware
-specs and a workload class, mirroring le0pard/pgtune's heuristics. The specs
-default to a probe of the host this command runs on; override with --ram/--cpus
-for shared hosts or cross-host clusters.
+	Long: `tune computes a parameter set from the machine's hardware specs and a
+workload class. The specs default to a probe of the host this command runs on;
+override with --ram/--cpus for shared hosts or cross-host clusters.
 
 Default output is a recommendation table only — nothing is written. --apply
 persists it: for a managed instance into pgcli's tuning block in
