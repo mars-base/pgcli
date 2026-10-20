@@ -101,6 +101,14 @@ func TestRunDegradesGracefully(t *testing.T) {
 	if !hasFinding(c.Findings, "section_queries", SeverityInfo) {
 		t.Errorf("missing a NOTE about the absent queries section: %s", idList(c.Findings))
 	}
+	// The absent-extension NOTE must recommend installing it via pgcli.
+	for _, f := range c.Findings {
+		if f.ID == "section_queries" {
+			if !strings.Contains(f.Remediation, "pg extension install pg_stat_statements") {
+				t.Errorf("remediation should suggest the install command, got %q", f.Remediation)
+			}
+		}
+	}
 }
 
 func idList(fs []Finding) string {

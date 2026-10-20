@@ -66,12 +66,16 @@ func Analyze(c *Context, notes []note) []Finding {
 	out = append(out, ruleSettings(c)...)
 	out = append(out, ruleGood(c)...)
 	for _, n := range notes {
+		fix := n.Fix
+		if fix == "" {
+			fix = "Grant the monitoring role access to the underlying stats view (pg_monitor helps)."
+		}
 		out = append(out, Finding{
 			ID:          "section_" + slug(n.Section),
 			Severity:    SeverityInfo,
 			Title:       fmt.Sprintf("%s not sampled", n.Section),
 			Detail:      n.Reason,
-			Remediation: "Grant the monitoring role access to the underlying stats view (pg_monitor helps).",
+			Remediation: fix,
 			ImpactScore: 1,
 		})
 	}

@@ -45,7 +45,7 @@ func Summary(w io.Writer, c *Context) {
 		}
 		fmt.Fprintf(w, "%s\n", strings.Repeat("─", 64))
 		for _, f := range group {
-			fmt.Fprintf(w, "  [%-8s] %s\n", f.Severity, f.Title)
+			fmt.Fprintf(w, "  [%s] %s\n", f.Severity, f.Title)
 			if f.Detail != "" {
 				printBlock(w, "", f.Detail)
 			}

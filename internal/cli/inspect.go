@@ -88,7 +88,7 @@ Examples:
 			if err != nil {
 				return err
 			}
-			target = fmt.Sprintf("instance %q (%s)", cfg.Instance, cfg.Podman.ContainerName)
+			target = fmt.Sprintf("instance %q", cfg.Instance)
 			q = &localQuerier{pm: pm}
 		}
 

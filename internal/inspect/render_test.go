@@ -11,7 +11,7 @@ func TestSummaryText(t *testing.T) {
 	var buf bytes.Buffer
 	Summary(&buf, sampleContext())
 	out := buf.String()
-	for _, want := range []string{"HEALTH SCORE", "/100", "PostgreSQL health report", "[WARNING ", "buffer cache"} {
+	for _, want := range []string{"HEALTH SCORE", "/100", "PostgreSQL health report", "[WARNING]", "buffer cache"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("summary missing %q\n---\n%s", want, out)
 		}

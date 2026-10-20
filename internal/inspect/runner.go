@@ -47,10 +47,12 @@ type Options struct {
 }
 
 // note is a degradation line (a domain that could not be sampled); it renders
-// as a NOTE finding and explains an empty section.
+// as a NOTE finding and explains an empty section. Fix, when set, is the
+// concrete next step instead of the generic grant-access hint.
 type note struct {
 	Section string
 	Reason  string
+	Fix     string
 }
 
 // Run samples every section once (health twice, for rates) and assembles the
@@ -108,7 +110,7 @@ WHERE e.extname = 'pg_stat_statements'`); err == nil && ns != "" {
 		c.Health = &h1[0]
 		c.Rates = computeRates(h0[0], h1[0], opts.Interval)
 	} else {
-		notes = append(notes, note{"health", "pg_stat_database could not be sampled"})
+		notes = append(notes, note{Section: "health", Reason: "pg_stat_database could not be sampled"})
 	}
 
 	// limits: a single rollup row.
@@ -123,9 +125,9 @@ WHERE e.extname = 'pg_stat_statements'`); err == nil && ns != "" {
 	}
 
 	if pgss == "" {
-		notes = append(notes, note{"queries", "the pg_stat_statements extension is not installed"})
+		notes = append(notes, note{Section: "queries", Reason: "the pg_stat_statements extension is not installed", Fix: `pg extension install pg_stat_statements -i <instance> installs the package, sets shared_preload_libraries and restarts; use "CREATE EXTENSION pg_stat_statements" on a remote server.`})
 	} else if qs, err := loadSQL("queries.sql"); err != nil {
-		notes = append(notes, note{"queries", err.Error()})
+		notes = append(notes, note{Section: "queries", Reason: err.Error()})
 	} else {
 		sql := fmt.Sprintf(qs, totalCol, pgss, opts.Limit)
 		runSection(&notes, "queries", func() error { return queryInto(q, sql, &c.Queries) })
@@ -190,7 +192,7 @@ func queryInto[T any](q Querier, sql string, dst *[]T) error {
 // section, not a failure — so the closure only returns an error for real errors.
 func runSection(notes *[]note, section string, run func() error) {
 	if err := run(); err != nil {
-		*notes = append(*notes, note{section, err.Error()})
+		*notes = append(*notes, note{Section: section, Reason: err.Error()})
 	}
 }
 
@@ -198,7 +200,7 @@ func runSection(notes *[]note, section string, run func() error) {
 func runFile(notes *[]note, section, file string, run func(sql string) error) {
 	sql, err := loadSQL(file)
 	if err != nil {
-		*notes = append(*notes, note{section, err.Error()})
+		*notes = append(*notes, note{Section: section, Reason: err.Error()})
 		return
 	}
 	runSection(notes, section, func() error { return run(sql) })
