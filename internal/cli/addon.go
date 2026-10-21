@@ -243,18 +243,17 @@ Infra addons (shared, not tied to one instance):
           reused) and run directly on the host — no container. The mount is a
           plain host directory (default <base_dir>/addon/juicefs/<name>/mnt),
           visible to host processes; it does NOT propagate into PG instance
-          containers. --meta picks the metadata engine: sqlite3 (default, a
-          file under the addon dir), redis (a pgcli redis addon via
-          --redis-name/--redis-dsn), pg (a pgcli instance — pgcli creates the
-          juicefs_<name> metadata database on it), or dsn (--meta-dsn with any
-          postgres://, redis:// or sqlite3:// URL). The S3 backend is a pgcli
-          object-storage addon (--s3 minio|silo --s3-name ..., read-only:
-          pgcli never creates buckets or service accounts — it prints the
-          exact "pg mc mb ..." line to run yourself; --access-key/--secret-key
-          override the backend's root credentials). format runs once — an
-          existing volume in the metadata engine is detected and left alone
-          (even under --force, which only rebuilds the config entry from the
-          flags); mount -d self-daemonizes with its log under the
+          containers. Both sides of a volume are given EXPLICITLY — there is no
+          same-host auto-detection, because the S3 provider and the client
+          normally live on different machines: --s3-endpoint http(s)://host[:port]
+          plus --access-key/--secret-key name the external object store (the
+          bucket itself is never created — pgcli prints the exact "pg mc mb ..."
+          line to run yourself), and --dsn (alias --meta-dsn) is the metadata
+          engine URL itself (postgres://, redis:// or sqlite3://; create the
+          database beforehand — pgcli never creates or drops it). format runs
+          once — an existing volume in the metadata engine is detected and left
+          alone (even under --force, which only rebuilds the config entry from
+          the flags); mount -d self-daemonizes with its log under the
           addon dir. "pg addon juicefs mount|umount|status [--name]" manage
           the mount; "pg addon remove juicefs" unmounts and forgets but KEEPS
           the bucket, metadata and binary. The S3 secret key is retrievable
@@ -272,11 +271,13 @@ Infra addons (shared, not tied to one instance):
           re-attaching needs the ORIGINAL password via --encryption-password.
           Fencing needs conditional put (If-None-Match): --conditional-put
           auto (default) assumes it (MinIO 2022-08+ and real S3 have it);
-          for stores lacking it (e.g. silo) use --conditional-put redis with a
-          pgcli redis addon, or none for a single writer only. Same S3-addon
-          read-only contract and manual "pg mc" bucket provisioning as juicefs.
-          "pg addon zerofs start|stop|mount|umount|status [--name]" manage it;
-          "pg logs addon zerofs --service server|mount" tail either log.
+          for stores lacking it (e.g. silo) use --conditional-put redis with an
+          explicit --redis-dsn redis://…, or none for a single writer only.
+          Same EXPLICIT external-S3 contract (--s3-endpoint + credentials,
+          optional --s3-region) and manual "pg mc" bucket provisioning as
+          juicefs. "pg addon zerofs start|stop|mount|umount|status [--name]"
+          manage it; "pg logs addon zerofs --service server|mount" tail either
+          log.
 
 Commands:
   pg addon install <addon>    install an add-on
@@ -315,8 +316,8 @@ Currently supported add-ons:
   alertmanager Alertmanager — the alert dedup/grouping/routing frontend of the Prometheus stack (single container from docker.io/prom/alertmanager; rendered alertmanager.yml with a no-op or --webhook-url web.hook receiver, or --conf-file; SIGHUP reload; cluster gossip disabled; NO web login — defaults to 0.0.0.0 guarded only by the network, and silences are dangerous, use --listen 127.0.0.1 for loopback; wired to Prometheus from the Prometheus side via --alertmanager-url; Linux host network, macOS bridge)
   gitea       Gitea — the self-hosted Git service (single container from docker.io/gitea/gitea; web login auto-generated and created via "gitea admin user create"; optional --ssh-port for clone/push over SSH; SQLite by default or --dsn to put its metadata in a PostgreSQL you already run; defaults to 0.0.0.0 since a Git host is reached from other machines; Linux host network, macOS bridge)
   beegfs      BeeGFS — the scale-out parallel filesystem (mgmtd/meta/storage services from ghcr.io/thinkparq/beegfs — brought up in dependency order by one install; by default all three on this host = a converged single-host filesystem, --roles scopes it to a subset and a --roles-without-mgmtd host joins an existing cluster via --mgmtd-host/--node-id/--password — every host runs its own pgcli, pgcli never SSHes; --storage-target repeats for multiple disks/targets; fixed protocol ports 8008/8010/8005/8003, meta/storage cannot move so one filesystem per host; shared conn-auth secret (generated on the mgmtd host), mgmtd TLS disabled; an unlicensed build caps client mounts at five — pgcli never generates a license but CARRIES a ThinkParQ PEM via --license-file / "pg addon beegfs license" (mgmtd-only); the kernel-module client is never installed — "pg addon beegfs mount-hint" prints its config, "join-hint" the per-host join commands; Linux host network only)
-  juicefs     JuiceFS — S3-backed POSIX filesystem installed as a HOST BINARY (GitHub releases + sha256; no container): metadata engine --meta sqlite3|redis|pg|dsn (pgcli's own instance or redis addon, or any --meta-dsn), S3 backend = a pgcli minio/silo addon read-only (buckets/accounts via "pg mc" by hand — pgcli prints the exact command), mounts a plain host directory; "pg addon juicefs mount|umount|status"; Linux only
-  zerofs      ZeroFS — encrypted self-maintaining S3 filesystem (LSM on S3, no external metadata) as a HOST BINARY (GitHub releases + sha256): pgcli writes config.toml and runs a loopback 9P server + FUSE client; generated encryption password wraps the bucket's data key ("pg addon password zerofs" to recover, --encryption-password to re-attach a kept bucket); needs conditional-put support (MinIO 2022-08+) else --conditional-put redis; Linux only
+  juicefs     JuiceFS — S3-backed POSIX filesystem installed as a HOST BINARY (GitHub releases + sha256; no container): an EXTERNAL S3 backend given explicitly (--s3-endpoint http(s)://host:port + --access-key/--secret-key — no same-host addon auto-detection; buckets via "pg mc" by hand, pgcli prints the exact command) and an explicit metadata URL (--dsn: postgres://, redis:// or sqlite3://); mounts a plain host directory; "pg addon juicefs mount|umount|status"; Linux only
+  zerofs      ZeroFS — encrypted self-maintaining S3 filesystem (LSM on S3, no external metadata) as a HOST BINARY (GitHub releases + sha256): an EXTERNAL S3 backend given explicitly (--s3-endpoint + --access-key/--secret-key, optional --s3-region; same no-auto-detection contract as juicefs); pgcli writes config.toml and runs a loopback 9P server + FUSE client; generated encryption password wraps the bucket's data key ("pg addon password zerofs" to recover, --encryption-password to re-attach a kept bucket); needs conditional-put support (MinIO 2022-08+ / real S3) else --conditional-put redis --redis-dsn; Linux only
   nginx       HTTP reverse proxy in front of web services (path-based routing, optional TLS termination; single container from docker.io/library/nginx; Linux host network, macOS bridge)
 
 Two modes (pgbouncer, postgrest):
@@ -753,11 +754,10 @@ Examples:
   pg addon install beegfs --name fs1 --beegfs-mgmtd-port 18008 --beegfs-mgmtd-grpc-port 18010   # move mgmtd's two ports (meta/storage re-target automatically)
   pg addon install beegfs --name fs1 --roles storage --mgmtd-host 10.0.0.11 --node-id 2 --password <conn-auth> --storage-target /mnt/d1 --storage-target /mnt/d2  # cross-host: add a 2-target storage node (run ON that host; conn-auth from "pg addon beegfs join-hint")
   pg addon install beegfs --license-file license.pem                        # carry a ThinkParQ license PEM into mgmtd (mgmtd host only; hot-swap later with "pg addon beegfs license --set")
-  pg addon install juicefs                                                  # sqlite3 metadata + the "minio" addon's bucket juicefs-juicefs, mounted at <base_dir>/addon/juicefs/juicefs/mnt
-  pg addon install juicefs --name data --meta pg --pg-name mydb --s3 minio --s3-name ms3 --bucket my-bucket   # metadata in a pgcli instance (db juicefs_data created if missing)
-  pg addon install juicefs --meta redis --redis-name cache --mount-point /srv/jfs   # redis metadata engine, custom mount dir
-  pg addon install zerofs                                                   # minio backend, auto fencing, generated encryption password (pg addon password zerofs)
-  pg addon install zerofs --name z1 --s3 silo --s3-name ss3 --conditional-put redis --redis-name mred   # silo lacks If-None-Match → fence through a redis addon
+  pg addon install juicefs --name data --s3-endpoint https://s3.example.com --access-key AK --secret-key SK --bucket my-bucket --dsn "postgres://u:p@meta-host:5432/jfs?sslmode=disable"   # external S3 + external metadata db (create the db first — pgcli never creates it)
+  pg addon install juicefs --name j1 --s3-endpoint http://minio.internal:9000 --access-key AK --secret-key SK --dsn "sqlite3:///var/lib/jfs/j1.db"   # http endpoint + local sqlite metadata; mount at <base_dir>/addon/juicefs/j1/mnt
+  pg addon install zerofs --name z1 --s3-endpoint https://s3.example.com --access-key AK --secret-key SK --bucket zerofs-z1   # auto fencing (needs conditional-put support), generated encryption password (pg addon password zerofs)
+  pg addon install zerofs --name z1 --s3-endpoint http://store.internal:9000 --access-key AK --secret-key SK --conditional-put redis --redis-dsn redis://:pw@fencer:6379   # store lacks If-None-Match → fence through an explicit redis URL
   pg addon install zerofs --name z1 --encryption-password '<from pg addon password zerofs>'   # re-attach a bucket whose entry was removed (a fresh password could not unwrap its data)
   pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050
   pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050 --upstream name=postgrest,path=/api,backend=127.0.0.1:3000 --tls`,
@@ -5628,7 +5628,7 @@ func runAddonList(showPassword bool) error {
 		fmt.Println("  (none)")
 	}
 
-	// juicefs (host-binary FUSE volume over an S3 addon)
+	// juicefs (host-binary FUSE volume over an external S3 service)
 	fmt.Println()
 	fmt.Println("Filesystem add-ons (juicefs):")
 	hasJuicefs := false
@@ -5641,8 +5641,8 @@ func runAddonList(showPassword bool) error {
 		}
 		fmt.Printf("  %s (name: %s)\n", "juicefs", name)
 		fmt.Printf("    Status:      %s\n", state)
-		fmt.Printf("    Metadata:    %s (%s engine)\n", dsnDisplay(jc.MetaDSN), jc.MetaEngine)
-		fmt.Printf("    S3:          %s addon %q, bucket %s\n", jc.S3Addon, jc.S3Name, jc.Bucket)
+		fmt.Printf("    Metadata:    %s\n", dsnDisplay(jc.MetaDSN))
+		fmt.Printf("    S3:          %s, bucket %s\n", jc.S3Endpoint, jc.Bucket)
 		fmt.Printf("    Binary:      %s\n", jc.BinaryPath)
 		fmt.Printf("    Mount:       %s\n", jc.MountPoint)
 		fmt.Printf("    Cache:       %s\n", jc.CacheDir)
@@ -5654,7 +5654,7 @@ func runAddonList(showPassword bool) error {
 		fmt.Println("  (none)")
 	}
 
-	// zerofs (host-binary 9P volume over an S3 addon, dual process)
+	// zerofs (host-binary 9P volume over an external S3 service, dual process)
 	fmt.Println()
 	fmt.Println("Filesystem add-ons (zerofs):")
 	hasZerofs := false
@@ -5672,7 +5672,7 @@ func runAddonList(showPassword bool) error {
 		fmt.Printf("  %s (name: %s)\n", "zerofs", name)
 		fmt.Printf("    Server:      %s (%s:%d, 9P)\n", srv, zc.Listen, zc.ListenPort)
 		fmt.Printf("    Mount:       %s at %s\n", state, zc.MountPoint)
-		fmt.Printf("    S3:          %s addon %q, bucket %s\n", zc.S3Addon, zc.S3Name, zc.Bucket)
+		fmt.Printf("    S3:          %s, bucket %s\n", zc.S3Endpoint, zc.Bucket)
 		fmt.Printf("    Fence:       %s\n", zc.ConditionalPut)
 		fmt.Printf("    Binary:      %s\n", zc.BinaryPath)
 		fmt.Printf("    Config:      %s\n", zc.ConfigPath)

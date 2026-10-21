@@ -30,9 +30,9 @@ import (
 // with the hostbin process primitives.
 //
 // ZeroFS requires conditional writes (put-if-not-exists) for writer fencing.
-// MinIO (RELEASE.2022-08+) and real S3 support this natively, so pgcli's
-// default backend does; a store that doesn't (untested: silo) needs
-// --conditional-put pointing the primitive at a redis addon. The 9P listener has
+// MinIO (RELEASE.2022-08+) and real S3 support this natively; a store that
+// doesn't (untested: silo) needs --conditional-put redis with an explicit
+// --redis-dsn pointing the primitive at a redis server. The 9P listener has
 // no authentication, so it is forced to loopback (config Validate enforces it;
 // install pre-checks with a clearer message).
 //
@@ -79,7 +79,8 @@ func ensureZerofsBinary(version, installDir string) (string, string, error) {
 // renderZerofsConfig produces the server config in ZeroFS's documented
 // [cache]/[storage]/[aws]/[servers.ninep] shape. The golden test
 // (TestRenderZerofsConfig) pins exact output. conditional_put is emitted only
-// in redis mode; `none` and `auto` both rely on native fencing (omitted).
+// in redis mode; `none` and `auto` both rely on native fencing (omitted). The
+// region is emitted only when given — zerofs itself defaults to us-east-1.
 func renderZerofsConfig(zc *config.ZerofsConfig, tgt *s3Target) string {
 	var b strings.Builder
 	b.WriteString("# pgcli-managed ZeroFS server config — do not edit by hand.\n")
@@ -89,6 +90,9 @@ func renderZerofsConfig(zc *config.ZerofsConfig, tgt *s3Target) string {
 	b.WriteString("[aws]\n")
 	fmt.Fprintf(&b, "access_key_id = %q\nsecret_access_key = %q\n", zc.AccessKey, zc.SecretKey)
 	fmt.Fprintf(&b, "endpoint = %q\n", tgt.BaseURL)
+	if zc.S3Region != "" {
+		fmt.Fprintf(&b, "region = %q\n", zc.S3Region)
+	}
 	if !tgt.TLS {
 		// ZeroFS's parser wants allow_http as a STRING, not a TOML bool.
 		b.WriteString("allow_http = \"true\"\n")
@@ -182,20 +186,20 @@ func runAddonInstallZerofs(cmd *cobra.Command) error {
 	if zc.Version == "" {
 		zc.Version = config.DefaultZerofsVersion
 	}
-	if v, _ := fs.GetString("s3"); v != "" {
-		zc.S3Addon = v
+	if v, _ := fs.GetString("s3-endpoint"); v != "" {
+		zc.S3Endpoint = v
 	}
-	if zc.S3Addon == "" {
-		zc.S3Addon = "minio"
-	}
-	if v, _ := fs.GetString("s3-name"); v != "" {
-		zc.S3Name = v
-	}
-	if zc.S3Name == "" {
-		zc.S3Name = zc.S3Addon
+	if v, _ := fs.GetString("s3-region"); v != "" {
+		zc.S3Region = v
 	}
 	if v, _ := fs.GetString("bucket"); v != "" {
 		zc.Bucket = v
+	}
+	if v, _ := fs.GetString("access-key"); v != "" {
+		zc.AccessKey = v
+	}
+	if v, _ := fs.GetString("secret-key"); v != "" {
+		zc.SecretKey = v
 	}
 	if v, _ := fs.GetString("mount-point"); v != "" {
 		zc.MountPoint = v
@@ -218,14 +222,30 @@ func runAddonInstallZerofs(cmd *cobra.Command) error {
 	if zc.ConditionalPut == "" {
 		zc.ConditionalPut = config.ZerofsConditionalPutAuto
 	}
-	if v, _ := fs.GetString("redis-name"); v != "" {
-		zc.RedisName = v
+	if v, _ := fs.GetString("redis-dsn"); v != "" {
+		zc.ConditionalPutURL = v
 	}
 	if v, _ := fs.GetString("encryption-password"); v != "" {
 		zc.EncryptionPassword = v
 	}
 	if !config.ValidZerofsConditionalPut(zc.ConditionalPut) {
 		return fmt.Errorf("--conditional-put %q is not one of auto, redis, none", zc.ConditionalPut)
+	}
+	// The external backend is fully explicit — endpoint plus a credential
+	// pair; nothing is inherited from a same-host pgcli addon.
+	akSet, skSet := fs.Changed("access-key"), fs.Changed("secret-key")
+	if akSet != skSet {
+		return fmt.Errorf("--access-key and --secret-key must be given together — an external S3 service has no local addon root credentials to inherit")
+	}
+	var missing []string
+	if zc.S3Endpoint == "" {
+		missing = append(missing, "--s3-endpoint http(s)://host[:port]")
+	}
+	if zc.AccessKey == "" || zc.SecretKey == "" {
+		missing = append(missing, "--access-key and --secret-key")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("zerofs mounts an EXTERNAL S3 service — missing %s (see pg addon install zerofs -h)", strings.Join(missing, ", "))
 	}
 
 	// Persist the draft so ApplyDefaults can resolve host paths from it, then
@@ -236,6 +256,12 @@ func runAddonInstallZerofs(cmd *cobra.Command) error {
 
 	if !isLoopbackBind(zc.Listen) {
 		return fmt.Errorf("  [X] zerofs 9P listens without authentication — --listen must be loopback (got %q)", zc.Listen)
+	}
+	// The mount-point contract, checked before the binary download: the
+	// operator creates the directory (mkdir -p) with read-write access for
+	// the user running pg — pgcli never creates or chowns it.
+	if err := checkMountPoint(zc.MountPoint); err != nil {
+		return fmt.Errorf("  [X] %v", err)
 	}
 
 	installDir, _ := fs.GetString("install-dir")
@@ -258,40 +284,25 @@ func runAddonInstallZerofs(cmd *cobra.Command) error {
 	}
 	fmt.Println("  [OK] FUSE available (/dev/fuse, fusermount3)")
 
-	// 3. S3 backend + credentials.
-	tgt, err := resolveS3Target(c, zc.S3Addon, zc.S3Name)
+	// 3. External S3 endpoint (credentials already validated as explicit).
+	tgt, err := externalS3Target(zc.S3Endpoint)
 	if err != nil {
 		return fmt.Errorf("  [X] %v", err)
 	}
-	fmt.Printf("  [OK] S3 backend: %s addon %q at %s\n", tgt.Kind, tgt.Name, tgt.BaseURL)
-	akSet, skSet := fs.Changed("access-key"), fs.Changed("secret-key")
-	switch {
-	case akSet != skSet:
-		return fmt.Errorf("  [X] --access-key and --secret-key must be given together (or neither, to use the %s root credentials)", tgt.Kind)
-	case akSet:
-		fmt.Printf("  [OK] credentials: explicit access-key %q\n", zc.AccessKey)
-	default:
-		zc.AccessKey, zc.SecretKey = tgt.User, tgt.Password
-		fmt.Printf("  [OK] credentials: %s addon root (%s)\n", tgt.Kind, tgt.User)
-	}
+	fmt.Printf("  [OK] S3 endpoint: %s (TLS: %v)\n", tgt.BaseURL, tgt.TLS)
+	fmt.Printf("  [OK] credentials: explicit access-key %q\n", zc.AccessKey)
 
 	// 4. Conditional-put fencing backend.
-	redisDSN, _ := fs.GetString("redis-dsn")
 	switch zc.ConditionalPut {
 	case config.ZerofsConditionalPutRedis:
-		rurl := redisDSN
-		if rurl == "" {
-			rurl, err = redisMetaURL(c, zc.RedisName)
-			if err != nil {
-				return fmt.Errorf("  [X] --conditional-put redis: %v", err)
-			}
+		if zc.ConditionalPutURL == "" {
+			return fmt.Errorf("  [X] --conditional-put redis needs an explicit --redis-dsn redis://… (no same-host addon lookup)")
 		}
-		zc.ConditionalPutURL = rurl
-		fmt.Printf("  [OK] conditional-put: redis backend (%s)\n", dsnDisplay(rurl))
+		fmt.Printf("  [OK] conditional-put: redis backend (%s)\n", dsnDisplay(zc.ConditionalPutURL))
 	case config.ZerofsConditionalPutNone:
 		fmt.Println("  [!] conditional-put none — no fencing; safe ONLY if nothing else writes this bucket")
 	default: // auto
-		fmt.Printf("  [OK] conditional-put: native If-None-Match (%s)\n", tgt.Kind)
+		fmt.Println("  [OK] conditional-put: native If-None-Match (needs MinIO 2022-08+ / real S3)")
 	}
 
 	// 5. Encryption password — generated once. --force regenerates the
@@ -328,6 +339,9 @@ func runAddonInstallZerofs(cmd *cobra.Command) error {
 	if hostbin.Alive(zc.ServerPidFile) {
 		fmt.Println("  [OK] server already running")
 	} else {
+		if err := ensureZerofsBindFree(zc.Listen, zc.ListenPort, zc.ServerPidFile); err != nil {
+			return fmt.Errorf("  [X] %v", err)
+		}
 		if err := hostbin.StartDetached(bin, []string{"run", "-c", zc.ConfigPath}, zc.LogFile, zc.ServerPidFile); err != nil {
 			return fmt.Errorf("  [X] starting server: %v", err)
 		}
@@ -360,7 +374,7 @@ func runAddonInstallZerofs(cmd *cobra.Command) error {
 	} else {
 		if err := zerofsMount(bin, &zc); err != nil {
 			fmt.Printf("  [X] mount failed: %v\n", err)
-			printBucketHint(tgt, zc.Bucket)
+			printBucketHint(tgt, zc.AccessKey, zc.Bucket)
 			return fmt.Errorf("mount %q", name)
 		}
 		fmt.Printf("  [OK] mounted at %s\n", zc.MountPoint)
@@ -368,13 +382,13 @@ func runAddonInstallZerofs(cmd *cobra.Command) error {
 
 	fmt.Println()
 	fmt.Printf("✓ zerofs installed: %q\n", name)
-	fmt.Printf("  Volume:      %s (bucket %s on %s %q)\n", name, zc.Bucket, tgt.Kind, tgt.Name)
+	fmt.Printf("  Volume:      %s (bucket %s on %s)\n", name, zc.Bucket, tgt.BaseURL)
 	fmt.Printf("  9P endpoint: %s:%d (loopback, unauthenticated)\n", zc.Listen, zc.ListenPort)
 	fmt.Printf("  Mount point: %s\n", zc.MountPoint)
 	fmt.Printf("  Config:      %s (0600 — holds the encryption key; pg addon password zerofs to view)\n", zc.ConfigPath)
 	fmt.Println()
 	fmt.Printf("  pgcli does not create buckets. If the mount fails, provision once:\n")
-	printBucketHint(tgt, zc.Bucket)
+	printBucketHint(tgt, zc.AccessKey, zc.Bucket)
 	fmt.Println()
 	fmt.Printf("  Manage: pg addon zerofs {status|stop|start|umount|mount} --name %s\n", name)
 	fmt.Printf("  Remove: pg addon remove zerofs --name %s\n", name)
@@ -394,10 +408,32 @@ func lastLines(path string, n int) (string, error) {
 	return strings.Join(lines, "\n"), nil
 }
 
+// ensureZerofsBindFree refuses to spawn a 9P server onto a port that is
+// already answering. ZeroFS does not fail on a bind collision — the process
+// starts, logs nothing useful, and listens on nothing — so a blind
+// waitForTCPPort afterwards would match the OTHER instance's listener and the
+// client would silently mount the wrong volume. serverPidFile only shapes the
+// hint: a live pid on this very entry means a second zerofs server is running.
+func ensureZerofsBindFree(listenHost string, port int, serverPidFile string) error {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(listenHost, fmt.Sprint(port)), 500*time.Millisecond)
+	if err != nil {
+		return nil // nothing listening — the port is ours to bind
+	}
+	conn.Close()
+	hint := "stop whatever holds it or pick a free --port"
+	if hostbin.Alive(serverPidFile) {
+		hint = "this zerofs entry already has a live server on it — stop it first or choose a different --port"
+	}
+	return fmt.Errorf("9P port %s:%d is already answering — %s", listenHost, port, hint)
+}
+
 // zerofsMount starts the FUSE client detached against the local 9P server.
+// The mount point is the operator's (checkMountPoint enforces the contract —
+// pgcli never creates it); the pid/log files below land in pgcli's own addon
+// dir, which StartDetached creates as needed.
 func zerofsMount(bin string, zc *config.ZerofsConfig) error {
-	if err := os.MkdirAll(zc.MountPoint, 0o755); err != nil {
-		return fmt.Errorf("creating mount point: %w", err)
+	if err := checkMountPoint(zc.MountPoint); err != nil {
+		return err
 	}
 	if hostbin.Alive(zc.MountPidFile) && isMountPoint(zc.MountPoint) {
 		return nil
@@ -424,27 +460,59 @@ func zerofsMount(bin string, zc *config.ZerofsConfig) error {
 
 // --- `pg addon zerofs` lifecycle --------------------------------------------
 
-func resolveZerofs(cmd *cobra.Command) (*config.Config, string, config.ZerofsConfig, error) {
-	c, _, err := loadAddonCfg()
+// resolveZerofs loads config and the named zerofs entry (default "zerofs").
+// It also returns the config file path so `mount --mount-point` can persist a
+// relocated path.
+func resolveZerofs(cmd *cobra.Command) (*config.Config, string, string, config.ZerofsConfig, error) {
+	c, path, err := loadAddonCfg()
 	if err != nil {
-		return nil, "", config.ZerofsConfig{}, err
+		return nil, "", "", config.ZerofsConfig{}, err
 	}
 	name, _ := cmd.Flags().GetString("name")
 	if name == "" {
 		name = "zerofs"
 	}
 	if c.Addons.Zerofs == nil {
-		return nil, "", config.ZerofsConfig{}, fmt.Errorf("no zerofs add-ons configured (run 'pg addon install zerofs')")
+		return nil, "", "", config.ZerofsConfig{}, fmt.Errorf("no zerofs add-ons configured (run 'pg addon install zerofs')")
 	}
 	if _, ok := c.Addons.Zerofs[name]; !ok {
-		return nil, "", config.ZerofsConfig{}, fmt.Errorf("zerofs volume %q not found (see 'pg addon list')", name)
+		return nil, "", "", config.ZerofsConfig{}, fmt.Errorf("zerofs volume %q not found (see 'pg addon list')", name)
 	}
 	c.ApplyDefaults()
-	return c, name, c.Addons.Zerofs[name], nil
+	return c, path, name, c.Addons.Zerofs[name], nil
+}
+
+// mountOverrideZerofs applies a `mount --mount-point` flag: relocate the FUSE
+// mount to a pre-created, writable directory and persist the new path. The
+// flag exists only on the nested mount command, so the top-level `pg addon
+// start zerofs` alias (which shares RunE via addonStartCmd — but that calls
+// start, not mount) passes the guard trivially. Refuses while the volume is
+// still mounted at the old path: umount first.
+func mountOverrideZerofs(c *config.Config, path, name string, zc *config.ZerofsConfig, cmd *cobra.Command) error {
+	if f := cmd.Flags().Lookup("mount-point"); f == nil {
+		return nil
+	}
+	want, _ := cmd.Flags().GetString("mount-point")
+	if want == "" || want == zc.MountPoint {
+		return nil
+	}
+	if isMountPoint(zc.MountPoint) {
+		return fmt.Errorf("zerofs %q is still mounted at %s — umount first: pg addon zerofs umount --name %s", name, zc.MountPoint, name)
+	}
+	if err := checkMountPoint(want); err != nil {
+		return err
+	}
+	zc.MountPoint = want
+	c.Addons.Zerofs[name] = *zc
+	if err := c.Save(path); err != nil {
+		return fmt.Errorf("saving config: %w", err)
+	}
+	fmt.Printf("  [i] mount point moved to %s (saved)\n", want)
+	return nil
 }
 
 func runZerofsStart(cmd *cobra.Command, _ []string) error {
-	_, name, zc, err := resolveZerofs(cmd)
+	_, _, name, zc, err := resolveZerofs(cmd)
 	if err != nil {
 		return err
 	}
@@ -453,6 +521,9 @@ func runZerofsStart(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 	raiseOpenFileLimit()
+	if err := ensureZerofsBindFree(zc.Listen, zc.ListenPort, zc.ServerPidFile); err != nil {
+		return err
+	}
 	if err := hostbin.StartDetached(zc.BinaryPath, []string{"run", "-c", zc.ConfigPath}, zc.LogFile, zc.ServerPidFile); err != nil {
 		return fmt.Errorf("starting server: %w", err)
 	}
@@ -464,7 +535,7 @@ func runZerofsStart(cmd *cobra.Command, _ []string) error {
 }
 
 func runZerofsStop(cmd *cobra.Command, _ []string) error {
-	_, name, zc, err := resolveZerofs(cmd)
+	_, _, name, zc, err := resolveZerofs(cmd)
 	if err != nil {
 		return err
 	}
@@ -485,8 +556,11 @@ func zerofsStopBoth(zc *config.ZerofsConfig) {
 }
 
 func runZerofsMount(cmd *cobra.Command, _ []string) error {
-	_, name, zc, err := resolveZerofs(cmd)
+	c, path, name, zc, err := resolveZerofs(cmd)
 	if err != nil {
+		return err
+	}
+	if err := mountOverrideZerofs(c, path, name, &zc, cmd); err != nil {
 		return err
 	}
 	if isMountPoint(zc.MountPoint) {
@@ -504,7 +578,7 @@ func runZerofsMount(cmd *cobra.Command, _ []string) error {
 }
 
 func runZerofsUmount(cmd *cobra.Command, _ []string) error {
-	_, name, zc, err := resolveZerofs(cmd)
+	_, _, name, zc, err := resolveZerofs(cmd)
 	if err != nil {
 		return err
 	}
@@ -524,7 +598,7 @@ func runZerofsUmount(cmd *cobra.Command, _ []string) error {
 }
 
 func runZerofsStatus(cmd *cobra.Command, _ []string) error {
-	_, name, zc, err := resolveZerofs(cmd)
+	_, _, name, zc, err := resolveZerofs(cmd)
 	if err != nil {
 		return err
 	}
@@ -539,14 +613,14 @@ func runZerofsStatus(cmd *cobra.Command, _ []string) error {
 	fmt.Printf("zerofs %q\n", name)
 	fmt.Printf("  Server:    %s (%s:%d)\n", srv, zc.Listen, zc.ListenPort)
 	fmt.Printf("  Mount:     %s\n", mnt)
-	fmt.Printf("  S3:        %s addon %q, bucket %s\n", zc.S3Addon, zc.S3Name, zc.Bucket)
+	fmt.Printf("  S3:        %s, bucket %s\n", zc.S3Endpoint, zc.Bucket)
 	fmt.Printf("  Config:    %s\n", zc.ConfigPath)
 	fmt.Printf("  Log:       %s\n", zc.LogFile)
 	return nil
 }
 
 func runAddonRemoveZerofs(cmd *cobra.Command) error {
-	_, name, zc, err := resolveZerofs(cmd)
+	_, _, name, zc, err := resolveZerofs(cmd)
 	if err != nil {
 		return err
 	}
@@ -567,7 +641,7 @@ func runAddonRemoveZerofs(cmd *cobra.Command) error {
 		return fmt.Errorf("saving config: %w", err)
 	}
 	fmt.Printf("  [OK] config entry removed (%s)\n", path)
-	addonDir := filepath.Dir(zc.MountPoint)
+	addonDir := hostAddonDir(c, "zerofs", name)
 	if cleanData {
 		if err := os.RemoveAll(addonDir); err != nil {
 			return fmt.Errorf("cleaning %s: %w", addonDir, err)
@@ -585,7 +659,7 @@ func runAddonRemoveZerofs(cmd *cobra.Command) error {
 var addonZerofsCmd = &cobra.Command{
 	Use:   "zerofs",
 	Short: "Manage zerofs host-mount add-on instances",
-	Long: `Manage zerofs add-on instances: host FUSE mounts backed by a pgcli S3 addon.
+	Long: `Manage zerofs add-on instances: host FUSE mounts backed by an external S3 service.
 
 A zerofs volume is two host processes: a server (zerofs run) speaking 9P on a
 loopback port that owns the S3 + encryption side, and a client (zerofs mount)
@@ -599,7 +673,7 @@ Subcommands:
   status   Show server, mount, backend and file locations
 
 Examples:
-  pg addon install zerofs --name data --s3 minio --s3-name ms3 --bucket zerofs-data
+  pg addon install zerofs --name data --s3-endpoint https://s3.example.com --access-key AK --secret-key SK --bucket zerofs-data
   pg addon zerofs status --name data
   pg addon zerofs stop --name data`,
 }
@@ -621,8 +695,9 @@ func init() {
 	for _, c := range []*cobra.Command{addonZerofsStartCmd, addonZerofsStopCmd, addonZerofsMountCmd, addonZerofsUmountCmd, addonZerofsStatusCmd} {
 		c.Flags().String("name", "", "zerofs volume name (default \"zerofs\")")
 	}
+	addonZerofsMountCmd.Flags().String("mount-point", "", "mount at this path instead of the stored one (the directory must already exist: mkdir -p, writable for the user running pg) — persisted; refuses while still mounted at the old path")
 
-	addonInstallCmd.Flags().String("conditional-put", "auto", "zerofs: fencing backend — auto (native If-None-Match, needs MinIO 2022-08+ / real S3; default), redis (fence via a pgcli redis addon --redis-name / --redis-dsn; for stores lacking conditional-put, e.g. silo), or none (no fencing — single writer only, unsafe if anything else touches the bucket)")
+	addonInstallCmd.Flags().String("conditional-put", "auto", "zerofs: fencing backend — auto (native If-None-Match, needs MinIO 2022-08+ / real S3; default), redis (fence via an explicit --redis-dsn redis://…; for stores lacking conditional-put, e.g. silo), or none (no fencing — single writer only, unsafe if anything else touches the bucket)")
 	addonInstallCmd.Flags().Int("server-cache-gb", 0, "zerofs: server-side disk cache size in GiB (default 100)")
 	addonInstallCmd.Flags().String("encryption-password", "", "zerofs: encryption password (default: generated). Required to re-attach a bucket whose DEK was wrapped by a previously generated password — pg addon password zerofs recovers it")
 }

@@ -32,15 +32,3 @@ func TestValidJuicefsVolumeName(t *testing.T) {
 		}
 	}
 }
-
-func TestSwapDSNDatabase(t *testing.T) {
-	got := swapDSNDatabase("postgres://admin:pw@127.0.0.1:5432/postgres?sslmode=disable", "juicefs_pg3")
-	want := "postgres://admin:pw@127.0.0.1:5432/juicefs_pg3?sslmode=disable"
-	if got != want {
-		t.Errorf("swap = %q, want %q", got, want)
-	}
-	got = swapDSNDatabase("postgres://h:5432/db", "x")
-	if got != "postgres://h:5432/x" {
-		t.Errorf("swap no-params = %q", got)
-	}
-}

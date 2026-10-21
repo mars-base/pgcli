@@ -241,11 +241,18 @@ done
   TCP 协议、非 HTTP，不存在容器端口映射可分配——故没有端口池，meta/storage 在 8.4
   根本没有可移动的监听口，每宿主仅一个文件系统）。没有 client 镜像：客户端是内核模块
   （DKMS），无法容器化，pgcli 不安装
+- **juicefs** / **zerofs**：**没有镜像**——这两个是宿主二进制 addon，不走本清单。
+  `pg addon install` 从各自 GitHub releases 下载官方 tarball（sha256 pin 在
+  `internal/config/config.go`：juicefs `DefaultJuicefsVersion` + `JuicefsSHA256`，
+  zerofs `DefaultZerofsVersion` + `ZerofsTarballSHA256`），落到宿主 `PATH`（默认
+  `/usr/local/bin`），`PATH` 上已有同名二进制则直接复用。离线环境无需预置任何
+  tar——把二进制预先放到目标主机的 `PATH` 上即可绕过下载
 - **pgbouncer** / **postgrest** / **haproxy** / **etcd** / **pgdog**：上游官方或社区维护的稳定版本
 
 ---
 
-**最后更新**：2026-10-19（新增 beegfs 三镜像；此前 gitea 于 2026-10-16
+**最后更新**：2026-10-21（补录 juicefs / zerofs 宿主二进制的无镜像说明；
+此前新增 beegfs 三镜像于 2026-10-19，gitea 于 2026-10-16
 合入时补录，alertmanager 于 2026-10-15
 合入时补录，grafana 与 prometheus 于 2026-10-14 合入时补录，再往前 garage 与
 seaweedfs 分别于 2026-10-12 / 2026-10-14 合入时补录）

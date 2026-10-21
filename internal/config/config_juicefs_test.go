@@ -17,29 +17,8 @@ func TestJuicefsApplyDefaults(t *testing.T) {
 	if j.Name != "fs1" || j.Version != DefaultJuicefsVersion {
 		t.Fatalf("name/version = %q/%q", j.Name, j.Version)
 	}
-	if j.MetaEngine != JuicefsMetaSQLite3 {
-		t.Errorf("meta engine default = %q", j.MetaEngine)
-	}
-	if j.RedisName != "redis" || j.PgName != "default" {
-		t.Errorf("addon name defaults = %q/%q", j.RedisName, j.PgName)
-	}
-	if j.PgDBName != "juicefs_fs1" {
-		t.Errorf("pg db name = %q", j.PgDBName)
-	}
-	// Hyphenated instance names become valid identifiers.
-	c.Addons.Juicefs["my-fs"] = JuicefsConfig{}
-	c.ApplyDefaults()
-	if got := c.Addons.Juicefs["my-fs"].PgDBName; got != "juicefs_my_fs" {
-		t.Errorf("pg db name for my-fs = %q", got)
-	}
-	if j.MetaDBPath != "/base/addon/juicefs/fs1/meta.db" {
-		t.Errorf("meta db = %q", j.MetaDBPath)
-	}
-	if j.S3Addon != "minio" || j.S3Name != "minio" {
-		t.Errorf("s3 default = %q/%q", j.S3Addon, j.S3Name)
-	}
-	if j.Bucket != "juicefs-fs1" || j.AccessKey != "juicefs-fs1" {
-		t.Errorf("bucket/access = %q/%q", j.Bucket, j.AccessKey)
+	if j.Bucket != "juicefs-fs1" {
+		t.Errorf("bucket = %q", j.Bucket)
 	}
 	if j.MountPoint != filepath.Join("/base", "addon", "juicefs", "fs1", "mnt") {
 		t.Errorf("mount point = %q", j.MountPoint)
@@ -47,9 +26,10 @@ func TestJuicefsApplyDefaults(t *testing.T) {
 	if j.MountPidFile == "" || j.MountLogFile == "" || j.CacheDir == "" {
 		t.Errorf("host bookkeeping not defaulted: %+v", j)
 	}
-	// Secrets are never defaulted.
-	if j.SecretKey != "" {
-		t.Error("secret key must stay empty until install resolves it")
+	// The external S3 contract is never defaulted — endpoint, credentials and
+	// the metadata DSN all come from explicit flags.
+	if j.MetaDSN != "" || j.S3Endpoint != "" || j.AccessKey != "" || j.SecretKey != "" {
+		t.Errorf("external backend must stay empty until install: %+v", j)
 	}
 }
 
@@ -78,8 +58,9 @@ func TestZerofsApplyDefaults(t *testing.T) {
 	if z.ServerPidFile == "" || z.MountPidFile == "" || z.LogFile == "" {
 		t.Errorf("pid/log not defaulted: %+v", z)
 	}
-	if z.EncryptionPassword != "" {
-		t.Error("encryption password must stay empty until install generates it")
+	// Secrets and the external backend are never defaulted.
+	if z.EncryptionPassword != "" || z.S3Endpoint != "" || z.AccessKey != "" || z.SecretKey != "" {
+		t.Errorf("must stay empty until install: %+v", z)
 	}
 }
 
@@ -99,7 +80,9 @@ func TestJuicefsValidate(t *testing.T) {
 	base := func() *Config {
 		c := Default()
 		c.Addons.Juicefs = map[string]JuicefsConfig{"fs1": {
-			MetaEngine: JuicefsMetaSQLite3, S3Addon: "minio", MountPoint: "/mnt/j",
+			MetaDSN:    "sqlite3:///base/meta.db",
+			S3Endpoint: "https://s3.example.com",
+			MountPoint: "/mnt/j",
 		}}
 		return c
 	}
@@ -113,51 +96,48 @@ func TestJuicefsValidate(t *testing.T) {
 		t.Errorf("relative mount point accepted: %v", err)
 	}
 
+	// The metadata engine is always an explicit DSN — missing or unknown
+	// schemes are rejected.
 	c = base()
-	mutateJuicefs(c, "fs1", func(j *JuicefsConfig) { j.MetaEngine = "mysql" })
-	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "meta_engine") {
-		t.Errorf("bad meta engine accepted: %v", err)
+	mutateJuicefs(c, "fs1", func(j *JuicefsConfig) { j.MetaDSN = "" })
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "meta_dsn is required") {
+		t.Errorf("missing meta_dsn accepted: %v", err)
 	}
 
 	c = base()
-	mutateJuicefs(c, "fs1", func(j *JuicefsConfig) { j.S3Addon = "rustfs" })
-	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "s3_addon") {
-		t.Errorf("bad s3 addon accepted: %v", err)
-	}
-
-	c = base()
-	mutateJuicefs(c, "fs1", func(j *JuicefsConfig) {
-		j.MetaEngine, j.MetaDSN = JuicefsMetaDSN, ""
-	})
-	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "required") {
-		t.Errorf("missing meta_dsn on dsn engine accepted: %v", err)
-	}
-
-	// Non-dsn engines freely carry the RESOLVED url (the installer writes it
-	// back after format) — must not be rejected.
-	c = base()
-	mutateJuicefs(c, "fs1", func(j *JuicefsConfig) {
-		j.MetaEngine, j.MetaDSN = JuicefsMetaSQLite3, "sqlite3:///base/meta.db"
-	})
-	if err := c.Validate(); err != nil {
-		t.Errorf("resolved meta_dsn on sqlite3 engine rejected: %v", err)
-	}
-
-	c = base()
-	mutateJuicefs(c, "fs1", func(j *JuicefsConfig) {
-		j.MetaEngine, j.MetaDSN = JuicefsMetaDSN, "mysql://host/db"
-	})
+	mutateJuicefs(c, "fs1", func(j *JuicefsConfig) { j.MetaDSN = "mysql://host/db" })
 	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "postgres://") {
 		t.Errorf("unknown dsn scheme accepted: %v", err)
 	}
 
-	for _, ok := range []string{"postgres://u:p@h:5432/db", "redis://:pw@h:6379/0", "sqlite3:///x/y.db"} {
+	for _, ok := range []string{
+		"postgres://u:p@h:5432/db", "postgresql://u:p@h:5432/db",
+		"redis://:pw@h:6379/0", "rediss://h:6379/0", "sqlite3:///x/y.db",
+	} {
 		c = base()
-		mutateJuicefs(c, "fs1", func(j *JuicefsConfig) {
-			j.MetaEngine, j.MetaDSN = JuicefsMetaDSN, ok
-		})
+		mutateJuicefs(c, "fs1", func(j *JuicefsConfig) { j.MetaDSN = ok })
 		if err := c.Validate(); err != nil {
 			t.Errorf("scheme %q rejected: %v", ok, err)
+		}
+	}
+
+	// s3_endpoint shape: only bare http(s)://host[:port] is accepted (an empty
+	// endpoint passes Validate — presence is enforced by the installer).
+	for _, bad := range []string{
+		"ftp://host", "http://host/bucket", "https://u:***@host",
+		"https://host?x=1", "minio:9000",
+	} {
+		c = base()
+		mutateJuicefs(c, "fs1", func(j *JuicefsConfig) { j.S3Endpoint = bad })
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "s3_endpoint") {
+			t.Errorf("bad endpoint %q accepted: %v", bad, err)
+		}
+	}
+	for _, ok := range []string{"http://host:9000", "https://s3.amazonaws.com", "http://10.0.0.5:9000"} {
+		c = base()
+		mutateJuicefs(c, "fs1", func(j *JuicefsConfig) { j.S3Endpoint = ok })
+		if err := c.Validate(); err != nil {
+			t.Errorf("endpoint %q rejected: %v", ok, err)
 		}
 	}
 }
@@ -167,7 +147,8 @@ func TestZerofsValidate(t *testing.T) {
 		c := Default()
 		c.Addons.Zerofs = map[string]ZerofsConfig{"z1": {
 			MountPoint: "/mnt/z", Listen: "127.0.0.1", ListenPort: 5564,
-			ConditionalPut: ZerofsConditionalPutAuto, S3Addon: "minio",
+			ConditionalPut: ZerofsConditionalPutAuto,
+			S3Endpoint:     "http://minio.example.com:9000",
 		}}
 		return c
 	}
@@ -195,7 +176,7 @@ func TestZerofsValidate(t *testing.T) {
 
 	c = base()
 	c.Addons.Zerofs["z2"] = ZerofsConfig{MountPoint: "/mnt/z2", Listen: "localhost",
-		ListenPort: 5564, ConditionalPut: "none", S3Addon: "silo"}
+		ListenPort: 5564, ConditionalPut: "none"}
 	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "listen_port") {
 		t.Errorf("duplicate 9P port accepted: %v", err)
 	}
@@ -205,14 +186,27 @@ func TestZerofsValidate(t *testing.T) {
 	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "mount_point") {
 		t.Errorf("relative mount accepted: %v", err)
 	}
+
+	c = base()
+	mutateZerofs(c, "z1", func(z *ZerofsConfig) { z.S3Endpoint = "http://host/bucket" })
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "s3_endpoint") {
+		t.Errorf("endpoint with a path accepted: %v", err)
+	}
 }
 
 func TestJuicefsZerofsRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pg.yaml")
 	c := Default()
-	c.Addons.Juicefs = map[string]JuicefsConfig{"fs1": {SecretKey: "sk-1"}}
-	c.Addons.Zerofs = map[string]ZerofsConfig{"z1": {EncryptionPassword: "ep-1"}}
+	c.Addons.Juicefs = map[string]JuicefsConfig{"fs1": {
+		MetaDSN: "postgres://u:***@meta-host:5432/jfs", SecretKey: "sk-1",
+		S3Endpoint: "https://s3.example.com", AccessKey: "ak-1",
+	}}
+	c.Addons.Zerofs = map[string]ZerofsConfig{"z1": {
+		EncryptionPassword: "ep-1", S3Endpoint: "http://minio.example.com:9000",
+		AccessKey: "ak-2", SecretKey: "sk-2", ConditionalPut: "redis",
+		ConditionalPutURL: "redis://:***@fencer:6379",
+	}}
 	c.ApplyDefaults()
 	if err := c.Save(path); err != nil {
 		t.Fatal(err)
@@ -224,15 +218,21 @@ func TestJuicefsZerofsRoundTrip(t *testing.T) {
 	if got := loaded.Addons.Juicefs["fs1"].SecretKey; got != "sk-1" {
 		t.Errorf("juicefs round trip lost secret: %q", got)
 	}
+	if got := loaded.Addons.Juicefs["fs1"].MetaDSN; got != "postgres://u:***@meta-host:5432/jfs" {
+		t.Errorf("juicefs round trip lost meta dsn: %q", got)
+	}
 	if got := loaded.Addons.Zerofs["z1"].EncryptionPassword; got != "ep-1" {
 		t.Errorf("zerofs round trip lost password: %q", got)
+	}
+	if got := loaded.Addons.Zerofs["z1"].ConditionalPutURL; got != "redis://:***@fencer:6379" {
+		t.Errorf("zerofs round trip lost conditional put url: %q", got)
 	}
 	if got := loaded.Addons.Juicefs["fs1"].MountPoint; !filepath.IsAbs(got) {
 		t.Errorf("mount point lost: %q", got)
 	}
 	// The yaml keys are the lower-case family names.
 	raw, _ := os.ReadFile(path)
-	for _, want := range []string{"juicefs:", "zerofs:", "meta_engine:", "conditional_put:"} {
+	for _, want := range []string{"juicefs:", "zerofs:", "meta_dsn:", "s3_endpoint:", "conditional_put_url:"} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("saved yaml missing %q\n%s", want, raw)
 		}

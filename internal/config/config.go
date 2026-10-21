@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -925,35 +926,17 @@ func JuicefsSHA256(arch string) string {
 	return ""
 }
 
-// JuicefsMetaEngines are the supported metadata backends, mirrored in flag
-// help: a local sqlite3 file, a pgcli redis addon, a pgcli PG instance, or a
-// caller-supplied --meta-dsn URL.
-const (
-	JuicefsMetaSQLite3 = "sqlite3"
-	JuicefsMetaRedis   = "redis"
-	JuicefsMetaPG      = "pg"
-	JuicefsMetaDSN     = "dsn"
-)
-
-// ValidJuicefsMetaEngine reports whether engine is one of the four above.
-func ValidJuicefsMetaEngine(engine string) bool {
-	switch engine {
-	case JuicefsMetaSQLite3, JuicefsMetaRedis, JuicefsMetaPG, JuicefsMetaDSN:
-		return true
-	}
-	return false
-}
-
 // JuicefsConfig holds a host-installed JuiceFS client mount: the juicefs
 // binary (not a container — FUSE has to live on the host to serve a host
-// mount point) formatting a volume whose S3 backend is a pgcli-managed minio
-// or silo addon and whose metadata engine is one of the four JuicefsMeta*
-// kinds. Like BeeGFS the addon manages the client lifecycle (format once,
-// mount/umount on demand); unlike BeeGFS everything runs on this host.
+// mount point) formatting a volume over an EXTERNAL S3 service. There is no
+// same-host addon auto-detection: both the object backend (S3Endpoint +
+// explicit AccessKey/SecretKey) and the metadata engine (MetaDSN, a URL
+// juicefs itself accepts — sqlite3://, redis://, postgres://…) are supplied
+// explicitly and stored resolved. Like BeeGFS the addon manages the client
+// lifecycle (format once, mount/umount on demand); everything runs on this host.
 //
 // The S3 bucket itself is provisioned manually (pg mc) — pgcli only reads the
-// S3 addon's stored root credentials unless AccessKey/SecretKey override them,
-// and never creates buckets or service accounts.
+// endpoint/credentials you give it and never creates buckets or accounts.
 type JuicefsConfig struct {
 	Name    string `yaml:"name,omitempty"`    // addon key, defaults to the map key
 	Version string `yaml:"version,omitempty"` // pinned release tag, e.g. "1.4.1" (v-prefix optional)
@@ -962,29 +945,22 @@ type JuicefsConfig struct {
 	// entry Detect found). Empty until installed.
 	BinaryPath string `yaml:"binary_path,omitempty"`
 
-	// Meta engine: one of the JuicefsMeta* constants. MetaDSN is the resolved
-	// juicefs-style URL (sqlite3://.../meta.db, redis://:pw@host:port/0,
-	// postgres://...) stored at install; for engine dsn it is the user's URL
-	// verbatim. RedisName / PgName point at pgcli addons (default "redis" /
-	// "default"); PgDBName is the metadata database created inside the PG
-	// instance (default juicefs_<name>), and MetaDBPath the sqlite3 file.
-	MetaEngine string `yaml:"meta_engine,omitempty"`
-	MetaDSN    string `yaml:"meta_dsn,omitempty"`
-	RedisName  string `yaml:"redis_name,omitempty"`
-	PgName     string `yaml:"pg_name,omitempty"`
-	PgDBName   string `yaml:"pg_db_name,omitempty"`
-	MetaDBPath string `yaml:"meta_db_path,omitempty"`
+	// MetaDSN is the metadata-engine URL supplied explicitly at install
+	// (juicefs accepts sqlite3://, redis://, postgres://…). There is no
+	// same-host engine auto-detection — the operator names the store.
+	MetaDSN string `yaml:"meta_dsn,omitempty"`
 
-	// S3 backend: kind is "minio" or "silo", Name the addon instance (default
-	// "default"-style lookup done by the CLI, not here). Bucket is never
-	// created by pgcli; AccessKey/SecretKey empty means "use the S3 addon's
-	// root credentials" — resolved at install and persisted, since juicefs
-	// format bakes them into the volume metadata anyway.
-	S3Addon   string `yaml:"s3_addon,omitempty"`
-	S3Name    string `yaml:"s3_name,omitempty"`
-	Bucket    string `yaml:"bucket,omitempty"`
-	AccessKey string `yaml:"access_key,omitempty"`
-	SecretKey string `yaml:"secret_key,omitempty"`
+	// S3 backend: an EXTERNAL (cloud or remote-host) S3 service, given as
+	// S3Endpoint (http(s)://host[:port], no bucket path) plus explicit
+	// AccessKey/SecretKey — pgcli never inherits or auto-discovers a local
+	// addon's credentials. Bucket is never created by pgcli. JuiceFS bakes the
+	// endpoint into its volume metadata at format time, so it needs no region;
+	// ZeroFS signs with one — S3Region (optional, zerofs defaults to us-east-1).
+	S3Endpoint string `yaml:"s3_endpoint,omitempty"`
+	S3Region   string `yaml:"s3_region,omitempty"`
+	Bucket     string `yaml:"bucket,omitempty"`
+	AccessKey  string `yaml:"access_key,omitempty"`
+	SecretKey  string `yaml:"secret_key,omitempty"`
 
 	// Host paths, all defaulted under <base>/addon/juicefs/<name>/: the mount
 	// point (created empty; the operator decides what goes under it), the
@@ -1046,13 +1022,15 @@ type ZerofsConfig struct {
 
 	BinaryPath string `yaml:"binary_path,omitempty"`
 
-	// S3 backend, same contract as JuicefsConfig (bucket provisioned by hand,
-	// root credentials unless overridden).
-	S3Addon   string `yaml:"s3_addon,omitempty"`
-	S3Name    string `yaml:"s3_name,omitempty"`
-	Bucket    string `yaml:"bucket,omitempty"`
-	AccessKey string `yaml:"access_key,omitempty"`
-	SecretKey string `yaml:"secret_key,omitempty"`
+	// S3 backend, same contract as JuicefsConfig: an EXTERNAL endpoint given
+	// explicitly (S3Endpoint + AccessKey/SecretKey), bucket provisioned by hand.
+	// ZeroFS signs requests, so S3Region is honoured (optional; zerofs itself
+	// defaults to us-east-1).
+	S3Endpoint string `yaml:"s3_endpoint,omitempty"`
+	S3Region   string `yaml:"s3_region,omitempty"`
+	Bucket     string `yaml:"bucket,omitempty"`
+	AccessKey  string `yaml:"access_key,omitempty"`
+	SecretKey  string `yaml:"secret_key,omitempty"`
 
 	// EncryptionPassword encrypts the LSM at rest (client-side; the S3 addon
 	// sees only opaque objects). Always generated at install — losing it
@@ -1068,17 +1046,15 @@ type ZerofsConfig struct {
 
 	// Listen is the 9P bind HOST (forced loopback by Validate — no auth on
 	// 9P); ListenPort the TCP port (default 5564; pool-free, it is not an HTTP
-	// API port). ConditionalPut/RedisName back the fencing mode.
+	// API port).
 	Listen         string `yaml:"listen,omitempty"`
 	ListenPort     int    `yaml:"listen_port,omitempty"`
 	ConditionalPut string `yaml:"conditional_put,omitempty"`
-	RedisName      string `yaml:"redis_name,omitempty"`
 
-	// ConditionalPutURL is the fencing backend URL resolved by the installer
-	// when ConditionalPut is "redis" (from the named redis addon, or an
-	// explicit --redis-dsn). It is what reaches config.toml's `conditional_put`
-	// key; ConditionalPut itself stays the enum so Validate and `pg config show`
-	// keep working on raw files.
+	// ConditionalPutURL is the fencing backend URL supplied explicitly (via
+	// --redis-dsn) when ConditionalPut is "redis". It is what reaches
+	// config.toml's `conditional_put` key; ConditionalPut itself stays the
+	// enum so Validate and `pg config show` keep working on raw files.
 	ConditionalPutURL string `yaml:"conditional_put_url,omitempty"`
 
 	MountPoint string `yaml:"mount_point,omitempty"`
@@ -2367,21 +2343,13 @@ func (c *Config) Validate() error {
 		if jc.MountPoint != "" && !filepath.IsAbs(jc.MountPoint) {
 			return fmt.Errorf("addons.juicefs.%s.mount_point must be an absolute path, got %q", name, jc.MountPoint)
 		}
-		if jc.MetaEngine != "" && !ValidJuicefsMetaEngine(jc.MetaEngine) {
-			return fmt.Errorf("addons.juicefs.%s.meta_engine %q is not one of sqlite3, redis, pg, dsn", name, jc.MetaEngine)
+		// MetaDSN is the explicitly-supplied metadata-engine URL (mount needs
+		// only it, after format); it must carry a scheme juicefs accepts.
+		if err := ValidateJuicefsDSNScheme(jc.MetaDSN); err != nil {
+			return fmt.Errorf("addons.juicefs.%s: %w", name, err)
 		}
-		if jc.S3Addon != "" && jc.S3Addon != "minio" && jc.S3Addon != "silo" {
-			return fmt.Errorf("addons.juicefs.%s.s3_addon %q is not one of minio, silo", name, jc.S3Addon)
-		}
-		// MetaDSN is the RESOLVED engine URL the installer stores for every
-		// engine (mount needs only it, after format). For a dsn engine it is
-		// user-supplied and must carry a scheme juicefs accepts; for the
-		// others it is derived, so only a present-but-empty-on-dsn case (an
-		// install that never finished resolving) is worth refusing.
-		if jc.MetaEngine == JuicefsMetaDSN {
-			if err := validateJuicefsDSNScheme(jc.MetaDSN); err != nil {
-				return fmt.Errorf("addons.juicefs.%s: %w", name, err)
-			}
+		if err := ValidateS3Endpoint("addons.juicefs."+name, jc.S3Endpoint); err != nil {
+			return err
 		}
 	}
 	zports := map[int]string{}
@@ -2397,10 +2365,14 @@ func (c *Config) Validate() error {
 		if zc.ConditionalPut != "" && !ValidZerofsConditionalPut(zc.ConditionalPut) {
 			return fmt.Errorf("addons.zerofs.%s.conditional_put %q is not one of auto, redis, none", name, zc.ConditionalPut)
 		}
-		if zc.S3Addon != "" && zc.S3Addon != "minio" && zc.S3Addon != "silo" {
-			return fmt.Errorf("addons.zerofs.%s.s3_addon %q is not one of minio, silo", name, zc.S3Addon)
+		if err := ValidateS3Endpoint("addons.zerofs."+name, zc.S3Endpoint); err != nil {
+			return err
 		}
 		if zc.ListenPort != 0 {
+			// A zerofs server that loses the 9P bind starts silently and
+			// listens on nothing, so one port per instance is enforced here —
+			// conservatively keyed on the port alone (127.0.0.1 and ::1 are
+			// distinct sockets, but a refused load beats that silent failure).
 			if prev, dup := zports[zc.ListenPort]; dup {
 				return fmt.Errorf("addons.zerofs.%s.listen_port %d already used by %s (one 9P port per addon instance)", name, zc.ListenPort, prev)
 			}
@@ -2410,13 +2382,32 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// validateJuicefsDSNScheme checks a dsn-engine MetaDSN carries one of the URL
-// schemes juicefs itself accepts for that path (postgres:// or redis://; the
-// sqlite3 flavour never arrives via dsn since the installer picks the file
-// path itself — but juicefs also speaks sqlite3://, so allow it).
-func validateJuicefsDSNScheme(dsn string) error {
+// ValidateS3Endpoint checks a bare http(s)://host[:port] external S3 endpoint
+// (no bucket path, no embedded credentials or query). Shape-only: the presence
+// requirement is enforced at install, so a half-written config still loads.
+func ValidateS3Endpoint(path, endpoint string) error {
+	if endpoint == "" {
+		return nil
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("%s.s3_endpoint %q is not a bare http(s)://host[:port] URL", path, endpoint)
+	}
+	if u.Path != "" && u.Path != "/" {
+		return fmt.Errorf("%s.s3_endpoint %q must not carry a path — the bucket is named separately", path, endpoint)
+	}
+	if u.RawQuery != "" || u.User != nil {
+		return fmt.Errorf("%s.s3_endpoint %q must not embed credentials or a query string", path, endpoint)
+	}
+	return nil
+}
+
+// ValidateJuicefsDSNScheme checks MetaDSN carries one of the URL schemes
+// juicefs itself accepts (postgres://, redis://, sqlite3://). It is required —
+// there is no same-host engine auto-detection, so the operator always names it.
+func ValidateJuicefsDSNScheme(dsn string) error {
 	if dsn == "" {
-		return fmt.Errorf("meta_dsn is required with meta_engine dsn")
+		return fmt.Errorf("meta_dsn is required — the metadata engine is always given explicitly (--dsn)")
 	}
 	for _, scheme := range []string{"postgres://", "postgresql://", "redis://", "rediss://", "sqlite3://"} {
 		if strings.HasPrefix(dsn, scheme) {
@@ -3225,9 +3216,9 @@ func (c *Config) ApplyDefaults() {
 	// <base>/addon/juicefs/<name>/ — unlike BeeGFS, where dirs stay lazy and
 	// the manager resolves them, the CLI needs the mount point present before
 	// `juicefs mount`, so ApplyDefaults fills every path deterministically and
-	// the installer MkdirAlls them. SecretKey is deliberately NOT defaulted:
-	// the install resolves it from the S3 addon (or a flag) once and stores
-	// the resolved value.
+	// the installer MkdirAlls them. The external-backend values — S3Endpoint,
+	// MetaDSN, AccessKey/SecretKey — are deliberately NOT defaulted: there is no
+	// same-host auto-detection to fall back on, so the install must supply them.
 	juicefsBaseDir := platform.DefaultConfigDir()
 	if c.BaseDir != "" {
 		juicefsBaseDir = c.BaseDir
@@ -3239,33 +3230,9 @@ func (c *Config) ApplyDefaults() {
 		if addon.Version == "" {
 			addon.Version = DefaultJuicefsVersion
 		}
-		if addon.MetaEngine == "" {
-			addon.MetaEngine = JuicefsMetaSQLite3
-		}
 		addonDir := filepath.Join(juicefsBaseDir, "addon", "juicefs", name)
-		if addon.RedisName == "" {
-			addon.RedisName = "redis"
-		}
-		if addon.PgName == "" {
-			addon.PgName = "default"
-		}
-		if addon.PgDBName == "" {
-			addon.PgDBName = "juicefs_" + strings.ReplaceAll(name, "-", "_")
-		}
-		if addon.MetaDBPath == "" {
-			addon.MetaDBPath = filepath.Join(addonDir, "meta.db")
-		}
-		if addon.S3Addon == "" {
-			addon.S3Addon = "minio"
-		}
-		if addon.S3Name == "" {
-			addon.S3Name = addon.S3Addon
-		}
 		if addon.Bucket == "" {
 			addon.Bucket = "juicefs-" + name
-		}
-		if addon.AccessKey == "" {
-			addon.AccessKey = addon.Bucket
 		}
 		if addon.MountPoint == "" {
 			addon.MountPoint = filepath.Join(addonDir, "mnt")
@@ -3284,10 +3251,10 @@ func (c *Config) ApplyDefaults() {
 
 	// Top-level addons defaults (ZeroFS). Same host-path story as JuiceFS:
 	// everything under <base>/addon/zerofs/<name>/. EncryptionPassword and the
-	// S3 credentials are install-resolved, not defaulted here. The 9P port is
-	// NOT drawn from the S3 pool — it is a filesystem protocol port with its
-	// own default, and ZeroFS runs one server per addon name, so collisions
-	// are caught by Validate across entries instead of auto-shifted.
+	// external S3 endpoint/credentials are install-supplied, not defaulted here.
+	// The 9P port is NOT drawn from the S3 pool — it is a filesystem protocol
+	// port with its own default, and ZeroFS runs one server per addon name, so
+	// collisions are caught by Validate across entries instead of auto-shifted.
 	zerofsBaseDir := platform.DefaultConfigDir()
 	if c.BaseDir != "" {
 		zerofsBaseDir = c.BaseDir
@@ -3300,17 +3267,8 @@ func (c *Config) ApplyDefaults() {
 			addon.Version = DefaultZerofsVersion
 		}
 		addonDir := filepath.Join(zerofsBaseDir, "addon", "zerofs", name)
-		if addon.S3Addon == "" {
-			addon.S3Addon = "minio"
-		}
-		if addon.S3Name == "" {
-			addon.S3Name = addon.S3Addon
-		}
 		if addon.Bucket == "" {
 			addon.Bucket = "zerofs-" + name
-		}
-		if addon.AccessKey == "" {
-			addon.AccessKey = addon.Bucket
 		}
 		if addon.Listen == "" {
 			addon.Listen = "127.0.0.1"
@@ -3320,9 +3278,6 @@ func (c *Config) ApplyDefaults() {
 		}
 		if addon.ConditionalPut == "" {
 			addon.ConditionalPut = ZerofsConditionalPutAuto
-		}
-		if addon.RedisName == "" {
-			addon.RedisName = "redis"
 		}
 		if addon.CacheDir == "" {
 			addon.CacheDir = filepath.Join(addonDir, "cache")

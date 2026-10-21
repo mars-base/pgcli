@@ -5,20 +5,7 @@ import (
 	"net"
 	"strings"
 	"testing"
-
-	"github.com/mars-base/pgcli/internal/config"
 )
-
-func s3TestConfig() *config.Config {
-	c := config.Default()
-	c.Addons.Minio = map[string]config.MinioConfig{
-		"ms3": {Listen: "127.0.0.1", APIPort: 0, RootUser: "admin", RootPassword: "pw"},
-	}
-	c.Addons.Silo = map[string]config.SiloConfig{
-		"ss3": {Listen: "127.0.0.1", APIPort: 0, RootUser: "admin", RootPassword: "spw", TLS: true},
-	}
-	return c
-}
 
 // startProbeListener binds a random loopback port and hands the number over.
 func startProbeListener(t *testing.T) int {
@@ -44,56 +31,54 @@ func closedLoopbackPort(t *testing.T) int {
 	return port
 }
 
-func TestResolveS3Target(t *testing.T) {
-	cfg := s3TestConfig()
+func TestExternalS3Target(t *testing.T) {
 	port := startProbeListener(t)
-	mutateMinio(cfg, "ms3", func(m *config.MinioConfig) { m.APIPort = port })
 
-	tgt, err := resolveS3Target(cfg, "minio", "ms3")
+	tgt, err := externalS3Target(fmt.Sprintf("http://127.0.0.1:%d", port))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := fmt.Sprintf("http://127.0.0.1:%d", port); tgt.BaseURL != want {
 		t.Errorf("base url = %q, want %q", tgt.BaseURL, want)
 	}
-	if tgt.User != "admin" || tgt.Password != "pw" {
-		t.Errorf("creds = %q/%q", tgt.User, tgt.Password)
+	if tgt.TLS {
+		t.Error("http scheme must not report TLS")
 	}
 
-	mutated := s3TestConfig()
-	mutated.Addons.Silo["ss3"] = config.SiloConfig{Listen: "127.0.0.1", APIPort: port, TLS: true}
-	tgt, err = resolveS3Target(mutated, "silo", "ss3")
+	// The probe is a plain TCP dial, so the same reachability check serves an
+	// https endpoint too (the scheme only flips the TLS flag, which is what
+	// the mount hint and config rendering branch on).
+	tgt, err = externalS3Target(fmt.Sprintf("https://127.0.0.1:%d", port))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tgt.BaseURL != fmt.Sprintf("https://127.0.0.1:%d", port) {
-		t.Errorf("tls silo base url = %q", tgt.BaseURL)
+	if !tgt.TLS {
+		t.Error("https scheme must report TLS")
 	}
 }
 
-func TestResolveS3TargetErrors(t *testing.T) {
-	cfg := s3TestConfig()
-	if _, err := resolveS3Target(cfg, "minio", "nope"); err == nil ||
-		!strings.Contains(err.Error(), "not installed") {
-		t.Errorf("missing addon: %v", err)
+func TestExternalS3TargetErrors(t *testing.T) {
+	if _, err := externalS3Target(""); err == nil ||
+		!strings.Contains(err.Error(), "no s3_endpoint") {
+		t.Errorf("empty endpoint: %v", err)
 	}
-	if _, err := resolveS3Target(cfg, "garage", "x"); err == nil ||
-		!strings.Contains(err.Error(), "minio or silo") {
-		t.Errorf("bad kind: %v", err)
+
+	// Shape errors are rejected before any dial happens.
+	for _, bad := range []string{
+		"ftp://host", "http://host/bucket", "https://u:***@host",
+		"https://host?x=1", "minio:9000",
+	} {
+		if _, err := externalS3Target(bad); err == nil ||
+			!strings.Contains(err.Error(), "s3_endpoint") {
+			t.Errorf("bad shape %q accepted: %v", bad, err)
+		}
 	}
-	// Configured but nobody listening: a released loopback port refuses.
+
+	// Well-formed but nobody listening: the TCP dial to a released port
+	// refuses, and the error names the host:port it tried.
 	closed := closedLoopbackPort(t)
-	mut := s3TestConfig()
-	mut.Addons.Minio = map[string]config.MinioConfig{"ms3": {Listen: "127.0.0.1", APIPort: closed}}
-	if _, err := resolveS3Target(mut, "minio", "ms3"); err == nil ||
-		!strings.Contains(err.Error(), "start it first") {
-		t.Errorf("down addon should hint at pg addon start, got %v", err)
+	_, err := externalS3Target(fmt.Sprintf("http://127.0.0.1:%d", closed))
+	if err == nil || !strings.Contains(err.Error(), "not answering") {
+		t.Errorf("down endpoint should report not-answering, got %v", err)
 	}
-}
-
-// mutator helpers (map values are not addressable).
-func mutateMinio(c *config.Config, name string, fn func(*config.MinioConfig)) {
-	v := c.Addons.Minio[name]
-	fn(&v)
-	c.Addons.Minio[name] = v
 }

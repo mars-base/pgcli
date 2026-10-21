@@ -1,6 +1,10 @@
 package cli
 
 import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -68,6 +72,18 @@ func TestRenderZerofsConfig(t *testing.T) {
 		t.Errorf("none mode must omit conditional_put:\n%s", gotNone)
 	}
 
+	// An explicit region is rendered into [aws]; the default (empty) config
+	// above must NOT carry a region line — zerofs picks us-east-1 itself.
+	region := *base
+	region.S3Region = "us-west-2"
+	gotRegion := renderZerofsConfig(&region, tgt)
+	if !strings.Contains(gotRegion, `region = "us-west-2"`) {
+		t.Errorf("region not rendered:\n%s", gotRegion)
+	}
+	if strings.Contains(got, `region =`) {
+		t.Errorf("empty region must omit the key:\n%s", got)
+	}
+
 	tlsTgt := &s3Target{BaseURL: "https://127.0.0.1:9002", TLS: true}
 	gotTLS := renderZerofsConfig(base, tlsTgt)
 	if strings.Contains(gotTLS, "allow_http") {
@@ -75,6 +91,45 @@ func TestRenderZerofsConfig(t *testing.T) {
 	}
 	if !strings.Contains(gotTLS, `endpoint = "https://127.0.0.1:9002"`) {
 		t.Errorf("TLS endpoint wrong:\n%s", gotTLS)
+	}
+}
+
+func TestEnsureZerofsBindFree(t *testing.T) {
+	// A port nothing listens on is free.
+	closed := closedLoopbackPort(t)
+	if err := ensureZerofsBindFree("127.0.0.1", closed, "/nonexistent/pid"); err != nil {
+		t.Errorf("closed port reported busy: %v", err)
+	}
+	// A port that answers is refused, with actionable hints for both cases:
+	// no pid file ⇒ some foreign listener, a LIVE pid file ⇒ this entry's own
+	// stale server still holds the port.
+	busy := startProbeListener(t)
+	err := ensureZerofsBindFree("127.0.0.1", busy, "/nonexistent/pid")
+	if err == nil || !strings.Contains(err.Error(), "already answering") {
+		t.Fatalf("busy port accepted: %v", err)
+	}
+	if !strings.Contains(err.Error(), "--port") {
+		t.Errorf("missing pick-a-port hint: %v", err)
+	}
+
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "server.pid")
+	cmd := exec.Command("/bin/sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot spawn sleep: %v", err)
+	}
+	t.Cleanup(func() {
+		cmd.Process.Kill()
+		cmd.Wait()
+	})
+	// The pid file's first line is the pid, second the binary path — Alive
+	// matches the process's argv[0] base against that path.
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n%s\n", cmd.Process.Pid, "/bin/sleep")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = ensureZerofsBindFree("127.0.0.1", busy, pidFile)
+	if err == nil || !strings.Contains(err.Error(), "this zerofs entry already has a live server") {
+		t.Errorf("stale-server hint wrong: %v", err)
 	}
 }
 

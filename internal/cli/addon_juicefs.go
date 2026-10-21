@@ -14,7 +14,6 @@ import (
 	"github.com/mars-base/pgcli/internal/config"
 	"github.com/mars-base/pgcli/internal/hostbin"
 	"github.com/mars-base/pgcli/internal/platform"
-	"github.com/mars-base/pgcli/internal/podman"
 )
 
 // ---------------------------------------------------------------------------
@@ -22,16 +21,19 @@ import (
 // ---------------------------------------------------------------------------
 //
 // One config entry (addons.juicefs.<name>) is a host juicefs client mount: a
-// POSIX directory backed by a pgcli S3 addon (minio/silo) with metadata in one
-// of four engines (sqlite3 file, a pgcli redis addon, a pgcli PG instance, or
-// a caller --dsn URL). Unlike every container addon, the "service" is a process
-// on this host: the binary is downloaded (GitHub release + pinned sha256) or
-// reused from PATH, `format` initialises the volume once (it stores the S3
-// credentials inside the metadata, so later mounts need only the meta URL), and
-// `mount -d` self-daemonises. pgcli never touches the S3 bucket itself —
-// provisioning it is manual `pg mc` work, so the install only reads the S3
-// addon's stored credentials and, on a failure that smells like a missing
-// bucket, prints the exact `pg mc mb` to run.
+// POSIX directory backed by an EXTERNAL S3 service (cloud or remote-host —
+// the normal case is that the S3 provider and this client are different
+// machines), with metadata in an explicitly-supplied engine URL (--dsn:
+// sqlite3://, redis://, postgres://…). There is deliberately no same-host
+// addon auto-detection: endpoint, credentials and metadata URL all come from
+// the command line and are stored as given. The "service" is a process on this
+// host: the binary is downloaded (GitHub release + pinned sha256) or reused
+// from PATH, `format` initialises the volume once (it stores the S3
+// credentials inside the metadata, so later mounts need only the meta URL),
+// and `mount -d` self-daemonises. pgcli never touches the S3 bucket itself —
+// provisioning it is manual `pg mc` work, so the install only probes the
+// endpoint and, on a failure that smells like a missing bucket, prints the
+// exact `pg mc mb` to run.
 //
 // FUSE needs /dev/fuse + fusermount3 on the host, so this is Linux-only (same
 // refusal as BeeGFS); pgcli detects the prerequisite and tells you, it never
@@ -108,89 +110,11 @@ func preflightFUSE() error {
 	return nil
 }
 
-// resolveJuicefsMeta turns the meta-engine selection into the concrete juicefs
-// metadata URL, performing the engine's setup side effects (create the PG
-// metadata database, create the sqlite3 parent directory). The result is stored
-// in JuicefsConfig.MetaDSN for every engine — mount/umount/status need only it.
-func resolveJuicefsMeta(cfg *config.Config, jc *config.JuicefsConfig) (string, error) {
-	switch jc.MetaEngine {
-	case config.JuicefsMetaSQLite3:
-		if err := os.MkdirAll(filepath.Dir(jc.MetaDBPath), 0o755); err != nil {
-			return "", fmt.Errorf("creating meta dir: %w", err)
-		}
-		return "sqlite3://" + jc.MetaDBPath, nil
-	case config.JuicefsMetaRedis:
-		return redisMetaURL(cfg, jc.RedisName)
-	case config.JuicefsMetaPG:
-		return pgMetaURL(cfg, jc)
-	case config.JuicefsMetaDSN:
-		if jc.MetaDSN == "" {
-			return "", fmt.Errorf("meta engine dsn needs a --dsn URL")
-		}
-		return jc.MetaDSN, nil
-	}
-	return "", fmt.Errorf("unknown meta engine %q", jc.MetaEngine)
-}
-
-// redisMetaURL points juicefs at a pgcli redis addon. pgcli does NOT auto-install
-// redis: the addon must already exist, so creating it stays an explicit choice.
-func redisMetaURL(cfg *config.Config, redisName string) (string, error) {
-	rc, ok := cfg.Addons.Redis[redisName]
-	if !ok {
-		return "", fmt.Errorf("redis addon %q not installed — run `pg addon install redis --name %s` first", redisName, redisName)
-	}
-	if rc.Password == "" {
-		return "", fmt.Errorf("redis addon %q has no password in config — check pg.yaml", redisName)
-	}
-	host := rc.Listen
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		host = "127.0.0.1"
-	}
-	return fmt.Sprintf("redis://:%s@%s:%d/0", rc.Password, host, rc.Port), nil
-}
-
-// pgMetaURL resolves a pgcli PG instance, creates the metadata database if
-// missing (juicefs format refuses a nonexistent db), and returns the URL
-// pointed at that db.
-func pgMetaURL(cfg *config.Config, jc *config.JuicefsConfig) (string, error) {
-	pc := *cfg
-	if err := pc.SetInstance(jc.PgName); err != nil {
-		return "", fmt.Errorf("resolving PG instance %q: %w", jc.PgName, err)
-	}
-	pm, err := podman.New(&pc)
-	if err != nil {
-		return "", err
-	}
-	if err := pm.CheckContainerRunning(); err != nil {
-		return "", fmt.Errorf("PG instance %q is not running — start it: pg start %s", jc.PgName, jc.PgName)
-	}
-	base := podman.MetaEngineURL(pc.GetPostgresURL())
-	if err := pm.EnsureMetaDB(base, jc.PgDBName); err != nil {
-		return "", err
-	}
-	return swapDSNDatabase(base, jc.PgDBName), nil
-}
-
-// swapDSNDatabase replaces the path (database) component of a postgres:// URL,
-// preserving query params like sslmode.
-func swapDSNDatabase(dsn, dbname string) string {
-	base, q := dsn, ""
-	if i := strings.IndexByte(dsn, '?'); i >= 0 {
-		base, q = dsn[:i], dsn[i:]
-	}
-	if i := strings.LastIndexByte(base, '/'); i >= 0 {
-		base = base[:i+1]
-	} else {
-		base += "/"
-	}
-	return base + dbname + q
-}
-
-// runAddonInstallJuicefs implements `pg addon install juicefs` per the plan:
-// binary → FUSE → S3 target → meta engine → save config → format → mount.
-// The config entry is saved before any external command runs, so a crash
-// mid-install leaves a re-runnable state (format skips when the volume
-// already exists).
+// runAddonInstallJuicefs implements `pg addon install juicefs`:
+// binary → FUSE → external S3 endpoint → explicit meta DSN → save config →
+// format → mount. The config entry is saved before any external command runs,
+// so a crash mid-install leaves a re-runnable state (format skips when the
+// volume already exists).
 func runAddonInstallJuicefs(cmd *cobra.Command) error {
 	if runtime.GOOS != "linux" {
 		return fmt.Errorf("the juicefs add-on runs a host FUSE mount and is Linux-only (like beegfs)")
@@ -239,24 +163,21 @@ func runAddonInstallJuicefs(cmd *cobra.Command) error {
 	if jc.Version == "" {
 		jc.Version = config.DefaultJuicefsVersion
 	}
-	metaEngine, _ := fs.GetString("meta")
+	// Everything that identifies the volume is explicit — there is no
+	// same-host fallback for the S3 endpoint, the credentials, or the
+	// metadata URL. --dsn is the metadata URL; --meta-dsn is its alias.
+	if v, _ := fs.GetString("s3-endpoint"); v != "" {
+		jc.S3Endpoint = v
+	}
 	dsnFlag, _ := fs.GetString("dsn")
 	metaDSN, _ := fs.GetString("meta-dsn")
-	redisDSN, _ := fs.GetString("redis-dsn")
-	if v, _ := fs.GetString("redis-name"); v != "" {
-		jc.RedisName = v
-	}
-	if v, _ := fs.GetString("pg-name"); v != "" {
-		jc.PgName = v
-	}
-	if v, _ := fs.GetString("s3"); v != "" {
-		jc.S3Addon = v
-	}
-	if jc.S3Addon == "" {
-		jc.S3Addon = "minio"
-	}
-	if v, _ := fs.GetString("s3-name"); v != "" {
-		jc.S3Name = v
+	switch {
+	case dsnFlag != "" && metaDSN != "" && dsnFlag != metaDSN:
+		return fmt.Errorf("--dsn and --meta-dsn disagree; pass one")
+	case dsnFlag != "":
+		jc.MetaDSN = dsnFlag
+	case metaDSN != "":
+		jc.MetaDSN = metaDSN
 	}
 	for _, s := range []struct {
 		flag string
@@ -269,38 +190,38 @@ func runAddonInstallJuicefs(cmd *cobra.Command) error {
 			*s.dst = v
 		}
 	}
-
-	// Engine: an explicit --dsn forces the dsn engine (it is the user-visible
-	// "point me at any URL" knob); --meta-dsn is its alias. --redis-dsn pins
-	// the redis-engine URL instead of resolving --redis-name.
-	switch {
-	case dsnFlag != "" && metaDSN != "" && dsnFlag != metaDSN:
-		return fmt.Errorf("--dsn and --meta-dsn disagree; pass one")
-	case dsnFlag != "":
-		metaEngine = config.JuicefsMetaDSN
-		jc.MetaDSN = dsnFlag
-	case metaDSN != "":
-		metaEngine = config.JuicefsMetaDSN
-		jc.MetaDSN = metaDSN
+	akSet, skSet := fs.Changed("access-key"), fs.Changed("secret-key")
+	if akSet != skSet {
+		return fmt.Errorf("--access-key and --secret-key must be given together — an external S3 service has no local addon root credentials to inherit")
 	}
-	if redisDSN != "" && metaEngine != "" && metaEngine != config.JuicefsMetaRedis {
-		return fmt.Errorf("--redis-dsn is only valid with --meta redis")
+	var missing []string
+	if jc.S3Endpoint == "" {
+		missing = append(missing, "--s3-endpoint http(s)://host[:port]")
 	}
-	if metaEngine == "" {
-		metaEngine = config.JuicefsMetaSQLite3
+	if jc.AccessKey == "" || jc.SecretKey == "" {
+		missing = append(missing, "--access-key and --secret-key")
 	}
-	if !config.ValidJuicefsMetaEngine(metaEngine) {
-		return fmt.Errorf("--meta %q is not one of sqlite3, redis, pg, dsn", metaEngine)
+	if jc.MetaDSN == "" {
+		missing = append(missing, "--dsn <metadata URL: sqlite3://…, redis://…, postgres://…>")
 	}
-	jc.MetaEngine = metaEngine
+	if len(missing) > 0 {
+		return fmt.Errorf("juicefs mounts an EXTERNAL S3 service with an EXPLICIT metadata engine — missing %s (see pg addon install juicefs -h)", strings.Join(missing, ", "))
+	}
+	if err := config.ValidateJuicefsDSNScheme(jc.MetaDSN); err != nil {
+		return fmt.Errorf("%w", err)
+	}
 
 	// Normalise host paths/defaults, then re-read the merged entry (defaults
 	// are applied to the map, so the draft must be stored first).
 	c.Addons.Juicefs[name] = jc
 	c.ApplyDefaults()
 	jc = c.Addons.Juicefs[name]
-	if redisDSN != "" {
-		jc.MetaDSN = redisDSN // --meta redis + explicit URL skips addon lookup
+
+	// The mount-point contract, checked before any download or format: the
+	// operator creates the directory (mkdir -p) with read-write access for the
+	// user running pg — pgcli never creates or chowns it.
+	if err := checkMountPoint(jc.MountPoint); err != nil {
+		return fmt.Errorf("  [X] %v", err)
 	}
 
 	installDir, _ := fs.GetString("install-dir")
@@ -323,34 +244,16 @@ func runAddonInstallJuicefs(cmd *cobra.Command) error {
 	}
 	fmt.Println("  [OK] FUSE available (/dev/fuse, fusermount3)")
 
-	// --- 3. S3 backend (read-only: pgcli never runs mc) -------------------
-	tgt, err := resolveS3Target(c, jc.S3Addon, jc.S3Name)
+	// --- 3. external S3 endpoint (read-only: pgcli never runs mc) ---------
+	tgt, err := externalS3Target(jc.S3Endpoint)
 	if err != nil {
 		return fmt.Errorf("  [X] %v", err)
 	}
-	fmt.Printf("  [OK] S3 backend: %s addon %q at %s\n", tgt.Kind, tgt.Name, tgt.BaseURL)
-	// Credentials: an explicit pair is honoured verbatim (an operator-scoped
-	// service account made with `pg mc`); otherwise the S3 addon's own root
-	// creds are stored. Keyed on Changed(), not emptiness — ApplyDefaults has
-	// already filled the bucket-name access-key default.
-	akSet, skSet := fs.Changed("access-key"), fs.Changed("secret-key")
-	switch {
-	case akSet != skSet:
-		return fmt.Errorf("  [X] --access-key and --secret-key must be given together (or neither, to use the %s root credentials)", tgt.Kind)
-	case akSet:
-		fmt.Printf("  [OK] credentials: explicit access-key %q\n", jc.AccessKey)
-	default:
-		jc.AccessKey, jc.SecretKey = tgt.User, tgt.Password
-		fmt.Printf("  [OK] credentials: %s addon root (%s)\n", tgt.Kind, tgt.User)
-	}
+	fmt.Printf("  [OK] S3 endpoint: %s (TLS: %v)\n", tgt.BaseURL, tgt.TLS)
+	fmt.Printf("  [OK] credentials: explicit access-key %q\n", jc.AccessKey)
 
-	// --- 4. metadata engine ------------------------------------------------
-	metaURL, err := resolveJuicefsMeta(c, &jc)
-	if err != nil {
-		return fmt.Errorf("  [X] %v", err)
-	}
-	jc.MetaDSN = metaURL
-	fmt.Printf("  [OK] metadata engine (%s): %s\n", jc.MetaEngine, dsnDisplay(metaURL))
+	// --- 4. metadata engine (explicit URL, verified reachable by format) ---
+	fmt.Printf("  [OK] metadata engine: %s\n", dsnDisplay(jc.MetaDSN))
 
 	// --- 5. persist BEFORE anything external --------------------------------
 	c.Addons.Juicefs[name] = jc
@@ -362,8 +265,8 @@ func runAddonInstallJuicefs(cmd *cobra.Command) error {
 	formatArgs := []string{"format", "--storage", "s3",
 		"--bucket", fmt.Sprintf("%s/%s", tgt.BaseURL, jc.Bucket),
 		"--access-key", jc.AccessKey, "--secret-key", jc.SecretKey,
-		metaURL, name}
-	formatted, err := juicefsVolumeExists(bin, metaURL)
+		jc.MetaDSN, name}
+	formatted, err := juicefsVolumeExists(bin, jc.MetaDSN)
 	if err != nil {
 		fmt.Printf("  [!] existing-volume probe inconclusive (%v) — attempting format anyway\n", err)
 	}
@@ -371,7 +274,7 @@ func runAddonInstallJuicefs(cmd *cobra.Command) error {
 		fmt.Println("  [OK] volume already formatted — skipping format")
 	} else if err := runJuicefsQuiet(bin, formatArgs...); err != nil {
 		fmt.Printf("  [X] format failed: %v\n", err)
-		printBucketHint(tgt, jc.Bucket)
+		printBucketHint(tgt, jc.AccessKey, jc.Bucket)
 		return fmt.Errorf("format volume %q", name)
 	} else {
 		fmt.Printf("  [OK] formatted volume %q (bucket %s)\n", name, jc.Bucket)
@@ -383,7 +286,7 @@ func runAddonInstallJuicefs(cmd *cobra.Command) error {
 	} else {
 		if err := juicefsMount(bin, &jc); err != nil {
 			fmt.Printf("  [X] mount failed: %v\n", err)
-			printBucketHint(tgt, jc.Bucket)
+			printBucketHint(tgt, jc.AccessKey, jc.Bucket)
 			return fmt.Errorf("mount %q", name)
 		}
 		fmt.Printf("  [OK] mounted at %s\n", jc.MountPoint)
@@ -391,15 +294,15 @@ func runAddonInstallJuicefs(cmd *cobra.Command) error {
 
 	fmt.Println()
 	fmt.Printf("✓ juicefs installed: %q\n", name)
-	fmt.Printf("  Volume:      %s (engine %s)\n", name, jc.MetaEngine)
+	fmt.Printf("  Volume:      %s\n", name)
 	fmt.Printf("  Metadata:    %s\n", dsnDisplay(jc.MetaDSN))
-	fmt.Printf("  S3:          %s addon %q, bucket %s\n", tgt.Kind, tgt.Name, jc.Bucket)
+	fmt.Printf("  S3:          %s, bucket %s\n", tgt.BaseURL, jc.Bucket)
 	fmt.Printf("  Mount point: %s\n", jc.MountPoint)
 	fmt.Printf("  Cache:       %s\n", jc.CacheDir)
 	fmt.Println()
 	fmt.Printf("  pgcli does not create buckets. If the volume is not yet usable,\n")
 	fmt.Printf("  provision the bucket manually (once):\n")
-	printBucketHint(tgt, jc.Bucket)
+	printBucketHint(tgt, jc.AccessKey, jc.Bucket)
 	fmt.Println()
 	fmt.Printf("  Manage: pg addon juicefs {status|umount|mount} --name %s\n", name)
 	fmt.Printf("  Remove: pg addon remove juicefs --name %s\n", name)
@@ -407,17 +310,22 @@ func runAddonInstallJuicefs(cmd *cobra.Command) error {
 }
 
 // printBucketHint renders the exact manual `pg mc` commands to provision the
-// bucket — pgcli itself never runs them.
-func printBucketHint(tgt *s3Target, bucket string) {
-	alias := "pgcli-" + tgt.Kind
-	fmt.Printf("      pg mc alias set %s %s %s '***'\n", alias, tgt.BaseURL, tgt.User)
-	fmt.Printf("      pg mc mb %s/%s\n", alias, bucket)
+// bucket — pgcli itself never runs them. The alias is generic ("externals3")
+// because the store is not a pgcli addon; the secret stays behind '***'.
+func printBucketHint(tgt *s3Target, accessKey, bucket string) {
+	fmt.Printf("      pg mc alias set externals3 %s %s '***'\n", tgt.BaseURL, accessKey)
+	fmt.Printf("      pg mc mb externals3/%s\n", bucket)
 }
 
-// juicefsMount creates the mount/cache dirs and self-daemonises a client.
+// juicefsMount self-daemonises a client on the (operator-created) mount point.
+// The cache and log dirs are pgcli's own bookkeeping under the addon dir, so
+// pgcli creates those — but never the mount point itself: every call path
+// (mount command, install, autostart) enforces the contract here, so a
+// directory removed since install fails with the mkdir -p remedy, not a
+// cryptic juicefs exit.
 func juicefsMount(bin string, jc *config.JuicefsConfig) error {
-	if err := os.MkdirAll(jc.MountPoint, 0o755); err != nil {
-		return fmt.Errorf("creating mount point %s: %w", jc.MountPoint, err)
+	if err := checkMountPoint(jc.MountPoint); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(jc.CacheDir, 0o755); err != nil {
 		return fmt.Errorf("creating cache dir %s: %w", jc.CacheDir, err)
@@ -472,24 +380,54 @@ func truncateRunes(s string, n int) string {
 // --- shared host-addon plumbing ---------------------------------------------
 
 // resolveHostAddon loads config and the named juicefs entry (default "juicefs"),
-// with the same find-or-complain shape as resolveBeeGFSConfig.
-func resolveHostAddon(cmd *cobra.Command) (*config.Config, string, config.JuicefsConfig, error) {
-	c, _, err := loadAddonCfg()
+// with the same find-or-complain shape as resolveBeeGFSConfig. It also returns
+// the config file path so `mount --mount-point` can persist a relocated path.
+func resolveHostAddon(cmd *cobra.Command) (*config.Config, string, string, config.JuicefsConfig, error) {
+	c, path, err := loadAddonCfg()
 	if err != nil {
-		return nil, "", config.JuicefsConfig{}, err
+		return nil, "", "", config.JuicefsConfig{}, err
 	}
 	name, _ := cmd.Flags().GetString("name")
 	if name == "" {
 		name = "juicefs"
 	}
 	if c.Addons.Juicefs == nil {
-		return nil, "", config.JuicefsConfig{}, fmt.Errorf("no juicefs add-ons configured (run 'pg addon install juicefs')")
+		return nil, "", "", config.JuicefsConfig{}, fmt.Errorf("no juicefs add-ons configured (run 'pg addon install juicefs')")
 	}
 	if _, ok := c.Addons.Juicefs[name]; !ok {
-		return nil, "", config.JuicefsConfig{}, fmt.Errorf("juicefs volume %q not found (see 'pg addon list')", name)
+		return nil, "", "", config.JuicefsConfig{}, fmt.Errorf("juicefs volume %q not found (see 'pg addon list')", name)
 	}
 	c.ApplyDefaults()
-	return c, name, c.Addons.Juicefs[name], nil
+	return c, path, name, c.Addons.Juicefs[name], nil
+}
+
+// mountOverrideJuicefs applies a `mount --mount-point` flag: it relocates the
+// volume's mount path (persisted to pg.yaml) after refusing to move a volume
+// that is still mounted at its old path. The flag is only registered on the
+// nested mount command, so the top-level `pg addon start juicefs` alias (which
+// shares this RunE via addonStartCmd) passes the Lookup guard with an empty
+// flag and is a no-op. Returns the effective mount point.
+func mountOverrideJuicefs(c *config.Config, path, name string, jc *config.JuicefsConfig, cmd *cobra.Command) error {
+	if f := cmd.Flags().Lookup("mount-point"); f == nil {
+		return nil // top-level start alias: no flag, keep the stored path
+	}
+	want, _ := cmd.Flags().GetString("mount-point")
+	if want == "" || want == jc.MountPoint {
+		return nil
+	}
+	if isMountPoint(jc.MountPoint) {
+		return fmt.Errorf("juicefs %q is still mounted at %s — umount first: pg addon juicefs umount --name %s", name, jc.MountPoint, name)
+	}
+	if err := checkMountPoint(want); err != nil {
+		return err
+	}
+	jc.MountPoint = want
+	c.Addons.Juicefs[name] = *jc
+	if err := c.Save(path); err != nil {
+		return fmt.Errorf("saving config: %w", err)
+	}
+	fmt.Printf("  [i] mount point moved to %s (saved)\n", want)
+	return nil
 }
 
 // isMountPoint checks /proc/mounts for an exact mount-point match.
@@ -509,8 +447,11 @@ func isMountPoint(dir string) bool {
 }
 
 func runJuicefsMount(cmd *cobra.Command, _ []string) error {
-	_, name, jc, err := resolveHostAddon(cmd)
+	c, path, name, jc, err := resolveHostAddon(cmd)
 	if err != nil {
+		return err
+	}
+	if err := mountOverrideJuicefs(c, path, name, &jc, cmd); err != nil {
 		return err
 	}
 	if isMountPoint(jc.MountPoint) {
@@ -525,7 +466,7 @@ func runJuicefsMount(cmd *cobra.Command, _ []string) error {
 }
 
 func runJuicefsUmount(cmd *cobra.Command, _ []string) error {
-	_, name, jc, err := resolveHostAddon(cmd)
+	_, _, name, jc, err := resolveHostAddon(cmd)
 	if err != nil {
 		return err
 	}
@@ -541,7 +482,7 @@ func runJuicefsUmount(cmd *cobra.Command, _ []string) error {
 }
 
 func runJuicefsStatus(cmd *cobra.Command, _ []string) error {
-	_, name, jc, err := resolveHostAddon(cmd)
+	_, _, name, jc, err := resolveHostAddon(cmd)
 	if err != nil {
 		return err
 	}
@@ -550,8 +491,8 @@ func runJuicefsStatus(cmd *cobra.Command, _ []string) error {
 		state = "mounted"
 	}
 	fmt.Printf("juicefs %q — %s\n", name, state)
-	fmt.Printf("  Metadata:  %s (%s engine)\n", dsnDisplay(jc.MetaDSN), jc.MetaEngine)
-	fmt.Printf("  S3:        %s addon %q, bucket %s\n", jc.S3Addon, jc.S3Name, jc.Bucket)
+	fmt.Printf("  Metadata:  %s\n", dsnDisplay(jc.MetaDSN))
+	fmt.Printf("  S3:        %s, bucket %s\n", jc.S3Endpoint, jc.Bucket)
 	fmt.Printf("  Binary:    %s\n", jc.BinaryPath)
 	fmt.Printf("  Mount:     %s\n", jc.MountPoint)
 	fmt.Printf("  Cache:     %s\n", jc.CacheDir)
@@ -562,9 +503,8 @@ func runJuicefsStatus(cmd *cobra.Command, _ []string) error {
 // runAddonRemoveJuicefs tears down the host mount and forgets the entry. Like
 // every other addon it deletes NO data: bucket, metadata store, cache and the
 // binary all survive; --clean-data additionally removes the per-instance
-// <base>/addon/juicefs/<name> dir (sqlite meta + cache + logs) — still never
-// the S3 bucket and never a PG metadata db, which pgcli refuses to drop
-// speculatively (it prints the statement instead).
+// <base>/addon/juicefs/<name> dir (cache + logs) — still never the S3 bucket,
+// which pgcli refuses to touch speculatively.
 func runAddonRemoveJuicefs(cmd *cobra.Command) error {
 	c, path, err := loadAddonCfg()
 	if err != nil {
@@ -598,20 +538,16 @@ func runAddonRemoveJuicefs(cmd *cobra.Command) error {
 	}
 	fmt.Printf("  [OK] config entry removed (%s)\n", path)
 
-	// The per-instance dir is the parent of the defaulted absolute mount point
-	// (c.BaseDir may be unset; ApplyDefaults already resolved paths against the
-	// platform default).
-	addonDir := filepath.Dir(jc.MountPoint)
+	// The per-instance dir lives at <base>/addon/juicefs/<name> regardless of
+	// where the (possibly relocated or custom) mount point points.
+	addonDir := hostAddonDir(c, "juicefs", name)
 	if cleanData {
 		if err := os.RemoveAll(addonDir); err != nil {
 			return fmt.Errorf("cleaning %s: %w", addonDir, err)
 		}
-		fmt.Printf("  [OK] cleaned %s (cache, logs, sqlite meta)\n", addonDir)
+		fmt.Printf("  [OK] cleaned %s (cache, logs)\n", addonDir)
 	} else {
-		fmt.Printf("  [i] kept %s (cache/meta/logs) and the %s bucket — pass --clean-data to drop the host dir; the S3 data and any PG metadata db are never deleted automatically\n", addonDir, jc.Bucket)
-	}
-	if jc.MetaEngine == config.JuicefsMetaPG {
-		fmt.Printf("  [i] metadata db %q on instance %q was left in place — drop it manually if you are sure:\n      psql ... -c 'DROP DATABASE %s'\n", jc.PgDBName, jc.PgName, jc.PgDBName)
+		fmt.Printf("  [i] kept %s (cache/logs), the metadata store and the %s bucket — pass --clean-data to drop the host dir; object storage and the metadata engine are never deleted automatically\n", addonDir, jc.Bucket)
 	}
 	fmt.Printf("✓ juicefs %q removed\n", name)
 	return nil
@@ -622,15 +558,16 @@ func runAddonRemoveJuicefs(cmd *cobra.Command) error {
 var addonJuicefsCmd = &cobra.Command{
 	Use:   "juicefs",
 	Short: "Manage juicefs host-mount add-on instances",
-	Long: `Manage juicefs add-on instances: host FUSE mounts backed by a pgcli S3 addon.
+	Long: `Manage juicefs add-on instances: host FUSE mounts backed by an external S3 service.
 
 Subcommands:
-  mount    Mount a formatted juicefs volume on this host
+  mount    Mount a formatted juicefs volume on this host (--mount-point to
+           relocate it first — after umount, to a pre-created directory)
   umount   Unmount it (the client daemon exits; volume, bucket and metadata stay)
-  status   Show backend, metadata engine, binary and mount state
+  status   Show backend, metadata URL, binary and mount state
 
 Examples:
-  pg addon install juicefs --name data --s3 minio --s3-name ms3 --meta pg --pg-name default
+  pg addon install juicefs --name data --s3-endpoint https://s3.example.com --access-key AK --secret-key SK --bucket my-bucket --dsn "postgres://u:p@meta-host:5432/jfs?sslmode=disable"
   pg addon juicefs status --name data
   pg addon juicefs umount --name data`,
 }
@@ -666,18 +603,18 @@ func init() {
 	for _, c := range []*cobra.Command{addonJuicefsMountCmd, addonJuicefsUmountCmd, addonJuicefsStatusCmd} {
 		c.Flags().String("name", "", "juicefs volume name (default \"juicefs\")")
 	}
+	addonJuicefsMountCmd.Flags().String("mount-point", "", "mount at this path instead of the stored one (the directory must already exist: mkdir -p, writable for the user running pg) — persisted; refuses while still mounted at the old path")
 
 	// Install-time knobs shared with zerofs (see addon_zerofs.go). --clean-data
 	// for remove is already registered on addonRemoveCmd in addon.go.
-	addonInstallCmd.Flags().String("meta", "", "juicefs: metadata engine — sqlite3 (default), redis, pg, or dsn (--dsn/--meta-dsn implies dsn)")
-	addonInstallCmd.Flags().String("meta-dsn", "", "juicefs --meta dsn: the metadata URL itself (postgres://…, redis://…, sqlite3://…); alias of --dsn for this addon")
-	addonInstallCmd.Flags().String("redis-name", "", "juicefs --meta redis / zerofs conditional-put redis: pgcli redis addon name (default \"redis\"; must already be installed)")
-	addonInstallCmd.Flags().String("redis-dsn", "", "explicit redis:// URL instead of resolving --redis-name (juicefs meta / zerofs conditional-put backend)")
-	addonInstallCmd.Flags().String("s3", "minio", "juicefs/zerofs: S3 backend kind — minio (default) or silo")
-	addonInstallCmd.Flags().String("s3-name", "", "juicefs/zerofs: minio/silo addon instance backing the store (default = the --s3 kind name)")
-	addonInstallCmd.Flags().String("access-key", "", "juicefs/zerofs: S3 access key (default: the backend addon's root user)")
-	addonInstallCmd.Flags().String("secret-key", "", "juicefs/zerofs: S3 secret key (default: the backend addon's root password)")
-	addonInstallCmd.Flags().String("mount-point", "", "juicefs/zerofs: host mount directory (default <base_dir>/addon/<family>/<name>/mnt)")
+	// --dsn (the metadata URL) is the shared addon-install flag (addon.go).
+	addonInstallCmd.Flags().String("meta-dsn", "", "juicefs: the metadata-engine URL itself (postgres://…, redis://…, sqlite3://…) — required, there is no same-host engine auto-detection; alias of --dsn for this addon")
+	addonInstallCmd.Flags().String("redis-dsn", "", "zerofs --conditional-put redis: the fencing backend redis:// URL (explicit — no same-host addon lookup)")
+	addonInstallCmd.Flags().String("s3-endpoint", "", "juicefs/zerofs: EXTERNAL S3 service as http(s)://host[:port] (no bucket path) — required; the client and the object store normally live on different machines, and pgcli never auto-detects a same-host addon")
+	addonInstallCmd.Flags().String("s3-region", "", "zerofs: SigV4 region for the external endpoint (default: zerofs's own us-east-1). JuiceFS needs none — it probes the endpoint at format")
+	addonInstallCmd.Flags().String("access-key", "", "juicefs/zerofs: S3 access key — REQUIRED with --s3-endpoint (an external store has no local addon root to inherit)")
+	addonInstallCmd.Flags().String("secret-key", "", "juicefs/zerofs: S3 secret key — REQUIRED with --s3-endpoint")
+	addonInstallCmd.Flags().String("mount-point", "", "juicefs/zerofs: host mount directory (default <base_dir>/addon/<family>/<name>/mnt) — pgcli never creates it: mkdir -p it first, owned and writable by the user running pg; `pg addon juicefs|zerofs mount --mount-point` relocates a volume")
 	addonInstallCmd.Flags().String("cache-dir", "", "juicefs/zerofs: local cache directory (default <base_dir>/addon/<family>/<name>/cache)")
 	addonInstallCmd.Flags().String("install-dir", "", "juicefs/zerofs: where to place the host binary (default /usr/local/bin, else ~/.local/bin)")
 	addonInstallCmd.Flags().Bool("no-mount", false, "juicefs/zerofs: set everything up but leave the filesystem unmounted (mount later with `pg addon juicefs mount`)")
