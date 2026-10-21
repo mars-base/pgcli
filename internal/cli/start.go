@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mars-base/pgcli/internal/config"
+	"github.com/mars-base/pgcli/internal/hostbin"
 	"github.com/mars-base/pgcli/internal/pitr"
 	"github.com/mars-base/pgcli/internal/platform"
 	"github.com/mars-base/pgcli/internal/podman"
@@ -75,8 +76,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartNginx(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --gitea / --beegfs / --nginx)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartNginx(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --gitea / --beegfs / --juicefs / --zerofs / --nginx)")
 		return nil
 	}
 
@@ -240,6 +241,19 @@ func startAutostart() error {
 	// Placed after the web addons — nothing on this pass depends on the
 	// filesystem, and a client mount on this host re-attaches by itself.
 	if err := startAutostartBeeGFS(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// Host-binary filesystem addons (juicefs, zerofs). These are the only
+	// non-container addons: their "start" is a mount (juicefs) or a 9P server +
+	// FUSE client (zerofs), launched as detached host processes. Both helpers are
+	// idempotent — a volume already mounted is left alone — and neither re-formats
+	// or re-creates anything. They run after the S3 addons (minio/silo/etc. above)
+	// so the object store is listening before the filesystem tries to reach it.
+	if err := startAutostartJuicefs(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if err := startAutostartZerofs(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -1117,6 +1131,107 @@ func hasAutostartNginx(c *config.Config) bool {
 		}
 	}
 	return false
+}
+
+// hasAutostartJuicefs / hasAutostartZerofs report whether any host-binary
+// filesystem volume is autostart-enabled.
+func hasAutostartJuicefs(c *config.Config) bool {
+	for _, jc := range c.Addons.Juicefs {
+		if jc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAutostartZerofs(c *config.Config) bool {
+	for _, zc := range c.Addons.Zerofs {
+		if zc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartJuicefs re-mounts each autostart-enabled JuiceFS volume. It
+// never re-formats: the volume already exists in the metadata engine (created
+// at install), so a boot pass is just `juicefs mount`, which is idempotent
+// against an already-mounted point. Sorted by name for deterministic boot logs.
+func startAutostartJuicefs(c *config.Config) error {
+	var names []string
+	for name, jc := range c.Addons.Juicefs {
+		if jc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	var firstErr error
+	for _, name := range names {
+		jc := c.Addons.Juicefs[name]
+		if isMountPoint(jc.MountPoint) {
+			fmt.Printf("  [OK] juicefs %q already mounted\n", name)
+			continue
+		}
+		if err := juicefsMount(jc.BinaryPath, &jc); err != nil {
+			fmt.Printf("  [X] juicefs autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		fmt.Printf("  [OK] juicefs %q mounted at %s\n", name, jc.MountPoint)
+	}
+	return firstErr
+}
+
+// startAutostartZerofs brings each autostart-enabled ZeroFS volume up: the 9P
+// server first (if not already running), then the FUSE client. Both launch
+// paths are idempotent and, unlike install, never write config.toml or touch
+// the encryption password — the config file on disk is the source of truth.
+func startAutostartZerofs(c *config.Config) error {
+	var names []string
+	for name, zc := range c.Addons.Zerofs {
+		if zc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	raiseOpenFileLimit()
+	var firstErr error
+	for _, name := range names {
+		zc := c.Addons.Zerofs[name]
+		if !hostbin.Alive(zc.ServerPidFile) {
+			if err := hostbin.StartDetached(zc.BinaryPath, []string{"run", "-c", zc.ConfigPath}, zc.LogFile, zc.ServerPidFile); err != nil {
+				fmt.Printf("  [X] zerofs autostart (%s): server: %v\n", name, err)
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			if err := waitForTCPPort(zc.Listen, zc.ListenPort, 10*time.Second); err != nil {
+				fmt.Printf("  [X] zerofs autostart (%s): server did not come up (check %s)\n", name, zc.LogFile)
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+		}
+		if err := zerofsMount(zc.BinaryPath, &zc); err != nil {
+			fmt.Printf("  [X] zerofs autostart (%s): mount: %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		fmt.Printf("  [OK] zerofs %q up (9P %s:%d, mounted at %s)\n", name, zc.Listen, zc.ListenPort, zc.MountPoint)
+	}
+	return firstErr
 }
 
 // startAutostartNginx starts each autostart-enabled nginx instance. Start-only

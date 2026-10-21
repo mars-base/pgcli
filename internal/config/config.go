@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -129,6 +130,8 @@ type TopAddonsConfig struct {
 	Gitea        map[string]GiteaConfig          `yaml:"gitea,omitempty"`
 	Nginx        map[string]NginxConfig          `yaml:"nginx,omitempty"`
 	BeeGFS       map[string]BeeGFSConfig         `yaml:"beegfs,omitempty"`
+	Juicefs      map[string]JuicefsConfig        `yaml:"juicefs,omitempty"`
+	Zerofs       map[string]ZerofsConfig         `yaml:"zerofs,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -896,6 +899,198 @@ type SiloConfig struct {
 	// Autostart brings this container up on host boot via the boot service
 	// (pg autostart enable --silo). Start-only: it starts the existing
 	// container, so install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// DefaultJuicefsVersion pins the host juicefs binary the installer downloads
+// from juicedata/juicefs GitHub releases. The digests are the release
+// checksums.txt entries for the linux tarballs (asset-level, matching what
+// hostbin.Ensure verifies); --version latest re-resolves from the GitHub API.
+const (
+	DefaultJuicefsVersion = "1.4.1"
+	juicefsSHAlinuxamd64  = "01ee09a21a9351a465e09906f113845e1c6a19bea70f530e5e2b2125b2dd3b82"
+	juicefsSHAlinuxarm64  = "1015ade83a7a93180a29f6c93ee5780a3eda52522331934ef2ef0cc0921995fd"
+)
+
+// JuicefsSHA256 returns the pinned checksum of the juicefs release tarball
+// for a linux architecture (amd64/arm64). An unknown arch returns "" — the
+// installer refuses those rather than downloading unverified.
+func JuicefsSHA256(arch string) string {
+	switch arch {
+	case "amd64":
+		return juicefsSHAlinuxamd64
+	case "arm64":
+		return juicefsSHAlinuxarm64
+	}
+	return ""
+}
+
+// JuicefsMetaEngines are the supported metadata backends, mirrored in flag
+// help: a local sqlite3 file, a pgcli redis addon, a pgcli PG instance, or a
+// caller-supplied --meta-dsn URL.
+const (
+	JuicefsMetaSQLite3 = "sqlite3"
+	JuicefsMetaRedis   = "redis"
+	JuicefsMetaPG      = "pg"
+	JuicefsMetaDSN     = "dsn"
+)
+
+// ValidJuicefsMetaEngine reports whether engine is one of the four above.
+func ValidJuicefsMetaEngine(engine string) bool {
+	switch engine {
+	case JuicefsMetaSQLite3, JuicefsMetaRedis, JuicefsMetaPG, JuicefsMetaDSN:
+		return true
+	}
+	return false
+}
+
+// JuicefsConfig holds a host-installed JuiceFS client mount: the juicefs
+// binary (not a container — FUSE has to live on the host to serve a host
+// mount point) formatting a volume whose S3 backend is a pgcli-managed minio
+// or silo addon and whose metadata engine is one of the four JuicefsMeta*
+// kinds. Like BeeGFS the addon manages the client lifecycle (format once,
+// mount/umount on demand); unlike BeeGFS everything runs on this host.
+//
+// The S3 bucket itself is provisioned manually (pg mc) — pgcli only reads the
+// S3 addon's stored root credentials unless AccessKey/SecretKey override them,
+// and never creates buckets or service accounts.
+type JuicefsConfig struct {
+	Name    string `yaml:"name,omitempty"`    // addon key, defaults to the map key
+	Version string `yaml:"version,omitempty"` // pinned release tag, e.g. "1.4.1" (v-prefix optional)
+
+	// BinaryPath is where the host binary lives after install (or the PATH
+	// entry Detect found). Empty until installed.
+	BinaryPath string `yaml:"binary_path,omitempty"`
+
+	// Meta engine: one of the JuicefsMeta* constants. MetaDSN is the resolved
+	// juicefs-style URL (sqlite3://.../meta.db, redis://:pw@host:port/0,
+	// postgres://...) stored at install; for engine dsn it is the user's URL
+	// verbatim. RedisName / PgName point at pgcli addons (default "redis" /
+	// "default"); PgDBName is the metadata database created inside the PG
+	// instance (default juicefs_<name>), and MetaDBPath the sqlite3 file.
+	MetaEngine string `yaml:"meta_engine,omitempty"`
+	MetaDSN    string `yaml:"meta_dsn,omitempty"`
+	RedisName  string `yaml:"redis_name,omitempty"`
+	PgName     string `yaml:"pg_name,omitempty"`
+	PgDBName   string `yaml:"pg_db_name,omitempty"`
+	MetaDBPath string `yaml:"meta_db_path,omitempty"`
+
+	// S3 backend: kind is "minio" or "silo", Name the addon instance (default
+	// "default"-style lookup done by the CLI, not here). Bucket is never
+	// created by pgcli; AccessKey/SecretKey empty means "use the S3 addon's
+	// root credentials" — resolved at install and persisted, since juicefs
+	// format bakes them into the volume metadata anyway.
+	S3Addon   string `yaml:"s3_addon,omitempty"`
+	S3Name    string `yaml:"s3_name,omitempty"`
+	Bucket    string `yaml:"bucket,omitempty"`
+	AccessKey string `yaml:"access_key,omitempty"`
+	SecretKey string `yaml:"secret_key,omitempty"`
+
+	// Host paths, all defaulted under <base>/addon/juicefs/<name>/: the mount
+	// point (created empty; the operator decides what goes under it), the
+	// local read cache dir, the mount daemon's pid and log files.
+	MountPoint   string `yaml:"mount_point,omitempty"`
+	CacheDir     string `yaml:"cache_dir,omitempty"`
+	MountPidFile string `yaml:"mount_pid_file,omitempty"`
+	MountLogFile string `yaml:"mount_log_file,omitempty"`
+
+	// Autostart remounts on host boot via the boot service
+	// (pg autostart enable --juicefs). Mount-only: the binary and volume must
+	// already exist, so install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// DefaultZerofsVersion pins the ZeroFS (Barre/ZeroFS) release. One tarball
+// carries every platform's binary; the digest is the shipped .sha256 sidecar
+// of that tarball, and the installer extracts zerofs-linux-<arch>-pgo.
+const (
+	DefaultZerofsVersion = "2.3.5"
+	zerofsTarballSHA256  = "367b2e79e05167af8409b28322f21b1ae5de033fc40820a3c27684a9974a56f2"
+
+	// DefaultZerofsPort is the stock 9P listener port ZeroFS documents.
+	DefaultZerofsPort = 5564
+)
+
+// ZerofsTarballSHA256 is the checksum of the release tarball for any arch (the
+// asset is multi-platform).
+func ZerofsTarballSHA256() string { return zerofsTarballSHA256 }
+
+// ZerofsConditionalPut modes for the fencing primitive ZeroFS needs from the
+// object store: auto probes the backing minio image tag, redis routes through
+// a conditional-put helper on a pgcli redis addon, none trusts the store
+// (only safe on a single-writer setup the operator controls).
+const (
+	ZerofsConditionalPutAuto  = "auto"
+	ZerofsConditionalPutRedis = "redis"
+	ZerofsConditionalPutNone  = "none"
+)
+
+// ValidZerofsConditionalPut reports whether mode is one of the three above.
+func ValidZerofsConditionalPut(mode string) bool {
+	switch mode {
+	case ZerofsConditionalPutAuto, ZerofsConditionalPutRedis, ZerofsConditionalPutNone:
+		return true
+	}
+	return false
+}
+
+// ZerofsConfig holds a host-installed ZeroFS deployment: one binary running
+// as a 9P server over an encrypted LSM on the S3 addon (like JuiceFS's,
+// minio or silo — but here the bucket is the whole filesystem, so ZeroFS
+// additionally demands conditional-put support for fencing) plus a FUSE
+// client mounting it. pgcli writes the server's config.toml; the 9P listener
+// stays on loopback because the protocol has no authentication.
+type ZerofsConfig struct {
+	Name    string `yaml:"name,omitempty"`    // addon key, defaults to the map key
+	Version string `yaml:"version,omitempty"` // pinned release tag, e.g. "2.3.5"
+
+	BinaryPath string `yaml:"binary_path,omitempty"`
+
+	// S3 backend, same contract as JuicefsConfig (bucket provisioned by hand,
+	// root credentials unless overridden).
+	S3Addon   string `yaml:"s3_addon,omitempty"`
+	S3Name    string `yaml:"s3_name,omitempty"`
+	Bucket    string `yaml:"bucket,omitempty"`
+	AccessKey string `yaml:"access_key,omitempty"`
+	SecretKey string `yaml:"secret_key,omitempty"`
+
+	// EncryptionPassword encrypts the LSM at rest (client-side; the S3 addon
+	// sees only opaque objects). Always generated at install — losing it
+	// loses the data.
+	EncryptionPassword string `yaml:"encryption_password,omitempty"`
+
+	// Server storage/cache: CacheDir doubles as the server's on-disk object
+	// cache ([cache] dir) and the client's fuse cache; ServerCacheGB sizes the
+	// server cache ([cache] size_in_gb). ConfigPath is the written config.toml.
+	CacheDir      string `yaml:"cache_dir,omitempty"`
+	ServerCacheGB int    `yaml:"server_cache_gb,omitempty"`
+	ConfigPath    string `yaml:"config_path,omitempty"`
+
+	// Listen is the 9P bind HOST (forced loopback by Validate — no auth on
+	// 9P); ListenPort the TCP port (default 5564; pool-free, it is not an HTTP
+	// API port). ConditionalPut/RedisName back the fencing mode.
+	Listen         string `yaml:"listen,omitempty"`
+	ListenPort     int    `yaml:"listen_port,omitempty"`
+	ConditionalPut string `yaml:"conditional_put,omitempty"`
+	RedisName      string `yaml:"redis_name,omitempty"`
+
+	// ConditionalPutURL is the fencing backend URL resolved by the installer
+	// when ConditionalPut is "redis" (from the named redis addon, or an
+	// explicit --redis-dsn). It is what reaches config.toml's `conditional_put`
+	// key; ConditionalPut itself stays the enum so Validate and `pg config show`
+	// keep working on raw files.
+	ConditionalPutURL string `yaml:"conditional_put_url,omitempty"`
+
+	MountPoint string `yaml:"mount_point,omitempty"`
+
+	// Process bookkeeping for the two long-lived pieces: the 9P server and the
+	// FUSE mount client; both log to LogFile.
+	ServerPidFile string `yaml:"server_pid_file,omitempty"`
+	MountPidFile  string `yaml:"mount_pid_file,omitempty"`
+	LogFile       string `yaml:"log_file,omitempty"`
+
+	// Autostart restarts server+client on host boot (pg autostart enable
+	// --zerofs). Start-only: install first.
 	Autostart bool `yaml:"autostart,omitempty"`
 }
 
@@ -2168,7 +2363,76 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	for name, jc := range c.Addons.Juicefs {
+		if jc.MountPoint != "" && !filepath.IsAbs(jc.MountPoint) {
+			return fmt.Errorf("addons.juicefs.%s.mount_point must be an absolute path, got %q", name, jc.MountPoint)
+		}
+		if jc.MetaEngine != "" && !ValidJuicefsMetaEngine(jc.MetaEngine) {
+			return fmt.Errorf("addons.juicefs.%s.meta_engine %q is not one of sqlite3, redis, pg, dsn", name, jc.MetaEngine)
+		}
+		if jc.S3Addon != "" && jc.S3Addon != "minio" && jc.S3Addon != "silo" {
+			return fmt.Errorf("addons.juicefs.%s.s3_addon %q is not one of minio, silo", name, jc.S3Addon)
+		}
+		// MetaDSN is the RESOLVED engine URL the installer stores for every
+		// engine (mount needs only it, after format). For a dsn engine it is
+		// user-supplied and must carry a scheme juicefs accepts; for the
+		// others it is derived, so only a present-but-empty-on-dsn case (an
+		// install that never finished resolving) is worth refusing.
+		if jc.MetaEngine == JuicefsMetaDSN {
+			if err := validateJuicefsDSNScheme(jc.MetaDSN); err != nil {
+				return fmt.Errorf("addons.juicefs.%s: %w", name, err)
+			}
+		}
+	}
+	zports := map[int]string{}
+	for name, zc := range c.Addons.Zerofs {
+		if zc.MountPoint != "" && !filepath.IsAbs(zc.MountPoint) {
+			return fmt.Errorf("addons.zerofs.%s.mount_point must be an absolute path, got %q", name, zc.MountPoint)
+		}
+		// 9P has no authentication layer — a non-loopback listener exposes the
+		// filesystem to the network.
+		if zc.Listen != "" && !isLoopbackHost(zc.Listen) {
+			return fmt.Errorf("addons.zerofs.%s.listen %q must be loopback (127.0.0.1/::1/localhost) — the 9P protocol carries no authentication", name, zc.Listen)
+		}
+		if zc.ConditionalPut != "" && !ValidZerofsConditionalPut(zc.ConditionalPut) {
+			return fmt.Errorf("addons.zerofs.%s.conditional_put %q is not one of auto, redis, none", name, zc.ConditionalPut)
+		}
+		if zc.S3Addon != "" && zc.S3Addon != "minio" && zc.S3Addon != "silo" {
+			return fmt.Errorf("addons.zerofs.%s.s3_addon %q is not one of minio, silo", name, zc.S3Addon)
+		}
+		if zc.ListenPort != 0 {
+			if prev, dup := zports[zc.ListenPort]; dup {
+				return fmt.Errorf("addons.zerofs.%s.listen_port %d already used by %s (one 9P port per addon instance)", name, zc.ListenPort, prev)
+			}
+			zports[zc.ListenPort] = name
+		}
+	}
 	return nil
+}
+
+// validateJuicefsDSNScheme checks a dsn-engine MetaDSN carries one of the URL
+// schemes juicefs itself accepts for that path (postgres:// or redis://; the
+// sqlite3 flavour never arrives via dsn since the installer picks the file
+// path itself — but juicefs also speaks sqlite3://, so allow it).
+func validateJuicefsDSNScheme(dsn string) error {
+	if dsn == "" {
+		return fmt.Errorf("meta_dsn is required with meta_engine dsn")
+	}
+	for _, scheme := range []string{"postgres://", "postgresql://", "redis://", "rediss://", "sqlite3://"} {
+		if strings.HasPrefix(dsn, scheme) {
+			return nil
+		}
+	}
+	return fmt.Errorf("meta_dsn %q must start with postgres://, redis:// or sqlite3://", dsn)
+}
+
+// isLoopbackHost reports whether a listen host is loopback-only.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // GetPostgresURL returns the PostgreSQL connection string.
@@ -2954,6 +3218,134 @@ func (c *Config) ApplyDefaults() {
 			addon.NodeID = 1
 		}
 		c.Addons.BeeGFS[name] = addon
+	}
+
+	// Top-level addons defaults (JuiceFS). These are host binaries, so the
+	// paths are real directories on this machine, all rooted at
+	// <base>/addon/juicefs/<name>/ — unlike BeeGFS, where dirs stay lazy and
+	// the manager resolves them, the CLI needs the mount point present before
+	// `juicefs mount`, so ApplyDefaults fills every path deterministically and
+	// the installer MkdirAlls them. SecretKey is deliberately NOT defaulted:
+	// the install resolves it from the S3 addon (or a flag) once and stores
+	// the resolved value.
+	juicefsBaseDir := platform.DefaultConfigDir()
+	if c.BaseDir != "" {
+		juicefsBaseDir = c.BaseDir
+	}
+	for name, addon := range c.Addons.Juicefs {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.Version == "" {
+			addon.Version = DefaultJuicefsVersion
+		}
+		if addon.MetaEngine == "" {
+			addon.MetaEngine = JuicefsMetaSQLite3
+		}
+		addonDir := filepath.Join(juicefsBaseDir, "addon", "juicefs", name)
+		if addon.RedisName == "" {
+			addon.RedisName = "redis"
+		}
+		if addon.PgName == "" {
+			addon.PgName = "default"
+		}
+		if addon.PgDBName == "" {
+			addon.PgDBName = "juicefs_" + strings.ReplaceAll(name, "-", "_")
+		}
+		if addon.MetaDBPath == "" {
+			addon.MetaDBPath = filepath.Join(addonDir, "meta.db")
+		}
+		if addon.S3Addon == "" {
+			addon.S3Addon = "minio"
+		}
+		if addon.S3Name == "" {
+			addon.S3Name = addon.S3Addon
+		}
+		if addon.Bucket == "" {
+			addon.Bucket = "juicefs-" + name
+		}
+		if addon.AccessKey == "" {
+			addon.AccessKey = addon.Bucket
+		}
+		if addon.MountPoint == "" {
+			addon.MountPoint = filepath.Join(addonDir, "mnt")
+		}
+		if addon.CacheDir == "" {
+			addon.CacheDir = filepath.Join(addonDir, "cache")
+		}
+		if addon.MountPidFile == "" {
+			addon.MountPidFile = filepath.Join(addonDir, "mount.pid")
+		}
+		if addon.MountLogFile == "" {
+			addon.MountLogFile = filepath.Join(addonDir, "mount.log")
+		}
+		c.Addons.Juicefs[name] = addon
+	}
+
+	// Top-level addons defaults (ZeroFS). Same host-path story as JuiceFS:
+	// everything under <base>/addon/zerofs/<name>/. EncryptionPassword and the
+	// S3 credentials are install-resolved, not defaulted here. The 9P port is
+	// NOT drawn from the S3 pool — it is a filesystem protocol port with its
+	// own default, and ZeroFS runs one server per addon name, so collisions
+	// are caught by Validate across entries instead of auto-shifted.
+	zerofsBaseDir := platform.DefaultConfigDir()
+	if c.BaseDir != "" {
+		zerofsBaseDir = c.BaseDir
+	}
+	for name, addon := range c.Addons.Zerofs {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.Version == "" {
+			addon.Version = DefaultZerofsVersion
+		}
+		addonDir := filepath.Join(zerofsBaseDir, "addon", "zerofs", name)
+		if addon.S3Addon == "" {
+			addon.S3Addon = "minio"
+		}
+		if addon.S3Name == "" {
+			addon.S3Name = addon.S3Addon
+		}
+		if addon.Bucket == "" {
+			addon.Bucket = "zerofs-" + name
+		}
+		if addon.AccessKey == "" {
+			addon.AccessKey = addon.Bucket
+		}
+		if addon.Listen == "" {
+			addon.Listen = "127.0.0.1"
+		}
+		if addon.ListenPort == 0 {
+			addon.ListenPort = DefaultZerofsPort
+		}
+		if addon.ConditionalPut == "" {
+			addon.ConditionalPut = ZerofsConditionalPutAuto
+		}
+		if addon.RedisName == "" {
+			addon.RedisName = "redis"
+		}
+		if addon.CacheDir == "" {
+			addon.CacheDir = filepath.Join(addonDir, "cache")
+		}
+		if addon.ServerCacheGB == 0 {
+			addon.ServerCacheGB = 100
+		}
+		if addon.ConfigPath == "" {
+			addon.ConfigPath = filepath.Join(addonDir, "config.toml")
+		}
+		if addon.MountPoint == "" {
+			addon.MountPoint = filepath.Join(addonDir, "mnt")
+		}
+		if addon.ServerPidFile == "" {
+			addon.ServerPidFile = filepath.Join(addonDir, "server.pid")
+		}
+		if addon.MountPidFile == "" {
+			addon.MountPidFile = filepath.Join(addonDir, "mount.pid")
+		}
+		if addon.LogFile == "" {
+			addon.LogFile = filepath.Join(addonDir, "zerofs.log")
+		}
+		c.Addons.Zerofs[name] = addon
 	}
 
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.

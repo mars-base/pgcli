@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mars-base/pgcli/internal/config"
+	"github.com/mars-base/pgcli/internal/hostbin"
 	"github.com/mars-base/pgcli/internal/platform"
 	"github.com/mars-base/pgcli/internal/podman"
 	"github.com/mars-base/pgcli/internal/tlsca"
@@ -234,6 +235,48 @@ Infra addons (shared, not tied to one instance):
           downloaded PEM ("--license-file <pem>" at install, or "pg addon beegfs
           license --set <pem>" / "--clear" to hot-swap; the PEM is stored in the
           config and reaches the mgmtd container only — mgmtd alone verifies it).
+  pg addon install juicefs
+          Stored under top-level addons.juicefs in config (Linux only).
+          JuiceFS — an S3-backed POSIX filesystem, pgcli's first HOST-BINARY
+          addon: the juicefs binary is downloaded from GitHub releases (sha256
+          pinned, --install-dir picks where; a binary already on PATH is
+          reused) and run directly on the host — no container. The mount is a
+          plain host directory (default <base_dir>/addon/juicefs/<name>/mnt),
+          visible to host processes; it does NOT propagate into PG instance
+          containers. --meta picks the metadata engine: sqlite3 (default, a
+          file under the addon dir), redis (a pgcli redis addon via
+          --redis-name/--redis-dsn), pg (a pgcli instance — pgcli creates the
+          juicefs_<name> metadata database on it), or dsn (--meta-dsn with any
+          postgres://, redis:// or sqlite3:// URL). The S3 backend is a pgcli
+          object-storage addon (--s3 minio|silo --s3-name ..., read-only:
+          pgcli never creates buckets or service accounts — it prints the
+          exact "pg mc mb ..." line to run yourself; --access-key/--secret-key
+          override the backend's root credentials). format runs once — an
+          existing volume in the metadata engine is detected and left alone
+          (even under --force, which only rebuilds the config entry from the
+          flags); mount -d self-daemonizes with its log under the
+          addon dir. "pg addon juicefs mount|umount|status [--name]" manage
+          the mount; "pg addon remove juicefs" unmounts and forgets but KEEPS
+          the bucket, metadata and binary. The S3 secret key is retrievable
+          with "pg addon password juicefs".
+  pg addon install zerofs
+          Stored under top-level addons.zerofs in config (Linux only).
+          ZeroFS — an encrypted, self-maintaining S3 filesystem (LSM on S3,
+          no external metadata engine), also host-binary (GitHub releases,
+          sha256-pinned). pgcli writes the zerofs config.toml itself and runs
+          TWO host processes: the 9P server (loopback-only by construction —
+          9P has no authentication) and the FUSE client that mounts it at
+          --mount-point. Encryption password is generated ("pg addon password
+          zerofs"); it WRAPS the bucket's data key, so losing it means losing
+          the data — and after "pg addon remove" (which keeps the bucket),
+          re-attaching needs the ORIGINAL password via --encryption-password.
+          Fencing needs conditional put (If-None-Match): --conditional-put
+          auto (default) assumes it (MinIO 2022-08+ and real S3 have it);
+          for stores lacking it (e.g. silo) use --conditional-put redis with a
+          pgcli redis addon, or none for a single writer only. Same S3-addon
+          read-only contract and manual "pg mc" bucket provisioning as juicefs.
+          "pg addon zerofs start|stop|mount|umount|status [--name]" manage it;
+          "pg logs addon zerofs --service server|mount" tail either log.
 
 Commands:
   pg addon install <addon>    install an add-on
@@ -272,6 +315,8 @@ Currently supported add-ons:
   alertmanager Alertmanager — the alert dedup/grouping/routing frontend of the Prometheus stack (single container from docker.io/prom/alertmanager; rendered alertmanager.yml with a no-op or --webhook-url web.hook receiver, or --conf-file; SIGHUP reload; cluster gossip disabled; NO web login — defaults to 0.0.0.0 guarded only by the network, and silences are dangerous, use --listen 127.0.0.1 for loopback; wired to Prometheus from the Prometheus side via --alertmanager-url; Linux host network, macOS bridge)
   gitea       Gitea — the self-hosted Git service (single container from docker.io/gitea/gitea; web login auto-generated and created via "gitea admin user create"; optional --ssh-port for clone/push over SSH; SQLite by default or --dsn to put its metadata in a PostgreSQL you already run; defaults to 0.0.0.0 since a Git host is reached from other machines; Linux host network, macOS bridge)
   beegfs      BeeGFS — the scale-out parallel filesystem (mgmtd/meta/storage services from ghcr.io/thinkparq/beegfs — brought up in dependency order by one install; by default all three on this host = a converged single-host filesystem, --roles scopes it to a subset and a --roles-without-mgmtd host joins an existing cluster via --mgmtd-host/--node-id/--password — every host runs its own pgcli, pgcli never SSHes; --storage-target repeats for multiple disks/targets; fixed protocol ports 8008/8010/8005/8003, meta/storage cannot move so one filesystem per host; shared conn-auth secret (generated on the mgmtd host), mgmtd TLS disabled; an unlicensed build caps client mounts at five — pgcli never generates a license but CARRIES a ThinkParQ PEM via --license-file / "pg addon beegfs license" (mgmtd-only); the kernel-module client is never installed — "pg addon beegfs mount-hint" prints its config, "join-hint" the per-host join commands; Linux host network only)
+  juicefs     JuiceFS — S3-backed POSIX filesystem installed as a HOST BINARY (GitHub releases + sha256; no container): metadata engine --meta sqlite3|redis|pg|dsn (pgcli's own instance or redis addon, or any --meta-dsn), S3 backend = a pgcli minio/silo addon read-only (buckets/accounts via "pg mc" by hand — pgcli prints the exact command), mounts a plain host directory; "pg addon juicefs mount|umount|status"; Linux only
+  zerofs      ZeroFS — encrypted self-maintaining S3 filesystem (LSM on S3, no external metadata) as a HOST BINARY (GitHub releases + sha256): pgcli writes config.toml and runs a loopback 9P server + FUSE client; generated encryption password wraps the bucket's data key ("pg addon password zerofs" to recover, --encryption-password to re-attach a kept bucket); needs conditional-put support (MinIO 2022-08+) else --conditional-put redis; Linux only
   nginx       HTTP reverse proxy in front of web services (path-based routing, optional TLS termination; single container from docker.io/library/nginx; Linux host network, macOS bridge)
 
 Two modes (pgbouncer, postgrest):
@@ -708,6 +753,12 @@ Examples:
   pg addon install beegfs --name fs1 --beegfs-mgmtd-port 18008 --beegfs-mgmtd-grpc-port 18010   # move mgmtd's two ports (meta/storage re-target automatically)
   pg addon install beegfs --name fs1 --roles storage --mgmtd-host 10.0.0.11 --node-id 2 --password <conn-auth> --storage-target /mnt/d1 --storage-target /mnt/d2  # cross-host: add a 2-target storage node (run ON that host; conn-auth from "pg addon beegfs join-hint")
   pg addon install beegfs --license-file license.pem                        # carry a ThinkParQ license PEM into mgmtd (mgmtd host only; hot-swap later with "pg addon beegfs license --set")
+  pg addon install juicefs                                                  # sqlite3 metadata + the "minio" addon's bucket juicefs-juicefs, mounted at <base_dir>/addon/juicefs/juicefs/mnt
+  pg addon install juicefs --name data --meta pg --pg-name mydb --s3 minio --s3-name ms3 --bucket my-bucket   # metadata in a pgcli instance (db juicefs_data created if missing)
+  pg addon install juicefs --meta redis --redis-name cache --mount-point /srv/jfs   # redis metadata engine, custom mount dir
+  pg addon install zerofs                                                   # minio backend, auto fencing, generated encryption password (pg addon password zerofs)
+  pg addon install zerofs --name z1 --s3 silo --s3-name ss3 --conditional-put redis --redis-name mred   # silo lacks If-None-Match → fence through a redis addon
+  pg addon install zerofs --name z1 --encryption-password '<from pg addon password zerofs>'   # re-attach a bucket whose entry was removed (a fresh password could not unwrap its data)
   pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050
   pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050 --upstream name=postgrest,path=/api,backend=127.0.0.1:3000 --tls`,
 	Args: cobra.ExactArgs(1),
@@ -741,7 +792,7 @@ pg.yaml.`,
 // shaped for $(...) capture in scripts.
 var addonPasswordCmd = &cobra.Command{
 	Use:   "password <addon>",
-	Short: "Print an add-on's stored password (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin/Grafana/Gitea web login password, BeeGFS conn-auth secret)",
+	Short: "Print an add-on's stored password (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin/Grafana/Gitea web login password, BeeGFS conn-auth secret, juicefs S3 secret, zerofs encryption password)",
 	Long: `Print the password stored for one add-on instance: the Redis
 requirepass (generated by pgcli), the Predixy proxy password (the
 operator-supplied copy of the proxied cluster's requirepass), the
@@ -751,7 +802,10 @@ login password (the PGADMIN_DEFAULT_PASSWORD / GF_SECURITY_ADMIN_PASSWORD / Gite
 admin-account password generated for the UI's sign-in form — not a PostgreSQL
 password), or the BeeGFS connection-auth secret (the shared CONN_AUTH_FILE_DATA
 value every daemon and client must carry — not a login, but the addon's only
-credential).
+credential), or the JuiceFS S3 secret-key it formatted the volume with, or the
+ZeroFS encryption password (the DEK wrap key — losing it means losing the
+volume's data; pass it back to "pg addon install zerofs --encryption-password"
+to re-attach a bucket after a remove).
 
 The single value goes to stdout with no decoration, so it composes into
 scripts and app config:
@@ -781,9 +835,13 @@ var addonRemoveCmd = &cobra.Command{
 For local add-ons, use -i to specify the instance.
 For remote add-ons, use --pg-name to specify the pooler name.
 
-Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/beegfs) use --name.
+Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/beegfs/juicefs/zerofs) use --name.
 Remove keeps the data directory; pass --clean-data for object-storage/KV/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea/BeeGFS
 data to go too. For beegfs the unit is the filesystem on THIS host — its role containers (all three on a converged host, the configured subset on a cross-host member) go, and --clean-data deletes their data dirs.
+For juicefs/zerofs (host-binary addons) remove unmounts and stops the processes but NEVER touches object storage or the
+metadata engine — only the config entry goes; --clean-data additionally deletes the addon's host dir (cache, logs, sqlite
+meta, config.toml). For zerofs the bucket survives by design: re-attach it later by passing the original password
+("pg addon password zerofs" before removing) to a fresh install via --encryption-password.
 
 Examples:
   pg addon remove pgbouncer -i proj01
@@ -804,7 +862,10 @@ Examples:
   pg addon remove gitea
   pg addon remove gitea --clean-data
   pg addon remove beegfs
-  pg addon remove beegfs --clean-data`,
+  pg addon remove beegfs --clean-data
+  pg addon remove juicefs --name data
+  pg addon remove juicefs --name data --clean-data
+  pg addon remove zerofs --name z1 --clean-data`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonRemove(args[0], cmd)
@@ -839,6 +900,8 @@ Supported add-ons:
   alertmanager pg addon start alertmanager [--name alertmanager]
   gitea      pg addon start gitea [--name gitea]
   beegfs     pg addon start beegfs [--name fs1]   (starts this host's roles in dependency order — mgmtd → meta → storage, or the subset a cross-host member runs)
+  juicefs    pg addon start juicefs [--name data]   (host binary: mounts the volume — alias of "pg addon juicefs mount")
+  zerofs     pg addon start zerofs [--name z1]   (host binary: brings up the 9P server — alias of "pg addon zerofs start"; the FUSE client is "pg addon zerofs mount")
   nginx      pg addon start nginx [--name proxy]
   pgbouncer  pg addon start pgbouncer -i <instance>
              pg addon start pgbouncer --pg-name <remote-name>
@@ -861,6 +924,8 @@ Examples:
   pg addon start alertmanager
   pg addon start gitea
   pg addon start beegfs
+  pg addon start juicefs --name data
+  pg addon start zerofs --name z1
   pg addon start nginx --name proxy
   pg addon start pgbouncer -i proj01
   pg addon start postgrest --pg-name app-api`,
@@ -893,6 +958,8 @@ Supported add-ons:
   alertmanager pg addon stop alertmanager [--name alertmanager]
   gitea      pg addon stop gitea [--name gitea]
   beegfs     pg addon stop beegfs [--name fs1]   (stops this host's roles in reverse order — storage → meta → mgmtd)
+  juicefs    pg addon stop juicefs [--name data]   (host binary: unmounts — alias of "pg addon juicefs umount")
+  zerofs     pg addon stop zerofs [--name z1]   (host binary: unmounts the client and stops the 9P server — alias of "pg addon zerofs stop")
   nginx      pg addon stop nginx [--name proxy]
   pgbouncer  pg addon stop pgbouncer -i <instance>
              pg addon stop pgbouncer --pg-name <remote-name>
@@ -915,6 +982,8 @@ Examples:
   pg addon stop alertmanager
   pg addon stop gitea
   pg addon stop beegfs
+  pg addon stop juicefs --name data
+  pg addon stop zerofs --name z1
   pg addon stop nginx --name proxy
   pg addon stop pgbouncer -i proj01
   pg addon stop postgrest --pg-name app-api`,
@@ -1008,7 +1077,7 @@ func init() {
 	addonInstallCmd.Flags().String("advertise-host", "", "peer-visible host: etcd member peer/client URLs, redis native-cluster --cluster-announce-ip, , garage cluster rpc_public_addr, and seaweedfs cluster weed -ip that peers dial (empty=127.0.0.1 single-host; set a LAN IP or FQDN for cross-host clusters — required on every garage or seaweedfs --cluster member)")
 	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.0.0.12:2379 (implies --initial-cluster-state existing; requires --advertise-host)")
 	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea or beegfs instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"gitea\"/\"beegfs\")")
-	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/garage/seaweedfs/redis/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea data directory (object storage / backup repository / key-value data / pgAdmin config+sessions, Grafana dashboards sqlite DB, Prometheus TSDB, Alertmanager silences+notification state, or Gitea repos + app.ini + its default SQLite DB) and pgcli-rendered files beside it; no-op for predixy, which is stateless. Never drops a seaweedfs filer metadata database or a Gitea --dsn PostgreSQL database")
+	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/garage/seaweedfs/redis/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea data directory (object storage / backup repository / key-value data / pgAdmin config+sessions, Grafana dashboards sqlite DB, Prometheus TSDB, Alertmanager silences+notification state, or Gitea repos + app.ini + its default SQLite DB) and pgcli-rendered files beside it, or the juicefs/zerofs host per-instance dir (cache, logs, sqlite meta); never the S3 bucket or a PG metadata database. No-op for predixy, which is stateless. Never drops a seaweedfs filer metadata database or a Gitea --dsn PostgreSQL database")
 
 	// haproxy flags (top-level load balancer in front of a Patroni cluster)
 	addonInstallCmd.Flags().String("mode", "", "HAProxy routing mode: unified (default, all traffic to the leader) or split (separate read listener for replicas)")
@@ -1047,10 +1116,10 @@ func init() {
 	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo/rustfs/seaweedfs: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo|rustfs>/<name>/, or the addon dir for seaweedfs; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Seaweedfs serves TLS natively: the S3 port becomes HTTPS-only (cleartext listener off). Changing this needs --force to recreate. NOT for garage: it has no native TLS (rejects --tls); front it with the nginx addon")
 	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo/rustfs: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt for MinIO/silo, rustfs_cert.pem for rustfs, cert.pem for seaweedfs). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
 	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo/rustfs: private key for --tls-cert (PEM; mounted read-only as private.key for MinIO/silo, rustfs_key.pem for rustfs, key.pem for seaweedfs). Must pair with the cert; both are required to enable BYO TLS")
-	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/PostgREST/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea container (or, for BeeGFS, the whole 3-container filesystem cluster) even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, a changed pgAdmin --email/--dsn/--pg-name, Grafana --admin-user or Gitea --admin-user/--ssh-port/--dsn seed/--allow-registration, or to force-recreate a Prometheus instance instead of hot-reloading its config)")
+	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/PostgREST/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea container (or, for BeeGFS, the whole 3-container filesystem cluster) even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, a changed pgAdmin --email/--dsn/--pg-name, Grafana --admin-user or Gitea --admin-user/--ssh-port/--dsn seed/--allow-registration, or to force-recreate a Prometheus instance instead of hot-reloading its config). For juicefs it rebuilds the config entry from the flags (format is still skipped when the volume already exists in the metadata engine); for zerofs it re-renders config.toml and restarts the server/client, KEEPING the stored encryption password (a fresh one could not unwrap the bucket's existing data)")
 
 	// redis flags (top-level standalone KV store — the first version-selectable addon)
-	addonInstallCmd.Flags().String("version", "", "Redis major version to install: 7 or 8 (default \"8\"); each maps to a pinned upstream docker.io/library/redis tag. Ignored for every other addon")
+	addonInstallCmd.Flags().String("version", "", "Redis major version to install: 7 or 8 (default \"8\"); each maps to a pinned upstream docker.io/library/redis tag. For juicefs/zerofs it instead pins the host binary release to download (default: the version's pinned sha256). Ignored for every other addon")
 	addonInstallCmd.Flags().String("password", "", "Redis requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls) / Predixy proxy password (REQUIRED, never generated: it must be the proxied cluster's requirepass — read it with `pg addon password redis --name <member>`) / pgAdmin, Grafana or Gitea WEB login password (generated on first install if omitted — not a PostgreSQL password; retrieve it with `pg addon password pgadmin`/`grafana`/`gitea`. For Grafana it only takes effect while grafana.db is absent; for Gitea the stored password is the one pgcli CREATES the admin account with, so it is inert on a revived store whose admin already exists) / BeeGFS connection-auth secret (generated on first install ONLY on a host running mgmtd; REQUIRED on a cross-host join (--roles without mgmtd) and must equal the cluster's value — retrieve it with `pg addon password beegfs` or `pg addon beegfs join-hint`)")
 	addonInstallCmd.Flags().String("admin-user", "", "Grafana WEB login user (GF_SECURITY_ADMIN_USER; default \"admin\") / Gitea WEB login user (created via `gitea admin user create`; default \"gitea\" — deliberately NOT the container's OS user \"git\") — the account you sign into the web UI with, unrelated to any PostgreSQL role")
 	addonInstallCmd.Flags().Bool("allow-registration", false, "Gitea: open self-service signup (GITEA__service__DISABLE_REGISTRATION=false; the web UI shows a Register entry). Closed by default — it is one of the two guards on the default 0.0.0.0 listen. Signups always create NORMAL users: Gitea offers no way for the register form to produce an admin, so this opens account spam, not takeover. The toggle needs --force to reach the live container; close it again with --allow-registration=false --force")
@@ -1132,12 +1201,16 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallGitea(cmd)
 	case "beegfs":
 		return runAddonInstallBeeGFS(cmd)
+	case "juicefs":
+		return runAddonInstallJuicefs(cmd)
+	case "zerofs":
+		return runAddonInstallZerofs(cmd)
 	case "nginx":
 		return runAddonInstallNginx(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, juicefs, zerofs, nginx)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -5555,6 +5628,62 @@ func runAddonList(showPassword bool) error {
 		fmt.Println("  (none)")
 	}
 
+	// juicefs (host-binary FUSE volume over an S3 addon)
+	fmt.Println()
+	fmt.Println("Filesystem add-ons (juicefs):")
+	hasJuicefs := false
+	for _, name := range sortedAddonNames(cfg.Addons.Juicefs) {
+		jc := cfg.Addons.Juicefs[name]
+		hasJuicefs = true
+		state := "not mounted"
+		if isMountPoint(jc.MountPoint) {
+			state = "mounted"
+		}
+		fmt.Printf("  %s (name: %s)\n", "juicefs", name)
+		fmt.Printf("    Status:      %s\n", state)
+		fmt.Printf("    Metadata:    %s (%s engine)\n", dsnDisplay(jc.MetaDSN), jc.MetaEngine)
+		fmt.Printf("    S3:          %s addon %q, bucket %s\n", jc.S3Addon, jc.S3Name, jc.Bucket)
+		fmt.Printf("    Binary:      %s\n", jc.BinaryPath)
+		fmt.Printf("    Mount:       %s\n", jc.MountPoint)
+		fmt.Printf("    Cache:       %s\n", jc.CacheDir)
+		if showPassword && jc.SecretKey != "" {
+			fmt.Printf("    S3 secret:   %s\n", jc.SecretKey)
+		}
+	}
+	if !hasJuicefs {
+		fmt.Println("  (none)")
+	}
+
+	// zerofs (host-binary 9P volume over an S3 addon, dual process)
+	fmt.Println()
+	fmt.Println("Filesystem add-ons (zerofs):")
+	hasZerofs := false
+	for _, name := range sortedAddonNames(cfg.Addons.Zerofs) {
+		zc := cfg.Addons.Zerofs[name]
+		hasZerofs = true
+		srv := "stopped"
+		if hostbin.Alive(zc.ServerPidFile) {
+			srv = "running"
+		}
+		state := "not mounted"
+		if isMountPoint(zc.MountPoint) {
+			state = "mounted"
+		}
+		fmt.Printf("  %s (name: %s)\n", "zerofs", name)
+		fmt.Printf("    Server:      %s (%s:%d, 9P)\n", srv, zc.Listen, zc.ListenPort)
+		fmt.Printf("    Mount:       %s at %s\n", state, zc.MountPoint)
+		fmt.Printf("    S3:          %s addon %q, bucket %s\n", zc.S3Addon, zc.S3Name, zc.Bucket)
+		fmt.Printf("    Fence:       %s\n", zc.ConditionalPut)
+		fmt.Printf("    Binary:      %s\n", zc.BinaryPath)
+		fmt.Printf("    Config:      %s\n", zc.ConfigPath)
+		if showPassword && zc.EncryptionPassword != "" {
+			fmt.Printf("    Encryption:  %s\n", zc.EncryptionPassword)
+		}
+	}
+	if !hasZerofs {
+		fmt.Println("  (none)")
+	}
+
 	// nginx (HTTP reverse proxy, top-level addon; Linux + macOS)
 	fmt.Println()
 	fmt.Println("Web add-ons (nginx):")
@@ -5674,6 +5803,18 @@ func addonPasswords(cfg *config.Config) map[string]string {
 	for name, bc := range cfg.Addons.BeeGFS {
 		out["beegfs:"+name] = bc.ConnAuth
 	}
+	// juicefs's credential is the S3 secret-key it formatted the volume with
+	// (stored in the volume's metadata thereafter, but this is the one the
+	// reinstall must reproduce).
+	for name, jc := range cfg.Addons.Juicefs {
+		out["juicefs:"+name] = jc.SecretKey
+	}
+	// zerofs's is the encryption password wrapping the bucket's data-encryption
+	// key — losing it means losing the volume's data, so re-installs must be
+	// able to reproduce it (pg addon install zerofs --encryption-password).
+	for name, zc := range cfg.Addons.Zerofs {
+		out["zerofs:"+name] = zc.EncryptionPassword
+	}
 	return out
 }
 
@@ -5770,12 +5911,16 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemoveGitea(cmd)
 	case "beegfs":
 		return runAddonRemoveBeeGFS(cmd)
+	case "juicefs":
+		return runAddonRemoveJuicefs(cmd)
+	case "zerofs":
+		return runAddonRemoveZerofs(cmd)
 	case "nginx":
 		return runAddonRemoveNginx(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, juicefs, zerofs, nginx)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -6088,10 +6233,14 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartGitea(cmd)
 	case "beegfs":
 		return runAddonStartBeeGFS(cmd)
+	case "juicefs":
+		return runAddonStartJuicefs(cmd)
+	case "zerofs":
+		return runAddonStartZerofs(cmd)
 	case "nginx":
 		return runAddonStartNginx(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, juicefs, zerofs, nginx)", addonName)
 	}
 }
 
@@ -6133,10 +6282,14 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopGitea(cmd)
 	case "beegfs":
 		return runAddonStopBeeGFS(cmd)
+	case "juicefs":
+		return runAddonStopJuicefs(cmd)
+	case "zerofs":
+		return runAddonStopZerofs(cmd)
 	case "nginx":
 		return runAddonStopNginx(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, juicefs, zerofs, nginx)", addonName)
 	}
 }
 

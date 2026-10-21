@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -443,10 +444,22 @@ func seedSeaweedfsBucket(sc *config.SeaweedfsConfig) error {
 // credential never reaches terminal scrollback through a listing.
 func dsnDisplay(dsn string) string {
 	host, port, _, _, db, err := podman.ParseDSN(dsn)
-	if err != nil {
-		return "(unparseable dsn)"
+	if err == nil {
+		return fmt.Sprintf("%s:%d/%s", host, port, db)
 	}
-	return fmt.Sprintf("%s:%d/%s", host, port, db)
+	// Non-postgres schemes the juicefs addon stores (redis://, sqlite3://) are
+	// not ParseDSN's problem — render host:port/db without the password, or a
+	// bare file path. Neither ever leaks a credential.
+	if u, perr := url.Parse(dsn); perr == nil && u.User != nil {
+		u.User = nil // drop user:password entirely (redis URLs are password-only)
+		if u.Host != "" {
+			return u.String()
+		}
+	}
+	if strings.HasPrefix(dsn, "sqlite3://") {
+		return dsn
+	}
+	return "(unparseable dsn)"
 }
 
 // runAddonRemoveSeaweedfs removes the seaweedfs container and its config

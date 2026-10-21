@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -67,12 +69,16 @@ var logsAddonCmd = &cobra.Command{
 	Short: "Show addon console output logs",
 	Long: `Show addon console output logs.
 
-Requires the addon type (pgbouncer, postgrest, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, patroni).
+Requires the addon type (pgbouncer, postgrest, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, juicefs, zerofs, patroni).
 Use -i for local instance addons, --pg-name for remote addons,
 --name for an etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage,
-seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea or beegfs instance, or Patroni member (default
-"etcd"/"pgdog"/"haproxy"/"minio"/"silo"/"rustfs"/"garage"/"seaweedfs"/"redis"/"predixy"/"pgadmin"/"grafana"/"prometheus"/"alertmanager"/"gitea"/"beegfs"; Patroni members have
+seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, juicefs or zerofs instance, or Patroni member (default
+"etcd"/"pgdog"/"haproxy"/"minio"/"silo"/"rustfs"/"garage"/"seaweedfs"/"redis"/"predixy"/"pgadmin"/"grafana"/"prometheus"/"alertmanager"/"gitea"/"beegfs"/"juicefs"/"zerofs"; Patroni members have
 no default and also require --scope).
+
+juicefs and zerofs are host-binary addons, so their logs are plain files, not
+containers: juicefs tails the mount daemon's log; zerofs tails the server log
+by default and the FUSE client's with --service mount.
 
 Examples:
   pg logs addon pgbouncer -i myinst
@@ -113,6 +119,10 @@ Examples:
   pg logs addon beegfs                 # BeeGFS mgmtd logs (the registry; default service)
   pg logs addon beegfs --service meta  # the metadata daemon's logs
   pg logs addon beegfs --name fs1 --service storage -f
+  pg logs addon juicefs --name vol1            # JuiceFS mount daemon log
+  pg logs addon juicefs --name vol1 -f
+  pg logs addon zerofs --name z1               # ZeroFS server log (default service)
+  pg logs addon zerofs --name z1 --service mount -f  # the FUSE client log
   pg logs addon patroni --scope app --name node1
   pg logs addon patroni --scope app --name node1 -f`,
 	Args: cobra.ExactArgs(1),
@@ -138,8 +148,8 @@ Examples:
 		if scope != "" && addonType != "patroni" {
 			return fmt.Errorf("--scope only applies to the patroni addon type")
 		}
-		if service != "" && addonType != "beegfs" {
-			return fmt.Errorf("--service only applies to the beegfs addon type (its one filesystem spans three containers)")
+		if service != "" && addonType != "beegfs" && addonType != "zerofs" {
+			return fmt.Errorf("--service only applies to the beegfs and zerofs addon types")
 		}
 
 		var containerName string
@@ -387,8 +397,21 @@ Examples:
 				}
 				containerName = inst.Addons.Postgrest.ContainerName
 			}
+		case "juicefs", "zerofs":
+			// Host-binary addons: logs are plain files on the host, not a
+			// container. juicefs has one mount log; zerofs has a server log
+			// (default) and a mount log (--service mount).
+			jname := etcdName
+			if jname == "" {
+				jname = addonType
+			}
+			m, err := hostAddonLogfile(addonType, jname, service, cfg)
+			if err != nil {
+				return err
+			}
+			return tailHostLog(m, tail, follow)
 		default:
-			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, nginx, patroni)", addonType)
+			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, patroni)", addonType)
 		}
 
 		return runPodmanLogs(containerName, tail, follow)
@@ -466,7 +489,7 @@ func init() {
 	logsAddonCmd.Flags().String("pg-name", "", "Remote addon name (for remote PgBouncer or PostgREST)")
 	logsAddonCmd.Flags().String("name", "", "etcd member name, pgdog proxy name, haproxy instance name, minio/silo/rustfs/garage/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/beegfs instance name, or Patroni member name")
 	logsAddonCmd.Flags().String("scope", "", "Patroni cluster scope (required only with addon type patroni)")
-	logsAddonCmd.Flags().String("service", "", "beegfs only: which container of the filesystem to read — mgmtd, meta or storage (default \"mgmtd\")")
+	logsAddonCmd.Flags().String("service", "", "beegfs: which container of the filesystem to read — mgmtd, meta or storage (default \"mgmtd\"); zerofs: server or mount (the FUSE client) (default \"server\")")
 
 	// Flags on ha subcommand
 	logsHaCmd.Flags().BoolP("follow", "f", false, "Stream logs continuously")
@@ -515,4 +538,100 @@ func runPodmanLogs(containerName string, tail int, follow bool) error {
 	cmd.Stderr = os.Stderr
 
 	return cmd.Run()
+}
+
+// ---------------------------------------------------------------------------
+// Host-binary add-on logs (juicefs, zerofs) — plain files, not containers
+// ---------------------------------------------------------------------------
+
+// hostAddonLogfile resolves the on-disk log path for a host-binary add-on
+// instance. juicefs has a single mount daemon (MountLogFile); zerofs runs a
+// server plus a FUSE client, so --service {server|mount} picks between
+// LogFile (the server, the default) and the derived mount log.
+func hostAddonLogfile(addonType, name, service string, cfg *config.Config) (string, error) {
+	switch addonType {
+	case "juicefs":
+		if service != "" {
+			return "", fmt.Errorf("--service does not apply to juicefs (one mount daemon, one log)")
+		}
+		jc, ok := cfg.Addons.Juicefs[name]
+		if !ok {
+			return "", fmt.Errorf("juicefs volume %q not found (use 'pg addon list' to see available)", name)
+		}
+		if jc.MountLogFile == "" {
+			return "", fmt.Errorf("juicefs %q has no recorded mount log path", name)
+		}
+		return jc.MountLogFile, nil
+	case "zerofs":
+		zc, ok := cfg.Addons.Zerofs[name]
+		if !ok {
+			return "", fmt.Errorf("zerofs volume %q not found (use 'pg addon list' to see available)", name)
+		}
+		svc := service
+		if svc == "" {
+			svc = "server"
+		}
+		switch svc {
+		case "server":
+			return zc.LogFile, nil
+		case "mount":
+			return zerofsMountLog(&zc), nil
+		default:
+			return "", fmt.Errorf("--service must be server or mount, got %q", svc)
+		}
+	}
+	return "", fmt.Errorf("not a host-binary add-on: %s", addonType)
+}
+
+// tailHostLog prints the last `tail` lines of a host log file, or follows it
+// with `tail -f` (matching runPodmanLogs' semantics: tail>0 → -n, follow →
+// stream). The file is small and daemon-appended, so reading it whole is fine.
+func tailHostLog(path string, tail int, follow bool) error {
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("log file %s: %w", path, err)
+	}
+	if follow {
+		args := []string{"-n", fmt.Sprintf("%d", max(tail, 10)), "-f", path}
+		return followFile(args...)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if tail > 0 && len(lines) > tail {
+		lines = lines[len(lines)-tail:]
+	}
+	for _, l := range lines {
+		fmt.Println(l)
+	}
+	return nil
+}
+
+// followFile runs `tail -f` with the file's parent dir made group-readable-safe
+// and forwards interrupt/TERM so Ctrl-C detaches cleanly (reusing the repo's
+// stopSignal/killSelf convention from ha_restore).
+func followFile(args ...string) error {
+	cmd := exec.Command("tail", args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("starting tail: %w", err)
+	}
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, stopSignal)
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		signal.Stop(sigs)
+		return err
+	case sig := <-sigs:
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		<-done
+		signal.Stop(sigs)
+		killSelf(sig)
+		return nil
+	}
 }

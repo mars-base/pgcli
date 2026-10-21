@@ -25,7 +25,7 @@ func init() {
 		c.Flags().Bool("postgrest", false, "select the PostgREST addon (use with -i for a local one, --pg-name for a remote one)")
 		c.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST (top-level addons)")
 		c.Flags().Bool("etcd", false, "select an etcd member (top-level addons)")
-		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea or beegfs instance, or Patroni member")
+		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, juicefs, zerofs or nginx instance, or Patroni member")
 		c.Flags().Bool("pgdog", false, "select a PgDog proxy (top-level addons)")
 		c.Flags().Bool("ha", false, "select Patroni HA members (top-level addons; requires --scope)")
 		c.Flags().Bool("haproxy", false, "select an HAProxy instance (top-level addons)")
@@ -42,6 +42,8 @@ func init() {
 		c.Flags().Bool("alertmanager", false, "select an Alertmanager instance (top-level addons)")
 		c.Flags().Bool("gitea", false, "select a Gitea instance (top-level addons)")
 		c.Flags().Bool("beegfs", false, "select a BeeGFS filesystem (top-level addons; autostart starts the whole 3-container cluster)")
+		c.Flags().Bool("juicefs", false, "select a JuiceFS volume (top-level host-binary addons; autostart re-mounts it)")
+		c.Flags().Bool("zerofs", false, "select a ZeroFS volume (top-level host-binary addons; autostart starts the 9P server and FUSE client)")
 		c.Flags().Bool("nginx", false, "select an nginx instance (top-level addons)")
 		c.Flags().String("scope", "", "Patroni cluster scope (required only with --ha)")
 	}
@@ -60,7 +62,7 @@ Use 'pg autostart disable' to opt out.`,
 
 var autostartEnableCmd = &cobra.Command{
 	Use:   "enable",
-	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/beegfs instance, or a Patroni member",
+	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/beegfs/juicefs/zerofs instance, or a Patroni member",
 	Long: `Enable auto-start on boot for exactly one target:
 
   pg autostart enable -i myinst          # instance
@@ -85,6 +87,8 @@ var autostartEnableCmd = &cobra.Command{
   pg autostart enable --alertmanager --name am1      # Alertmanager (default name "alertmanager")
   pg autostart enable --gitea --name git1            # Gitea (default name "gitea")
   pg autostart enable --beegfs --name fs1            # BeeGFS filesystem — starts the whole mgmtd+meta+storage cluster (default name "beegfs")
+  pg autostart enable --juicefs --name vol1          # JuiceFS volume — remounts it (default name "juicefs")
+  pg autostart enable --zerofs --name z1             # ZeroFS volume — 9P server + FUSE client (default name "zerofs")
   pg autostart enable --ha --scope app --name node1  # Patroni member (one at a time)
 
 Etcd autostart only starts the member's existing container at boot; it never
@@ -148,6 +152,13 @@ addon install beegfs first). The data dirs are owned by the root-running images
 from creation, so a boot-time start needs no special host privileges; the mgmtd
 registry and both targets persist across reboots, and clients re-establish
 mounts on their own once the cluster is back.
+JuiceFS and ZeroFS autostart are the only host-binary (non-container) ones: they
+re-run the mount at boot rather than start a container. JuiceFS remounts the
+volume (the metadata engine and bucket already exist — it never re-formats);
+ZeroFS brings up its 9P server and then the FUSE client. Both run after the
+object-storage addons in the boot sequence, so the S3 backend is listening
+before the filesystem reaches for it. They mount as the user the boot service
+runs as (root here), same as a manual "pg addon ... mount".
 Patroni member autostart only brings that member's existing container up,
 reading the patroni.yml already on disk — create the member first (pg ha
 create). Start order relative to the DCS doesn't matter: Patroni retries until
@@ -229,6 +240,8 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	giteaSel, _ := cmd.Flags().GetBool("gitea")
 	beegfsSel, _ := cmd.Flags().GetBool("beegfs")
 	nginxSel, _ := cmd.Flags().GetBool("nginx")
+	juicefsSel, _ := cmd.Flags().GetBool("juicefs")
+	zerofsSel, _ := cmd.Flags().GetBool("zerofs")
 	pgName, _ := cmd.Flags().GetString("pg-name")
 	addonName, _ := cmd.Flags().GetString("name")
 	scope, _ := cmd.Flags().GetString("scope")
@@ -299,17 +312,23 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	if beegfsSel {
 		sel++
 	}
+	if juicefsSel {
+		sel++
+	}
+	if zerofsSel {
+		sel++
+	}
 	if nginxSel {
 		sel++
 	}
 	if sel != 1 {
-		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --gitea, --beegfs, or --nginx")
+		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --gitea, --beegfs, --juicefs, --zerofs, or --nginx")
 	}
 	if pgName != "" && !pgbSel && !prSel {
 		return fmt.Errorf("--pg-name requires --pgbouncer or --postgrest")
 	}
-	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !garageSel && !seaweedfsSel && !redisSel && !predixySel && !pgadminSel && !grafanaSel && !prometheusSel && !alertmanagerSel && !giteaSel && !beegfsSel && !nginxSel {
-		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --gitea, --beegfs, or --nginx")
+	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !garageSel && !seaweedfsSel && !redisSel && !predixySel && !pgadminSel && !grafanaSel && !prometheusSel && !alertmanagerSel && !giteaSel && !beegfsSel && !juicefsSel && !zerofsSel && !nginxSel {
+		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --gitea, --beegfs, --juicefs, --zerofs, or --nginx")
 	}
 	if scope != "" && !haSel {
 		return fmt.Errorf("--scope requires --ha")
@@ -491,6 +510,30 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		bc.Autostart = enable
 		cfg.Addons.BeeGFS[proxyName] = bc
 		targetDesc = fmt.Sprintf("beegfs filesystem %q", proxyName)
+	case juicefsSel:
+		proxyName := addonName
+		if proxyName == "" {
+			proxyName = "juicefs"
+		}
+		jc, ok := cfg.Addons.Juicefs[proxyName]
+		if !ok {
+			return fmt.Errorf("juicefs volume %q not found in config", proxyName)
+		}
+		jc.Autostart = enable
+		cfg.Addons.Juicefs[proxyName] = jc
+		targetDesc = fmt.Sprintf("juicefs volume %q", proxyName)
+	case zerofsSel:
+		proxyName := addonName
+		if proxyName == "" {
+			proxyName = "zerofs"
+		}
+		zc, ok := cfg.Addons.Zerofs[proxyName]
+		if !ok {
+			return fmt.Errorf("zerofs volume %q not found in config", proxyName)
+		}
+		zc.Autostart = enable
+		cfg.Addons.Zerofs[proxyName] = zc
+		targetDesc = fmt.Sprintf("zerofs volume %q", proxyName)
 	case nginxSel:
 		proxyName := addonName
 		if proxyName == "" {
@@ -821,6 +864,12 @@ func runAutostartStatus(cmd *cobra.Command, args []string) error {
 	}
 	for name, bc := range cfg.Addons.BeeGFS {
 		fmt.Printf("  beegfs %-13s %s\n", name, onOff(bc.Autostart))
+	}
+	for name, jc := range cfg.Addons.Juicefs {
+		fmt.Printf("  juicefs %-12s %s\n", name, onOff(jc.Autostart))
+	}
+	for name, zc := range cfg.Addons.Zerofs {
+		fmt.Printf("  zerofs %-13s %s\n", name, onOff(zc.Autostart))
 	}
 	for name, nc := range cfg.Addons.Nginx {
 		fmt.Printf("  nginx %-15s %s\n", name, onOff(nc.Autostart))
