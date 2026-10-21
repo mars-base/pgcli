@@ -226,6 +226,7 @@ container-images-export:
 	@mkdir -p images
 	@for img in $(IMAGES); do \
 	  tar=images/$$(echo $${img##*/} | tr : _).tar; \
+	  if [ -f $$tar ]; then echo "SKIP $$tar  (already exported)"; continue; fi; \
 	  podman pull --platform linux/amd64 $$img >/dev/null 2>&1 \
 	    || podman image exists $$img \
 	    || { echo "FAIL: cannot resolve $$img (pull --platform amd64 failed and not in local store; login ghcr.io if private)" >&2; exit 1; }; \
