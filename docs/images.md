@@ -37,6 +37,7 @@ pgcli 使用的容器镜像及其默认 tag。
 | `ghcr.io/thinkparq/beegfs-mgmtd` | `8.4.0` | BeeGFS 管理/注册服务（三容器之一），官方 ThinkParQ 镜像无 wrapper；root 运行、host 网络 | `BeeGFSImageRepo` + `DefaultBeeGFSVersion`（`config.go:629/635`） |
 | `ghcr.io/thinkparq/beegfs-meta` | `8.4.0` | BeeGFS 元数据服务（三容器之二），固定监听 8005 | 同上 |
 | `ghcr.io/thinkparq/beegfs-storage` | `8.4.0` | BeeGFS 数据目标（三容器之三），固定监听 8003 | 同上 |
+| `docker.io/victoriametrics/victoria-metrics` | `v1.154.1` | VictoriaMetrics（高性能 Prometheus 兼容时序数据库），纯上游官方镜像无 wrapper；单架构 amd64，以 root 运行 | `DefaultVictoriaMetricsImageTag` |
 
 ## 镜像导出
 
@@ -123,6 +124,11 @@ for svc in mgmtd meta storage; do
   podman pull --platform linux/amd64 ghcr.io/thinkparq/beegfs-${svc}:8.4.0
   podman save -o "$TARGET/beegfs-${svc}_8.4.0.tar" ghcr.io/thinkparq/beegfs-${svc}:8.4.0
 done
+
+# victoriametrics 上游镜像是单架构 amd64（root 运行，无 uid chown），直接 save
+podman pull --platform linux/amd64 docker.io/victoriametrics/victoria-metrics:v1.154.1
+podman save -o "$TARGET/victoriametrics_v1.154.1.tar" \
+  docker.io/victoriametrics/victoria-metrics:v1.154.1
 ```
 
 ### rustfs（双架构 manifest 不能直接 save）
@@ -247,11 +253,19 @@ done
   zerofs `DefaultZerofsVersion` + `ZerofsTarballSHA256`），落到宿主 `PATH`（默认
   `/usr/local/bin`），`PATH` 上已有同名二进制则直接复用。离线环境无需预置任何
   tar——把二进制预先放到目标主机的 `PATH` 上即可绕过下载
+- **victoriametrics**：纯上游官方 `docker.io/victoriametrics/victoria-metrics`，
+  无 wrapper。镜像以 **root** 运行（与 prometheus/grafana 的 uid 65534/472 不同，
+  无需宿主预 chown 数据目录）；单架构 amd64（上游只发 amd64 二进制）。pin 到
+  stable 线 `v1.154.1`（2026-10-19 发布的最新稳定版）。与 Prometheus 一样**完全没有
+  鉴权**——`0.0.0.0` 默认背后没有密码兜底，暴露面只靠网络边界；不同的是**完全不需要
+  配置文件**——一切都作为镜像名之后的 CLI flag 传入（`-storageDataPath` /
+  `-httpListenAddr` / `-retentionPeriod` / `--extra-arg` 自定义 flags），故
+  没有 SIGHUP reload，所有变更需重建容器
 - **pgbouncer** / **postgrest** / **haproxy** / **etcd** / **pgdog**：上游官方或社区维护的稳定版本
 
 ---
 
-**最后更新**：2026-10-21（补录 juicefs / zerofs 宿主二进制的无镜像说明；
+**最后更新**：2026-10-22（新增 victoriametrics 镜像；此前补录 juicefs / zerofs 宿主二进制的无镜像说明；
 此前新增 beegfs 三镜像于 2026-10-19，gitea 于 2026-10-16
 合入时补录，alertmanager 于 2026-10-15
 合入时补录，grafana 与 prometheus 于 2026-10-14 合入时补录，再往前 garage 与
