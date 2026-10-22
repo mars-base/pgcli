@@ -124,8 +124,11 @@ put it behind a TLS-terminating reverse proxy (see
 # Using -connect flag (v2.0.0+)
 duckdb -connect -c "SELECT * FROM t"
 
-# Or via SQL
+# Or via SQL (short form, localhost default)
 duckdb -c "ATTACH 'quack:localhost' AS qk (TOKEN 'BAED...'); CONNECT qk; SELECT * FROM t"
+
+# Explicit ip:port form (for remote or non-default port)
+duckdb -c "ATTACH 'quack:127.0.0.1:9494' AS qk (TOKEN 'BAED...'); CONNECT qk; SELECT * FROM t"
 ```
 
 The `-connect` flag auto-discovers the token from the server's output. For

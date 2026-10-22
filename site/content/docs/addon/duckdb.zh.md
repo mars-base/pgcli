@@ -116,8 +116,11 @@ duckdb -c "INSTALL quack; LOAD quack; CALL quack_serve(token='mytoken')"
 # 使用 -connect 参数（v2.0.0+）
 duckdb -connect -c "SELECT * FROM t"
 
-# 或通过 SQL
+# 或通过 SQL（简写形式，默认 localhost）
 duckdb -c "ATTACH 'quack:localhost' AS qk (TOKEN 'BAED...'); CONNECT qk; SELECT * FROM t"
+
+# 显式 ip:port 形式（远程连接或非默认端口时使用）
+duckdb -c "ATTACH 'quack:127.0.0.1:9494' AS qk (TOKEN 'BAED...'); CONNECT qk; SELECT * FROM t"
 ```
 
 `-connect` 参数会自动发现服务端输出的 token。手动连接时，从服务端启动
