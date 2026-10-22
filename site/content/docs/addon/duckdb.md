@@ -14,8 +14,8 @@ once the `httpfs` extension is loaded.
 As a pgcli addon, DuckDB is a **host-binary** addon: there is no container and
 no daemon. `pg addon install duckdb` downloads the official CLI zip from GitHub
 releases (sha256-verified; a `duckdb` already on `PATH` is reused), installs
-common extensions (`httpfs`, `parquet`, `json`), and records the entry in
-`pg.yaml`.
+the `httpfs` extension (parquet and json are bundled in the binary), and
+records the entry in `pg.yaml`.
 
 > **Platform**: Linux only, amd64 only (macOS and other architectures refuse
 > with a clear error). DuckDB is a standalone CLI tool — it does not run as a
@@ -34,7 +34,7 @@ rustfs, garage, seaweedfs) — DuckDB queries their contents directly via
 ## Usage
 
 ```bash
-# Default: v1.5.6 LTS, install httpfs+parquet+json extensions
+# Default: v1.5.6 LTS, install httpfs extension (parquet/json are bundled)
 pg addon install duckdb
 
 # Pin a specific version
@@ -74,7 +74,7 @@ duckdb ~/.pgcli/addon/duckdb/duckdb/analytics.duckdb
 | `--version` | `1.5.6` | Release to download (its sha256 is pinned in pgcli; `1.5.6` LTS and `2.0.0` supported) |
 | `--data-dir` | `<base>/addon/duckdb/<name>` | Default database directory for `.duckdb` files |
 | `--install-dir` | `/usr/local/bin` | Where the host binary goes (falls back to `~/.local/bin` when not writable — keep it on `PATH`) |
-| `--no-extensions` | off | Skip installing common extensions (`httpfs`, `parquet`, `json`) |
+| `--no-extensions` | off | Skip installing the `httpfs` extension (parquet and json are bundled in the binary) |
 | `--force` | off | Rebuild the config entry from the flags |
 
 ## Daily operations
@@ -176,17 +176,21 @@ SELECT * FROM read_csv_auto('/tmp/data.tsv', delim = '\t');
 
 ### S3 access (httpfs extension)
 
-The `httpfs` extension enables S3 access. Credentials are configured once per
-session, or via environment variables:
+The `httpfs` extension enables S3 access. Credentials and endpoint are configured
+via `CREATE SECRET` (v2.0.0+) or legacy `SET` commands (v1.5.x).
+
+#### DuckDB v2.0.0+ — `CREATE SECRET`
 
 ```sql
--- Configure S3 credentials in the DuckDB session
-SET s3_endpoint = 'minio.example.com:9000';
-SET s3_access_key_id = 'admin';
-SET s3_secret_access_key = 'your-secret-key';
-SET s3_use_ssl = false;   -- true for https endpoints
-SET s3_region = 'us-east-1';   -- 'us-east-1' works for MinIO (region is ignored)
-SET s3_url_style = 'path';   -- MinIO and compatible stores use path-style
+-- Configure S3 credentials (v2.0.0+ syntax)
+CREATE SECRET (
+  TYPE S3,
+  ENDPOINT 'minio.example.com:9000',
+  KEY_ID 'admin',
+  SECRET 'your-secret-key',
+  USE_SSL false,
+  URL_STYLE 'path'   -- required for MinIO and compatible stores
+);
 
 -- Query Parquet directly from S3
 SELECT count(*) FROM read_parquet('s3://my-bucket/events/2026/*.parquet');
@@ -200,6 +204,18 @@ SELECT * FROM read_json_auto('s3://my-bucket/config.json');
 -- Write Parquet back to S3 (needs write permissions on the bucket)
 COPY (SELECT * FROM read_parquet('/tmp/*.parquet') WHERE year = 2026)
   TO 's3://output-bucket/filtered/2026.parquet' (FORMAT parquet);
+```
+
+#### DuckDB v1.5.x — legacy `SET` commands
+
+```sql
+-- Configure S3 credentials in the DuckDB session (v1.5.x only)
+SET s3_endpoint = 'minio.example.com:9000';
+SET s3_access_key_id = 'admin';
+SET s3_secret_access_key = 'your-secret-key';
+SET s3_use_ssl = false;   -- true for https endpoints
+SET s3_region = 'us-east-1';   -- 'us-east-1' works for MinIO (region is ignored)
+SET s3_url_style = 'path';   -- MinIO and compatible stores use path-style
 ```
 
 #### Connecting to pgcli-managed S3 stores
@@ -233,10 +249,24 @@ pg mc mb ms3/my-bucket
 pg mc cp /tmp/data.parquet ms3/my-bucket/data.parquet
 ```
 
-Then query it from DuckDB — note `s3_url_style = 'path'` is required for
+Then query it from DuckDB — note `URL_STYLE 'path'` is required for
 MinIO, silo, rustfs and compatible stores (they do not support virtual-host style):
 
 ```bash
+# DuckDB v2.0.0+
+duckdb -c "
+  CREATE SECRET (
+    TYPE S3,
+    ENDPOINT '127.0.0.1:9000',
+    KEY_ID 'admin',
+    SECRET '${S3_SECRET}',
+    USE_SSL false,
+    URL_STYLE 'path'
+  );
+  SELECT count(*) FROM read_parquet('s3://my-bucket/data/*.parquet');
+"
+
+# DuckDB v1.5.x (legacy SET syntax)
 duckdb -c "
   SET s3_endpoint = '127.0.0.1:9000';
   SET s3_access_key_id = 'admin';
@@ -248,15 +278,19 @@ duckdb -c "
 ```
 
 For a more permanent setup, create a DuckDB startup file (`~/.duckdbrc`) with
-the `SET` commands — they run on every session start:
+the `CREATE SECRET` (v2.0.0+) or `SET` (v1.5.x) commands — they run on every
+session start:
 
 ```sql
--- ~/.duckdbrc
-SET s3_endpoint = 'minio.example.com:9000';
-SET s3_access_key_id = 'admin';
-SET s3_secret_access_key = 'your-secret-key';
-SET s3_use_ssl = false;
-SET s3_url_style = 'path';
+-- ~/.duckdbrc (DuckDB v2.0.0+)
+CREATE SECRET (
+  TYPE S3,
+  ENDPOINT 'minio.example.com:9000',
+  KEY_ID 'admin',
+  SECRET 'your-secret-key',
+  USE_SSL false,
+  URL_STYLE 'path'
+);
 ```
 
 ### Environment variables for S3
@@ -265,8 +299,9 @@ DuckDB reads endpoint and SSL settings from `DUCKDB_S3_*` environment variables,
 but credentials must use standard AWS variables (`AWS_ACCESS_KEY_ID`,
 `AWS_SECRET_ACCESS_KEY`) — DuckDB's `enable_global_s3_configuration` auto-detects these.
 
-`s3_url_style` cannot be set via environment variables — it must be configured
-with `SET` or in `~/.duckdbrc`.
+> **v2.0.0 limitation**: `URL_STYLE` cannot be set via environment variables.
+> It defaults to virtual-host, which breaks MinIO/silo/rustfs (they require path-style).
+> For these stores, use `CREATE SECRET` with `URL_STYLE 'path'` instead of env vars.
 
 ```bash
 # Endpoint and SSL via DUCKDB_S3_*
@@ -277,8 +312,16 @@ export DUCKDB_S3_USE_SSL='false'
 export AWS_ACCESS_KEY_ID='admin'
 export AWS_SECRET_ACCESS_KEY='your-secret-key'
 
-# URL style must still be set in the session or startup file
-duckdb -c "LOAD httpfs; SET s3_url_style = 'path'; SELECT * FROM read_parquet('s3://my-bucket/data.parquet');"
+# URL style must still be set in the session or startup file (v1.5.x)
+duckdb -c "SET s3_url_style = 'path'; SELECT * FROM read_parquet('s3://my-bucket/data.parquet');"
+
+# For v2.0.0, URL_STYLE must be set via CREATE SECRET — env vars alone are insufficient
+# for MinIO/silo/rustfs (virtual-host style is not supported by these stores)
+duckdb -c "
+  CREATE SECRET (TYPE S3, ENDPOINT '127.0.0.1:9000', KEY_ID 'admin',
+    SECRET 'your-secret-key', USE_SSL false, URL_STYLE 'path');
+  SELECT * FROM read_parquet('s3://my-bucket/data.parquet');
+"
 ```
 
 For MinIO/silo/rustfs, you still need `s3_url_style = 'path'` because these

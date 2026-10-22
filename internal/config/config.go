@@ -1072,20 +1072,28 @@ type ZerofsConfig struct {
 }
 
 // DefaultDuckdbVersion pins the DuckDB CLI version downloaded from
-// duckdb/duckdb GitHub releases. The digest is the SHA256 of the
-// duckdb_cli-linux-amd64.zip asset.
+// duckdb/duckdb GitHub releases. v1.5.x uses .zip, v2.0.x uses .tar.gz.
 const (
 	DefaultDuckdbVersion = "1.5.6"
-	duckdbSHAamd64       = "6e89deac1ebbc36eed0291caf8b567b030c7b86ac35998f71854e22b3c5d5e2f"
+	duckdbSHA_1_5_6     = "6e89deac1ebbc36eed0291caf8b567b030c7b86ac35998f71854e22b3c5d5e2f" // duckdb_cli-linux-amd64.zip
+	duckdbSHA_2_0_0     = "c6507206baf7793c6013dbd82368469a45f20dc0e17a6f92f204602f652ed2bc" // duckdb-cli-linux-amd64.tar.gz
 )
 
-// DuckdbSHA256 returns the pinned checksum of the DuckDB CLI release zip
-// for a linux architecture (amd64 only). An unknown arch returns "".
-func DuckdbSHA256(arch string) string {
-	if arch == "amd64" {
-		return duckdbSHAamd64
+// DuckdbSHA256 returns the pinned checksum for a specific DuckDB version
+// and architecture (amd64 only). Unknown version/arch returns "".
+func DuckdbSHA256(version, arch string) string {
+	if arch != "amd64" {
+		return ""
 	}
-	return ""
+	v := strings.TrimPrefix(version, "v")
+	switch v {
+	case "1.5.6":
+		return duckdbSHA_1_5_6
+	case "2.0.0":
+		return duckdbSHA_2_0_0
+	default:
+		return ""
+	}
 }
 
 // DuckdbConfig holds a host-installed DuckDB CLI deployment: the duckdb

@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"archive/tar"
 	"archive/zip"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -108,6 +110,46 @@ func duckdbExtractZip(zipPath, dest string) error {
 	return fmt.Errorf("duckdb binary not found in %s", zipPath)
 }
 
+// duckdbExtractTarGz extracts the duckdb binary from a tar.gz archive into dest.
+func duckdbExtractTarGz(tarGzPath, dest string) error {
+	f, err := os.Open(tarGzPath)
+	if err != nil {
+		return fmt.Errorf("opening tar.gz: %w", err)
+	}
+	defer f.Close()
+
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("creating gzip reader: %w", err)
+	}
+	defer gz.Close()
+
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("reading tar: %w", err)
+		}
+		if filepath.Base(hdr.Name) != "duckdb" || hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+
+		out, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0755)
+		if err != nil {
+			return fmt.Errorf("creating %s: %w", dest, err)
+		}
+		if _, err := io.Copy(out, tr); err != nil {
+			out.Close()
+			return fmt.Errorf("extracting %s: %w", hdr.Name, err)
+		}
+		return out.Close()
+	}
+	return fmt.Errorf("duckdb binary not found in %s", tarGzPath)
+}
+
 // ensureDuckdbBinary locates or downloads the DuckDB CLI binary.
 // Returns the binary path plus a user-facing note (empty unless the installer
 // had to fall back off /usr/local/bin).
@@ -133,8 +175,16 @@ func ensureDuckdbBinary(version, installDir string) (string, string, error) {
 	}
 
 	v := strings.TrimPrefix(version, "v")
-	sha := config.DuckdbSHA256("amd64")
-	url := fmt.Sprintf("https://github.com/duckdb/duckdb/releases/download/v%s/duckdb_cli-linux-amd64.zip", v)
+	sha := config.DuckdbSHA256(version, "amd64")
+
+	// DuckDB v2.0.0+ uses .tar.gz, earlier versions use .zip
+	var url, assetName string
+	if strings.HasPrefix(v, "2.") {
+		assetName = "duckdb-cli-linux-amd64.tar.gz"
+	} else {
+		assetName = "duckdb_cli-linux-amd64.zip"
+	}
+	url = fmt.Sprintf("https://github.com/duckdb/duckdb/releases/download/v%s/%s", v, assetName)
 
 	// Download to temp file
 	tmpDir, err := os.MkdirTemp("", "duckdb-install-")
@@ -143,17 +193,24 @@ func ensureDuckdbBinary(version, installDir string) (string, string, error) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	zipPath := filepath.Join(tmpDir, "duckdb.zip")
+	assetPath := filepath.Join(tmpDir, assetName)
 	fmt.Printf("-> Downloading duckdb %s (linux/amd64)...\n", version)
-	if err := duckdbFetch(url, zipPath, sha); err != nil {
+	if err := duckdbFetch(url, assetPath, sha); err != nil {
 		return "", "", err
 	}
 
 	// Extract to temp name, then atomic rename
 	exPath := filepath.Join(dir, ".duckdb.extracting")
 	defer os.Remove(exPath)
-	if err := duckdbExtractZip(zipPath, exPath); err != nil {
-		return "", "", err
+
+	var extractErr error
+	if strings.HasSuffix(assetName, ".tar.gz") {
+		extractErr = duckdbExtractTarGz(assetPath, exPath)
+	} else {
+		extractErr = duckdbExtractZip(assetPath, exPath)
+	}
+	if extractErr != nil {
+		return "", "", extractErr
 	}
 
 	final := filepath.Join(dir, "duckdb")

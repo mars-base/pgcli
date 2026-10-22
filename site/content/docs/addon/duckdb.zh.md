@@ -12,8 +12,8 @@ C++ 编写的列式引擎，向量化执行，可以直接查询 Parquet、CSV�
 
 作为 pgcli 插件，DuckDB 是**宿主二进制**形态：没有容器，没有守护进程。
 `pg addon install duckdb` 从 GitHub releases 下载官方 CLI zip（sha256 校验；
-`PATH` 上已有 `duckdb` 则直接复用），安装常用扩展（`httpfs`、`parquet`、
-`json`），并在 `pg.yaml` 中记录条目。
+`PATH` 上已有 `duckdb` 则直接复用），安装 `httpfs` 扩展（parquet 和 json
+已内置于二进制中），并在 `pg.yaml` 中记录条目。
 
 > **平台**：仅 Linux，仅 amd64（macOS 及其他架构明确拒绝并给出错误提示）。
 > DuckDB 是一个独立的 CLI 工具——不作为后台服务运行、不监听端口、不会传播进
@@ -29,7 +29,7 @@ seaweedfs）——DuckDB 通过 `httpfs` 直接查询其中的内容。
 ## 用法
 
 ```bash
-# 默认：v1.5.6 LTS，安装 httpfs+parquet+json 扩展
+# 默认：v1.5.6 LTS，安装 httpfs 扩展（parquet/json 已内置）
 pg addon install duckdb
 
 # 指定版本
@@ -69,7 +69,7 @@ duckdb ~/.pgcli/addon/duckdb/duckdb/analytics.duckdb
 | `--version` | `1.5.6` | 要下载的版本（sha256 已 pin 在 pgcli 源码里；支持 `1.5.6` LTS 和 `2.0.0`） |
 | `--data-dir` | `<base>/addon/duckdb/<name>` | `.duckdb` 数据库文件的默认目录 |
 | `--install-dir` | `/usr/local/bin` | 宿主二进制落点（不可写时退到 `~/.local/bin`——注意保持其在 `PATH` 上） |
-| `--no-extensions` | 关 | 跳过安装常用扩展（`httpfs`、`parquet`、`json`） |
+| `--no-extensions` | 关 | 跳过安装 `httpfs` 扩展（parquet 和 json 已内置于二进制中） |
 | `--force` | 关 | 按命令行参数重建配置条目 |
 
 ## 日常管理
@@ -168,15 +168,21 @@ SELECT * FROM read_csv_auto('/tmp/data.tsv', delim = '\t');
 
 ### S3 访问（httpfs 扩展）
 
-`httpfs` 扩展启用 S3 访问。凭据在每个会话里配置一次，或通过环境变量：
+`httpfs` 扩展启用 S3 访问。凭据和端点通过 `CREATE SECRET`（v2.0.0+）或传统
+`SET` 命令（v1.5.x）配置。
+
+#### DuckDB v2.0.0+ — `CREATE SECRET`
 
 ```sql
--- 在 DuckDB 会话中配置 S3 凭据
-SET s3_endpoint = 'minio.example.com:9000';
-SET s3_access_key_id = 'admin';
-SET s3_secret_access_key = 'your-secret-key';
-SET s3_use_ssl = false;   -- https 端点用 true
-SET s3_region = 'us-east-1';   -- MinIO 写 'us-east-1' 即可（region 被忽略）
+-- 配置 S3 凭据（v2.0.0+ 语法）
+CREATE SECRET (
+  TYPE S3,
+  ENDPOINT 'minio.example.com:9000',
+  KEY_ID 'admin',
+  SECRET 'your-secret-key',
+  USE_SSL false,
+  URL_STYLE 'path'   -- MinIO 及兼容存储必须设置
+);
 
 -- 从 S3 直接查询 Parquet
 SELECT count(*) FROM read_parquet('s3://my-bucket/events/2026/*.parquet');
@@ -190,6 +196,18 @@ SELECT * FROM read_json_auto('s3://my-bucket/config.json');
 -- 写回 Parquet 到 S3（需要桶的写权限）
 COPY (SELECT * FROM read_parquet('/tmp/*.parquet') WHERE year = 2026)
   TO 's3://output-bucket/filtered/2026.parquet' (FORMAT parquet);
+```
+
+#### DuckDB v1.5.x — 传统 `SET` 命令
+
+```sql
+-- 在 DuckDB 会话中配置 S3 凭据（仅 v1.5.x）
+SET s3_endpoint = 'minio.example.com:9000';
+SET s3_access_key_id = 'admin';
+SET s3_secret_access_key = 'your-secret-key';
+SET s3_use_ssl = false;   -- https 端点用 true
+SET s3_region = 'us-east-1';   -- MinIO 写 'us-east-1' 即可（region 被忽略）
+SET s3_url_style = 'path';   -- MinIO 及兼容存储必须设置
 ```
 
 #### 连接 pgcli 管理的 S3 存储
@@ -224,9 +242,23 @@ pg mc cp /tmp/data.parquet ms3/my-bucket/data.parquet
 ```
 
 然后从 DuckDB 查询——MinIO、silo、rustfs 及兼容存储需要
-`s3_url_style = 'path'`（不支持 virtual-host style）：
+`URL_STYLE 'path'`（不支持 virtual-host style）：
 
 ```bash
+# DuckDB v2.0.0+
+duckdb -c "
+  CREATE SECRET (
+    TYPE S3,
+    ENDPOINT '127.0.0.1:9000',
+    KEY_ID 'admin',
+    SECRET '${S3_SECRET}',
+    USE_SSL false,
+    URL_STYLE 'path'
+  );
+  SELECT count(*) FROM read_parquet('s3://my-bucket/data/*.parquet');
+"
+
+# DuckDB v1.5.x（传统 SET 语法）
 duckdb -c "
   SET s3_endpoint = '127.0.0.1:9000';
   SET s3_access_key_id = 'admin';
@@ -237,16 +269,19 @@ duckdb -c "
 "
 ```
 
-如需更持久的配置，创建 DuckDB 启动文件（`~/.duckdbrc`），其中的 `SET` 命令
+如需更持久的配置，创建 DuckDB 启动文件（`~/.duckdbrc`），其中的命令
 会在每次会话启动时执行：
 
 ```sql
--- ~/.duckdbrc
-SET s3_endpoint = 'minio.example.com:9000';
-SET s3_access_key_id = 'admin';
-SET s3_secret_access_key = 'your-secret-key';
-SET s3_use_ssl = false;
-SET s3_url_style = 'path';
+-- ~/.duckdbrc (DuckDB v2.0.0+)
+CREATE SECRET (
+  TYPE S3,
+  ENDPOINT 'minio.example.com:9000',
+  KEY_ID 'admin',
+  SECRET 'your-secret-key',
+  USE_SSL false,
+  URL_STYLE 'path'
+);
 ```
 
 ### S3 环境变量
@@ -255,7 +290,9 @@ DuckDB 从 `DUCKDB_S3_*` 环境变量读取端点和 SSL 设置，但凭据必�
 变量（`AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY`）——DuckDB 的
 `enable_global_s3_configuration` 会自动检测这些变量。
 
-`s3_url_style` 无法通过环境变量设置——必须用 `SET` 或在 `~/.duckdbrc` 中配置。
+> **v2.0.0 限制**：`URL_STYLE` 无法通过环境变量设置。它默认为 virtual-host，
+> 会导致 MinIO/silo/rustfs（需要 path-style）无法访问。对于这些存储，
+> 应使用 `CREATE SECRET` 并指定 `URL_STYLE 'path'`。
 
 ```bash
 # 端点和 SSL 通过 DUCKDB_S3_*
@@ -266,8 +303,16 @@ export DUCKDB_S3_USE_SSL='false'
 export AWS_ACCESS_KEY_ID='admin'
 export AWS_SECRET_ACCESS_KEY='your-secret-key'
 
-# URL 样式仍需在会话或启动文件中设置
-duckdb -c "LOAD httpfs; SET s3_url_style = 'path'; SELECT * FROM read_parquet('s3://my-bucket/data.parquet');"
+# URL 样式仍需在会话或启动文件中设置（v1.5.x）
+duckdb -c "SET s3_url_style = 'path'; SELECT * FROM read_parquet('s3://my-bucket/data.parquet');"
+
+# v2.0.0 中 URL_STYLE 必须通过 CREATE SECRET 设置——环境变量无法覆盖
+# MinIO/silo/rustfs 不支持 virtual-host style，必须显式指定 path
+duckdb -c "
+  CREATE SECRET (TYPE S3, ENDPOINT '127.0.0.1:9000', KEY_ID 'admin',
+    SECRET 'your-secret-key', USE_SSL false, URL_STYLE 'path');
+  SELECT * FROM read_parquet('s3://my-bucket/data.parquet');
+"
 ```
 
 对于 MinIO/silo/rustfs，仍需设置 `s3_url_style = 'path'`，因为这些存储
