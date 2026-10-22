@@ -118,6 +118,37 @@ auth token. By default, it only accepts local connections — for remote access,
 put it behind a TLS-terminating reverse proxy (see
 [DuckDB docs](https://duckdb.org/docs/2.0/quack/setup/reverse_proxy.html)).
 
+#### Cross-host access (0.0.0.0 binding)
+
+To accept connections from any network interface, use `quack_serve()` with
+explicit parameters instead of `-serve`:
+
+```sql
+-- Server: bind to all interfaces on port 9494
+CALL quack_serve(
+  listen_uri='quack:0.0.0.0:9494',
+  allow_other_hostname=true,  -- required for non-localhost binding
+  disable_ssl=true,            -- optional, default is HTTPS
+  token='mytoken'
+);
+```
+
+Three parameters are needed:
+- `listen_uri='quack:0.0.0.0:9494'` — bind to all interfaces (not just localhost)
+- `allow_other_hostname=true` — bypass the localhost-only restriction
+- `disable_ssl=true` — use plain HTTP (default is HTTPS with auto-generated cert)
+
+Clients connect using the server's IP address:
+
+```bash
+# Client connecting to remote server
+duckdb -c "ATTACH 'quack:192.0.2.10:9494' AS qk (TOKEN 'mytoken'); CONNECT qk; SELECT * FROM t"
+```
+
+> **Security warning**: Binding to `0.0.0.0` with `disable_ssl=true` exposes the
+> database to the network without encryption. Use only on trusted networks or
+> behind a firewall. For production, use a reverse proxy with TLS.
+
 ### Connecting to a server
 
 ```bash

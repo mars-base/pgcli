@@ -110,6 +110,35 @@ duckdb -c "INSTALL quack; LOAD quack; CALL quack_serve(token='mytoken')"
 默认只接受本地连接——如需远程访问，需在前面放一个 TLS 终止反向代理
 （参见 [DuckDB 文档](https://duckdb.org/docs/2.0/quack/setup/reverse_proxy.html)）。
 
+#### 跨主机访问（绑定 0.0.0.0）
+
+要接受来自任意网络接口的连接，使用 `quack_serve()` 并指定参数（而非 `-serve`）：
+
+```sql
+-- 服务端：绑定到所有接口的 9494 端口
+CALL quack_serve(
+  listen_uri='quack:0.0.0.0:9494',
+  allow_other_hostname=true,  -- 必须，允许非 localhost 绑定
+  disable_ssl=true,            -- 可选，默认是 HTTPS
+  token='mytoken'
+);
+```
+
+需要三个参数：
+- `listen_uri='quack:0.0.0.0:9494'` — 绑定到所有接口（不只是 localhost）
+- `allow_other_hostname=true` — 绕过仅限 localhost 的限制
+- `disable_ssl=true` — 使用纯 HTTP（默认是 HTTPS 并自动生成证书）
+
+客户端使用服务端 IP 地址连接：
+
+```bash
+# 客户端连接远程服务端
+duckdb -c "ATTACH 'quack:192.0.2.10:9494' AS qk (TOKEN 'mytoken'); CONNECT qk; SELECT * FROM t"
+```
+
+> **安全警告**：绑定 `0.0.0.0` 并使用 `disable_ssl=true` 会将数据库以明文形式暴露到网络。
+> 仅在可信网络或防火墙后面使用。生产环境请使用带 TLS 的反向代理。
+
 ### 客户端连接
 
 ```bash
