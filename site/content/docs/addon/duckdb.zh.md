@@ -251,14 +251,25 @@ SET s3_url_style = 'path';
 
 ### S3 环境变量
 
-DuckDB 也读取以下环境变量，免去在会话内 `SET`：
+DuckDB 从 `DUCKDB_S3_*` 环境变量读取端点和 SSL 设置，但凭据必须使用标准 AWS
+变量（`AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY`）——DuckDB 的
+`enable_global_s3_configuration` 会自动检测这些变量。
+
+`s3_url_style` 无法通过环境变量设置——必须用 `SET` 或在 `~/.duckdbrc` 中配置。
 
 ```bash
-export DUCKDB_S3_ENDPOINT='minio.example.com:9000'
-export DUCKDB_S3_ACCESS_KEY_ID='admin'
-export DUCKDB_S3_SECRET_ACCESS_KEY='your-secret-key'
+# 端点和 SSL 通过 DUCKDB_S3_*
+export DUCKDB_S3_ENDPOINT='127.0.0.1:9000'
 export DUCKDB_S3_USE_SSL='false'
 
-duckdb -c "SELECT * FROM read_parquet('s3://my-bucket/data.parquet')"
+# 凭据通过 AWS_*（标准变量，DuckDB 自动检测）
+export AWS_ACCESS_KEY_ID='admin'
+export AWS_SECRET_ACCESS_KEY='your-secret-key'
+
+# URL 样式仍需在会话或启动文件中设置
+duckdb -c "LOAD httpfs; SET s3_url_style = 'path'; SELECT * FROM read_parquet('s3://my-bucket/data.parquet');"
 ```
+
+对于 MinIO/silo/rustfs，仍需设置 `s3_url_style = 'path'`，因为这些存储
+不支持虚拟主机样式 URL。
 

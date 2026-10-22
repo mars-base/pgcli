@@ -261,15 +261,26 @@ SET s3_url_style = 'path';
 
 ### Environment variables for S3
 
-DuckDB also reads these environment variables, avoiding in-session `SET`
-commands:
+DuckDB reads endpoint and SSL settings from `DUCKDB_S3_*` environment variables,
+but credentials must use standard AWS variables (`AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`) — DuckDB's `enable_global_s3_configuration` auto-detects these.
+
+`s3_url_style` cannot be set via environment variables — it must be configured
+with `SET` or in `~/.duckdbrc`.
 
 ```bash
-export DUCKDB_S3_ENDPOINT='minio.example.com:9000'
-export DUCKDB_S3_ACCESS_KEY_ID='admin'
-export DUCKDB_S3_SECRET_ACCESS_KEY='your-secret-key'
+# Endpoint and SSL via DUCKDB_S3_*
+export DUCKDB_S3_ENDPOINT='127.0.0.1:9000'
 export DUCKDB_S3_USE_SSL='false'
 
-duckdb -c "SELECT * FROM read_parquet('s3://my-bucket/data.parquet')"
+# Credentials via AWS_* (standard variables, auto-detected by DuckDB)
+export AWS_ACCESS_KEY_ID='admin'
+export AWS_SECRET_ACCESS_KEY='your-secret-key'
+
+# URL style must still be set in the session or startup file
+duckdb -c "LOAD httpfs; SET s3_url_style = 'path'; SELECT * FROM read_parquet('s3://my-bucket/data.parquet');"
 ```
+
+For MinIO/silo/rustfs, you still need `s3_url_style = 'path'` because these
+stores don't support virtual-host style URLs.
 
