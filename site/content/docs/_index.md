@@ -24,5 +24,6 @@ Complete guide to managing PostgreSQL databases with pgcli.
 - [Replication](/docs/replica/) — Read-only replicas and failover
 - [Extensions](/docs/extensions/) — Install and manage PostgreSQL extensions
 - [Addons](/docs/addon/) — PgBouncer connection pooler and other addons
+- [KV Cache](/docs/kv/) — Lightweight Redis alternative for key-value caching
 - [Auto-start on Boot](/docs/autostart/) — Start instances and services automatically after reboot
 {.cards}
