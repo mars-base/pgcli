@@ -88,6 +88,48 @@ pg addon remove duckdb --name duckdb --clean-data   # 同时删除数据目录
 `remove` 从不删除二进制——它可能被多个命名实例共享。加 `--clean-data` 删除
 数据目录（数据库文件）；不加则保留目录并打印提示。
 
+## Server/Client 模式（v2.0.0+）
+
+DuckDB v2.0.0 引入了 **Quack 协议**，支持原生 server/client 模式。
+DuckDB 可以通过 HTTP 对外提供数据库服务，多个客户端可以同时查询同一个实例。
+
+### 启动服务端
+
+```bash
+# 交互式 server（stdin 必须保持打开）
+duckdb /path/to/db.duckdb -serve
+
+# 后台 server（重定向 stdin 以保持存活）
+nohup duckdb /path/to/db.duckdb -serve < /dev/zero > /tmp/duckdb-serve.log 2>&1 &
+
+# 或在 SQL 中使用 quack_serve()
+duckdb -c "INSTALL quack; LOAD quack; CALL quack_serve(token='mytoken')"
+```
+
+服务端默认监听 `localhost:9494`，启动时会打印自动生成的 auth token。
+默认只接受本地连接——如需远程访问，需在前面放一个 TLS 终止反向代理
+（参见 [DuckDB 文档](https://duckdb.org/docs/2.0/quack/setup/reverse_proxy.html)）。
+
+### 客户端连接
+
+```bash
+# 使用 -connect 参数（v2.0.0+）
+duckdb -connect -c "SELECT * FROM t"
+
+# 或通过 SQL
+duckdb -c "ATTACH 'quack:localhost' AS qk (TOKEN 'BAED...'); CONNECT qk; SELECT * FROM t"
+```
+
+`-connect` 参数会自动发现服务端输出的 token。手动连接时，从服务端启动
+信息中复制 token 即可。
+
+### 注意事项
+
+- **stdin 必须保持打开**：服务端在 stdin 关闭后会退出（后台运行用 `< /dev/zero` 或 `tail -f /dev/null |`）
+- **仅限本地**：远程访问需要带 TLS 终止的反向代理
+- **Auth token**：自动生成，启动时打印，客户端连接时必须提供
+- **pgcli 不管理 Quack server**：`pg addon start/stop duckdb` 仍然是无操作——Quack server 是一个独立进程，需要自行管理
+
 ## 扩展
 
 DuckDB 的扩展系统在首次使用时安装共享库。pgcli 在安装时预装 `httpfs`——

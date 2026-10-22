@@ -94,6 +94,50 @@ pg addon remove duckdb --name duckdb --clean-data   # also deletes the data dire
 instances. Pass `--clean-data` to delete the data directory (database files);
 without it, the directory is kept and reported.
 
+## Server/Client mode (v2.0.0+)
+
+DuckDB v2.0.0 introduced the **Quack protocol** for native server/client operation.
+This allows DuckDB to serve its databases over HTTP, letting multiple clients
+query the same instance.
+
+### Starting a server
+
+```bash
+# Interactive server (stdin must stay open)
+duckdb /path/to/db.duckdb -serve
+
+# Background server (redirect stdin to keep alive)
+nohup duckdb /path/to/db.duckdb -serve < /dev/zero > /tmp/duckdb-serve.log 2>&1 &
+
+# Or use quack_serve() from SQL
+duckdb -c "INSTALL quack; LOAD quack; CALL quack_serve(token='mytoken')"
+```
+
+The server listens on `localhost:9494` by default and prints an auto-generated
+auth token. By default, it only accepts local connections — for remote access,
+put it behind a TLS-terminating reverse proxy (see
+[DuckDB docs](https://duckdb.org/docs/2.0/quack/setup/reverse_proxy.html)).
+
+### Connecting to a server
+
+```bash
+# Using -connect flag (v2.0.0+)
+duckdb -connect -c "SELECT * FROM t"
+
+# Or via SQL
+duckdb -c "ATTACH 'quack:localhost' AS qk (TOKEN 'BAED...'); CONNECT qk; SELECT * FROM t"
+```
+
+The `-connect` flag auto-discovers the token from the server's output. For
+manual connections, copy the token from the server's startup message.
+
+### Key points
+
+- **stdin must stay open**: the server exits when stdin closes (use `< /dev/zero` or `tail -f /dev/null |` for background operation)
+- **localhost only**: remote access requires a reverse proxy with TLS termination
+- **Auth token**: auto-generated, printed at startup, required for client connections
+- **Not managed by pgcli**: `pg addon start/stop duckdb` remain no-ops — the Quack server is a standalone process you manage yourself
+
 ## Extensions
 
 DuckDB's extension system installs shared libraries on first use. pgcli
