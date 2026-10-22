@@ -56,8 +56,10 @@ const webTemplate = `<!DOCTYPE html>
 <body>
 <div class="wrap">
   <h1>pg tune</h1>
-  <p class="sub">Interactive PostgreSQL tuning. Adjust the hardware and workload;
-    the parameters recompute live. This page is self-contained and offline.</p>
+  <p class="sub">Generate optimized <code>postgresql.conf</code> settings based on your hardware and workload.
+    Adjust the parameters on the left — the recommended configuration updates instantly.
+    Copy the output as a parameter table, <code>postgresql.conf</code> snippet, or <code>ALTER SYSTEM</code> statements.
+    No data leaves your browser; everything runs client-side.</p>
   <div class="banner" id="banner"></div>
   <div class="cols">
     <div class="card">
