@@ -164,14 +164,31 @@ func ensureDuckdbBinary(version, installDir string) (string, string, error) {
 }
 
 // installDuckdbExtensions installs common extensions via `INSTALL 'ext'`.
+// The current process's HTTP(S) proxy environment is forwarded to the duckdb
+// subprocess so that extensions can be downloaded behind a proxy.
 func installDuckdbExtensions(bin string, extensions []string) error {
 	for _, ext := range extensions {
 		cmd := exec.Command(bin, "-c", fmt.Sprintf("INSTALL '%s'", ext))
+		// Forward proxy settings — DuckDB reads http_proxy / https_proxy
+		// (lowercase) as well as the uppercase variants.
+		cmd.Env = append(os.Environ(),
+			fmt.Sprintf("http_proxy=%s", proxyURL("HTTP_PROXY")),
+			fmt.Sprintf("https_proxy=%s", proxyURL("HTTPS_PROXY")),
+		)
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("installing extension %s: %w", ext, err)
 		}
 	}
 	return nil
+}
+
+// proxyURL returns the proxy URL for the given env var name, checking both
+// uppercase and lowercase variants.
+func proxyURL(upperKey string) string {
+	if v := os.Getenv(upperKey); v != "" {
+		return v
+	}
+	return os.Getenv(strings.ToLower(upperKey))
 }
 
 // extractDuckdbVersion parses "v1.5.6 ..." from `duckdb --version` output.
@@ -257,12 +274,14 @@ func runAddonInstallDuckdb(cmd *cobra.Command) error {
 	fmt.Printf("  [OK] data dir: %s\n", dc.DataDir)
 
 	// --- 3. extensions -----------------------------------------------------
-	extensions := []string{"httpfs", "parquet", "json"}
+	// Only httpfs needs a network download; parquet and json are statically
+	// linked into the DuckDB CLI binary (install_mode = STATICALLY_LINKED).
+	extensions := []string{"httpfs"}
 	if !noExtensions {
 		if err := installDuckdbExtensions(bin, extensions); err != nil {
 			return fmt.Errorf("  [X] %v", err)
 		}
-		fmt.Printf("  [OK] extensions: %s installed\n", strings.Join(extensions, ", "))
+		fmt.Printf("  [OK] extensions: %s installed (parquet, json are bundled)\n", strings.Join(extensions, ", "))
 	}
 
 	// --- 4. verify ---------------------------------------------------------

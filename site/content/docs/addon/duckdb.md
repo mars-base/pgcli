@@ -97,11 +97,13 @@ without it, the directory is kept and reported.
 ## Extensions
 
 DuckDB's extension system installs shared libraries on first use. pgcli
-pre-installs three common ones at install time:
+pre-installs `httpfs` at install time — it enables reading files over HTTP/S3.
+`parquet` and `json` are statically linked into the DuckDB CLI binary, so they
+are always available without a network download.
 
 - **`httpfs`** — read files over HTTP/S3 (`read_parquet('s3://...')`)
-- **`parquet`** — Parquet file reader/writer
-- **`json`** — JSON file reader (`read_json_auto(...)`)
+- **`parquet`** — Parquet file reader/writer (bundled)
+- **`json`** — JSON file reader (`read_json_auto(...)`) (bundled)
 
 Additional extensions can be installed later from the DuckDB shell:
 
@@ -114,3 +116,160 @@ LOAD 'httpfs';           -- load an installed extension in the current session
 
 Pass `--no-extensions` at install time if you prefer to manage extensions
 manually, or if the host has no internet access at install time.
+
+## Accessing S3, Parquet, JSON and CSV data
+
+DuckDB is built for analytical queries over files — no server, no `COPY`, no
+import step. Point it at your data.
+
+### Parquet files
+
+```sql
+-- Single file
+SELECT * FROM read_parquet('/tmp/events.parquet');
+
+-- Wildcard: all parquet files in a directory
+SELECT * FROM read_parquet('/data/logs/*.parquet');
+
+-- Schema inference + count
+SELECT count(*) FROM read_parquet('s3://bucket/year=2026/*.parquet');
+
+-- Specific columns + filter
+SELECT user_id, event, ts
+FROM read_parquet('/data/events.parquet')
+WHERE ts > '2026-01-01'
+LIMIT 100;
+```
+
+### JSON files
+
+```sql
+-- Auto-detect schema (handles JSON lines and nested JSON)
+SELECT * FROM read_json_auto('/tmp/users.json');
+
+-- Explicit schema with read_json
+SELECT * FROM read_json('/tmp/users.json',
+    columns = {'id': 'INTEGER', 'name': 'VARCHAR', 'email': 'VARCHAR'},
+    format = 'newline_delimited');
+
+-- Nested objects: extract fields with ->>
+SELECT
+    data->>'user_id' AS user_id,
+    data->>'event'   AS event
+FROM read_json_auto('/tmp/events.jsonl');
+```
+
+### CSV files
+
+```sql
+-- Auto-detect header and types
+SELECT * FROM read_csv_auto('/tmp/sales.csv');
+
+-- Explicit column types (when auto-detection guesses wrong)
+SELECT * FROM read_csv('/tmp/sales.csv',
+    columns = {'id': 'INTEGER', 'amount': 'DOUBLE', 'date': 'DATE'},
+    header = true);
+
+-- TSV or custom delimiter
+SELECT * FROM read_csv_auto('/tmp/data.tsv', delim = '\t');
+```
+
+### S3 access (httpfs extension)
+
+The `httpfs` extension enables S3 access. Credentials are configured once per
+session, or via environment variables:
+
+```sql
+-- Configure S3 credentials in the DuckDB session
+SET s3_endpoint = 'minio.example.com:9000';
+SET s3_access_key_id = 'admin';
+SET s3_secret_access_key = 'your-secret-key';
+SET s3_use_ssl = false;   -- true for https endpoints
+SET s3_region = 'us-east-1';   -- 'us-east-1' works for MinIO (region is ignored)
+SET s3_url_style = 'path';   -- MinIO and compatible stores use path-style
+
+-- Query Parquet directly from S3
+SELECT count(*) FROM read_parquet('s3://my-bucket/events/2026/*.parquet');
+
+-- Query CSV from S3
+SELECT * FROM read_csv_auto('s3://my-bucket/users.csv') LIMIT 10;
+
+-- Query JSON from S3
+SELECT * FROM read_json_auto('s3://my-bucket/config.json');
+
+-- Write Parquet back to S3 (needs write permissions on the bucket)
+COPY (SELECT * FROM read_parquet('/tmp/*.parquet') WHERE year = 2026)
+  TO 's3://output-bucket/filtered/2026.parquet' (FORMAT parquet);
+```
+
+#### Connecting to pgcli-managed S3 stores
+
+pgcli manages several S3-compatible stores (MinIO, silo, rustfs, garage,
+seaweedfs). DuckDB queries them directly — the `s3_endpoint` is the store's
+HTTP address, and credentials come from `pg addon password`.
+
+First, create an S3 store instance and a bucket. The setup is identical across
+MinIO, silo (Pigsty's MinIO fork), and rustfs (Rust reimplementation) — they
+all share the same `pg mc` wrapper and the same DuckDB `s3_url_style = 'path'`:
+
+```bash
+# MinIO
+pg addon install minio --name ms3
+S3_SECRET=$(pg addon password minio --name ms3)
+
+# or silo (same API surface, shares the port pool with minio)
+pg addon install silo --name ms3
+S3_SECRET=$(pg addon password silo --name ms3)
+
+# or rustfs (Rust S3-compatible store, Linux only)
+pg addon install rustfs --name ms3
+S3_SECRET=$(pg addon password rustfs --name ms3)
+
+# Create a bucket via the pg mc wrapper
+pg mc alias set ms3 http://127.0.0.1:9000 admin "${S3_SECRET}"
+pg mc mb ms3/my-bucket
+
+# Upload test data (optional)
+pg mc cp /tmp/data.parquet ms3/my-bucket/data.parquet
+```
+
+Then query it from DuckDB — note `s3_url_style = 'path'` is required for
+MinIO, silo, rustfs and compatible stores (they do not support virtual-host style):
+
+```bash
+duckdb -c "
+  SET s3_endpoint = '127.0.0.1:9000';
+  SET s3_access_key_id = 'admin';
+  SET s3_secret_access_key = '${S3_SECRET}';
+  SET s3_use_ssl = false;
+  SET s3_url_style = 'path';
+  SELECT count(*) FROM read_parquet('s3://my-bucket/data/*.parquet');
+"
+```
+
+For a more permanent setup, create a DuckDB startup file (`~/.duckdbrc`) with
+the `SET` commands — they run on every session start:
+
+```sql
+-- ~/.duckdbrc
+SET s3_endpoint = 'minio.example.com:9000';
+SET s3_access_key_id = 'admin';
+SET s3_secret_access_key = 'your-secret-key';
+SET s3_use_ssl = false;
+SET s3_url_style = 'path';
+```
+
+### Environment variables for S3
+
+DuckDB also reads these environment variables, avoiding in-session `SET`
+commands:
+
+```bash
+export DUCKDB_S3_ENDPOINT='minio.example.com:9000'
+export DUCKDB_S3_ACCESS_KEY_ID='admin'
+export DUCKDB_S3_SECRET_ACCESS_KEY='your-secret-key'
+export DUCKDB_S3_USE_SSL='false'
+
+duckdb -c "SELECT * FROM read_parquet('s3://my-bucket/data.parquet')"
+```
+

@@ -90,11 +90,13 @@ pg addon remove duckdb --name duckdb --clean-data   # 同时删除数据目录
 
 ## 扩展
 
-DuckDB 的扩展系统在首次使用时安装共享库。pgcli 在安装时预装三个常用扩展：
+DuckDB 的扩展系统在首次使用时安装共享库。pgcli 在安装时预装 `httpfs`——
+它启用通过 HTTP/S3 读取文件的能力。`parquet` 和 `json` 是静态链接在 DuckDB CLI
+二进制里的，始终可用，无需网络下载。
 
 - **`httpfs`** —— 通过 HTTP/S3 读取文件（`read_parquet('s3://...')`）
-- **`parquet`** —— Parquet 文件读写器
-- **`json`** —— JSON 文件读取器（`read_json_auto(...)`）
+- **`parquet`** —— Parquet 文件读写器（内置）
+- **`json`** —— JSON 文件读取器（`read_json_auto(...)`）（内置）
 
 后续可以从 DuckDB shell 里安装更多扩展：
 
@@ -106,3 +108,157 @@ LOAD 'httpfs';           -- 在当前会话中加载已安装的扩展
 ```
 
 如果希望手动管理扩展，或安装时主机无法上网，可在安装时加 `--no-extensions`。
+
+## 访问 S3、Parquet、JSON 和 CSV 数据
+
+DuckDB 天生为文件分析查询而生——无需服务器、无需 `COPY`、无需导入步骤。
+直接指向你的数据即可。
+
+### Parquet 文件
+
+```sql
+-- 单个文件
+SELECT * FROM read_parquet('/tmp/events.parquet');
+
+-- 通配符：目录下所有 parquet 文件
+SELECT * FROM read_parquet('/data/logs/*.parquet');
+
+-- schema 推断 + 计数
+SELECT count(*) FROM read_parquet('s3://bucket/year=2026/*.parquet');
+
+-- 指定列 + 过滤
+SELECT user_id, event, ts
+FROM read_parquet('/data/events.parquet')
+WHERE ts > '2026-01-01'
+LIMIT 100;
+```
+
+### JSON 文件
+
+```sql
+-- 自动推断 schema（支持 JSON lines 和嵌套 JSON）
+SELECT * FROM read_json_auto('/tmp/users.json');
+
+-- 显式 schema
+SELECT * FROM read_json('/tmp/users.json',
+    columns = {'id': 'INTEGER', 'name': 'VARCHAR', 'email': 'VARCHAR'},
+    format = 'newline_delimited');
+
+-- 嵌套对象：用 ->> 提取字段
+SELECT
+    data->>'user_id' AS user_id,
+    data->>'event'   AS event
+FROM read_json_auto('/tmp/events.jsonl');
+```
+
+### CSV 文件
+
+```sql
+-- 自动推断表头和类型
+SELECT * FROM read_csv_auto('/tmp/sales.csv');
+
+-- 显式列类型（自动推断不准时）
+SELECT * FROM read_csv('/tmp/sales.csv',
+    columns = {'id': 'INTEGER', 'amount': 'DOUBLE', 'date': 'DATE'},
+    header = true);
+
+-- TSV 或自定义分隔符
+SELECT * FROM read_csv_auto('/tmp/data.tsv', delim = '\t');
+```
+
+### S3 访问（httpfs 扩展）
+
+`httpfs` 扩展启用 S3 访问。凭据在每个会话里配置一次，或通过环境变量：
+
+```sql
+-- 在 DuckDB 会话中配置 S3 凭据
+SET s3_endpoint = 'minio.example.com:9000';
+SET s3_access_key_id = 'admin';
+SET s3_secret_access_key = 'your-secret-key';
+SET s3_use_ssl = false;   -- https 端点用 true
+SET s3_region = 'us-east-1';   -- MinIO 写 'us-east-1' 即可（region 被忽略）
+
+-- 从 S3 直接查询 Parquet
+SELECT count(*) FROM read_parquet('s3://my-bucket/events/2026/*.parquet');
+
+-- 从 S3 查询 CSV
+SELECT * FROM read_csv_auto('s3://my-bucket/users.csv') LIMIT 10;
+
+-- 从 S3 查询 JSON
+SELECT * FROM read_json_auto('s3://my-bucket/config.json');
+
+-- 写回 Parquet 到 S3（需要桶的写权限）
+COPY (SELECT * FROM read_parquet('/tmp/*.parquet') WHERE year = 2026)
+  TO 's3://output-bucket/filtered/2026.parquet' (FORMAT parquet);
+```
+
+#### 连接 pgcli 管理的 S3 存储
+
+pgcli 管理了多种 S3 兼容存储（MinIO、silo、rustfs、garage、seaweedfs）。
+DuckDB 直接查询它们——`s3_endpoint` 就是存储的 HTTP 地址，凭据来自
+`pg addon password`。
+
+先创建 S3 存储实例和桶。MinIO、silo（Pigsty 的 MinIO 分支）和 rustfs
+（Rust 重新实现）的设置方式完全相同——它们共用 `pg mc` 包装命令，DuckDB
+端也需要相同的 `s3_url_style = 'path'`：
+
+```bash
+# MinIO
+pg addon install minio --name ms3
+S3_SECRET=$(pg addon password minio --name ms3)
+
+# 或 silo（功能面一致，与 minio 共用端口池）
+pg addon install silo --name ms3
+S3_SECRET=$(pg addon password silo --name ms3)
+
+# 或 rustfs（Rust S3 兼容存储，仅 Linux）
+pg addon install rustfs --name ms3
+S3_SECRET=$(pg addon password rustfs --name ms3)
+
+# 通过 pg mc 包装命令创建桶
+pg mc alias set ms3 http://127.0.0.1:9000 admin "${S3_SECRET}"
+pg mc mb ms3/my-bucket
+
+# 上传测试数据（可选）
+pg mc cp /tmp/data.parquet ms3/my-bucket/data.parquet
+```
+
+然后从 DuckDB 查询——MinIO、silo、rustfs 及兼容存储需要
+`s3_url_style = 'path'`（不支持 virtual-host style）：
+
+```bash
+duckdb -c "
+  SET s3_endpoint = '127.0.0.1:9000';
+  SET s3_access_key_id = 'admin';
+  SET s3_secret_access_key = '${S3_SECRET}';
+  SET s3_use_ssl = false;
+  SET s3_url_style = 'path';
+  SELECT count(*) FROM read_parquet('s3://my-bucket/data/*.parquet');
+"
+```
+
+如需更持久的配置，创建 DuckDB 启动文件（`~/.duckdbrc`），其中的 `SET` 命令
+会在每次会话启动时执行：
+
+```sql
+-- ~/.duckdbrc
+SET s3_endpoint = 'minio.example.com:9000';
+SET s3_access_key_id = 'admin';
+SET s3_secret_access_key = 'your-secret-key';
+SET s3_use_ssl = false;
+SET s3_url_style = 'path';
+```
+
+### S3 环境变量
+
+DuckDB 也读取以下环境变量，免去在会话内 `SET`：
+
+```bash
+export DUCKDB_S3_ENDPOINT='minio.example.com:9000'
+export DUCKDB_S3_ACCESS_KEY_ID='admin'
+export DUCKDB_S3_SECRET_ACCESS_KEY='your-secret-key'
+export DUCKDB_S3_USE_SSL='false'
+
+duckdb -c "SELECT * FROM read_parquet('s3://my-bucket/data.parquet')"
+```
+
