@@ -327,6 +327,7 @@ Currently supported add-ons:
   pgadmin     pgAdmin 4 — the official web administration UI (single container from docker.io/dpage/pgadmin4; web login auto-generated; Linux host network, macOS bridge)
   grafana     Grafana — the open-source observability dashboard (single container from docker.io/grafana; web login auto-generated; defaults to 0.0.0.0 since a dashboard is meant to be viewed remotely; Linux host network, macOS bridge)
   prometheus  Prometheus — the metrics collection backend Grafana reads from (single container from docker.io/prom/prometheus; rendered prometheus.yml or --conf-file, --scrape targets, --alertmanager-url to forward alerts + watch Alertmanager, --rule-file to load alerting rules, SIGHUP reload; NO web login — defaults to 0.0.0.0 guarded only by the network, use --listen 127.0.0.1 for loopback; Linux host network, macOS bridge)
+  victoriametrics VictoriaMetrics — fast, Prometheus-compatible time-series database (single container from docker.io/victoriametrics/victoria-metrics; pure CLI flags, no config file; --retention-months for data retention, --extra-arg for custom flags like -search.maxUniqueTimeseries; NO web login — defaults to 0.0.0.0 guarded only by the network, use --listen 127.0.0.1 for loopback; Linux host network, macOS bridge)
   alertmanager Alertmanager — the alert dedup/grouping/routing frontend of the Prometheus stack (single container from docker.io/prom/alertmanager; rendered alertmanager.yml with a no-op or --webhook-url web.hook receiver, or --conf-file; SIGHUP reload; cluster gossip disabled; NO web login — defaults to 0.0.0.0 guarded only by the network, and silences are dangerous, use --listen 127.0.0.1 for loopback; wired to Prometheus from the Prometheus side via --alertmanager-url; Linux host network, macOS bridge)
   gitea       Gitea — the self-hosted Git service (single container from docker.io/gitea/gitea; web login auto-generated and created via "gitea admin user create"; optional --ssh-port for clone/push over SSH; SQLite by default or --dsn to put its metadata in a PostgreSQL you already run; defaults to 0.0.0.0 since a Git host is reached from other machines; Linux host network, macOS bridge)
   beegfs      BeeGFS — the scale-out parallel filesystem (mgmtd/meta/storage services from ghcr.io/thinkparq/beegfs — brought up in dependency order by one install; by default all three on this host = a converged single-host filesystem, --roles scopes it to a subset and a --roles-without-mgmtd host joins an existing cluster via --mgmtd-host/--node-id/--password — every host runs its own pgcli, pgcli never SSHes; --storage-target repeats for multiple disks/targets; fixed protocol ports 8008/8010/8005/8003, meta/storage cannot move so one filesystem per host; shared conn-auth secret (generated on the mgmtd host), mgmtd TLS disabled; an unlicensed build caps client mounts at five — pgcli never generates a license but CARRIES a ThinkParQ PEM via --license-file / "pg addon beegfs license" (mgmtd-only); the kernel-module client is never installed — "pg addon beegfs mount-hint" prints its config, "join-hint" the per-host join commands; Linux host network only)
@@ -1128,6 +1129,10 @@ func init() {
 	addonInstallCmd.Flags().StringArray("rule-file", nil, "Prometheus: path to a rule file (*.rules.yml with a top-level groups: block; repeatable) — pgcli copies each into its managed rules dir (basename only; two files sharing a basename abort), bind-mounts that dir read-only at /etc/prometheus/rules, and the rendered prometheus.yml loads the copies via rule_files. Valid alongside --conf-file: the copy and mount happen either way, and your own file decides whether to reference /etc/prometheus/rules. A missing or empty file aborts, touching nothing")
 	addonInstallCmd.Flags().StringArray("webhook-url", nil, "Alertmanager webhook URL to notify (repeatable; e.g. --webhook-url http://hook:5001/) — every URL is rendered as one webhook_configs entry of the SAME web.hook receiver (so multiple URLs fan out); the root route points at it. Each URL is validated (must parse as an http(s) URL with a host) BEFORE anything is written; a bad URL aborts the install touching nothing. Connectivity is NOT probed (a webhook fires at alert time, not install time). Mutually exclusive with --conf-file; without it the rendered config uses a name-only no-op receiver (nothing is ever sent)")
 
+	// victoriametrics flags (top-level time-series database)
+	addonInstallCmd.Flags().String("retention-months", "", "VictoriaMetrics data retention in months (default \"1\"); e.g. 3 = 3 months")
+	addonInstallCmd.Flags().StringArray("extra-arg", nil, "VictoriaMetrics: extra CLI flag passed to the binary (repeatable), e.g. --extra-arg -search.maxUniqueTimeseries=1000000 — appended last so last-wins overrides earlier flags")
+
 	// minio flags (top-level single-node S3-compatible object storage)
 	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo/rustfs S3 API host port (0=auto-assign from the shared minio_start_port pool); for garage, the S3 API port (0=auto from garage_start_port, default 3900 — garage takes four consecutive ports API/RPC/Web/Admin)")
 	addonInstallCmd.Flags().Int("console-port", 0, "MinIO/silo/rustfs web console host port (0=auto-assign, next free port)")
@@ -1218,6 +1223,8 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallGrafana(cmd)
 	case "prometheus":
 		return runAddonInstallPrometheus(cmd)
+	case "victoriametrics":
+		return runAddonInstallVictoriaMetrics(cmd)
 	case "alertmanager":
 		return runAddonInstallAlertmanager(cmd)
 	case "gitea":
@@ -1235,7 +1242,7 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -5509,6 +5516,43 @@ func runAddonList(showPassword bool) error {
 		fmt.Println("  (none)")
 	}
 
+	// victoriametrics (time-series database, top-level addon; Linux host network, macOS bridge)
+	fmt.Println()
+	fmt.Println("Web add-ons (victoriametrics):")
+	hasVM := false
+	if vm, err := podman.NewVictoriaMetricsManager(cfg); err == nil {
+		for _, name := range sortedAddonNames(cfg.Addons.VictoriaMetrics) {
+			vc := cfg.Addons.VictoriaMetrics[name]
+			hasVM = true
+			status := "stopped"
+			if running, err := vm.ContainerRunning(vc.ContainerName); err == nil && running {
+				status = "running"
+			}
+			fmt.Printf("  %s (name: %s)\n", "victoriametrics", name)
+			fmt.Printf("    Status:      %s\n", status)
+			fmt.Printf("    URL:         http://%s:%d/\n", vc.Listen, vc.HostPort)
+			fmt.Printf("    Retention:   %s month(s)\n", vc.Retention)
+			if len(vc.ExtraArgs) > 0 {
+				fmt.Printf("    Extra args:  %s\n", strings.Join(vc.ExtraArgs, " "))
+			}
+			fmt.Printf("    Data:        %s\n", vm.DataDir(&vc))
+			fmt.Printf("    Image:       %s\n", vc.ImageTag)
+			fmt.Printf("    Container:   %s\n", vc.ContainerName)
+		}
+	} else if len(cfg.Addons.VictoriaMetrics) > 0 {
+		for _, name := range sortedAddonNames(cfg.Addons.VictoriaMetrics) {
+			vc := cfg.Addons.VictoriaMetrics[name]
+			hasVM = true
+			fmt.Printf("  %s (name: %s)\n", "victoriametrics", name)
+			fmt.Printf("    Status:      n/a (%v)\n", err)
+			fmt.Printf("    URL:         http://%s:%d/\n", vc.Listen, vc.HostPort)
+			fmt.Printf("    Container:   %s\n", vc.ContainerName)
+		}
+	}
+	if !hasVM {
+		fmt.Println("  (none)")
+	}
+
 	// alertmanager (alert routing frontend, top-level addon; Linux host network, macOS bridge)
 	fmt.Println()
 	fmt.Println("Web add-ons (alertmanager):")
@@ -5958,6 +6002,8 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemoveGrafana(cmd)
 	case "prometheus":
 		return runAddonRemovePrometheus(cmd)
+	case "victoriametrics":
+		return runAddonRemoveVictoriaMetrics(cmd)
 	case "alertmanager":
 		return runAddonRemoveAlertmanager(cmd)
 	case "gitea":
@@ -5975,7 +6021,7 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -6282,6 +6328,8 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartGrafana(cmd)
 	case "prometheus":
 		return runAddonStartPrometheus(cmd)
+	case "victoriametrics":
+		return runAddonStartVictoriaMetrics(cmd)
 	case "alertmanager":
 		return runAddonStartAlertmanager(cmd)
 	case "gitea":
@@ -6299,7 +6347,7 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		fmt.Println("Run 'pg addon duckdb shell' to launch an interactive session.")
 		return nil
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
 	}
 }
 
@@ -6335,6 +6383,8 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopGrafana(cmd)
 	case "prometheus":
 		return runAddonStopPrometheus(cmd)
+	case "victoriametrics":
+		return runAddonStopVictoriaMetrics(cmd)
 	case "alertmanager":
 		return runAddonStopAlertmanager(cmd)
 	case "gitea":
@@ -6351,7 +6401,7 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		fmt.Println("DuckDB is a CLI tool, not a daemon — start/stop are not applicable.")
 		return nil
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
 	}
 }
 

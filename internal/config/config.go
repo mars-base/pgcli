@@ -44,6 +44,7 @@ type Config struct {
 	NginxStartPort          int                       `yaml:"nginx_start_port,omitempty"`           // starting nginx HTTP host port, default 8080 (HTTPS takes the next free port)
 	GarageStartPort         int                       `yaml:"garage_start_port,omitempty"`          // starting Garage S3 API host port, default 3900 (RPC, web, admin take the next three free ports)
 	SeaweedfsStartPort      int                       `yaml:"seaweedfs_start_port,omitempty"`       // starting SeaweedFS master host port, default 8400 (volume, filer, s3 take the next three free ports; gRPC twins at +10000 are reserved)
+	VictoriaMetricsStartPort int                      `yaml:"victoriametrics_start_port,omitempty"` // starting VictoriaMetrics HTTP host port, default 8428
 	Postgres                PostgresConfig            `yaml:"postgres"`
 	Podman                  PodmanConfig              `yaml:"podman"`
 	PITR                    PITRConfig                `yaml:"pitr"`
@@ -134,6 +135,7 @@ type TopAddonsConfig struct {
 	Juicefs      map[string]JuicefsConfig        `yaml:"juicefs,omitempty"`
 	Zerofs       map[string]ZerofsConfig         `yaml:"zerofs,omitempty"`
 	Duckdb       map[string]DuckdbConfig         `yaml:"duckdb,omitempty"`
+	VictoriaMetrics map[string]VictoriaMetricsConfig `yaml:"victoriametrics,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -633,6 +635,13 @@ const DefaultPrometheusImageTag = "docker.io/prom/prometheus:v3.15.0"
 // mounts — see internal/podman.AlertmanagerManager for how pgcli makes a
 // bind-mounted /alertmanager writable by 65534. Keep this in sync when bumping.
 const DefaultAlertmanagerImageTag = "docker.io/prom/alertmanager:v0.34.1"
+
+// DefaultVictoriaMetricsImageTag pins the VictoriaMetrics single-node image.
+// victoriametrics/victoria-metrics is the official multi-arch image on
+// docker.io (pull-only — pgcli never builds it). v1.154.1 is a fixed stable
+// release (2026-10-19). The image runs as root, so no pre-chown of the data
+// dir is needed (unlike Prometheus's uid 65534). Keep this in sync when bumping.
+const DefaultVictoriaMetricsImageTag = "docker.io/victoriametrics/victoria-metrics:v1.154.1"
 
 // DefaultGiteaImageTag pins the Gitea image. gitea/gitea is the official
 // multi-arch image on docker.io (pull-only — pgcli never builds it). Note the
@@ -1698,6 +1707,34 @@ type PrometheusConfig struct {
 	Autostart bool `yaml:"autostart,omitempty"`
 }
 
+// VictoriaMetricsConfig holds a standalone VictoriaMetrics addon — a fast,
+// Prometheus-compatible time-series database
+// (https://victoriametrics.com/). Unlike Prometheus it needs no rendered config
+// file; everything is passed as CLI flags after the image name. The single-node
+// version is a single binary in a single container, no clustering.
+//
+// There is NO login/password: VictoriaMetrics has no authentication by default.
+// Its HTTP API can ingest and query arbitrary metrics, so a remote-exposed
+// instance is guarded only by the network boundary (firewall / --listen
+// 127.0.0.1), same as Prometheus.
+//
+// The image runs as root, so no pre-chown of the data dir is needed (unlike
+// Prometheus's uid 65534).
+type VictoriaMetricsConfig struct {
+	ContainerName string   `yaml:"container_name"`       // pgcli-victoriametrics<ns>-<name>
+	Name          string   `yaml:"name,omitempty"`       // addon key
+	ImageTag      string   `yaml:"image_tag,omitempty"`  // docker.io/victoriametrics/victoria-metrics:v1.154.1
+	HostPort      int      `yaml:"host_port,omitempty"`  // HTTP port, 8428+ auto-assigned
+	Listen        string   `yaml:"listen,omitempty"`     // -httpListenAddr bind, default 0.0.0.0
+	DataDir       string   `yaml:"data_dir,omitempty"`   // host dir mounted at /victoria-metrics-data
+	Retention     string   `yaml:"retention,omitempty"`  // -retentionPeriod value (months), default "1"
+	ExtraArgs     []string `yaml:"extra_args,omitempty"` // additional CLI flags, e.g. ["-search.maxUniqueTimeseries=1000000"]
+	// Autostart brings this container up on host boot via the boot service
+	// (pg autostart enable --victoriametrics). Start-only: it starts the existing
+	// container, so install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
 // AlertmanagerConfig holds a standalone Alertmanager addon — the alert
 // dedup/grouping/routing frontend of the Prometheus stack
 // (https://prometheus.io/docs/alerting/latest/alertmanager/). Shape mirrors
@@ -2060,6 +2097,7 @@ func Default() *Config {
 		NginxStartPort:          8080,
 		GarageStartPort:         3900,
 		SeaweedfsStartPort:      8400,
+		VictoriaMetricsStartPort: 8428,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -2269,6 +2307,7 @@ type displayConfig struct {
 	NginxStartPort          int                       `yaml:"nginx_start_port,omitempty"`
 	GarageStartPort         int                       `yaml:"garage_start_port,omitempty"`
 	SeaweedfsStartPort      int                       `yaml:"seaweedfs_start_port,omitempty"`
+	VictoriaMetricsStartPort int                      `yaml:"victoriametrics_start_port,omitempty"`
 	Logging                 LoggingConfig             `yaml:"logging"`
 	Backup                  BackupConfig              `yaml:"backup"`
 	Pigsty                  PigstyConfig              `yaml:"pigsty"`
@@ -2537,6 +2576,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.SeaweedfsStartPort == 0 {
 		c.SeaweedfsStartPort = d.SeaweedfsStartPort
+	}
+	if c.VictoriaMetricsStartPort == 0 {
+		c.VictoriaMetricsStartPort = d.VictoriaMetricsStartPort
 	}
 
 	// Postgres
@@ -3143,6 +3185,29 @@ func (c *Config) ApplyDefaults() {
 			addon.ScrapeInterval = "15s"
 		}
 		c.Addons.Prometheus[name] = addon
+	}
+
+	// Top-level addons defaults (VictoriaMetrics). Same shape as Prometheus:
+	// Listen defaults to 0.0.0.0 because a metrics service is reached from other
+	// machines. No auth — guarded only by the network boundary. Retention
+	// (months) is a deterministic literal, not a secret.
+	for name, addon := range c.Addons.VictoriaMetrics {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-victoriametrics" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultVictoriaMetricsImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "0.0.0.0"
+		}
+		if addon.Retention == "" {
+			addon.Retention = "1"
+		}
+		c.Addons.VictoriaMetrics[name] = addon
 	}
 
 	// Top-level addons defaults (Alertmanager). Same shape as Prometheus above:
@@ -4025,6 +4090,42 @@ func (c *Config) autoAssignPorts() {
 				next = addon.HostPort + 1
 			}
 			c.Addons.Prometheus[name] = addon
+		}
+	}
+
+	// Allocate ports for VictoriaMetrics addons from their own pool
+	// (victoriametrics_start_port, default 8428 — VictoriaMetrics's default HTTP
+	// port). One port per instance, same shape as the Prometheus block above.
+	{
+		vmBase := c.VictoriaMetricsStartPort
+		assignedVM := map[int]bool{}
+		for _, addon := range c.Addons.VictoriaMetrics {
+			if addon.HostPort != 0 {
+				assignedVM[addon.HostPort] = true
+			}
+		}
+		next := vmBase
+		nextFreeVM := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedVM[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.VictoriaMetrics))
+		for name := range c.Addons.VictoriaMetrics {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.VictoriaMetrics[name]
+			if addon.HostPort == 0 && vmBase > 0 {
+				addon.HostPort = nextFreeVM()
+			} else if addon.HostPort >= next {
+				next = addon.HostPort + 1
+			}
+			c.Addons.VictoriaMetrics[name] = addon
 		}
 	}
 
