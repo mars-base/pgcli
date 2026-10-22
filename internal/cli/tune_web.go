@@ -51,7 +51,7 @@ func runWebTuneServer(listen string, doOpen bool, out io.Writer) error {
 		server.Shutdown(ctx)
 	}()
 
-	fmt.Fprintf(out, "Starting web-tune server on http://%s (Ctrl+C to stop)\n", listen)
+	fmt.Fprintf(out, "Starting web-tune server on http://%s (Ctrl+C / SIGTERM to stop)\n", listen)
 	if doOpen {
 		go func() {
 			time.Sleep(200 * time.Millisecond)
