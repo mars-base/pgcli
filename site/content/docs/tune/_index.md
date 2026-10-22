@@ -129,16 +129,20 @@ make for you.
 ## `--web-tune`: the interactive site
 
 ```bash
-pg tune --web-tune tune.html --open
+pg tune --web-tune                  # start server on http://127.0.0.1:10864
+pg tune --web-tune --listen :8080   # custom port
+pg tune --web-tune --open           # start server and open browser
 ```
 
-Writes a single self-contained HTML file — the full calculator with a form for
-every input (version, OS, workload, RAM+unit, CPUs, connections, storage, db
-size), live recompute, and postgresql.conf / ALTER SYSTEM output with a copy
-button. No network access, no dependencies; the host's RAM/CPU/OS prefill the
-form. The embedded calculator is a JS port of the Go algorithm; the page ships
-Go-computed golden fixtures and self-checks them on load, showing a red banner if
-the two implementations ever disagree.
+Starts an HTTP server that serves the interactive tuning calculator. The page
+has a form for every input (version, OS, workload, RAM+unit, CPUs, connections,
+storage, db size), live recompute, and postgresql.conf / ALTER SYSTEM output with
+a copy button. No network access, no dependencies; the host's RAM/CPU/OS prefill
+the form. The embedded calculator is a JS port of the Go algorithm; the page
+ships Go-computed golden fixtures and self-checks them on load, showing a red
+banner if the two implementations ever disagree.
+
+Press Ctrl+C (or send SIGTERM) to stop the server gracefully.
 
 ## How the numbers are derived
 

@@ -40,8 +40,9 @@ func init() {
 	tuneCmd.Flags().String("dsn", "", "target a remote database (recommend only; --apply/--revert are refused)")
 	tuneCmd.Flags().String("ha", "", "target a Patroni cluster by <scope> instead of a local instance")
 	tuneCmd.Flags().Bool("auto-restart", false, "with --ha --apply/--revert, skip the rolling-restart confirmation")
-	tuneCmd.Flags().String("web-tune", "", "write a self-contained interactive tuning site to this path and exit")
-	tuneCmd.Flags().Bool("open", false, "after --web-tune, try to open the site in a browser (needs a GUI)")
+	tuneCmd.Flags().Bool("web-tune", false, "start an interactive tuning web server (default: http://127.0.0.1:10864)")
+	tuneCmd.Flags().String("listen", "127.0.0.1:10864", "server listen address for --web-tune")
+	tuneCmd.Flags().Bool("open", false, "with --web-tune, try to open the site in a browser")
 	rootCmd.AddCommand(tuneCmd)
 }
 
@@ -66,6 +67,11 @@ parameter source instead of the computed set. In both apply paths every
 parameter is validated against the target server's pg_settings first (unknown
 name, bad bool/enum, out-of-range) and the apply aborts listing any offenders.
 
+--web-tune starts an HTTP server that serves an interactive tuning calculator
+in the browser. The page is prefilled from host hardware specs and recomputes
+live as you adjust inputs. Use --listen to change the address (default
+127.0.0.1:10864). Ctrl+C stops the server gracefully.
+
 Examples:
   pg tune -i myinst
   pg tune -i myinst --type oltp --hd nvme --ram 16G --cpus 8
@@ -74,7 +80,9 @@ Examples:
   pg tune -i myinst --apply --apply-conf /tmp/tune.conf
   pg tune --ha app --apply --auto-restart
   pg tune --dsn postgres://user:pass@host:5432/db   # recommendations only
-  pg tune -i myinst --revert`,
+  pg tune -i myinst --revert
+  pg tune --web-tune                                 # server on http://127.0.0.1:10864
+  pg tune --web-tune --listen 0.0.0.0:8080 --open    # custom address, open browser`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		typ, _ := cmd.Flags().GetString("type")
 		hd, _ := cmd.Flags().GetString("hd")
@@ -88,11 +96,12 @@ Examples:
 		dsn, _ := cmd.Flags().GetString("dsn")
 		haScope, _ := cmd.Flags().GetString("ha")
 		autoRestart, _ := cmd.Flags().GetBool("auto-restart")
-		webTune, _ := cmd.Flags().GetString("web-tune")
+		webTune, _ := cmd.Flags().GetBool("web-tune")
+		listen, _ := cmd.Flags().GetString("listen")
 		doOpen, _ := cmd.Flags().GetBool("open")
 
-		if webTune != "" {
-			return runWebTune(webTune, doOpen, cmd.OutOrStdout())
+		if webTune {
+			return runWebTuneServer(listen, doOpen, cmd.OutOrStdout())
 		}
 		if err := checkTuneTargets(cmd, dsn, haScope); err != nil {
 			return err

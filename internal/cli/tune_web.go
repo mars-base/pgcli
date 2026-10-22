@@ -1,20 +1,23 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
-	"path/filepath"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/mars-base/pgcli/internal/tune"
 )
 
-// runWebTune writes the self-contained --web-tune site to path and, with --open,
-// tries to launch it. The form is prefilled from a host probe (RAM/CPUs/OS); the
-// target version defaults to 18 since the site runs standalone — no database is
-// consulted. The page recomputes live in JS, guarded by embedded golden
-// fixtures, so there is nothing else to plumb here.
-func runWebTune(path string, doOpen bool, out io.Writer) error {
+// runWebTuneServer starts an HTTP server that serves the interactive tuning
+// site directly. The server listens on the specified address (default
+// 127.0.0.1:10864) and serves the self-contained HTML page. Ctrl+C / SIGTERM
+// gracefully shuts down the server.
+func runWebTuneServer(listen string, doOpen bool, out io.Writer) error {
 	prefill := tune.Inputs{
 		RAMBytes: hostRAM(),
 		CPUs:     hostCPUs(),
@@ -24,29 +27,44 @@ func runWebTune(path string, doOpen bool, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("tune: cannot write web site: %w", err)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(html))
+	})
+
+	server := &http.Server{
+		Addr:    listen,
+		Handler: mux,
 	}
-	if _, err := io.WriteString(f, html); err != nil {
-		f.Close()
-		return fmt.Errorf("tune: writing web site: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		abs = path
-	}
+
+	// Signal handling: SIGINT (Ctrl+C) or SIGTERM → graceful shutdown
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigCh
+		fmt.Fprintln(out, "\nShutting down...")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		server.Shutdown(ctx)
+	}()
+
+	fmt.Fprintf(out, "Starting web-tune server on http://%s (Ctrl+C to stop)\n", listen)
 	if doOpen {
-		if err := openBrowser(abs); err != nil {
-			fmt.Fprintf(out, "wrote %s (open it manually — browser launch failed: %v)\n", abs, err)
-			return nil
-		}
-		fmt.Fprintf(out, "opened %s in the browser\n", abs)
-		return nil
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			if err := openBrowser("http://" + listen); err != nil {
+				fmt.Fprintf(out, "server running (open http://%s manually — browser launch failed: %v)\n", listen, err)
+			}
+		}()
 	}
-	fmt.Fprintf(out, "wrote interactive tuning site to %s\n", abs)
+
+	if err := server.ListenAndServe(); err != http.ErrServerClosed {
+		return fmt.Errorf("server error: %w", err)
+	}
+	fmt.Fprintf(out, "Server stopped.\n")
 	return nil
 }
+

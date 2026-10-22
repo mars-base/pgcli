@@ -105,13 +105,17 @@ pg tune --dsn postgres://user:pass@host:5432/db
 ## `--web-tune`：交互式站点
 
 ```bash
-pg tune --web-tune tune.html --open
+pg tune --web-tune                  # 启动服务器，监听 http://127.0.0.1:10864
+pg tune --web-tune --listen :8080   # 自定义端口
+pg tune --web-tune --open           # 启动服务器并打开浏览器
 ```
 
-写出单个自包含 HTML——完整的计算器，每个输入都有表单（版本、OS、负载、RAM+单位、
+启动 HTTP 服务器，提供交互式调优计算器。页面有完整的输入表单（版本、OS、负载、RAM+单位、
 CPU、连接数、存储、库大小），实时重算，postgresql.conf / ALTER SYSTEM 输出带一键复制。
 无网络、无依赖；宿主机 RAM/CPU/OS 会预填表单。页面内的计算器是 Go 算法的 JS 移植；
 页面自带 Go 现算的 golden 样例，加载时自检，两套实现一旦对不上就显示红条警示。
+
+按 Ctrl+C（或发送 SIGTERM）优雅关闭服务器。
 
 ## 数值怎么来的
 

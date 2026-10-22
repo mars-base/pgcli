@@ -2,10 +2,13 @@ package cli
 
 import (
 	"bytes"
-	"os"
-	"path/filepath"
+	"io"
+	"net"
+	"net/http"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -198,22 +201,50 @@ func TestFormatSize(t *testing.T) {
 	}
 }
 
-func TestRunWebTuneWritesSite(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "tune.html")
-	var buf bytes.Buffer
-	if err := runWebTune(path, false, &buf); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(path)
+func TestRunWebTuneServerServesHTML(t *testing.T) {
+	// Start server on a random port
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("cannot allocate port: %v", err)
 	}
-	if !strings.Contains(string(data), "<!DOCTYPE html>") {
-		t.Errorf("no HTML written:\n%s", data)
+	addr := listener.Addr().String()
+	listener.Close()
+
+	var buf bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		runWebTuneServer(addr, false, &buf)
+		close(done)
+	}()
+
+	// Wait for server to start
+	time.Sleep(150 * time.Millisecond)
+
+	// Make a request
+	resp, err := http.Get("http://" + addr)
+	if err != nil {
+		t.Fatalf("GET failed: %v", err)
 	}
-	if !strings.Contains(buf.String(), path) {
-		t.Errorf("output should name the file: %q", buf.String())
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
 	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Errorf("Content-Type = %q, want text/html", ct)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "<!DOCTYPE html>") {
+		t.Errorf("response body does not contain HTML")
+	}
+	if !strings.Contains(buf.String(), "Starting web-tune server") {
+		t.Errorf("output should mention server start: %q", buf.String())
+	}
+
+	// Stop server via SIGTERM
+	syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+	<-done
 }
 
 func TestInputsToStringsRoundTrip(t *testing.T) {
