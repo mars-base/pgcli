@@ -133,6 +133,7 @@ type TopAddonsConfig struct {
 	BeeGFS       map[string]BeeGFSConfig         `yaml:"beegfs,omitempty"`
 	Juicefs      map[string]JuicefsConfig        `yaml:"juicefs,omitempty"`
 	Zerofs       map[string]ZerofsConfig         `yaml:"zerofs,omitempty"`
+	Duckdb       map[string]DuckdbConfig         `yaml:"duckdb,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -1068,6 +1069,33 @@ type ZerofsConfig struct {
 	// Autostart restarts server+client on host boot (pg autostart enable
 	// --zerofs). Start-only: install first.
 	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// DefaultDuckdbVersion pins the DuckDB CLI version downloaded from
+// duckdb/duckdb GitHub releases. The digest is the SHA256 of the
+// duckdb_cli-linux-amd64.zip asset.
+const (
+	DefaultDuckdbVersion = "1.5.6"
+	duckdbSHAamd64       = "6e89deac1ebbc36eed0291caf8b567b030c7b86ac35998f71854e22b3c5d5e2f"
+)
+
+// DuckdbSHA256 returns the pinned checksum of the DuckDB CLI release zip
+// for a linux architecture (amd64 only). An unknown arch returns "".
+func DuckdbSHA256(arch string) string {
+	if arch == "amd64" {
+		return duckdbSHAamd64
+	}
+	return ""
+}
+
+// DuckdbConfig holds a host-installed DuckDB CLI deployment: the duckdb
+// binary (not a container — it's a standalone CLI tool) providing an embedded
+// OLAP database for analytical queries on Parquet/CSV/JSON files.
+type DuckdbConfig struct {
+	Name       string `yaml:"name,omitempty"`        // addon key, defaults to the map key
+	Version    string `yaml:"version,omitempty"`     // pinned release tag, e.g. "1.5.6"
+	BinaryPath string `yaml:"binary_path,omitempty"` // resolved path to duckdb binary
+	DataDir    string `yaml:"data_dir,omitempty"`    // default database directory, <base>/addon/duckdb/<name>
 }
 
 // RustfsConfig holds a standalone rustfs addon. Its field set is a
@@ -3301,6 +3329,24 @@ func (c *Config) ApplyDefaults() {
 			addon.LogFile = filepath.Join(addonDir, "zerofs.log")
 		}
 		c.Addons.Zerofs[name] = addon
+	}
+
+	// Apply defaults for DuckDB addon
+	for name, addon := range c.Addons.Duckdb {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.DataDir == "" {
+			duckdbBaseDir := platform.DefaultConfigDir()
+			if c.BaseDir != "" {
+				duckdbBaseDir = c.BaseDir
+			}
+			addon.DataDir = filepath.Join(duckdbBaseDir, "addon", "duckdb", name)
+		}
+		if addon.BinaryPath == "" {
+			addon.BinaryPath = "/usr/local/bin/duckdb"
+		}
+		c.Addons.Duckdb[name] = addon
 	}
 
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.

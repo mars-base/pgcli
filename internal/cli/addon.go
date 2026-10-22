@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -278,6 +279,19 @@ Infra addons (shared, not tied to one instance):
           juicefs. "pg addon zerofs start|stop|mount|umount|status [--name]"
           manage it; "pg logs addon zerofs --service server|mount" tail either
           log.
+  pg addon install duckdb
+          Stored under top-level addons.duckdb in config (Linux only, amd64).
+          DuckDB — an embedded OLAP database ("SQLite for analytics"), C++
+          columnar engine that queries Parquet/CSV/JSON directly. Host-binary
+          addon: the CLI zip is downloaded from GitHub releases (sha256 pinned,
+          --install-dir picks where; a binary already on PATH is reused). No
+          container, no daemon — DuckDB is a standalone CLI tool. Common
+          extensions (httpfs, parquet, json) are installed automatically unless
+          --no-extensions. --version picks the release (default 1.5.6 LTS;
+          2.0.0 also supported). --data-dir sets the default database directory
+          (default <base_dir>/addon/duckdb/<name>). "pg addon duckdb status"
+          shows the binary version and path; "pg addon duckdb shell" launches
+          an interactive DuckDB session.
 
 Commands:
   pg addon install <addon>    install an add-on
@@ -318,6 +332,7 @@ Currently supported add-ons:
   beegfs      BeeGFS — the scale-out parallel filesystem (mgmtd/meta/storage services from ghcr.io/thinkparq/beegfs — brought up in dependency order by one install; by default all three on this host = a converged single-host filesystem, --roles scopes it to a subset and a --roles-without-mgmtd host joins an existing cluster via --mgmtd-host/--node-id/--password — every host runs its own pgcli, pgcli never SSHes; --storage-target repeats for multiple disks/targets; fixed protocol ports 8008/8010/8005/8003, meta/storage cannot move so one filesystem per host; shared conn-auth secret (generated on the mgmtd host), mgmtd TLS disabled; an unlicensed build caps client mounts at five — pgcli never generates a license but CARRIES a ThinkParQ PEM via --license-file / "pg addon beegfs license" (mgmtd-only); the kernel-module client is never installed — "pg addon beegfs mount-hint" prints its config, "join-hint" the per-host join commands; Linux host network only)
   juicefs     JuiceFS — S3-backed POSIX filesystem installed as a HOST BINARY (GitHub releases + sha256; no container): an EXTERNAL S3 backend given explicitly (--s3-endpoint http(s)://host:port + --access-key/--secret-key — no same-host addon auto-detection; buckets via "pg mc" by hand, pgcli prints the exact command) and an explicit metadata URL (--dsn: postgres://, redis:// or sqlite3://); mounts a plain host directory; "pg addon juicefs mount|umount|status"; Linux only
   zerofs      ZeroFS — encrypted self-maintaining S3 filesystem (LSM on S3, no external metadata) as a HOST BINARY (GitHub releases + sha256): an EXTERNAL S3 backend given explicitly (--s3-endpoint + --access-key/--secret-key, optional --s3-region; same no-auto-detection contract as juicefs); pgcli writes config.toml and runs a loopback 9P server + FUSE client; generated encryption password wraps the bucket's data key ("pg addon password zerofs" to recover, --encryption-password to re-attach a kept bucket); needs conditional-put support (MinIO 2022-08+ / real S3) else --conditional-put redis --redis-dsn; Linux only
+  duckdb      DuckDB — embedded OLAP database as a HOST BINARY (GitHub releases + sha256 zip; no container, no daemon): C++ columnar engine querying Parquet/CSV/JSON directly; --version pins the release (default 1.5.6 LTS, 2.0.0 also supported); common extensions (httpfs, parquet, json) auto-installed; "pg addon duckdb status|shell"; Linux only, amd64
   nginx       HTTP reverse proxy in front of web services (path-based routing, optional TLS termination; single container from docker.io/library/nginx; Linux host network, macOS bridge)
 
 Two modes (pgbouncer, postgrest):
@@ -759,6 +774,8 @@ Examples:
   pg addon install zerofs --name z1 --s3-endpoint https://s3.example.com --access-key AK --secret-key SK --bucket zerofs-z1   # auto fencing (needs conditional-put support), generated encryption password (pg addon password zerofs)
   pg addon install zerofs --name z1 --s3-endpoint http://store.internal:9000 --access-key AK --secret-key SK --conditional-put redis --redis-dsn redis://:pw@fencer:6379   # store lacks If-None-Match → fence through an explicit redis URL
   pg addon install zerofs --name z1 --encryption-password '<from pg addon password zerofs>'   # re-attach a bucket whose entry was removed (a fresh password could not unwrap its data)
+  pg addon install duckdb                                                                  # default 1.5.6 LTS, install extensions, data dir at <base>/addon/duckdb/duckdb
+  pg addon install duckdb --version 2.0.0 --name analytics                                 # pin v2.0.0 under a custom name
   pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050
   pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050 --upstream name=postgrest,path=/api,backend=127.0.0.1:3000 --tls`,
 	Args: cobra.ExactArgs(1),
@@ -835,13 +852,15 @@ var addonRemoveCmd = &cobra.Command{
 For local add-ons, use -i to specify the instance.
 For remote add-ons, use --pg-name to specify the pooler name.
 
-Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/beegfs/juicefs/zerofs) use --name.
-Remove keeps the data directory; pass --clean-data for object-storage/KV/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea/BeeGFS
+Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/beegfs/juicefs/zerofs/duckdb) use --name.
+Remove keeps the data directory; pass --clean-data for object-storage/KV/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea/BeeGFS/DuckDB
 data to go too. For beegfs the unit is the filesystem on THIS host — its role containers (all three on a converged host, the configured subset on a cross-host member) go, and --clean-data deletes their data dirs.
 For juicefs/zerofs (host-binary addons) remove unmounts and stops the processes but NEVER touches object storage or the
 metadata engine — only the config entry goes; --clean-data additionally deletes the addon's host dir (cache, logs, sqlite
 meta, config.toml). For zerofs the bucket survives by design: re-attach it later by passing the original password
 ("pg addon password zerofs" before removing) to a fresh install via --encryption-password.
+For duckdb (host-binary CLI tool) remove deletes the config entry; --clean-data additionally deletes the data directory (database files).
+The binary is kept (shared across instances).
 
 Examples:
   pg addon remove pgbouncer -i proj01
@@ -865,7 +884,9 @@ Examples:
   pg addon remove beegfs --clean-data
   pg addon remove juicefs --name data
   pg addon remove juicefs --name data --clean-data
-  pg addon remove zerofs --name z1 --clean-data`,
+  pg addon remove zerofs --name z1 --clean-data
+  pg addon remove duckdb --name analytics
+  pg addon remove duckdb --name analytics --clean-data`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonRemove(args[0], cmd)
@@ -902,6 +923,7 @@ Supported add-ons:
   beegfs     pg addon start beegfs [--name fs1]   (starts this host's roles in dependency order — mgmtd → meta → storage, or the subset a cross-host member runs)
   juicefs    pg addon start juicefs [--name data]   (host binary: mounts the volume — alias of "pg addon juicefs mount")
   zerofs     pg addon start zerofs [--name z1]   (host binary: brings up the 9P server — alias of "pg addon zerofs start"; the FUSE client is "pg addon zerofs mount")
+  duckdb     pg addon start duckdb [--name duckdb]   (no-op: DuckDB is a CLI tool, not a daemon — run "pg addon duckdb shell" instead)
   nginx      pg addon start nginx [--name proxy]
   pgbouncer  pg addon start pgbouncer -i <instance>
              pg addon start pgbouncer --pg-name <remote-name>
@@ -960,6 +982,7 @@ Supported add-ons:
   beegfs     pg addon stop beegfs [--name fs1]   (stops this host's roles in reverse order — storage → meta → mgmtd)
   juicefs    pg addon stop juicefs [--name data]   (host binary: unmounts — alias of "pg addon juicefs umount")
   zerofs     pg addon stop zerofs [--name z1]   (host binary: unmounts the client and stops the 9P server — alias of "pg addon zerofs stop")
+  duckdb     pg addon stop duckdb [--name duckdb]   (no-op: DuckDB is a CLI tool, not a daemon)
   nginx      pg addon stop nginx [--name proxy]
   pgbouncer  pg addon stop pgbouncer -i <instance>
              pg addon stop pgbouncer --pg-name <remote-name>
@@ -1073,7 +1096,7 @@ func init() {
 	addonInstallCmd.Flags().Int("replication-factor", 0, "garage cluster only: object replication factor (garage.toml replication_factor; must be <= node count — a 3-node cluster with rf 3 tolerates losing 2; set it on EVERY member, the value is per-node config). Empty for garage = default 1 (single-node); etcd/redis ignore it")
 	addonInstallCmd.Flags().String("rpc-secret", "", "garage cluster only: the shared 64-hex cluster RPC secret (garage.toml rpc_secret) — generated by the bootstrap node and printed once; every joiner MUST pass the same value (pgcli never executes remotely, so you carry it). Invalid on a single-node install")
 	addonInstallCmd.Flags().Int("cluster-replicas", 0, "redis native-cluster only: per-master replica count for the --cluster create you will run (default 0 = masters-only). Only shapes the suggested assemble command and node-count guidance — which nodes become followers is decided by Redis at create time, not here; the whole group inherits the first member's value")
-	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs, garage, redis, pgAdmin, Grafana or Gitea instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; garage default <base_dir>/addon/garage/<name>/data (its metadata dir is a sibling .../meta); seaweedfs default <base_dir>/addon/seaweedfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data; pgadmin default <base_dir>/addon/pgadmin/<name>/data; grafana default <base_dir>/addon/grafana/<name>/data; prometheus default <base_dir>/addon/prometheus/<name>/data; alertmanager default <base_dir>/addon/alertmanager/<name>/data; gitea default <base_dir>/addon/gitea/<name>/data; beegfs — ONE dir for the whole filesystem, its three services use <dir>/mgmtd, <dir>/meta and <dir>/storage, default root <base_dir>/addon/beegfs/<name>)")
+	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs, garage, redis, pgAdmin, Grafana, Gitea or DuckDB instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; garage default <base_dir>/addon/garage/<name>/data (its metadata dir is a sibling .../meta); seaweedfs default <base_dir>/addon/seaweedfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data; pgadmin default <base_dir>/addon/pgadmin/<name>/data; grafana default <base_dir>/addon/grafana/<name>/data; prometheus default <base_dir>/addon/prometheus/<name>/data; alertmanager default <base_dir>/addon/alertmanager/<name>/data; gitea default <base_dir>/addon/gitea/<name>/data; beegfs — ONE dir for the whole filesystem, its three services use <dir>/mgmtd, <dir>/meta and <dir>/storage, default root <base_dir>/addon/beegfs/<name>; duckdb default <base_dir>/addon/duckdb/<name>)")
 	addonInstallCmd.Flags().String("advertise-host", "", "peer-visible host: etcd member peer/client URLs, redis native-cluster --cluster-announce-ip, , garage cluster rpc_public_addr, and seaweedfs cluster weed -ip that peers dial (empty=127.0.0.1 single-host; set a LAN IP or FQDN for cross-host clusters — required on every garage or seaweedfs --cluster member)")
 	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.0.0.12:2379 (implies --initial-cluster-state existing; requires --advertise-host)")
 	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea or beegfs instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"gitea\"/\"beegfs\")")
@@ -1116,10 +1139,10 @@ func init() {
 	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo/rustfs/seaweedfs: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo|rustfs>/<name>/, or the addon dir for seaweedfs; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Seaweedfs serves TLS natively: the S3 port becomes HTTPS-only (cleartext listener off). Changing this needs --force to recreate. NOT for garage: it has no native TLS (rejects --tls); front it with the nginx addon")
 	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo/rustfs: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt for MinIO/silo, rustfs_cert.pem for rustfs, cert.pem for seaweedfs). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
 	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo/rustfs: private key for --tls-cert (PEM; mounted read-only as private.key for MinIO/silo, rustfs_key.pem for rustfs, key.pem for seaweedfs). Must pair with the cert; both are required to enable BYO TLS")
-	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/PostgREST/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea container (or, for BeeGFS, the whole 3-container filesystem cluster) even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, a changed pgAdmin --email/--dsn/--pg-name, Grafana --admin-user or Gitea --admin-user/--ssh-port/--dsn seed/--allow-registration, or to force-recreate a Prometheus instance instead of hot-reloading its config). For juicefs it rebuilds the config entry from the flags (format is still skipped when the volume already exists in the metadata engine); for zerofs it re-renders config.toml and restarts the server/client, KEEPING the stored encryption password (a fresh one could not unwrap the bucket's existing data)")
+	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/PostgREST/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea container (or, for BeeGFS, the whole 3-container filesystem cluster) even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, a changed pgAdmin --email/--dsn/--pg-name, Grafana --admin-user or Gitea --admin-user/--ssh-port/--dsn seed/--allow-registration, or to force-recreate a Prometheus instance instead of hot-reloading its config). For juicefs it rebuilds the config entry from the flags (format is still skipped when the volume already exists in the metadata engine); for zerofs it re-renders config.toml and restarts the server/client, KEEPING the stored encryption password (a fresh one could not unwrap the bucket's existing data); for duckdb it rebuilds the config entry from the flags")
 
 	// redis flags (top-level standalone KV store — the first version-selectable addon)
-	addonInstallCmd.Flags().String("version", "", "Redis major version to install: 7 or 8 (default \"8\"); each maps to a pinned upstream docker.io/library/redis tag. For juicefs/zerofs it instead pins the host binary release to download (default: the version's pinned sha256). Ignored for every other addon")
+	addonInstallCmd.Flags().String("version", "", "Redis major version to install: 7 or 8 (default \"8\"); each maps to a pinned upstream docker.io/library/redis tag. For juicefs/zerofs/duckdb it instead pins the host binary release to download (default: the version's pinned sha256). Ignored for every other addon")
 	addonInstallCmd.Flags().String("password", "", "Redis requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls) / Predixy proxy password (REQUIRED, never generated: it must be the proxied cluster's requirepass — read it with `pg addon password redis --name <member>`) / pgAdmin, Grafana or Gitea WEB login password (generated on first install if omitted — not a PostgreSQL password; retrieve it with `pg addon password pgadmin`/`grafana`/`gitea`. For Grafana it only takes effect while grafana.db is absent; for Gitea the stored password is the one pgcli CREATES the admin account with, so it is inert on a revived store whose admin already exists) / BeeGFS connection-auth secret (generated on first install ONLY on a host running mgmtd; REQUIRED on a cross-host join (--roles without mgmtd) and must equal the cluster's value — retrieve it with `pg addon password beegfs` or `pg addon beegfs join-hint`)")
 	addonInstallCmd.Flags().String("admin-user", "", "Grafana WEB login user (GF_SECURITY_ADMIN_USER; default \"admin\") / Gitea WEB login user (created via `gitea admin user create`; default \"gitea\" — deliberately NOT the container's OS user \"git\") — the account you sign into the web UI with, unrelated to any PostgreSQL role")
 	addonInstallCmd.Flags().Bool("allow-registration", false, "Gitea: open self-service signup (GITEA__service__DISABLE_REGISTRATION=false; the web UI shows a Register entry). Closed by default — it is one of the two guards on the default 0.0.0.0 listen. Signups always create NORMAL users: Gitea offers no way for the register form to produce an admin, so this opens account spam, not takeover. The toggle needs --force to reach the live container; close it again with --allow-registration=false --force")
@@ -1207,10 +1230,12 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallZerofs(cmd)
 	case "nginx":
 		return runAddonInstallNginx(cmd)
+	case "duckdb":
+		return runAddonInstallDuckdb(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, juicefs, zerofs, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -5684,6 +5709,34 @@ func runAddonList(showPassword bool) error {
 		fmt.Println("  (none)")
 	}
 
+	// duckdb (host-binary embedded OLAP, no daemon)
+	fmt.Println()
+	fmt.Println("Analytics add-ons (duckdb):")
+	hasDuckdb := false
+	for _, name := range sortedAddonNames(cfg.Addons.Duckdb) {
+		dc := cfg.Addons.Duckdb[name]
+		hasDuckdb = true
+		state := "not found"
+		if _, err := os.Stat(dc.BinaryPath); err == nil {
+			// Try to extract version
+			cmd := exec.Command(dc.BinaryPath, "--version")
+			if out, err := cmd.Output(); err == nil {
+				ver := extractDuckdbVersion(string(out))
+				state = fmt.Sprintf("v%s", ver)
+			} else {
+				state = "error (cannot execute binary)"
+			}
+		}
+		fmt.Printf("  %s (name: %s)\n", "duckdb", name)
+		fmt.Printf("    Status:      %s\n", state)
+		fmt.Printf("    Binary:      %s\n", dc.BinaryPath)
+		fmt.Printf("    Version:     %s (configured)\n", dc.Version)
+		fmt.Printf("    Data dir:    %s\n", dc.DataDir)
+	}
+	if !hasDuckdb {
+		fmt.Println("  (none)")
+	}
+
 	// nginx (HTTP reverse proxy, top-level addon; Linux + macOS)
 	fmt.Println()
 	fmt.Println("Web add-ons (nginx):")
@@ -5917,10 +5970,12 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemoveZerofs(cmd)
 	case "nginx":
 		return runAddonRemoveNginx(cmd)
+	case "duckdb":
+		return runAddonRemoveDuckdb(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, juicefs, zerofs, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -6239,8 +6294,12 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartZerofs(cmd)
 	case "nginx":
 		return runAddonStartNginx(cmd)
+	case "duckdb":
+		fmt.Println("DuckDB is a CLI tool, not a daemon — start/stop are not applicable.")
+		fmt.Println("Run 'pg addon duckdb shell' to launch an interactive session.")
+		return nil
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, juicefs, zerofs, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
 	}
 }
 
@@ -6288,8 +6347,11 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopZerofs(cmd)
 	case "nginx":
 		return runAddonStopNginx(cmd)
+	case "duckdb":
+		fmt.Println("DuckDB is a CLI tool, not a daemon — start/stop are not applicable.")
+		return nil
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, juicefs, zerofs, nginx)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
 	}
 }
 
