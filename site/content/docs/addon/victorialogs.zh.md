@@ -93,39 +93,74 @@ curl -s -X POST -H 'Content-Type: application/json' \
 
 UI 与 HTTP API 共享同一端口，也共享同样的**无鉴权**态势：任何能连到端口的人都能查询、也能写入日志。按上文所述用 `--listen 127.0.0.1` 或防火墙限制访问。
 
+## 常用查询
+
+查询使用 [LogsQL](https://docs.victoriametrics.com/victorialogs/logsql/)。下面的示例走 HTTP 查询 API；同样的查询串可直接用在 `/select/vmui/` 的 VMUI 里。
+
+```bash
+curl -s http://127.0.0.1:9428/select/logsql/query \
+  --data-urlencode 'query=_time:15m level:error' \
+  --data-urlencode 'limit=20'
+```
+
+响应是逐行 JSON，每条日志一个对象。
+
+> 查生产数据时务必带 `_time:` 过滤条件。不带时 VictoriaLogs 会扫描保留期内的全部日志。
+
+| 目标 | 查询 |
+|---|---|
+| 最近 5 分钟全部日志 | `_time:5m` |
+| 全文检索 | `_time:15m error` |
+| 按字段过滤 | `_time:1h app:demo level:error` |
+| 精确值（区分大小写） | `_time:1h level:=error` |
+| 正则匹配（RE2） | `_time:1h path:~"/api/v[0-9]+/"` |
+| 短语 / 前缀匹配 | `_time:1h _msg:"payment timeout"` / `_time:1h _msg:timeout*` |
+| 数值比较 | `_time:1h request_duration:>1s` |
+| AND / OR / NOT | `_time:5m level:error -app:buggy` / `_time:5m (level:error OR level:warn)` |
+| stream 过滤 | `_time:1h {app="demo"}` |
+| 搜索所有字段 | `_time:5m \| *:timeout` |
+| 按时间倒序取前 10 条 | `_time:5m error \| sort by (_time) desc \| limit 10` |
+| 只保留部分字段 | `_time:5m error \| fields _time, level, _msg` |
+| 按 level 统计 | `_time:1h \| stats by (level) count()` |
+| 总数统计 | `_time:1h error \| stats count() errors` |
+| 去重值及命中次数 | `_time:1h \| uniq by (user) with hits` |
+| Top N 值 | `_time:1d level:error \| top 10 (path)` |
+
+说明：
+
+- `field:word` 匹配字段中的词；`field:=value` 是精确匹配，`field:~"regex"` 是正则匹配。取反形式为 `-filter`、`!=`、`!~`。
+- 时间过滤支持相对时长（`5m`、`1h`、`30d`）、绝对时间（`2026-10-23Z`、`2026-10-23T10:00:00Z`）和区间（`_time:[2026-10-01Z, 2026-10-23Z]`）。
+- 管道从左到右执行，过滤条件必须写在 `sort`、`limit`、`stats`、`top` 等处理阶段之前。
+
 ## 日志写入：vlagent、HTTP API、采集器
 
 pgcli 只负责运行 VictoriaLogs 后端——日志怎么进来由你决定。共有三种方式。
 
 ### vlagent（官方 agent）
 
-[`vlagent`](https://docs.victoriametrics.com/victorialogs/vlagent/) 是 VictoriaLogs 的官方日志 agent——`vmagent` 的**日志**对应物（`vmagent` 只负责指标，不要用它写日志）。它在端口 `9429`（可用 `-httpListenAddr` 修改）上接受与 VictoriaLogs 相同的 HTTP 摄入协议，并通过 `-remoteWrite.url` 转发到 VictoriaLogs，该 URL **必须以 `/insert/native` 结尾**：
+[`vlagent`](https://docs.victoriametrics.com/victorialogs/vlagent/) 是 VictoriaLogs 的官方日志 agent——`vmagent` 的**日志**对应物（`vmagent` 只负责指标，不要用它写日志）。它在自己的端口（默认 `9429`）上接受与 VictoriaLogs 相同的 HTTP 摄入协议，可以从磁盘跟踪日志文件，并通过 `-remoteWrite.url` 转发到 VictoriaLogs，该 URL **必须以 `/insert/native` 结尾**。pgcli 会替你运行并管理它——完整参数见 [vlagent 插件]({{< relref "../addon/vlagent" >}})页面：
 
 ```bash
-podman run -d --name vlagent --network host \
-  -v /var/lib/vlagent:/var/lib/vlagent \
-  docker.io/victoriametrics/vlagent:v1.53.0 \
-  -remoteWrite.url=http://127.0.0.1:9428/insert/native \
-  -tmpDataPath=/var/lib/vlagent
+# 仅转发：在 :9429 接受 HTTP 推送并转发给 VictoriaLogs
+pg addon install vlagent \
+  --remote-write-url http://127.0.0.1:9428/insert/native
+
+# 跟踪宿主日志文件：/var/log/nginx 以只读方式挂载到容器内相同路径；
+# --include/--exclude 使用 vlagent 原生 glob 语法（不是正则）
+pg addon install vlagent \
+  --log-path /var/log/nginx \
+  --include '/var/log/nginx/**/*.log' \
+  --exclude '/var/log/nginx/*.gz' \
+  --remote-write-url http://127.0.0.1:9428/insert/native
 ```
 
-这条命令**不跟踪任何日志文件**：在没有 `-kubernetesCollector` 或 `-fileCollector.glob` 时，vlagent 只接收推到端口 `9429` 的 HTTP 日志并转发。要跟踪宿主文件，必须先把目录挂进容器，再用 glob 匹配：
-
-```bash
-podman run -d --name vlagent --network host \
-  -v /var/lib/vlagent:/var/lib/vlagent \
-  -v /var/log/nginx:/var/log/nginx:ro \
-  docker.io/victoriametrics/vlagent:v1.53.0 \
-  -remoteWrite.url=http://127.0.0.1:9428/insert/native \
-  -tmpDataPath=/var/lib/vlagent \
-  -fileCollector.glob='/var/log/nginx/*.log'
-```
+第一种形式**不跟踪任何日志文件**：没有 `--log-path`/`--include`（也没有经 `--extra-arg` 传入的 `-kubernetesCollector`）时，vlagent 只接收推到端口 `9429` 的 HTTP 日志并转发。`--log-path` 接受任意宿主文件或目录；不给 `--include` 时，目录默认展开为 `<dir>/**/*.log`，单个文件默认就是它自身。glob 是在**容器内**匹配的，所以 pgcli 把每个宿主路径挂载到完全相同的绝对路径。
 
 适合使用 vlagent 的场景：
 
-- **复制 / 高可用** —— 为每个 VictoriaLogs 实例重复传 `-remoteWrite.url`。vlagent 会把每条日志复制到所有目标，并为每个 URL 维护独立磁盘缓冲（`-remoteWrite.tmpDataPath`，可用 `-remoteWrite.maxDiskUsagePerURL` 限制大小）；后端宕机期间采集的日志会在其恢复后重放。
-- **Kubernetes Pod 日志** —— 以 DaemonSet 方式运行并加 `-kubernetesCollector`（或使用 `victoria-logs-collector` Helm chart）。它跟踪节点上的 `/var/log/pods` 与 `/var/log/containers`（需把宿主 `/var/log` 只读挂入；使用 Docker runtime 时还要挂 `/var/lib` 以解析 runtime 符号链接），自动附加容器元数据，并把读取位点持久化在 `-tmpDataPath` 下。
-- **磁盘文件** —— `-fileCollector.glob='/var/log/nginx/*.log'`（可重复；glob 必须指向文件而非目录）。路径是在**容器内**解析的，所以要先挂载宿主目录。默认 `hostname` 与 `file` 成为 stream 字段，读取位点与缓冲位于 `-tmpDataPath` 下。
+- **复制 / 高可用** —— 为每个 VictoriaLogs 实例重复传 `--remote-write-url`。vlagent 会把每条日志复制到所有目标，并为每个 URL 维护独立磁盘缓冲（`-remoteWrite.tmpDataPath`，可用 `-remoteWrite.maxDiskUsagePerURL` 限制大小）；后端宕机期间采集的日志会在其恢复后重放。
+- **Kubernetes Pod 日志** —— 用 `--extra-arg -kubernetesCollector`，并通过 `--log-path` 把宿主 `/var/log`（使用 Docker runtime 时再加 `/var/lib` 以解析 runtime 符号链接）挂入。它跟踪 `/var/log/pods` 与 `/var/log/containers`，自动附加容器元数据，并把读取位点持久化在数据目录（`-tmpDataPath`）下。
+- **磁盘文件** —— `--log-path /var/log/nginx --include '/var/log/nginx/*.log'`（glob 必须指向文件而非目录）。默认 `hostname` 与 `file` 成为 stream 字段，读取位点与缓冲位于插件的数据目录。
 
 如果只有单个、网络稳定的 VictoriaLogs 实例，直接发送（见下）更简单——这是推荐的默认方式。
 
@@ -246,6 +281,14 @@ pg addon stop victorialogs
 pg addon start victorialogs
 ```
 
+### 开机自启
+
+```bash
+pg autostart enable --victorialogs --name vl
+```
+
+这会在 `pg.yaml` 里给实例打标记，并安装/刷新一个开机服务（Linux 上是 systemd `--user` unit，macOS 上是 LaunchAgent）来执行 `pg start --autostart`。开机启动只负责把容器拉起来——日志数据目录在 install 时已创建，重启后已有日志仍在。关闭用 `pg autostart disable --victorialogs --name vl`；完整机制见 [开机自启]({{< relref "../autostart" >}})。
+
 ## 移除
 
 ```bash
@@ -266,7 +309,7 @@ rootless podman 下，`--clean-data` 经 `podman unshare rm` 删除数据目录�
 
 ## 已知限制
 
-- v1 是裸日志后端：pgcli 不安装任何日志采集器——按上文「日志写入」一节使用 `vlagent`、直接 HTTP API 或第三方采集器；也不做告警（自行跑 `vlalert`）。它是你让 Grafana（VictoriaLogs 数据源）和采集器连的长期日志存储。
+- VictoriaLogs 本身是裸日志后端：pgcli 另外提供专门的 [`vlagent` 插件]({{< relref "../addon/vlagent" >}})做文件/HTTP 采集（也可以用上文直连 HTTP API 或第三方采集器），但不安装任何第三方采集器，也不做告警（自行跑 `vlalert`）。它是你让 Grafana（VictoriaLogs 数据源）和采集器连的长期日志存储。
 - **无鉴权。** VictoriaLogs 的 API 摄入并查询任意日志；`0.0.0.0` 绑定的唯一保护是网络边界。这与 VictoriaMetrics 同一态势——不要把它暴露到不可信网络。
 - pgcli 不校验 `--extra-arg` 值（install 阶段没有 pre-flight 检查）。有错的 flag 只会在启动时从容器日志里暴露。
 - macOS 上容器跑在 podman machine 里；目前只在 Linux 上验证过。

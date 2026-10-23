@@ -232,6 +232,14 @@ pg addon start vmcluster
 
 容器以 podman 的 `unless-stopped` 重启策略运行，宿主重启后随 podman 服务自动回来。
 
+### 开机自启
+
+```bash
+pg autostart enable --vmcluster --name vmc
+```
+
+开机启动以集群为单位：每台主机只拉自己的角色容器，按依赖序（storage → insert → select），已有容器直接启动、仅缺失/异常的重建，不会重建正在运行的容器。跨主机部署时要在每台主机上分别执行。完整机制见 [开机自启]({{< relref "../autostart" >}})。
+
 ## 移除
 
 ```bash

@@ -234,6 +234,14 @@ pg addon start vmcluster
 
 Containers run with podman's `unless-stopped` restart policy, so they come back automatically after a host reboot.
 
+### Autostart on boot
+
+```bash
+pg autostart enable --vmcluster --name vmc
+```
+
+Boot is cluster-granular: each host starts only the roles it runs, in dependency order (storage → insert → select), bringing up existing containers and recreating only what is missing — it never recreates running services. Run the command on every host in a cross-host deployment. See [Autostart]({{< relref "../autostart" >}}) for the full mechanism.
+
 ## Remove
 
 ```bash

@@ -96,39 +96,74 @@ curl -s -X POST -H 'Content-Type: application/json' \
 
 The UI shares the same port and the same **no-authentication** posture as the HTTP API: anyone who can reach the port can search and also ingest logs. Restrict it with `--listen 127.0.0.1` or a firewall, as described above.
 
+## Common queries
+
+Queries use [LogsQL](https://docs.victoriametrics.com/victorialogs/logsql/). The examples below run against the HTTP query API; the same strings work in the VMUI at `/select/vmui/`.
+
+```bash
+curl -s http://127.0.0.1:9428/select/logsql/query \
+  --data-urlencode 'query=_time:15m level:error' \
+  --data-urlencode 'limit=20'
+```
+
+The response is newline-delimited JSON, one object per log entry.
+
+> Always include a `_time:` filter when querying production data. Without one, VictoriaLogs scans every log in the retention period.
+
+| Goal | Query |
+|---|---|
+| All logs from the last 5 minutes | `_time:5m` |
+| Full-text search | `_time:15m error` |
+| Match specific fields | `_time:1h app:demo level:error` |
+| Exact value (case-sensitive) | `_time:1h level:=error` |
+| Regex match (RE2) | `_time:1h path:~"/api/v[0-9]+/"` |
+| Phrase / prefix match | `_time:1h _msg:"payment timeout"` / `_time:1h _msg:timeout*` |
+| Numeric comparison | `_time:1h request_duration:>1s` |
+| AND / OR / NOT | `_time:5m level:error -app:buggy` / `_time:5m (level:error OR level:warn)` |
+| Stream filter | `_time:1h {app="demo"}` |
+| Search every field | `_time:5m \| *:timeout` |
+| Newest first, top 10 | `_time:5m error \| sort by (_time) desc \| limit 10` |
+| Keep only some fields | `_time:5m error \| fields _time, level, _msg` |
+| Count by level | `_time:1h \| stats by (level) count()` |
+| Total count | `_time:1h error \| stats count() errors` |
+| Unique values with hit counts | `_time:1h \| uniq by (user) with hits` |
+| Top N values | `_time:1d level:error \| top 10 (path)` |
+
+Notes:
+
+- `field:word` matches the word within that field; `field:=value` is an exact match and `field:~"regex"` is a regex match. Negated forms are `-filter`, `!=` and `!~`.
+- Time filters accept durations (`5m`, `1h`, `30d`), absolute timestamps (`2026-10-23Z`, `2026-10-23T10:00:00Z`) and ranges (`_time:[2026-10-01Z, 2026-10-23Z]`).
+- Pipes run left to right, so filters must come before `sort`, `limit`, `stats`, `top` and the other processing stages.
+
 ## Ingestion: vlagent, HTTP APIs, collectors
 
 pgcli runs the VictoriaLogs backend only — how logs reach it is up to you. There are three routes.
 
 ### vlagent (official agent)
 
-[`vlagent`](https://docs.victoriametrics.com/victorialogs/vlagent/) is the official log agent for VictoriaLogs — the **log** counterpart of `vmagent` (`vmagent` ships metrics only; do not use it for logs). It accepts the same HTTP ingestion protocols as VictoriaLogs on port `9429` (change with `-httpListenAddr`) and forwards everything to VictoriaLogs via `-remoteWrite.url`, which **must end with `/insert/native`**:
+[`vlagent`](https://docs.victoriametrics.com/victorialogs/vlagent/) is the official log agent for VictoriaLogs — the **log** counterpart of `vmagent` (`vmagent` ships metrics only; do not use it for logs). It accepts the same HTTP ingestion protocols as VictoriaLogs on its own port (`9429` by default), can tail log files from disk, and forwards everything to VictoriaLogs via `-remoteWrite.url`, which **must end with `/insert/native`**. pgcli runs and manages it for you — see the [vlagent addon]({{< relref "../addon/vlagent" >}}) page for the full reference:
 
 ```bash
-podman run -d --name vlagent --network host \
-  -v /var/lib/vlagent:/var/lib/vlagent \
-  docker.io/victoriametrics/vlagent:v1.53.0 \
-  -remoteWrite.url=http://127.0.0.1:9428/insert/native \
-  -tmpDataPath=/var/lib/vlagent
+# Relay-only: accept HTTP pushes on :9429 and forward them to VictoriaLogs.
+pg addon install vlagent \
+  --remote-write-url http://127.0.0.1:9428/insert/native
+
+# Track host files: /var/log/nginx is mounted read-only into the container at
+# the same path; --include/--exclude use vlagent's native glob syntax (NOT regex).
+pg addon install vlagent \
+  --log-path /var/log/nginx \
+  --include '/var/log/nginx/**/*.log' \
+  --exclude '/var/log/nginx/*.gz' \
+  --remote-write-url http://127.0.0.1:9428/insert/native
 ```
 
-This command tracks **no log files**: without `-kubernetesCollector` or `-fileCollector.glob`, vlagent only receives logs pushed to it over HTTP on port `9429` and forwards them. To tail files on the host they must be mounted into the container and matched by a glob:
-
-```bash
-podman run -d --name vlagent --network host \
-  -v /var/lib/vlagent:/var/lib/vlagent \
-  -v /var/log/nginx:/var/log/nginx:ro \
-  docker.io/victoriametrics/vlagent:v1.53.0 \
-  -remoteWrite.url=http://127.0.0.1:9428/insert/native \
-  -tmpDataPath=/var/lib/vlagent \
-  -fileCollector.glob='/var/log/nginx/*.log'
-```
+The first form tracks **no log files**: without `--log-path`/`--include` (or `-kubernetesCollector` via `--extra-arg`), vlagent only receives logs pushed to it over HTTP and forwards them. `--log-path` accepts any host file or directory; with no `--include`, a directory defaults to `<dir>/**/*.log` and a file to itself. The globs are matched **inside the container**, which is why pgcli mounts each host path at the identical absolute path.
 
 Use vlagent when you need:
 
-- **Replication / HA** — repeat `-remoteWrite.url` for every VictoriaLogs instance. vlagent copies each log to all of them and keeps an independent on-disk buffer per URL (`-remoteWrite.tmpDataPath`, capped by `-remoteWrite.maxDiskUsagePerURL`); logs collected while a backend is down are replayed when it returns.
-- **Kubernetes Pod logs** — run it as a DaemonSet with `-kubernetesCollector` (or use the `victoria-logs-collector` Helm chart). It follows the node's container logs under `/var/log/pods` and `/var/log/containers` (mount the host's `/var/log` read-only; with the Docker runtime also mount `/var/lib` so runtime symlinks resolve), adds container metadata, and checkpoints its read position under `-tmpDataPath`.
-- **Files on disk** — `-fileCollector.glob='/var/log/nginx/*.log'` (repeatable; globs must point at files, not directories). The path is resolved **inside the container**, so mount the host directory first. By default `hostname` and `file` become stream fields, and reading checkpoints/buffers live under `-tmpDataPath`.
+- **Replication / HA** — repeat `--remote-write-url` for every VictoriaLogs instance. vlagent copies each log to all of them and keeps an independent on-disk buffer per URL (`-remoteWrite.tmpDataPath`, capped by `-remoteWrite.maxDiskUsagePerURL`); logs collected while a backend is down are replayed when it returns.
+- **Kubernetes Pod logs** — pass `--extra-arg -kubernetesCollector` and mount the host's `/var/log` (plus `/var/lib` with the Docker runtime so runtime symlinks resolve) via `--log-path`. It follows `/var/log/pods` and `/var/log/containers`, adds container metadata, and checkpoints its read position in the data dir under `-tmpDataPath`.
+- **Files on disk** — `--log-path /var/log/nginx --include '/var/log/nginx/*.log'` (globs must point at files, not directories). By default `hostname` and `file` become stream fields, and reading checkpoints/buffers live in the addon's data dir.
 
 For a single, stable VictoriaLogs instance, sending logs directly (below) is simpler — that is the recommended default.
 
@@ -249,6 +284,14 @@ pg addon stop victorialogs
 pg addon start victorialogs
 ```
 
+### Autostart on boot
+
+```bash
+pg autostart enable --victorialogs --name vl
+```
+
+This flags the instance in `pg.yaml` and installs/refreshes a boot service (a systemd `--user` unit on Linux, a LaunchAgent on macOS) that runs `pg start --autostart`. A boot-time start only brings the container up — the log data dir already exists, so stored logs survive the reboot. Disable with `pg autostart disable --victorialogs --name vl`; see [Autostart]({{< relref "../autostart" >}}) for the full mechanism.
+
 ## Remove
 
 ```bash
@@ -269,7 +312,7 @@ Under rootless podman, `--clean-data` deletes the data dir through `podman unsha
 
 ## Known limitations
 
-- v1 is a bare log backend: pgcli does not install any log shipper — use `vlagent`, a direct HTTP ingestion API, or a third-party collector as described in the Ingestion section above — and does no alerting (use `vlalert` separately). It is the long-term log store you point Grafana (VictoriaLogs datasource) and your shippers at.
+- VictoriaLogs itself is a bare log backend: pgcli ships a dedicated [`vlagent` addon]({{< relref "../addon/vlagent" >}}) for file/HTTP collection (plus direct HTTP ingestion APIs and third-party collectors, as described above), but configures no third-party shippers and does no alerting (use `vlalert` separately). It is the long-term log store you point Grafana (VictoriaLogs datasource) and your shippers at.
 - **No authentication.** VictoriaLogs's API ingests and queries arbitrary logs; the only protection for a `0.0.0.0` bind is the network boundary. This is the same posture as VictoriaMetrics — do not expose it on an untrusted network.
 - pgcli does not validate `--extra-arg` values (there is no pre-flight check at install). A bad flag surfaces only in the container logs on startup.
 - On macOS the container runs inside the podman machine; it has been validated on Linux only.
