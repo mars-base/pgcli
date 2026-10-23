@@ -47,6 +47,7 @@ type Config struct {
 	VictoriaMetricsStartPort int                      `yaml:"victoriametrics_start_port,omitempty"` // starting VictoriaMetrics HTTP host port, default 8428
 	VMClusterStartPort       int                      `yaml:"vmcluster_start_port,omitempty"`       // starting VMCluster port, default 8480 (5 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP, internal insert TCP, internal select TCP)
 	VictoriaLogsStartPort    int                      `yaml:"victorialogs_start_port,omitempty"`    // starting VictoriaLogs HTTP host port, default 9428
+	VlagentStartPort         int                      `yaml:"vlagent_start_port,omitempty"`         // starting vlagent ingest HTTP host port, default 9429
 	Postgres                PostgresConfig            `yaml:"postgres"`
 	Podman                  PodmanConfig              `yaml:"podman"`
 	PITR                    PITRConfig                `yaml:"pitr"`
@@ -140,6 +141,7 @@ type TopAddonsConfig struct {
 	VictoriaMetrics map[string]VictoriaMetricsConfig `yaml:"victoriametrics,omitempty"`
 	VMCluster      map[string]VMClusterConfig       `yaml:"vmcluster,omitempty"`
 	VictoriaLogs   map[string]VictoriaLogsConfig    `yaml:"victorialogs,omitempty"`
+	Vlagent        map[string]VlagentConfig          `yaml:"vlagent,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -667,6 +669,14 @@ const DefaultVMStorageImageTag = "docker.io/victoriametrics/vmstorage:v1.154.1-c
 // same family: one binary, one container, one HTTP port (9428) serving ingest,
 // query, and the built-in UI.
 const DefaultVictoriaLogsImageTag = "docker.io/victoriametrics/victoria-logs:v1.53.0"
+
+// DefaultVlagentImageTag pins the vlagent image — the official log agent of the
+// VictoriaLogs family. Same release train as VictoriaLogs, so the two version
+// numbers move together. vlagent ships the file collector pgcli configures
+// (`-fileCollector.glob`), accepts the VictoriaLogs ingest protocols on its own
+// HTTP port (9429 by default), and buffers to disk before forwarding to
+// VictoriaLogs via `-remoteWrite.url` (which must end in /insert/native).
+const DefaultVlagentImageTag = "docker.io/victoriametrics/vlagent:v1.53.0"
 
 // DefaultGiteaImageTag pins the Gitea image. gitea/gitea is the official
 // multi-arch image on docker.io (pull-only — pgcli never builds it). Note the
@@ -1930,6 +1940,45 @@ type VictoriaLogsConfig struct {
 	// Start-only: it starts the existing container, so install first.
 	Autostart bool `yaml:"autostart,omitempty"`
 }
+
+// VlagentConfig holds a standalone vlagent addon — the official VictoriaLogs
+// log agent (https://docs.victoriametrics.com/victorialogs/vlagent/). vlagent
+// is the log counterpart of vmagent: it accepts the VictoriaLogs ingest
+// protocols on its own HTTP port, tails log files from disk, buffers to a
+// persistent data dir, and forwards everything to one or more VictoriaLogs
+// instances.
+//
+// The file collector is the reason pgcli wraps it here. vlagent only sees
+// paths INSIDE its container, so every host LogPath is bind-mounted read-only
+// at the SAME absolute path; the glob patterns in Includes/Excludes are then
+// matched against those container paths. Matching is vlagent's native glob
+// syntax (`*`, `/**/`, `?`, `[a-z]`, `{a,b}`) — not regular expressions.
+// Includes/Excludes are positionally paired exactly like vlagent's
+// -fileCollector.glob / -fileCollector.excludeGlob flags (the Nth exclude
+// applies to the Nth include; an empty entry means "no exclude").
+//
+// RemoteWriteURLs must point at VictoriaLogs's /insert/native endpoint. There
+// is NO authentication on either side: vlagent's own HTTP listener is an
+// unauthenticated ingest endpoint, guarded only by the network boundary.
+//
+// The image runs as root, so no pre-chown of the data dir is needed.
+type VlagentConfig struct {
+	ContainerName   string   `yaml:"container_name"`               // pgcli-vlagent<ns>-<name>
+	Name            string   `yaml:"name,omitempty"`               // addon key
+	ImageTag        string   `yaml:"image_tag,omitempty"`          // docker.io/victoriametrics/vlagent:v1.53.0
+	HostPort        int      `yaml:"host_port,omitempty"`          // HTTP ingest port, 9429+ auto-assigned
+	Listen          string   `yaml:"listen,omitempty"`             // -httpListenAddr bind, default 0.0.0.0
+	DataDir         string   `yaml:"data_dir,omitempty"`           // host dir mounted at /var/lib/vlagent (-tmpDataPath)
+	RemoteWriteURLs []string `yaml:"remote_write_urls,omitempty"`  // -remoteWrite.url, must end in /insert/native
+	LogPaths        []string `yaml:"log_paths,omitempty"`          // host files/dirs bind-mounted read-only at the same path
+	Includes        []string `yaml:"includes,omitempty"`           // -fileCollector.glob (container paths)
+	Excludes        []string `yaml:"excludes,omitempty"`           // -fileCollector.excludeGlob, paired positionally with Includes
+	ExtraArgs       []string `yaml:"extra_args,omitempty"`         // additional CLI flags
+	// Autostart brings this container up on host boot via the boot service.
+	// Start-only: it starts the existing container, so install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+// AlertmanagerConfig holds a standalone Alertmanager — the
 // dedup/grouping/routing frontend of the Prometheus stack
 // (https://prometheus.io/docs/alerting/latest/alertmanager/). Shape mirrors
 // PrometheusConfig: a web UI on one host port, a persistent data dir outliving
@@ -2294,6 +2343,7 @@ func Default() *Config {
 		VictoriaMetricsStartPort: 8428,
 		VMClusterStartPort:       8480,
 		VictoriaLogsStartPort:    9428,
+		VlagentStartPort:         9429,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -2506,6 +2556,7 @@ type displayConfig struct {
 	VictoriaMetricsStartPort int                      `yaml:"victoriametrics_start_port,omitempty"`
 	VMClusterStartPort       int                      `yaml:"vmcluster_start_port,omitempty"`
 	VictoriaLogsStartPort    int                      `yaml:"victorialogs_start_port,omitempty"`
+	VlagentStartPort         int                      `yaml:"vlagent_start_port,omitempty"`
 	Logging                 LoggingConfig             `yaml:"logging"`
 	Backup                  BackupConfig              `yaml:"backup"`
 	Pigsty                  PigstyConfig              `yaml:"pigsty"`
@@ -2543,6 +2594,7 @@ func (c *Config) Display() displayConfig {
 		VictoriaMetricsStartPort: c.VictoriaMetricsStartPort,
 		VMClusterStartPort:      c.VMClusterStartPort,
 		VictoriaLogsStartPort:   c.VictoriaLogsStartPort,
+		VlagentStartPort:        c.VlagentStartPort,
 		Logging:                 c.Logging,
 		Backup:                  c.Backup,
 		Pigsty:                  c.Pigsty,
@@ -2786,6 +2838,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.VictoriaLogsStartPort == 0 {
 		c.VictoriaLogsStartPort = d.VictoriaLogsStartPort
+	}
+	if c.VlagentStartPort == 0 {
+		c.VlagentStartPort = d.VlagentStartPort
 	}
 
 	// Postgres
@@ -3437,6 +3492,27 @@ func (c *Config) ApplyDefaults() {
 			addon.Listen = "0.0.0.0"
 		}
 		c.Addons.VictoriaLogs[name] = addon
+	}
+
+	// Top-level addons defaults (vlagent). Same shape as VictoriaLogs above:
+	// one container, one HTTP ingest port, pure CLI flags, no auth. The file
+	// collector settings (LogPaths/Includes/Excludes) are left exactly as
+	// given — an install with no LogPaths is a relay-only agent that only
+	// accepts HTTP pushes, which is a valid configuration.
+	for name, addon := range c.Addons.Vlagent {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-vlagent" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultVlagentImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "0.0.0.0"
+		}
+		c.Addons.Vlagent[name] = addon
 	}
 
 	// Top-level addons defaults (Alertmanager). Same shape as Prometheus above:
@@ -4429,6 +4505,44 @@ func (c *Config) autoAssignPorts() {
 				next = addon.HostPort + 1
 			}
 			c.Addons.VictoriaLogs[name] = addon
+		}
+	}
+
+	// Allocate ports for vlagent addons from their own pool
+	// (vlagent_start_port, default 9429 — vlagent's own default HTTP port).
+	// One port per instance, same shape as the VictoriaLogs block above. 9429
+	// sits next to VictoriaLogs (9428) but is a separate pool, so an extra
+	// VictoriaLogs instance can never take the port a vlagent expects.
+	{
+		vaBase := c.VlagentStartPort
+		assignedVA := map[int]bool{}
+		for _, addon := range c.Addons.Vlagent {
+			if addon.HostPort != 0 {
+				assignedVA[addon.HostPort] = true
+			}
+		}
+		next := vaBase
+		nextFreeVA := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedVA[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.Vlagent))
+		for name := range c.Addons.Vlagent {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.Vlagent[name]
+			if addon.HostPort == 0 && vaBase > 0 {
+				addon.HostPort = nextFreeVA()
+			} else if addon.HostPort >= next {
+				next = addon.HostPort + 1
+			}
+			c.Addons.Vlagent[name] = addon
 		}
 	}
 

@@ -42,6 +42,7 @@ pgcli 使用的容器镜像及其默认 tag。
 | `docker.io/victoriametrics/vmselect` | `v1.154.1-cluster` | VMCluster 查询端（集群版三组件之二），纯上游官方镜像无 wrapper；单架构 amd64，以 root 运行 | `DefaultVMSelectImageTag` |
 | `docker.io/victoriametrics/vmstorage` | `v1.154.1-cluster` | VMCluster 数据存储（集群版三组件之三），纯上游官方镜像无 wrapper；单架构 amd64，以 root 运行 | `DefaultVMStorageImageTag` |
 | `docker.io/victoriametrics/victoria-logs` | `v1.53.0` | VictoriaLogs（VictoriaMetrics 家族的日志数据库），纯上游官方镜像无 wrapper；多架构，以 root 运行 | `DefaultVictoriaLogsImageTag` |
+| `docker.io/victoriametrics/vlagent` | `v1.53.0` | vlagent（VictoriaLogs 官方日志 agent），纯上游官方镜像无 wrapper；多架构，以 root 运行；文件采集由 pgcli 的 `--log-path`/`--include`/`--exclude` 接线 | `DefaultVlagentImageTag` |
 
 ## 镜像导出
 
@@ -145,6 +146,11 @@ done
 podman pull --platform linux/amd64 docker.io/victoriametrics/victoria-logs:v1.53.0
 podman save -o "$TARGET/victoria-logs_v1.53.0.tar" \
   docker.io/victoriametrics/victoria-logs:v1.53.0
+
+# vlagent 上游镜像（多架构，root 运行）；离线导出只要 amd64
+podman pull --platform linux/amd64 docker.io/victoriametrics/vlagent:v1.53.0
+podman save -o "$TARGET/vlagent_v1.53.0.tar" \
+  docker.io/victoriametrics/vlagent:v1.53.0
 ```
 
 ### rustfs（双架构 manifest 不能直接 save）
@@ -295,11 +301,18 @@ done
   victoriametrics 的 `-retentionPeriod` 按**月**计且 pgcli 默认 `"1"`；victoria-logs
   接受完整时长语法（`30d`、`3months`、`1y`），pgcli **不设默认**——`--retention` 省略
   时整个 flag 不下发，让镜像自身的默认生效。上游镜像为多架构（amd64/arm/arm64/ppc64le）
+- **vlagent**：纯上游官方 `docker.io/victoriametrics/vlagent`，无 wrapper。VictoriaLogs
+  的官方日志 agent（`vmagent` 的日志对应物），与 victoria-logs 同一发布节奏、同一版本号。
+  以 **root** 运行、**完全不需要配置文件**（一切经 CLI flag）、**完全没有鉴权**。pgcli
+  在其上接线文件采集：每个 `--log-path` 只读挂载到容器内相同绝对路径，`--include`/
+  `--exclude` 用 vlagent 原生 glob（不是正则）选文件，`--remote-write-url`（必填、以
+  `/insert/native` 结尾）指向 VictoriaLogs，可重复以做复制。单 HTTP 端口（默认 9429）。
+  上游镜像为多架构（amd64/arm64/ppc64le 等）
 - **pgbouncer** / **postgrest** / **haproxy** / **etcd** / **pgdog**：上游官方或社区维护的稳定版本
 
 ---
 
-**最后更新**：2026-10-23（新增 victorialogs 镜像；此前新增 vmcluster 三镜像于 2026-10-22；
+**最后更新**：2026-10-23（新增 vlagent 镜像；同日新增 victorialogs 镜像；此前新增 vmcluster 三镜像于 2026-10-22；
 此前新增 victoriametrics 镜像；
 此前新增 beegfs 三镜像于 2026-10-19，gitea 于 2026-10-16
 合入时补录，alertmanager 于 2026-10-15

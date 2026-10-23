@@ -330,6 +330,7 @@ Currently supported add-ons:
   victoriametrics VictoriaMetrics — fast, Prometheus-compatible time-series database (single container from docker.io/victoriametrics/victoria-metrics; pure CLI flags, no config file; --retention-months for data retention, --extra-arg for custom flags like -search.maxUniqueTimeseries; NO web login — defaults to 0.0.0.0 guarded only by the network, use --listen 127.0.0.1 for loopback; Linux host network, macOS bridge)
   vmcluster   VMCluster — VictoriaMetrics cluster edition: 3 components (vminsert + vmselect + vmstorage) from docker.io/victoriametrics/{vminsert,vmselect,vmstorage}:v1.154.1-cluster; --roles selects which components THIS host runs (default: all three = converged single-host cluster); --storage-node lists ALL vmstorage addresses (repeatable, enables multi-node sharding + replication); pure CLI flags, no config file; 5 ports from vmcluster_start_port (default 8480-8484); NO auth — defaults to 0.0.0.0, use --listen 127.0.0.1 for loopback; Linux host network only
   victorialogs VictoriaLogs — the log database of the VictoriaMetrics family (single container from docker.io/victoriametrics/victoria-logs; pure CLI flags, no config file; one HTTP port from victorialogs_start_port (default 9428) serving ingest + LogsQL queries + built-in UI; --retention for a duration like 30d (omit to keep the binary's default), --extra-arg for custom flags; NO web login — defaults to 0.0.0.0 guarded only by the network, use --listen 127.0.0.1 for loopback; Linux host network, macOS bridge)
+  vlagent     vlagent — the official VictoriaLogs log agent (single container from docker.io/victoriametrics/vlagent; pure CLI flags, no config file; one HTTP ingest port from vlagent_start_port (default 9429); --remote-write-url URL(s) ending in /insert/native forward collected logs to VictoriaLogs; --log-path mounts any host file/dir read-only at the same path and --include/--exclude select files with vlagent's native glob syntax (*, /**/, ?, [a-z], {a,b}) — no regex; no --include means <dir>/**/*.log for dirs and the file itself for files; NO auth — defaults to 0.0.0.0, use --listen 127.0.0.1 for loopback; Linux host network, macOS bridge)
   alertmanager Alertmanager — the alert dedup/grouping/routing frontend of the Prometheus stack (single container from docker.io/prom/alertmanager; rendered alertmanager.yml with a no-op or --webhook-url web.hook receiver, or --conf-file; SIGHUP reload; cluster gossip disabled; NO web login — defaults to 0.0.0.0 guarded only by the network, and silences are dangerous, use --listen 127.0.0.1 for loopback; wired to Prometheus from the Prometheus side via --alertmanager-url; Linux host network, macOS bridge)
   gitea       Gitea — the self-hosted Git service (single container from docker.io/gitea/gitea; web login auto-generated and created via "gitea admin user create"; optional --ssh-port for clone/push over SSH; SQLite by default or --dsn to put its metadata in a PostgreSQL you already run; defaults to 0.0.0.0 since a Git host is reached from other machines; Linux host network, macOS bridge)
   beegfs      BeeGFS — the scale-out parallel filesystem (mgmtd/meta/storage services from ghcr.io/thinkparq/beegfs — brought up in dependency order by one install; by default all three on this host = a converged single-host filesystem, --roles scopes it to a subset and a --roles-without-mgmtd host joins an existing cluster via --mgmtd-host/--node-id/--password — every host runs its own pgcli, pgcli never SSHes; --storage-target repeats for multiple disks/targets; fixed protocol ports 8008/8010/8005/8003, meta/storage cannot move so one filesystem per host; shared conn-auth secret (generated on the mgmtd host), mgmtd TLS disabled; an unlicensed build caps client mounts at five — pgcli never generates a license but CARRIES a ThinkParQ PEM via --license-file / "pg addon beegfs license" (mgmtd-only); the kernel-module client is never installed — "pg addon beegfs mount-hint" prints its config, "join-hint" the per-host join commands; Linux host network only)
@@ -1157,13 +1158,13 @@ func init() {
 	addonInstallCmd.Flags().StringArray("scrape-append", nil, "Prometheus scrape spec(s) JOB=HOST:PORT[,HOST:PORT...] [KEY=VALUE...] to ADD to the instance's stored --scrape list (same form as --scrape, repeatable) instead of replacing it; folds each appended target (and its labels) into the same-named job. Every appended target is probed with GET /metrics and install aborts, touching nothing, if any returns no data. Mutually exclusive with --scrape and --conf-file")
 	addonInstallCmd.Flags().StringArray("alertmanager-url", nil, "Prometheus: Alertmanager instance(s) to forward fired alerts to (repeatable; bare HOST[:PORT] — a portless entry gets Alertmanager's 9093 — or http(s)://HOST[:PORT][/path]). The rendered prometheus.yml gains an alerting: section pushing there PLUS a matching alertmanager scrape job (so Alertmanager's own /metrics is watched; not a separate opt-in). All entries are validated (and must share ONE scheme — mixing http and https aborts) BEFORE anything is written; connectivity is NOT probed (Prometheus shows a dead alertmanager itself). Mutually exclusive with --conf-file, which owns the whole file — write your own alerting: section there")
 	addonInstallCmd.Flags().StringArray("rule-file", nil, "Prometheus: path to a rule file (*.rules.yml with a top-level groups: block; repeatable) — pgcli copies each into its managed rules dir (basename only; two files sharing a basename abort), bind-mounts that dir read-only at /etc/prometheus/rules, and the rendered prometheus.yml loads the copies via rule_files. Valid alongside --conf-file: the copy and mount happen either way, and your own file decides whether to reference /etc/prometheus/rules. A missing or empty file aborts, touching nothing")
-	addonInstallCmd.Flags().StringArray("remote-write-url", nil, "Prometheus: remote-write URL(s) to push scraped samples to (repeatable; full http(s):// URL, e.g. http://127.0.0.1:8480/insert/0/prometheus/api/v1/write for the vmcluster addon, http://127.0.0.1:8428/api/v1/write for the victoriametrics addon). The rendered prometheus.yml gains a remote_write: section; the local TSDB keeps its own retention regardless (the remote is a copy, WAL-backed so a dead remote replays once it returns). Each URL is validated (must parse as http(s) with a host) BEFORE anything is written; connectivity is NOT probed. Mutually exclusive with --conf-file, which owns the whole file — write your own remote_write: section there")
+	addonInstallCmd.Flags().StringArray("remote-write-url", nil, "Prometheus: remote-write URL(s) to push scraped samples to (repeatable; full http(s):// URL, e.g. http://127.0.0.1:8480/insert/0/prometheus/api/v1/write for the vmcluster addon, http://127.0.0.1:8428/api/v1/write for the victoriametrics addon). The rendered prometheus.yml gains a remote_write: section; the local TSDB keeps its own retention regardless (the remote is a copy, WAL-backed so a dead remote replays once it returns). Each URL is validated (must parse as http(s) with a host) BEFORE anything is written; connectivity is NOT probed. Mutually exclusive with --conf-file, which owns the whole file — write your own remote_write: section there. vlagent: the VictoriaLogs endpoint(s) to forward collected logs to (repeatable; each URL MUST end with /insert/native, e.g. http://127.0.0.1:9428/insert/native); repeating it replicates every log to all targets, each with its own disk buffer")
 	addonInstallCmd.Flags().StringArray("remote-write-queue", nil, "Prometheus: queue_config tuning applied under every --remote-write-url entry (repeatable KEY=VALUE): capacity, max_shards, min_shards, max_samples_per_send (integers) and batch_send_deadline, min_backoff, max_backoff (durations like 5s, 1m30s, 2y). VictoriaMetrics recommends larger batches under load (e.g. --remote-write-queue max_samples_per_send=10000 --remote-write-queue capacity=20000 --remote-write-queue max_shards=30). Requires --remote-write-url; keys and values are validated before anything is written. Render-mode only, like --remote-write-url")
 	addonInstallCmd.Flags().StringArray("webhook-url", nil, "Alertmanager webhook URL to notify (repeatable; e.g. --webhook-url http://hook:5001/) — every URL is rendered as one webhook_configs entry of the SAME web.hook receiver (so multiple URLs fan out); the root route points at it. Each URL is validated (must parse as an http(s) URL with a host) BEFORE anything is written; a bad URL aborts the install touching nothing. Connectivity is NOT probed (a webhook fires at alert time, not install time). Mutually exclusive with --conf-file; without it the rendered config uses a name-only no-op receiver (nothing is ever sent)")
 
 	// victoriametrics flags (top-level time-series database)
 	addonInstallCmd.Flags().String("retention-months", "", "VictoriaMetrics data retention in months (default \"1\"); e.g. 3 = 3 months")
-	addonInstallCmd.Flags().StringArray("extra-arg", nil, "VictoriaMetrics/VictoriaLogs: extra CLI flag passed to the binary (repeatable), e.g. --extra-arg -search.maxUniqueTimeseries=1000000 — appended last so last-wins overrides earlier flags")
+	addonInstallCmd.Flags().StringArray("extra-arg", nil, "VictoriaMetrics/VictoriaLogs/vlagent: extra CLI flag passed to the binary (repeatable), e.g. --extra-arg -search.maxUniqueTimeseries=1000000 — appended last so last-wins overrides earlier flags")
 
 	// vmcluster flags (VictoriaMetrics cluster — cross-host, horizontal scaling)
 	addonInstallCmd.Flags().StringArray("storage-node", nil, "VMCluster: vmstorage address (repeatable; format host:insertPort:selectPort, e.g. 10.0.0.1:8483:8484). Lists ALL vmstorage nodes in the cluster for sharding/replication. Omit for converged single-host (auto-derived)")
@@ -1178,6 +1179,11 @@ func init() {
 	addonInstallCmd.Flags().StringArray("insert-extra-arg", nil, "VMCluster: extra CLI flag for vminsert (repeatable)")
 	addonInstallCmd.Flags().StringArray("select-extra-arg", nil, "VMCluster: extra CLI flag for vmselect (repeatable)")
 	addonInstallCmd.Flags().StringArray("storage-extra-arg", nil, "VMCluster: extra CLI flag for vmstorage (repeatable)")
+
+	// vlagent flags (VictoriaLogs log agent — collect host files, forward to VictoriaLogs)
+	addonInstallCmd.Flags().StringArray("log-path", nil, "vlagent: host file or directory to track (repeatable). It is bind-mounted READ-ONLY into the container at the SAME absolute path, so a directory also covers every file below it. Replace the stored list by passing the flag again; with no --include, a directory defaults to <dir>/**/*.log and a file to itself")
+	addonInstallCmd.Flags().StringArray("include", nil, "vlagent: glob pattern(s) selecting files to collect (repeatable; absolute CONTAINER paths, normally under a --log-path). vlagent's native glob syntax: *, /**/ (zero or more directories), ?, [a-z], {a,b}; it is NOT a regular expression. The Nth --exclude pairs with the Nth --include")
+	addonInstallCmd.Flags().StringArray("exclude", nil, "vlagent: glob pattern(s) excluding files from collection (repeatable; absolute CONTAINER paths, positionally paired with --include — the Nth exclude applies to the Nth include; pass an empty value '' as a placeholder to skip a position)")
 
 	// minio flags (top-level single-node S3-compatible object storage)
 	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo/rustfs S3 API host port (0=auto-assign from the shared minio_start_port pool); for garage, the S3 API port (0=auto from garage_start_port, default 3900 — garage takes four consecutive ports API/RPC/Web/Admin)")
@@ -1275,6 +1281,8 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallVMCluster(cmd)
 	case "victorialogs":
 		return runAddonInstallVictoriaLogs(cmd)
+	case "vlagent":
+		return runAddonInstallVlagent(cmd)
 	case "alertmanager":
 		return runAddonInstallAlertmanager(cmd)
 	case "gitea":
@@ -1292,7 +1300,7 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, victorialogs, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -5709,6 +5717,54 @@ func runAddonList(showPassword bool) error {
 		fmt.Println("  (none)")
 	}
 
+	// vlagent (log agent, top-level addon; Linux host network, macOS bridge)
+	fmt.Println()
+	fmt.Println("Log agents (vlagent):")
+	hasVA := false
+	if va, err := podman.NewVlagentManager(cfg); err == nil {
+		for _, name := range sortedAddonNames(cfg.Addons.Vlagent) {
+			vc := cfg.Addons.Vlagent[name]
+			hasVA = true
+			status := "stopped"
+			if running, err := va.ContainerRunning(vc.ContainerName); err == nil && running {
+				status = "running"
+			}
+			fmt.Printf("  %s (name: %s)\n", "vlagent", name)
+			fmt.Printf("    Status:      %s\n", status)
+			fmt.Printf("    Listen:      http://%s:%d/\n", vc.Listen, vc.HostPort)
+			for _, u := range vc.RemoteWriteURLs {
+				fmt.Printf("    Remote:      %s\n", u)
+			}
+			if len(vc.LogPaths) > 0 {
+				fmt.Printf("    Log paths:   %s\n", strings.Join(vc.LogPaths, ", "))
+			}
+			if len(vc.Includes) > 0 {
+				fmt.Printf("    Includes:    %s\n", strings.Join(vc.Includes, " "))
+			}
+			if len(vc.Excludes) > 0 {
+				fmt.Printf("    Excludes:    %s\n", strings.Join(vc.Excludes, " "))
+			}
+			if len(vc.ExtraArgs) > 0 {
+				fmt.Printf("    Extra args:  %s\n", strings.Join(vc.ExtraArgs, " "))
+			}
+			fmt.Printf("    Data:        %s\n", va.DataDir(&vc))
+			fmt.Printf("    Image:       %s\n", vc.ImageTag)
+			fmt.Printf("    Container:   %s\n", vc.ContainerName)
+		}
+	} else if len(cfg.Addons.Vlagent) > 0 {
+		for _, name := range sortedAddonNames(cfg.Addons.Vlagent) {
+			vc := cfg.Addons.Vlagent[name]
+			hasVA = true
+			fmt.Printf("  %s (name: %s)\n", "vlagent", name)
+			fmt.Printf("    Status:      n/a (%v)\n", err)
+			fmt.Printf("    Listen:      http://%s:%d/\n", vc.Listen, vc.HostPort)
+			fmt.Printf("    Container:   %s\n", vc.ContainerName)
+		}
+	}
+	if !hasVA {
+		fmt.Println("  (none)")
+	}
+
 	// alertmanager (alert routing frontend, top-level addon; Linux host network, macOS bridge)
 	fmt.Println()
 	fmt.Println("Web add-ons (alertmanager):")
@@ -6164,6 +6220,8 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemoveVMCluster(cmd)
 	case "victorialogs":
 		return runAddonRemoveVictoriaLogs(cmd)
+	case "vlagent":
+		return runAddonRemoveVlagent(cmd)
 	case "alertmanager":
 		return runAddonRemoveAlertmanager(cmd)
 	case "gitea":
@@ -6181,7 +6239,7 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, victorialogs, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -6494,6 +6552,8 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartVMCluster(cmd)
 	case "victorialogs":
 		return runAddonStartVictoriaLogs(cmd)
+	case "vlagent":
+		return runAddonStartVlagent(cmd)
 	case "alertmanager":
 		return runAddonStartAlertmanager(cmd)
 	case "gitea":
@@ -6511,7 +6571,7 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		fmt.Println("Run 'pg addon duckdb shell' to launch an interactive session.")
 		return nil
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, victorialogs, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
 	}
 }
 
@@ -6553,6 +6613,8 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopVMCluster(cmd)
 	case "victorialogs":
 		return runAddonStopVictoriaLogs(cmd)
+	case "vlagent":
+		return runAddonStopVlagent(cmd)
 	case "alertmanager":
 		return runAddonStopAlertmanager(cmd)
 	case "gitea":
@@ -6569,7 +6631,7 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		fmt.Println("DuckDB is a CLI tool, not a daemon — start/stop are not applicable.")
 		return nil
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, victorialogs, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
 	}
 }
 
