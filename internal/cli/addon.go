@@ -775,7 +775,7 @@ Examples:
   pg addon install prometheus
   pg addon install prometheus --name p1 --scrape postgres-exporter=127.0.0.1:9187 --retention 30d
   pg addon install prometheus --name p1 --scrape node=10.0.0.5:9100,10.0.0.6:9100   # one job, two targets
-  pg addon install prometheus --name p1 --scrape windows=10.0.0.1:9182 nodename=api1 --scrape windows=10.0.0.2:9182 nodename=api2   # per-target labels: one job, two labelled static_configs groups
+  pg addon install prometheus --name p1 --scrape "windows=10.0.0.1:9182 nodename=api1" --scrape "windows=10.0.0.2:9182 nodename=api2"   # per-target labels (quote the whole spec — it has a space): one job, two labelled static_configs groups
   pg addon install prometheus --name p1 --scrape-append node=10.0.0.7:9100           # add a target to the node job (probed; aborts if down)
   pg addon install prometheus --name local --listen 127.0.0.1   # loopback-only (Prometheus has no auth)
   pg addon install prometheus --name p1 --conf-file /etc/prometheus/my.yml   # run your own prometheus.yml verbatim

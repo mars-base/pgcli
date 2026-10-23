@@ -26,7 +26,7 @@ Prometheus 与 Grafana 的分歧在**配置方式**。Grafana 只经环境变量
 | `--image` | `docker.io/prom/prometheus:v3.15.0` | 覆盖镜像 |
 | `--port` | 自动（基址 9090） | Web 宿主端口；自 `prometheus_start_port` 自动分配 |
 | `--listen` | `0.0.0.0` | 绑定地址——默认开放全部网卡；`127.0.0.1` 收紧为仅回环（见上方暴露警告） |
-| `--scrape` | —（自带自监控 job） | 抓取声明 `JOB=HOST:PORT[,HOST:PORT...] [KEY=VALUE...]`（可重复）——job 名必填，逗号分隔的多个 target 全部并入这一个 job，在渲染的 `prometheus.yml` 里成一个 `static_configs` job；target 列表之后的裸 `KEY=VALUE` token 成为**逐 target 标签**，作用于该 spec 的所有 target。同一 job 名跨 spec 折叠为一个 job；同一 node 被两个 spec 提到时标签合并、只抓**一次**，而标签集不同的 node 拆成同 job 下多个 `static_configs` 块（即 `nodename=api1` 这类按节点打标签的原生形状）。声明的是**完整** job 集合（整体替换已存列表）。目标会被宿主侧 `GET /metrics` 探测，探测不通仅告警 |
+| `--scrape` | —（自带自监控 job） | 抓取声明 `JOB=HOST:PORT[,HOST:PORT...] [KEY=VALUE...]`（可重复）——job 名必填，逗号分隔的多个 target 全部并入这一个 job，在渲染的 `prometheus.yml` 里成一个 `static_configs` job；target 列表之后的裸 `KEY=VALUE` token 成为**逐 target 标签**，作用于该 spec 的所有 target（带标签的 spec 含空格，整个值要用引号包成**一个** shell 参数）。同一 job 名跨 spec 折叠为一个 job；同一 node 被两个 spec 提到时标签合并、只抓**一次**，而标签集不同的 node 拆成同 job 下多个 `static_configs` 块（即 `nodename=api1` 这类按节点打标签的原生形状）。声明的是**完整** job 集合（整体替换已存列表）。目标会被宿主侧 `GET /metrics` 探测，探测不通仅告警 |
 | `--scrape-append` | — | 同样的声明格式（标签同样支持），但把追加的 target **连同其标签**合并进已存的 `--scrape` 列表（同名 job 并入、新名字排到末尾）而非替换。每个被追加的目标都会探测，任一拉不到数据即**中止 install**——什么都不写。与 `--scrape`、`--conf-file` 互斥 |
 | `--scrape-interval` | `15s` | 渲染配置里的全局 `scrape_interval`；与 `--conf-file` 互斥 |
 | `--retention` | `15d` | TSDB 保留期（`--storage.tsdb.retention.time`）；时长如 `15d`、`6mo`、`2y`。是 CLI flag，故与 `--conf-file` 可并存 |
@@ -73,10 +73,11 @@ pg addon install prometheus --name p1 \
 
 ```bash
 # 一个 windows job，三个 target，各带自己的节点名
+# （带标签的 spec 含空格，要整体加引号作为**一个** shell 参数）
 pg addon install prometheus --name p1 \
-  --scrape windows=10.0.0.1:9182 nodename=api1 \
-  --scrape windows=10.0.0.2:9182 nodename=api2 \
-  --scrape windows=10.0.0.3:9182 nodename=api3
+  --scrape "windows=10.0.0.1:9182 nodename=api1" \
+  --scrape "windows=10.0.0.2:9182 nodename=api2" \
+  --scrape "windows=10.0.0.3:9182 nodename=api3"
 ```
 
 ```yaml
@@ -108,7 +109,7 @@ pg addon install prometheus --name p1 \
 ```bash
 pg addon install prometheus --name p1 --scrape-append node=10.0.0.7:9100
 # 已存的 node job 多出第三个 target，标签不动
-pg addon install prometheus --name p1 --scrape-append node=10.0.0.5:9100 env=prod
+pg addon install prometheus --name p1 --scrape-append "node=10.0.0.5:9100 env=prod"
 # ……或者给一个已存 target 就地补一个标签（合并，仍然只抓一次）
 ```
 

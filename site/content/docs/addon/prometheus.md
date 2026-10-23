@@ -28,7 +28,7 @@ Prometheus diverges from Grafana in **how it is configured**. Grafana is env-onl
 | `--image` | `docker.io/prom/prometheus:v3.15.0` | Image override |
 | `--port` | auto (base 9090) | Host web port; auto-allocated from `prometheus_start_port` |
 | `--listen` | `0.0.0.0` | Bind address — defaults to every interface; use `127.0.0.1` for loopback-only (see the exposure warning above) |
-| `--scrape` | — (self job always present) | Scrape spec `JOB=HOST:PORT[,HOST:PORT...] [KEY=VALUE...]` (repeatable) — the job name is required, every comma-separated target joins that one `static_configs` job in the generated `prometheus.yml`, and bare `KEY=VALUE` tokens after the target list become **per-target labels** applied to that spec's targets. Declares the FULL job set (replaces the stored list). Same job name across specs folds into one job; a node named by two specs merges both label sets and is scraped **once**, while nodes carrying different label sets split into separate `static_configs` blocks (Prometheus's native shape for `nodename=api1`-style per-node labels). Targets are probed with `GET /metrics` from the host; unreachable ones only warn |
+| `--scrape` | — (self job always present) | Scrape spec `JOB=HOST:PORT[,HOST:PORT...] [KEY=VALUE...]` (repeatable) — the job name is required, every comma-separated target joins that one `static_configs` job in the generated `prometheus.yml`, and bare `KEY=VALUE` tokens after the target list become **per-target labels** applied to that spec's targets (a spec with labels now contains a space — quote the whole value as one shell argument). Declares the FULL job set (replaces the stored list). Same job name across specs folds into one job; a node named by two specs merges both label sets and is scraped **once**, while nodes carrying different label sets split into separate `static_configs` blocks (Prometheus's native shape for `nodename=api1`-style per-node labels). Targets are probed with `GET /metrics` from the host; unreachable ones only warn |
 | `--scrape-append` | — | Same spec form (labels included), but folds the appended jobs' targets — and their labels — into the stored `--scrape` list (same-named job merges, new names append) instead of replacing it. Every appended target is probed and the install ABORTS — writing nothing — if any returns no data. Mutually exclusive with `--scrape` and `--conf-file` |
 | `--scrape-interval` | `15s` | Global `scrape_interval` in the rendered config; mutually exclusive with `--conf-file` |
 | `--retention` | `15d` | TSDB retention (`--storage.tsdb.retention.time`); a duration like `15d`, `6mo`, `2y`. A CLI flag, so it stays valid alongside `--conf-file` |
@@ -75,10 +75,11 @@ bare `KEY=VALUE` tokens after the target list — one spec per labelled node:
 
 ```bash
 # one windows job, three targets, each labelled with its node name
+# (a spec with labels contains a space, so quote it as ONE shell argument)
 pg addon install prometheus --name p1 \
-  --scrape windows=10.0.0.1:9182 nodename=api1 \
-  --scrape windows=10.0.0.2:9182 nodename=api2 \
-  --scrape windows=10.0.0.3:9182 nodename=api3
+  --scrape "windows=10.0.0.1:9182 nodename=api1" \
+  --scrape "windows=10.0.0.2:9182 nodename=api2" \
+  --scrape "windows=10.0.0.3:9182 nodename=api3"
 ```
 
 ```yaml
@@ -111,7 +112,7 @@ Re-running install with `--scrape` **replaces** the whole stored job set. To add
 ```bash
 pg addon install prometheus --name p1 --scrape-append node=10.0.0.7:9100
 # the stored node job grows a third target; its labels are untouched
-pg addon install prometheus --name p1 --scrape-append node=10.0.0.5:9100 env=prod
+pg addon install prometheus --name p1 --scrape-append "node=10.0.0.5:9100 env=prod"
 # ...or an existing target gains a label in place (merged, still one scrape)
 ```
 
