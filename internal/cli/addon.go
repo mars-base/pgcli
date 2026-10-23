@@ -555,6 +555,8 @@ Prometheus (the metrics collection backend; top-level addon, Linux and macOS):
                               [--scrape-append JOB=HOST:PORT[,HOST:PORT...]] (repeatable)
                               [--scrape-interval 15s] [--retention 15d]
                               [--alertmanager-url URL] (repeatable)
+                              [--remote-write-url URL] (repeatable)
+                              [--remote-write-queue KEY=VALUE] (repeatable)
                               [--rule-file FILE] (repeatable)
                               [--port N] [--listen 0.0.0.0] [--conf-file FILE]
                               [--data-dir ...] [--image ...] [--force]
@@ -571,14 +573,30 @@ Prometheus (the metrics collection backend; top-level addon, Linux and macOS):
   the same-named job) — every appended target is probed with GET /metrics and
   install aborts, touching nothing, if any returns no data. The two are mutually
   exclusive. --conf-file instead copies YOUR prometheus.yml into pgcli's managed
-  path (mutually exclusive with --scrape/--scrape-append/--scrape-interval and
-  --alertmanager-url, which all only shape the rendered file).
+  path (mutually exclusive with --scrape/--scrape-append/--scrape-interval,
+  --alertmanager-url and --remote-write-url/--remote-write-queue, which all only
+  shape the rendered file).
   --alertmanager-url (bare host[:port] or http(s)://host[:port], repeatable) wires
   this Prometheus to one or more Alertmanager instances: the rendered file gains an
   alerting: section pushing fired alerts there PLUS a matching "alertmanager"
   scrape job so their own /metrics is watched. All URLs are validated (and must
   share one scheme — http or https) BEFORE anything is written; connectivity is
   NOT probed (Prometheus shows a dead alertmanager as DOWN on its own).
+  --remote-write-url (full http(s)://host[:port]/path URL, repeatable) pushes a
+  COPY of every scraped sample to a long-term store — a VictoriaMetrics addon
+  (http://host:8428/api/v1/write single-node, or http://host:8480/insert/0/
+  prometheus/api/v1/write for the vmcluster addon). The rendered file gains a
+  top-level remote_write: section; the local TSDB keeps its own --retention and
+  keeps answering queries regardless, and the WAL-backed queue replays once a dead
+  remote returns. Unlike --alertmanager-url there is no portless/scheme default —
+  the path IS the write endpoint. Validated up front (must parse as http(s) with a
+  host); connectivity NOT probed. --remote-write-queue KEY=VALUE (repeatable) adds
+  a queue_config block under EVERY such URL — capacity, max_shards, min_shards and
+  max_samples_per_send (positive integers) plus batch_send_deadline, min_backoff
+  and max_backoff (durations like 5s, 1m30s, 2y), the keys VictoriaMetrics suggests
+  raising under load (max_samples_per_send=10000 capacity=20000 max_shards=30).
+  Requires --remote-write-url; validated up front. Per-remote tuning still needs
+  --conf-file.
   --rule-file (repeatable) copies YOUR Prometheus rule files (*.rules.yml with a
   groups: block) into the managed rules dir, bind-mounts that dir read-only at
   /etc/prometheus/rules, and the rendered file loads them via rule_files. Unlike
@@ -754,6 +772,8 @@ Examples:
   pg addon install prometheus --name local --listen 127.0.0.1   # loopback-only (Prometheus has no auth)
   pg addon install prometheus --name p1 --conf-file /etc/prometheus/my.yml   # run your own prometheus.yml verbatim
   pg addon install prometheus --name p1 --alertmanager-url 127.0.0.1:9093   # forward fired alerts to an alertmanager (bare host:port, repeatable; also scrapes it)
+  pg addon install prometheus --name p1 --remote-write-url http://127.0.0.1:8428/api/v1/write   # push a copy of every sample to VictoriaMetrics (full URL, repeatable; local TSDB keeps its own retention)
+  pg addon install prometheus --name p1 --remote-write-url http://127.0.0.1:8428/api/v1/write --remote-write-queue max_samples_per_send=10000 --remote-write-queue capacity=20000 --remote-write-queue max_shards=30   # add a queue_config under the remote (repeatable KEY=VALUE; VM's suggested batching)
   pg addon install prometheus --name p1 --rule-file /srv/rules/alert.rules.yml   # copy a rule file in and load it via rule_files (repeatable; works with --conf-file)
   pg addon install alertmanager
   pg addon install alertmanager --name am1 --webhook-url http://127.0.0.1:5001/   # fan-out to one webhook
@@ -1118,7 +1138,7 @@ func init() {
 	addonInstallCmd.Flags().Int("https-port", 0, "nginx HTTPS listener host port, TLS only (0=auto-assign, next free port)")
 	addonInstallCmd.Flags().Int("worker-connections", 0, "nginx worker_connections (max simultaneous connections per worker; default 1024)")
 	addonInstallCmd.Flags().StringArray("upstream", nil, "nginx upstream target name=<upstream>,path=<location>,backend=<host:port> (repeatable; e.g. --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050, or backends=h1:p1,h2:p2 for multiple servers)")
-	addonInstallCmd.Flags().String("conf-file", "", "path to a full custom config file (nginx: nginx.conf, mutually exclusive with --upstream; haproxy: haproxy.cfg, mutually exclusive with --node/--ha; prometheus: prometheus.yml, mutually exclusive with --scrape/--scrape-append/--scrape-interval/--alertmanager-url (but NOT --rule-file, which is copied and mounted either way); alertmanager: alertmanager.yml, mutually exclusive with --webhook-url) — pgcli copies it into its managed path and mounts that, manages the container lifecycle, and you control the whole config; validated with nginx -t / haproxy -c at install (prometheus/alertmanager: not pre-validated — a bad file is logged and the last good config keeps serving; reload with SIGHUP)")
+	addonInstallCmd.Flags().String("conf-file", "", "path to a full custom config file (nginx: nginx.conf, mutually exclusive with --upstream; haproxy: haproxy.cfg, mutually exclusive with --node/--ha; prometheus: prometheus.yml, mutually exclusive with --scrape/--scrape-append/--scrape-interval/--alertmanager-url/--remote-write-url/--remote-write-queue (but NOT --rule-file, which is copied and mounted either way); alertmanager: alertmanager.yml, mutually exclusive with --webhook-url) — pgcli copies it into its managed path and mounts that, manages the container lifecycle, and you control the whole config; validated with nginx -t / haproxy -c at install (prometheus/alertmanager: not pre-validated — a bad file is logged and the last good config keeps serving; reload with SIGHUP)")
 	addonInstallCmd.Flags().Bool("reload", false, "haproxy --conf-file only: hot-reload the running instance (validate with haproxy -c, then SIGUSR2) instead of recreating the container — no dropped connections; ignored otherwise")
 
 	// prometheus flags (top-level metrics collection backend)
@@ -1128,6 +1148,8 @@ func init() {
 	addonInstallCmd.Flags().StringArray("scrape-append", nil, "Prometheus scrape spec(s) JOB=HOST:PORT[,HOST:PORT...] to ADD to the instance's stored --scrape list (same form as --scrape, repeatable) instead of replacing it; folds each appended job's targets into the same-named job. Every appended target is probed with GET /metrics and install aborts, touching nothing, if any returns no data. Mutually exclusive with --scrape and --conf-file")
 	addonInstallCmd.Flags().StringArray("alertmanager-url", nil, "Prometheus: Alertmanager instance(s) to forward fired alerts to (repeatable; bare HOST[:PORT] — a portless entry gets Alertmanager's 9093 — or http(s)://HOST[:PORT][/path]). The rendered prometheus.yml gains an alerting: section pushing there PLUS a matching alertmanager scrape job (so Alertmanager's own /metrics is watched; not a separate opt-in). All entries are validated (and must share ONE scheme — mixing http and https aborts) BEFORE anything is written; connectivity is NOT probed (Prometheus shows a dead alertmanager itself). Mutually exclusive with --conf-file, which owns the whole file — write your own alerting: section there")
 	addonInstallCmd.Flags().StringArray("rule-file", nil, "Prometheus: path to a rule file (*.rules.yml with a top-level groups: block; repeatable) — pgcli copies each into its managed rules dir (basename only; two files sharing a basename abort), bind-mounts that dir read-only at /etc/prometheus/rules, and the rendered prometheus.yml loads the copies via rule_files. Valid alongside --conf-file: the copy and mount happen either way, and your own file decides whether to reference /etc/prometheus/rules. A missing or empty file aborts, touching nothing")
+	addonInstallCmd.Flags().StringArray("remote-write-url", nil, "Prometheus: remote-write URL(s) to push scraped samples to (repeatable; full http(s):// URL, e.g. http://127.0.0.1:8480/insert/0/prometheus/api/v1/write for the vmcluster addon, http://127.0.0.1:8428/api/v1/write for the victoriametrics addon). The rendered prometheus.yml gains a remote_write: section; the local TSDB keeps its own retention regardless (the remote is a copy, WAL-backed so a dead remote replays once it returns). Each URL is validated (must parse as http(s) with a host) BEFORE anything is written; connectivity is NOT probed. Mutually exclusive with --conf-file, which owns the whole file — write your own remote_write: section there")
+	addonInstallCmd.Flags().StringArray("remote-write-queue", nil, "Prometheus: queue_config tuning applied under every --remote-write-url entry (repeatable KEY=VALUE): capacity, max_shards, min_shards, max_samples_per_send (integers) and batch_send_deadline, min_backoff, max_backoff (durations like 5s, 1m30s, 2y). VictoriaMetrics recommends larger batches under load (e.g. --remote-write-queue max_samples_per_send=10000 --remote-write-queue capacity=20000 --remote-write-queue max_shards=30). Requires --remote-write-url; keys and values are validated before anything is written. Render-mode only, like --remote-write-url")
 	addonInstallCmd.Flags().StringArray("webhook-url", nil, "Alertmanager webhook URL to notify (repeatable; e.g. --webhook-url http://hook:5001/) — every URL is rendered as one webhook_configs entry of the SAME web.hook receiver (so multiple URLs fan out); the root route points at it. Each URL is validated (must parse as an http(s) URL with a host) BEFORE anything is written; a bad URL aborts the install touching nothing. Connectivity is NOT probed (a webhook fires at alert time, not install time). Mutually exclusive with --conf-file; without it the rendered config uses a name-only no-op receiver (nothing is ever sent)")
 
 	// victoriametrics flags (top-level time-series database)
@@ -8243,6 +8265,8 @@ func runAddonInstallPrometheus(cmd *cobra.Command) error {
 	scrapeSpecs, _ := cmd.Flags().GetStringArray("scrape")
 	scrapeAppendSpecs, _ := cmd.Flags().GetStringArray("scrape-append")
 	amURLs, _ := cmd.Flags().GetStringArray("alertmanager-url")
+	rwURLs, _ := cmd.Flags().GetStringArray("remote-write-url")
+	rwQueue, _ := cmd.Flags().GetStringArray("remote-write-queue")
 	ruleFiles, _ := cmd.Flags().GetStringArray("rule-file")
 	confFile, _ := cmd.Flags().GetString("conf-file")
 	force, _ := cmd.Flags().GetBool("force")
@@ -8254,12 +8278,13 @@ func runAddonInstallPrometheus(cmd *cobra.Command) error {
 	}
 
 	// --conf-file replaces the rendered config, so it is mutually exclusive with
-	// the render knobs --scrape/--scrape-append/--scrape-interval/--alertmanager-url
-	// (an operator file owns its alerting: section too). (--retention and
-	// --listen are CLI flags, and --rule-file only feeds a managed mount whose
-	// use the operator's file decides, so all three stay valid alongside it.)
-	if confFile != "" && (len(scrapeSpecs) > 0 || len(scrapeAppendSpecs) > 0 || cmd.Flags().Changed("scrape-interval") || len(amURLs) > 0) {
-		return fmt.Errorf("--conf-file is mutually exclusive with --scrape/--scrape-append/--scrape-interval/--alertmanager-url (they configure the rendered prometheus.yml) — write your own alerting: section in the file instead")
+	// the render knobs --scrape/--scrape-append/--scrape-interval/--alertmanager-url/
+	// --remote-write-url/--remote-write-queue (an operator file owns its alerting:
+	// and remote_write: sections too). (--retention and --listen are CLI flags, and
+	// --rule-file only feeds a managed mount whose use the operator's file decides,
+	// so all three stay valid alongside it.)
+	if confFile != "" && (len(scrapeSpecs) > 0 || len(scrapeAppendSpecs) > 0 || cmd.Flags().Changed("scrape-interval") || len(amURLs) > 0 || len(rwURLs) > 0 || len(rwQueue) > 0) {
+		return fmt.Errorf("--conf-file is mutually exclusive with --scrape/--scrape-append/--scrape-interval/--alertmanager-url/--remote-write-url/--remote-write-queue (they configure the rendered prometheus.yml) — write your own alerting:/remote_write: section in the file instead")
 	}
 	if confFile != "" {
 		info, err := os.Stat(confFile)
@@ -8281,6 +8306,16 @@ func runAddonInstallPrometheus(cmd *cobra.Command) error {
 	if len(amURLs) > 0 {
 		if err := podman.ValidateAlertmanagerURLs(amURLs); err != nil {
 			return fmt.Errorf("--alertmanager-url: %w", err)
+		}
+	}
+	if len(rwURLs) > 0 {
+		if err := podman.ValidateRemoteWriteURLs(rwURLs); err != nil {
+			return fmt.Errorf("--remote-write-url: %w", err)
+		}
+	}
+	if len(rwQueue) > 0 {
+		if err := podman.ValidateRemoteWriteQueue(rwQueue); err != nil {
+			return fmt.Errorf("--remote-write-queue: %w", err)
 		}
 	}
 	for _, rf := range ruleFiles {
@@ -8355,6 +8390,18 @@ func runAddonInstallPrometheus(cmd *cobra.Command) error {
 	hadRules := len(existing.RuleFiles) > 0
 	if cmd.Flags().Changed("alertmanager-url") {
 		existing.Alertmanager = amURLs
+	}
+	if cmd.Flags().Changed("remote-write-url") {
+		existing.RemoteWrite = rwURLs
+	}
+	if cmd.Flags().Changed("remote-write-queue") {
+		existing.RemoteWriteQueue = rwQueue
+	}
+	// queue_config knobs tune remote_write entries — without any URL there is
+	// nothing to tune under, and rendering would silently drop them. Checked on
+	// the merged state so a stored queue list cannot survive a URL-list clear.
+	if len(existing.RemoteWriteQueue) > 0 && len(existing.RemoteWrite) == 0 {
+		return fmt.Errorf("--remote-write-queue tunes --remote-write-url targets, but no remote-write URL is configured — pass --remote-write-url URL again, or drop the queue flags")
 	}
 	if cmd.Flags().Changed("rule-file") {
 		existing.RuleFiles = ruleFiles
@@ -8491,6 +8538,12 @@ func runAddonInstallPrometheus(cmd *cobra.Command) error {
 	}
 	if len(pc.Alertmanager) > 0 {
 		fmt.Printf("  Alerts:     %s\n", strings.Join(pc.Alertmanager, ", "))
+	}
+	if len(pc.RemoteWrite) > 0 {
+		fmt.Printf("  RemoteWrite: %s\n", strings.Join(pc.RemoteWrite, ", "))
+		if len(pc.RemoteWriteQueue) > 0 {
+			fmt.Printf("  RemoteWrite queue_config: %s (under every URL)\n", strings.Join(pc.RemoteWriteQueue, ", "))
+		}
 	}
 	if len(pc.RuleFiles) > 0 {
 		ref := ", referenced by the rendered rule_files"

@@ -32,8 +32,10 @@ Prometheus diverges from Grafana in **how it is configured**. Grafana is env-onl
 | `--scrape-append` | — | Same spec form, but folds the appended jobs' targets into the stored `--scrape` list (same-named job merges, new names append) instead of replacing it. Every appended target is probed and the install ABORTS — writing nothing — if any returns no data. Mutually exclusive with `--scrape` and `--conf-file` |
 | `--scrape-interval` | `15s` | Global `scrape_interval` in the rendered config; mutually exclusive with `--conf-file` |
 | `--retention` | `15d` | TSDB retention (`--storage.tsdb.retention.time`); a duration like `15d`, `6mo`, `2y`. A CLI flag, so it stays valid alongside `--conf-file` |
-| `--conf-file` | — | Path to your own `prometheus.yml` — skip rendering entirely (mutually exclusive with `--scrape`/`--scrape-append`/`--scrape-interval`/`--alertmanager-url`); see below |
+| `--conf-file` | — | Path to your own `prometheus.yml` — skip rendering entirely (mutually exclusive with `--scrape`/`--scrape-append`/`--scrape-interval`/`--alertmanager-url`/`--remote-write-url`/`--remote-write-queue`); see below |
 | `--alertmanager-url` | — | Alertmanager instance(s) to forward fired alerts to (repeatable): bare `HOST[:PORT]` (portless gets `9093`) or `http(s)://HOST[:PORT][/path]`. The rendered config gains an `alerting:` section pushing there **and** a matching `alertmanager` scrape job (so Alertmanager's own `/metrics` is watched — not a separate opt-in). All entries validated up front and must share one scheme (mixing http/https aborts); connectivity is **not** probed. Mutually exclusive with `--conf-file`; see below |
+| `--remote-write-url` | — | Remote-write URL(s) to push scraped samples to a long-term store (repeatable; a full `http(s)://host:port/path` URL). The rendered config gains a top-level `remote_write:` section. The local TSDB keeps its own `--retention` regardless — the remote is a WAL-backed copy, so a dead remote only stalls the queue and replays once it returns. Validated up front (must parse as http(s) with a host); connectivity is **not** probed. Mutually exclusive with `--conf-file`; see "Pushing samples to VictoriaMetrics" below |
+| `--remote-write-queue` | — | A `queue_config` tuning applied under **every** `--remote-write-url` entry (repeatable `KEY=VALUE`): positive integers `capacity`, `max_shards`, `min_shards`, `max_samples_per_send`, and durations `batch_send_deadline`, `min_backoff`, `max_backoff` (e.g. `5s`, `1m30s`, `2y`). VictoriaMetrics suggests bigger batches under load (`max_samples_per_send=10000 capacity=20000 max_shards=30`). Requires `--remote-write-url`; keys and values are validated up front (unknown keys, non-positive integers, and unitless durations abort before anything is written). Render-mode only, like `--remote-write-url`; per-remote tuning still needs `--conf-file` |
 | `--rule-file` | — | Path to a rule file (`*.rules.yml` with a top-level `groups:`; repeatable) — pgcli copies each into its managed rules dir (basename only; two files sharing a basename abort), mounts that dir read-only at `/etc/prometheus/rules`, and the rendered config loads the copies via `rule_files`. **Valid alongside `--conf-file`**: the copy and mount happen either way, your own file decides whether to reference them. A missing/empty file aborts, writing nothing; see below |
 | `--data-dir` | auto | Data directory override (default under the base dir) |
 | `--force` | false | Recreate even when running — instead of hot-reloading a changed config, or to apply changed ports / listen / retention (install also recreates on its own when `--rule-file` goes from empty to non-empty or back, since that changes the container's mount set) |
@@ -113,6 +115,51 @@ curl -s localhost:9090/api/v1/alertmanagers           # activeAlertmanagers list
 curl -s 'localhost:9090/api/v1/targets?state=any' | grep -c alertmanager
 ```
 
+## Pushing samples to VictoriaMetrics (`--remote-write-url`)
+
+Prometheus's built-in TSDB is compiled in and cannot be swapped out — the way to put VictoriaMetrics (or any remote store) behind it is `remote_write`: each scrape cycle pushes a **copy** of every sample to the remote, while the local TSDB keeps its own `--retention` window and keeps serving queries regardless. pgcli already runs both ends, so the pair is two installs:
+
+```bash
+# long-term store — single-node VictoriaMetrics on the loopback, or the
+# vmcluster addon's vminsert (http://<host>:8480/insert/0/prometheus/api/v1/write)
+pg addon install victoriametrics --name vm --listen 127.0.0.1
+
+# the scrape backend pushes every sample into it
+pg addon install prometheus --name p1 --listen 127.0.0.1 \
+  --remote-write-url http://127.0.0.1:8428/api/v1/write
+
+# same, with VictoriaMetrics's suggested batching under load
+pg addon install prometheus --name p1 --listen 127.0.0.1 \
+  --remote-write-url http://127.0.0.1:8428/api/v1/write \
+  --remote-write-queue max_samples_per_send=10000 \
+  --remote-write-queue capacity=20000 \
+  --remote-write-queue max_shards=30
+```
+
+The rendered `prometheus.yml` gains a top-level `remote_write:` section — with a `queue_config:` block under each URL when `--remote-write-queue` is set:
+
+```yaml
+remote_write:
+  - url: "http://127.0.0.1:8428/api/v1/write"
+    queue_config:
+      max_samples_per_send: 10000
+      capacity: 20000
+      max_shards: 30
+```
+
+A re-run replaces the stored URL list wholesale (no append form, like `--alertmanager-url`), and a changed URL is applied by **hot reload (SIGHUP)** — no container recreate. Entries must be full `http(s)://host[:port]/path` URLs (unlike Alertmanager targets there is no portless/scheme default — the path *is* the write endpoint); they are validated up front but **not** connectivity-probed. `--remote-write-queue` rides the same path: a repeated list replaces the stored one, it is validated up front (whitelisted keys only — integer sizes/shards and duration timeouts), and the same `KEY=VALUE` set is emitted under **every** remote, so differentiated per-remote tuning still drops to `--conf-file`. Passing it without any `--remote-write-url` aborts — there is nothing to tune under.
+
+Verify the link is alive and delivering:
+
+```bash
+# the remote-write queue is draining (pending ~0, samples_total rising)
+curl -s 'localhost:9090/api/v1/query?query=prometheus_remote_storage_samples_pending'
+# the sample actually landed in VictoriaMetrics
+curl -s 'localhost:8428/api/v1/query?query=prometheus_build_info'
+```
+
+Once Grafana is pointed at VictoriaMetrics instead of Prometheus (`http://<host>:8428/`, or `http://<host>:8481/select/0/prometheus/` for the cluster edition), the Prometheus instance is a thin scrape-and-forward layer and VictoriaMetrics is the queryable store. Historical data already in the Prometheus TSDB does **not** backfill automatically — use the `vmctl prometheus` tool for a one-time migration.
+
 ## Loading alerting rules (`--rule-file`)
 
 Prometheus evaluates alerting/recording rules from `rule_files:`. Give pgcli the rule file and it becomes a managed copy:
@@ -150,7 +197,7 @@ Give pgcli your own `prometheus.yml` and it skips rendering entirely:
 pg addon install prometheus --name p1 --conf-file /etc/prometheus/my.yml
 ```
 
-pgcli **copies** your file into its managed path (`<base>/addon/prometheus/<name>/prometheus.yml`) and mounts **that copy** read-only — never your original. This is deliberate: a single-file bind mount pins the source inode, so an in-place edit of your original file would not propagate into the running container. Because it's a copy, editing your own file and running `pg addon prometheus reload` re-copies it and signals Prometheus to reread. pgcli does not validate or rewrite the file's contents (same contract as the nginx/haproxy `--conf-file`). `--conf-file` is mutually exclusive with the render knobs `--scrape`/`--scrape-append`/`--scrape-interval`/`--alertmanager-url`; `--retention`, `--listen` and `--rule-file` are not render knobs and stay valid alongside it. Omit `--conf-file` on a reinstall to go back to render mode.
+pgcli **copies** your file into its managed path (`<base>/addon/prometheus/<name>/prometheus.yml`) and mounts **that copy** read-only — never your original. This is deliberate: a single-file bind mount pins the source inode, so an in-place edit of your original file would not propagate into the running container. Because it's a copy, editing your own file and running `pg addon prometheus reload` re-copies it and signals Prometheus to reread. pgcli does not validate or rewrite the file's contents (same contract as the nginx/haproxy `--conf-file`). `--conf-file` is mutually exclusive with the render knobs `--scrape`/`--scrape-append`/`--scrape-interval`/`--alertmanager-url`/`--remote-write-url`/`--remote-write-queue` (an operator file owns its `alerting:` and `remote_write:` sections); `--retention`, `--listen` and `--rule-file` are not render knobs and stay valid alongside it. Omit `--conf-file` on a reinstall to go back to render mode.
 
 ### Worked example
 
@@ -244,12 +291,14 @@ addons:
       scrape_interval: 15s
       autostart: false
       # alertmanager: [127.0.0.1:9093]        # render-mode only: forward fired alerts + a derived scrape job
+      # remote_write: [http://127.0.0.1:8428/api/v1/write]  # render-mode only: push samples to a long-term store (VictoriaMetrics)
+      # remote_write_queue: [max_samples_per_send=10000, capacity=20000]  # queue_config under every remote above
       # rule_files: [/srv/rules/alert.rules.yml]  # copied into <name>/rules, mounted at /etc/prometheus/rules
       # conf_file: /etc/prometheus/my.yml   # operator-file mode, skips rendering
       # data_dir: /srv/prometheus-data      # optional, overrides the default location
 ```
 
-The rendered `prometheus.yml` carries the global `scrape_interval`, the always-present self job, and one `static_configs` job per `scrape` JOB (folding every target that job's spec lists); `--alertmanager-url` adds the `alerting:` section plus its `alertmanager` scrape job, and `--rule-file` adds a `rule_files:` section. `retention` and the listener bind are **not** in that file — they are passed to the `prometheus` binary as CLI flags (`--storage.tsdb.retention.time`, `--web.listen-address`), which is why they remain settable alongside `--conf-file`.
+The rendered `prometheus.yml` carries the global `scrape_interval`, the always-present self job, and one `static_configs` job per `scrape` JOB (folding every target that job's spec lists); `--alertmanager-url` adds the `alerting:` section plus its `alertmanager` scrape job, `--remote-write-url` adds a top-level `remote_write:` section (`--remote-write-queue` fills each entry with a `queue_config:` block), and `--rule-file` adds a `rule_files:` section. `retention` and the listener bind are **not** in that file — they are passed to the `prometheus` binary as CLI flags (`--storage.tsdb.retention.time`, `--web.listen-address`), which is why they remain settable alongside `--conf-file`.
 
 ### List
 
@@ -318,7 +367,7 @@ pg logs addon prometheus -n 200     # last 200 lines (also -i / --tail)
 
 ## Known limitations
 
-- v1 is a bare collection backend: it ships no PostgreSQL exporter (install one yourself and point `--scrape postgres-exporter=127.0.0.1:9187` at it) and no remote-write. Alerting, however, is wired: `--alertmanager-url` forwards fired alerts to a pgcli Alertmanager and `--rule-file` loads alerting rules (both render-mode; `--conf-file` covers the rest by hand). It is the scrape/store/query layer you point Grafana at.
+- v1 is a bare collection backend: it ships no PostgreSQL exporter (install one yourself and point `--scrape postgres-exporter=127.0.0.1:9187` at it). Long-term storage and alerting are wired, though: `--remote-write-url` pushes scraped samples to a VictoriaMetrics addon (single-node or `vmcluster`), `--alertmanager-url` forwards fired alerts to a pgcli Alertmanager, and `--rule-file` loads alerting rules (all render-mode; `--conf-file` covers the rest by hand). It is the scrape/store/query layer you point Grafana at.
 - **No authentication.** Prometheus's API runs arbitrary PromQL; the only protection for a `0.0.0.0` bind is the network boundary. This is a materially weaker posture than Grafana's password-guarded `0.0.0.0` — do not expose it on an untrusted network.
 - pgcli renders or copies `prometheus.yml` but does not validate it (there is no `promtool check config` gate at install). A bad rendered config is impossible, but a bad `--conf-file` surfaces only in the container logs on reload.
 - The host-side ownership chown is automatic under rootless podman (`podman unshare chown`) and when pgcli runs as root on a rootful host (direct `chown`). A rootful daemon talked to by a non-root pgcli (only via an explicitly configured remote socket) has no automatic path.

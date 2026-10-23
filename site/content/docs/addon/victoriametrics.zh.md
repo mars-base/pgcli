@@ -182,7 +182,7 @@ pg logs addon victoriametrics -n 200     # 最近 200 行（也支持 -i / --tai
 
 ## 已知限制
 
-- v1 是裸存储后端：不自带抓取能力（用 `remote_write` 让 Prometheus 推给它，或单独跑 `vmagent`）、不做告警。它是你让 Prometheus 和 Grafana 连的长期存储层。
+- v1 是裸存储后端：不自带抓取能力（用 `pg addon install prometheus --remote-write-url http://<host>:8428/api/v1/write` 把 pgcli 的 Prometheus 实例指向它，或单独跑 `vmagent`）、不做告警。它是你让 Prometheus 和 Grafana 连的长期存储层。
 - **无鉴权。** VictoriaMetrics 的 API 执行任意 MetricsQL；`0.0.0.0` 绑定的唯一保护是网络边界。这与 Prometheus 同一态势——不要把它暴露到不可信网络。
 - pgcli 不校验 `--extra-arg` 值（install 阶段没有 pre-flight 检查）。有错的 flag 只会在启动时从容器日志里暴露。
 - macOS 上容器跑在 podman machine 里；目前只在 Linux 上验证过。

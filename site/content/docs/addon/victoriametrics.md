@@ -185,7 +185,7 @@ pg logs addon victoriametrics -n 200     # last 200 lines (also -i / --tail)
 
 ## Known limitations
 
-- v1 is a bare storage backend: it ships no scrape capability (point Prometheus at it via `remote_write`, or use `vmagent` separately) and no alerting. It is the long-term storage layer you point Prometheus and Grafana at.
+- v1 is a bare storage backend: it ships no scrape capability (point a pgcli Prometheus instance at it with `pg addon install prometheus --remote-write-url http://<host>:8428/api/v1/write`, or use `vmagent` separately) and no alerting. It is the long-term storage layer you point Prometheus and Grafana at.
 - **No authentication.** VictoriaMetrics's API runs arbitrary MetricsQL; the only protection for a `0.0.0.0` bind is the network boundary. This is the same posture as Prometheus — do not expose it on an untrusted network.
 - pgcli does not validate `--extra-arg` values (there is no pre-flight check at install). A bad flag surfaces only in the container logs on startup.
 - On macOS the container runs inside the podman machine; it has been validated on Linux only.

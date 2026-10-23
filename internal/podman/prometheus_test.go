@@ -263,10 +263,70 @@ func TestRenderPrometheusConfig(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, want := range []string{"alerting:", "job_name: alertmanager", "rule_files:"} {
+		for _, want := range []string{"alerting:", "job_name: alertmanager", "rule_files:", "remote_write:"} {
 			if strings.Contains(out, want) {
 				t.Errorf("rendered config must not contain %q when unset:\n%s", want, out)
 			}
+		}
+	})
+
+	t.Run("remote-write-url renders a remote_write section verbatim", func(t *testing.T) {
+		pc := base()
+		pc.RemoteWrite = []string{
+			"http://127.0.0.1:8480/insert/0/prometheus/api/v1/write",
+			"http://vm2:8428/api/v1/write",
+		}
+		out, err := renderPrometheusConfig(pc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Each URL is emitted quoted on its own `- url:` line, in input order,
+		// as a top-level section (not a scrape job, not under alerting:).
+		if !strings.Contains(out, "remote_write:\n  - url: \"http://127.0.0.1:8480/insert/0/prometheus/api/v1/write\"\n  - url: \"http://vm2:8428/api/v1/write\"\n") {
+			t.Errorf("remote_write section malformed:\n%s", out)
+		}
+		// No queue entries means no queue_config block at all.
+		if strings.Contains(out, "queue_config:") {
+			t.Errorf("queue_config must not appear without --remote-write-queue:\n%s", out)
+		}
+	})
+
+	t.Run("remote-write-queue renders queue_config under every URL", func(t *testing.T) {
+		pc := base()
+		pc.RemoteWrite = []string{
+			"http://127.0.0.1:8428/api/v1/write",
+			"http://vm2:8428/api/v1/write",
+		}
+		pc.RemoteWriteQueue = []string{
+			"max_samples_per_send=10000",
+			"capacity=20000",
+			"max_shards=30",
+			"batch_send_deadline=30s",
+			"max_backoff=2y",
+		}
+		out, err := renderPrometheusConfig(pc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The tuning rides under BOTH entries — one shared shape, indented
+		// two levels below `- url:`. Integers render bare, durations quoted.
+		want := "remote_write:\n" +
+			"  - url: \"http://127.0.0.1:8428/api/v1/write\"\n" +
+			"    queue_config:\n" +
+			"      max_samples_per_send: 10000\n" +
+			"      capacity: 20000\n" +
+			"      max_shards: 30\n" +
+			"      batch_send_deadline: \"30s\"\n" +
+			"      max_backoff: \"2y\"\n" +
+			"  - url: \"http://vm2:8428/api/v1/write\"\n" +
+			"    queue_config:\n" +
+			"      max_samples_per_send: 10000\n" +
+			"      capacity: 20000\n" +
+			"      max_shards: 30\n" +
+			"      batch_send_deadline: \"30s\"\n" +
+			"      max_backoff: \"2y\"\n"
+		if !strings.Contains(out, want) {
+			t.Errorf("remote_write queue_config malformed:\n%s", out)
 		}
 	})
 
@@ -531,6 +591,61 @@ func TestAlertmanagerTargets(t *testing.T) {
 		}
 		if err := ValidateAlertmanagerURLs(c.in); (err != nil) != c.wantErr {
 			t.Errorf("ValidateAlertmanagerURLs(%v) err=%v, wantErr=%v", c.in, err, c.wantErr)
+		}
+	}
+}
+
+func TestValidateRemoteWriteURLs(t *testing.T) {
+	cases := []struct {
+		in      []string
+		wantErr bool
+	}{
+		{nil, false},
+		{[]string{}, false},
+		{[]string{"http://127.0.0.1:8480/insert/0/prometheus/api/v1/write"}, false},
+		{[]string{"https://vm.example.com/api/v1/write"}, false},
+		// A bare host:port is rejected — unlike Alertmanager targets, a
+		// remote_write URL has no default scheme/port to fall back to (the path
+		// is the write endpoint).
+		{[]string{"127.0.0.1:8480"}, true},
+		{[]string{""}, true},
+		{[]string{"ftp://vm:8428/api/v1/write"}, true}, // unsupported scheme
+		{[]string{"http://"}, true},                    // no host
+	}
+	for _, c := range cases {
+		if err := ValidateRemoteWriteURLs(c.in); (err != nil) != c.wantErr {
+			t.Errorf("ValidateRemoteWriteURLs(%v) err=%v, wantErr=%v", c.in, err, c.wantErr)
+		}
+	}
+}
+
+func TestValidateRemoteWriteQueue(t *testing.T) {
+	cases := []struct {
+		in      []string
+		wantErr bool
+	}{
+		{nil, false},
+		{[]string{}, false},
+		{[]string{"capacity=20000", "max_shards=30", "max_samples_per_send=10000", "min_shards=2"}, false},
+		{[]string{"batch_send_deadline=30s", "min_backoff=1s", "max_backoff=2y"}, false},
+		// Compound durations follow model.Duration grammar.
+		{[]string{"max_backoff=1m30s"}, false},
+		{[]string{"capacity=abc"}, true}, // integer key, junk value
+		{[]string{"capacity=-5"}, true},  // queue sizes must be positive
+		{[]string{"capacity=0"}, true},
+		{[]string{"batch_send_deadline=30"}, true}, // duration key, unitless
+		{[]string{"batch_send_deadline=30x"}, true},
+		{[]string{"enable_http2=true"}, true}, // not whitelisted — needs --conf-file
+		{[]string{"bogus=1"}, true},
+		{[]string{"capacity"}, true},                 // no KEY=VALUE
+		{[]string{"=20000"}, true},                   // empty key
+		{[]string{"capacity="}, true},                // empty value
+		{[]string{"Capacity=1"}, true},               // keys are lowercase-exact
+		{[]string{"capacity=1", "capacity=2"}, true}, // duplicate key
+	}
+	for _, c := range cases {
+		if err := ValidateRemoteWriteQueue(c.in); (err != nil) != c.wantErr {
+			t.Errorf("ValidateRemoteWriteQueue(%v) err=%v, wantErr=%v", c.in, err, c.wantErr)
 		}
 	}
 }

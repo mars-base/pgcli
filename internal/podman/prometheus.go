@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -212,6 +213,32 @@ func renderPrometheusConfig(pc *config.PrometheusConfig) (string, error) {
 		b.WriteString("    static_configs:\n")
 		fmt.Fprintf(&b, "      - targets: [%s]\n", quoteTargets(amTargets))
 	}
+
+	if len(pc.RemoteWrite) > 0 {
+		// remote_write is a top-level section (like alerting:/rule_files:), not a
+		// scrape job: each entry pushes a copy of every sample out to a long-term
+		// store. The local TSDB keeps its own retention regardless, so a dead
+		// remote only stalls the queue — Prometheus surfaces that itself.
+		//
+		// queue_config tuning rides as --remote-write-queue entries applied
+		// identically under every URL (VictoriaMetrics' docs recommend larger
+		// batches under load): per-remote differentiation still needs --conf-file.
+		b.WriteString("\nremote_write:\n")
+		for _, u := range pc.RemoteWrite {
+			fmt.Fprintf(&b, "  - url: %s\n", quoteTargets([]string{u}))
+			if len(pc.RemoteWriteQueue) > 0 {
+				b.WriteString("    queue_config:\n")
+				for _, e := range pc.RemoteWriteQueue {
+					key, val, _ := strings.Cut(e, "=")
+					if slices.Contains(remoteWriteQueueDurations, key) {
+						fmt.Fprintf(&b, "      %s: %s\n", key, quoteTargets([]string{val}))
+					} else {
+						fmt.Fprintf(&b, "      %s: %s\n", key, val)
+					}
+				}
+			}
+		}
+	}
 	return b.String(), nil
 }
 
@@ -280,6 +307,99 @@ func AlertmanagerTargets(urls []string) ([]string, string, error) {
 func ValidateAlertmanagerURLs(urls []string) error {
 	_, _, err := AlertmanagerTargets(urls)
 	return err
+}
+
+// ValidateRemoteWriteURLs checks each --remote-write-url entry the same way
+// ValidateAlertmanagerURLs guards --alertmanager-url: format only, no
+// connectivity probe (Prometheus surfaces a stuck remote-write queue on its
+// own /rules and in logs). Unlike Alertmanager targets, a remote_write URL is
+// rendered verbatim and must be a complete http(s):// URL — the path carries
+// the write endpoint (/api/v1/write, or /insert/0/prometheus/api/v1/write on
+// the cluster edition), so there is no portless-default form to offer.
+func ValidateRemoteWriteURLs(urls []string) error {
+	for _, u := range urls {
+		parsed, err := url.Parse(u)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return fmt.Errorf("remote-write URL %q: want a full http(s)://host[:port]/path URL", u)
+		}
+	}
+	return nil
+}
+
+// remoteWriteQueueInts / remoteWriteQueueDurations are the whitelisted
+// --remote-write-queue keys: Prometheus's queue_config block has more fields
+// (metadata config, enable_http2, tls_config…), but they are either rarely
+// tuned or need more than a scalar value — an operator who needs those drops to
+// --conf-file. Keys must be exactly lowercase (matching Prometheus's own
+// config style), like every other render knob.
+var (
+	remoteWriteQueueInts      = []string{"capacity", "max_shards", "min_shards", "max_samples_per_send"}
+	remoteWriteQueueDurations = []string{"batch_send_deadline", "min_backoff", "max_backoff"}
+)
+
+// ValidateRemoteWriteQueue checks every --remote-write-queue KEY=VALUE entry:
+// the key must be one of the whitelisted queue_config scalars and the value an
+// integer (queue sizes/shards) or a Prometheus-style duration (timeouts) —
+// model.Duration grammar (a sum of `[0-9]+(\.[0-9]+)?(ms|s|m|h|d|w|y)` terms,
+// e.g. "5s", "1m30s", "2y"). Duplicate keys and a bare --remote-write-queue
+// without --remote-write-url are rejected the same way, all BEFORE anything is
+// written, so a typo never reaches the rendered file.
+func ValidateRemoteWriteQueue(entries []string) error {
+	seen := map[string]bool{}
+	for _, e := range entries {
+		key, val, ok := strings.Cut(e, "=")
+		if !ok || key == "" || val == "" {
+			return fmt.Errorf("remote-write queue %q: want KEY=VALUE", e)
+		}
+		if seen[key] {
+			return fmt.Errorf("remote-write queue key %q given twice", key)
+		}
+		seen[key] = true
+		switch {
+		case slices.Contains(remoteWriteQueueInts, key):
+			n, err := strconv.Atoi(val)
+			if err != nil || n <= 0 {
+				return fmt.Errorf("remote-write queue %q: %s wants a positive integer", e, key)
+			}
+		case slices.Contains(remoteWriteQueueDurations, key):
+			if !isPromDuration(val) {
+				return fmt.Errorf("remote-write queue %q: %s wants a duration like 5s, 1m or 1m30s", e, key)
+			}
+		default:
+			return fmt.Errorf("remote-write queue key %q: want one of %s", key,
+				strings.Join(append(append([]string{}, remoteWriteQueueInts...), remoteWriteQueueDurations...), ", "))
+		}
+	}
+	return nil
+}
+
+// isPromDuration matches Prometheus's model.Duration grammar: one or more
+// decimal-plus-unit terms concatenated (ms|s|m|h|d|w|y). The whole string is
+// anchored so a lone "5" or trailing junk fails.
+func isPromDuration(s string) bool {
+	for len(s) > 0 {
+		i := 0
+		for i < len(s) && (s[i] == '.' || (s[i] >= '0' && s[i] <= '9')) {
+			i++
+		}
+		num := s[:i]
+		if num == "" || num == "." || strings.Count(num, ".") > 1 {
+			return false
+		}
+		s = s[i:]
+		switch {
+		case strings.HasPrefix(s, "ms"):
+			s = s[2:]
+		case len(s) > 0 && strings.ContainsRune("smhwdy", rune(s[0])):
+			// model.Duration units beyond ms/s/m/h: d (days), w (weeks), y (years)
+			// — the VM docs' load-tuning examples use 2y-style values for
+			// max_backoff, and the render is verbatim either way.
+			s = s[1:]
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // normalizeRuleNames maps each --rule-file host path to its name inside the

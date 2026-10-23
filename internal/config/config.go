@@ -1708,6 +1708,23 @@ type PrometheusConfig struct {
 	// `alertmanager` scrape job over the same targets into the rendered config so
 	// Alertmanager's own /metrics is watched.
 	Alertmanager []string `yaml:"alertmanager,omitempty"`
+	// RemoteWrite lists Prometheus remote-write URLs (full http(s):// URLs,
+	// repeatable) rendered into a `remote_write:` section of the prometheus.yml
+	// (render-mode only; mutually exclusive with ConfFile). This is how a
+	// Prometheus pushes its scraped samples to a long-term store such as
+	// VictoriaMetrics — vminsert for the cluster edition
+	// (http://host:8480/insert/0/prometheus/api/v1/write), victoria-metrics or
+	// vmagent for the single-node one (http://host:8428/api/v1/write). The local
+	// TSDB keeps serving its retention window regardless; the remote is a copy.
+	RemoteWrite []string `yaml:"remote_write,omitempty"`
+	// RemoteWriteQueue lists KEY=VALUE queue_config tunings (repeatable) applied
+	// under EVERY rendered remote_write entry: capacity, max_samples_per_send,
+	// max_shards, min_shards (positive integers) and batch_send_deadline,
+	// min_backoff, max_backoff (durations). VictoriaMetrics' docs recommend
+	// larger batches under load; the keys are whitelisted and validated at
+	// install. Render-mode only, rides the same --conf-file exclusion as
+	// RemoteWrite, and is meaningless without it.
+	RemoteWriteQueue []string `yaml:"remote_write_queue,omitempty"`
 	// RuleFiles lists host paths to Prometheus rule files (*.rules.yml with a
 	// top-level `groups:` block). pgcli copies each into <base>/addon/prometheus/
 	// <name>/rules and mounts that dir read-only at /etc/prometheus/rules; the

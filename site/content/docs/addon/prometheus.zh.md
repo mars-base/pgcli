@@ -30,8 +30,10 @@ Prometheus 与 Grafana 的分歧在**配置方式**。Grafana 只经环境变量
 | `--scrape-append` | — | 同样的声明格式，但把追加的 job **合并**进已存的 `--scrape` 列表（同名 job 并入 target、新名字排到末尾）而非替换。每个被追加的目标都会探测，任一拉不到数据即**中止 install**——什么都不写。与 `--scrape`、`--conf-file` 互斥 |
 | `--scrape-interval` | `15s` | 渲染配置里的全局 `scrape_interval`；与 `--conf-file` 互斥 |
 | `--retention` | `15d` | TSDB 保留期（`--storage.tsdb.retention.time`）；时长如 `15d`、`6mo`、`2y`。是 CLI flag，故与 `--conf-file` 可并存 |
-| `--conf-file` | — | 你自己的 `prometheus.yml` 路径——完全跳过渲染（与 `--scrape`/`--scrape-append`/`--scrape-interval`/`--alertmanager-url` 互斥）；见下 |
+| `--conf-file` | — | 你自己的 `prometheus.yml` 路径——完全跳过渲染（与 `--scrape`/`--scrape-append`/`--scrape-interval`/`--alertmanager-url`/`--remote-write-url`/`--remote-write-queue` 互斥）；见下 |
 | `--alertmanager-url` | — | 本 Prometheus 转发已触发告警到的 Alertmanager 实例（可重复）：裸 `HOST[:PORT]`（不写端口则补 `9093`）或 `http(s)://HOST[:PORT][/path]`。渲染的配置会多出一段 `alerting:` 指向它，**并且**多出一个对应的 `alertmanager` 抓取 job（顺带盯住 Alertmanager 自己的 `/metrics`——不是另一个开关，二者一体）。全部条目先校验后落盘，且必须同一种 scheme（http/https 混用即中止）；**不**探测连通性。与 `--conf-file` 互斥；见下 |
+| `--remote-write-url` | — | 把每个抓取到的样本推送一份到的远端存储 URL（可重复；完整 `http(s)://host:port/path` URL）。渲染的配置多出一段顶级 `remote_write:`。**本地 TSDB 仍按自己的 `--retention` 保留并可查**——远端是一份 WAL 兜底的副本，远端挂掉只是队列积压，恢复后自动重放。先校验（必须是带 host 的 http(s) URL）；**不**探测连通性。与 `--conf-file` 互斥；见"把样本推给 VictoriaMetrics"一节 |
+| `--remote-write-queue` | — | 在**每个** `--remote-write-url` 条目下渲染一段 `queue_config:`（可重复 `KEY=VALUE`）：正整数 `capacity`、`max_shards`、`min_shards`、`max_samples_per_send`，以及时长 `batch_send_deadline`、`min_backoff`、`max_backoff`（如 `5s`、`1m30s`、`2y`）。VictoriaMetrics 建议高压下加大批量（`max_samples_per_send=10000 capacity=20000 max_shards=30`）。必须搭配 `--remote-write-url`；键与值先校验后落盘（未知键、非正整数、无单位时长都会中止）。与 `--remote-write-url` 同为渲染模式；差异化到单个远端的调优仍需 `--conf-file` |
 | `--rule-file` | — | rule 文件路径（`*.rules.yml`，顶层是 `groups:`；可重复）——pgcli 把每个文件拷进托管 rules 目录（只取 basename；两个文件撞名即中止），把该目录只读挂到 `/etc/prometheus/rules`，渲染的 `prometheus.yml` 随即用 `rule_files` 加载这些拷贝。**与 `--conf-file` 可并存**：拷贝和挂载无论如何都会发生，你自己的文件决定要不要引用它们。文件不存在或为空即中止——什么都不写；见下 |
 | `--data-dir` | 自动 | 覆盖数据目录（默认在 base 目录下） |
 | `--force` | false | 即使正在运行也重建——用于不热加载改动的配置，或应用改动的端口/监听/保留期（`--rule-file` 从无到有一样会触发重建，见下） |
@@ -111,6 +113,51 @@ curl -s localhost:9090/api/v1/alertmanagers           # activeAlertmanagers 列�
 curl -s 'localhost:9090/api/v1/targets?state=any' | grep -c alertmanager
 ```
 
+## 把样本推给 VictoriaMetrics（`--remote-write-url`）
+
+Prometheus 内置的 TSDB 是编译进二进制的，换不掉——把 VictoriaMetrics（或任何远端存储）垫在它后面的方式是 `remote_write`：每个抓取周期把每个样本的**一份副本**推给远端，而本地 TSDB 照常保留自己的 `--retention` 窗口、照常提供查询。pgcli 两端都已经能跑，所以这对组合就是两次 install：
+
+```bash
+# 长期存储——回环上的单机版 VictoriaMetrics，或 vmcluster 插件的 vminsert
+# （http://<host>:8480/insert/0/prometheus/api/v1/write）
+pg addon install victoriametrics --name vm --listen 127.0.0.1
+
+# 采集后端把每个样本都推进它
+pg addon install prometheus --name p1 --listen 127.0.0.1 \
+  --remote-write-url http://127.0.0.1:8428/api/v1/write
+
+# 同上，再带上 VictoriaMetrics 建议的高压批量调优
+pg addon install prometheus --name p1 --listen 127.0.0.1 \
+  --remote-write-url http://127.0.0.1:8428/api/v1/write \
+  --remote-write-queue max_samples_per_send=10000 \
+  --remote-write-queue capacity=20000 \
+  --remote-write-queue max_shards=30
+```
+
+渲染出的 `prometheus.yml` 多出一段顶级 `remote_write:`——给了 `--remote-write-queue` 时，每个 URL 下再多一段 `queue_config:`：
+
+```yaml
+remote_write:
+  - url: "http://127.0.0.1:8428/api/v1/write"
+    queue_config:
+      max_samples_per_send: 10000
+      capacity: 20000
+      max_shards: 30
+```
+
+重跑 install 会**整体替换**已存的 URL 列表（与 `--alertmanager-url` 一样没有追加形式），URL 变化靠**热加载（SIGHUP）**生效——不重建容器。条目必须是完整的 `http(s)://host[:port]/path` URL（与 Alertmanager 目标不同，没有补端口/补 scheme 的约定——path 本身就是写入端点）；先校验但**不**探测连通性。`--remote-write-queue` 走同一条路：重复传入即整体替换已存列表、先校验（只收白名单键——整数容量/分片与时长超时），且同一组 `KEY=VALUE` 会渲染进**每个**远端条目下，要按远端差异化调优仍需 `--conf-file`。没有 `--remote-write-url` 却单独传它会被中止——无处可调。
+
+验证链路活着且在投递：
+
+```bash
+# remote-write 队列在排空（pending ≈ 0，samples_total 持续上涨）
+curl -s 'localhost:9090/api/v1/query?query=prometheus_remote_storage_samples_pending'
+# 样本确实落进了 VictoriaMetrics
+curl -s 'localhost:8428/api/v1/query?query=prometheus_build_info'
+```
+
+把 Grafana 从 Prometheus 改指到 VictoriaMetrics（`http://<host>:8428/`，集群版则是 `http://<host>:8481/select/0/prometheus/`）之后，Prometheus 实例就退化成薄薄一层采集+转发，VictoriaMetrics 成为可查询的存储。已在 Prometheus TSDB 里的历史数据**不会**自动回填——一次性迁移用 `vmctl prometheus` 工具。
+
 ## 加载告警规则（`--rule-file`）
 
 Prometheus 从 `rule_files:` 评估告警/记录规则。把 rule 文件交给 pgcli，它就变成托管拷贝：
@@ -148,7 +195,7 @@ curl -s localhost:9090/api/v1/rules    # 组内容已是改动后的；或看 pg
 pg addon install prometheus --name p1 --conf-file /etc/prometheus/my.yml
 ```
 
-pgcli 把你的文件**拷贝**进托管路径（`<base>/addon/prometheus/<name>/prometheus.yml`），并只读挂载**这份拷贝**——绝不挂你的原文件。这是刻意为之：单文件 bind mount 锁死源 inode，原地改你的原文件不会传播进运行中的容器。正因它是拷贝，改完你的原文件后跑 `pg addon prometheus reload` 会重拷并通知 Prometheus 重读。pgcli 不校验、不改写文件内容（与 nginx/haproxy 的 `--conf-file` 同一约定）。`--conf-file` 与渲染旋钮 `--scrape`/`--scrape-append`/`--scrape-interval`/`--alertmanager-url` 互斥；`--retention`、`--listen` 是 CLI flag，`--rule-file` 是文件拷贝而非渲染旋钮，三者与它并存仍有效。重装时省略 `--conf-file` 即回到渲染模式。
+pgcli 把你的文件**拷贝**进托管路径（`<base>/addon/prometheus/<name>/prometheus.yml`），并只读挂载**这份拷贝**——绝不挂你的原文件。这是刻意为之：单文件 bind mount 锁死源 inode，原地改你的原文件不会传播进运行中的容器。正因它是拷贝，改完你的原文件后跑 `pg addon prometheus reload` 会重拷并通知 Prometheus 重读。pgcli 不校验、不改写文件内容（与 nginx/haproxy 的 `--conf-file` 同一约定）。`--conf-file` 与渲染旋钮 `--scrape`/`--scrape-append`/`--scrape-interval`/`--alertmanager-url`/`--remote-write-url`/`--remote-write-queue` 互斥（operator 文件自己掌管其 `alerting:` 与 `remote_write:` 段）；`--retention`、`--listen` 是 CLI flag，`--rule-file` 是文件拷贝而非渲染旋钮，三者与它并存仍有效。重装时省略 `--conf-file` 即回到渲染模式。
 
 ### 完整样例
 
@@ -241,12 +288,14 @@ addons:
       scrape_interval: 15s
       autostart: false
       # alertmanager: [127.0.0.1:9093]            # 仅渲染模式：转发已触发告警 + 派生的抓取 job
+      # remote_write: [http://127.0.0.1:8428/api/v1/write]  # 仅渲染模式：把样本推给长期存储（VictoriaMetrics）
+      # remote_write_queue: [max_samples_per_send=10000, capacity=20000]  # 在上面每个远端条目下渲染 queue_config
       # rule_files: [/srv/rules/alert.rules.yml]  # 拷进 <name>/rules，挂到 /etc/prometheus/rules
       # conf_file: /etc/prometheus/my.yml   # 用户文件模式，跳过渲染
       # data_dir: /srv/prometheus-data      # 可选，覆盖默认位置
 ```
 
-渲染的 `prometheus.yml` 承载全局 `scrape_interval`、始终存在的自监控 job、以及每个 `scrape` **JOB** 一个 `static_configs` job（该 job 声明的所有 target 折叠进同一行）；`--alertmanager-url` 会加上 `alerting:` 段与随之而来的 `alertmanager` 抓取 job，`--rule-file` 会加上 `rule_files:` 段。`retention` 与监听绑定**不在**那个文件里——它们作为 CLI flag 传给 `prometheus` 二进制（`--storage.tsdb.retention.time`、`--web.listen-address`），这正是它们能与 `--conf-file` 并存的原因。
+渲染的 `prometheus.yml` 承载全局 `scrape_interval`、始终存在的自监控 job、以及每个 `scrape` **JOB** 一个 `static_configs` job（该 job 声明的所有 target 折叠进同一行）；`--alertmanager-url` 会加上 `alerting:` 段与随之而来的 `alertmanager` 抓取 job，`--remote-write-url` 会加上一段顶级 `remote_write:`（`--remote-write-queue` 在每个条目下填充 `queue_config:` 块），`--rule-file` 会加上 `rule_files:` 段。`retention` 与监听绑定**不在**那个文件里——它们作为 CLI flag 传给 `prometheus` 二进制（`--storage.tsdb.retention.time`、`--web.listen-address`），这正是它们能与 `--conf-file` 并存的原因。
 
 ### 列出
 
@@ -315,7 +364,7 @@ pg logs addon prometheus -n 200     # 最近 200 行（也支持 -i / --tail）
 
 ## 已知限制
 
-- v1 是裸采集后端：不自带 PostgreSQL exporter（自己装好，再 `--scrape postgres-exporter=127.0.0.1:9187` 指向它）、不做 remote-write。告警则是接好的：`--alertmanager-url` 把已触发告警转发给 pgcli 的 Alertmanager，`--rule-file` 加载告警规则（两者都是渲染模式；其余场景用 `--conf-file` 手写）。它是你让 Grafana 连的采集/存储/查询层。
+- v1 是裸采集后端：不自带 PostgreSQL exporter（自己装好，再 `--scrape postgres-exporter=127.0.0.1:9187` 指向它）。但长期存储与告警都是接好的：`--remote-write-url` 把抓取到的样本推给 VictoriaMetrics 插件（单机版或 `vmcluster`），`--alertmanager-url` 把已触发告警转发给 pgcli 的 Alertmanager，`--rule-file` 加载告警规则（三者都是渲染模式；其余场景用 `--conf-file` 手写）。它是你让 Grafana 连的采集/存储/查询层。
 - **无鉴权。** Prometheus 的 API 执行任意 PromQL；`0.0.0.0` 绑定的唯一保护是网络边界。这比 Grafana 有密码兜底的 `0.0.0.0` 是实质更弱的态势——不要把它暴露到不可信网络。
 - pgcli 渲染或拷贝 `prometheus.yml`，但不校验它（install 阶段没有 `promtool check config` 闸门）。渲染出的配置不可能有错，但有错的 `--conf-file` 只会在 reload 时从容器日志里暴露。
 - 宿主侧的属主 chown 在 rootless podman（`podman unshare chown`）下自动完成，pgcli 以 root 跑在 rootful 宿主上也自动完成（直接 `chown`）。非 root 的 pgcli 连接一个显式配置的远程 rootful daemon 时没有自动路径。
