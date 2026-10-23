@@ -300,7 +300,9 @@ done
   9428）同时提供摄入、LogsQL 查询与内置 UI。与 victoriametrics 的差异只在 retention：
   victoriametrics 的 `-retentionPeriod` 按**月**计且 pgcli 默认 `"1"`；victoria-logs
   接受完整时长语法（`30d`、`3months`、`1y`），pgcli **不设默认**——`--retention` 省略
-  时整个 flag 不下发，让镜像自身的默认生效。上游镜像为多架构（amd64/arm/arm64/ppc64le）
+  时整个 flag 不下发，让镜像自身的默认生效。上游镜像为多架构（amd64/arm/arm64/ppc64le）。
+  **vlcluster** 插件复用**同一镜像**跑三个角色容器（`vlinsert` / `vlselect` /
+  `vlstorage`，仅靠 flag 区分），无需额外镜像
 - **vlagent**：纯上游官方 `docker.io/victoriametrics/vlagent`，无 wrapper。VictoriaLogs
   的官方日志 agent（`vmagent` 的日志对应物），与 victoria-logs 同一发布节奏、同一版本号。
   以 **root** 运行、**完全不需要配置文件**（一切经 CLI flag）、**完全没有鉴权**。pgcli

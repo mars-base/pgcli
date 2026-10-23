@@ -48,6 +48,7 @@ type Config struct {
 	VMClusterStartPort       int                      `yaml:"vmcluster_start_port,omitempty"`       // starting VMCluster port, default 8480 (5 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP, internal insert TCP, internal select TCP)
 	VictoriaLogsStartPort    int                      `yaml:"victorialogs_start_port,omitempty"`    // starting VictoriaLogs HTTP host port, default 9428
 	VlagentStartPort         int                      `yaml:"vlagent_start_port,omitempty"`         // starting vlagent ingest HTTP host port, default 9429
+	VLClusterStartPort       int                      `yaml:"vlcluster_start_port,omitempty"`       // starting VLCluster port, default 9430 (3 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP)
 	Postgres                PostgresConfig            `yaml:"postgres"`
 	Podman                  PodmanConfig              `yaml:"podman"`
 	PITR                    PITRConfig                `yaml:"pitr"`
@@ -140,6 +141,7 @@ type TopAddonsConfig struct {
 	Duckdb       map[string]DuckdbConfig         `yaml:"duckdb,omitempty"`
 	VictoriaMetrics map[string]VictoriaMetricsConfig `yaml:"victoriametrics,omitempty"`
 	VMCluster      map[string]VMClusterConfig       `yaml:"vmcluster,omitempty"`
+	VLCluster      map[string]VLClusterConfig       `yaml:"vlcluster,omitempty"`
 	VictoriaLogs   map[string]VictoriaLogsConfig    `yaml:"victorialogs,omitempty"`
 	Vlagent        map[string]VlagentConfig          `yaml:"vlagent,omitempty"`
 }
@@ -1914,6 +1916,121 @@ func orderVMClusterRoles(roles []string) []string {
 	return out
 }
 
+// VLClusterConfig holds a VictoriaLogs cluster addon — the cluster edition of
+// VictoriaLogs, where vlinsert / vlselect / vlstorage all run from ONE image
+// (docker.io/victoriametrics/victoria-logs) and differ only by flags. Storage
+// nodes talk to inserts/selects over a single HTTP port per node (the
+// /internal/insert and /internal/select/* endpoints share it), so a storage
+// address is just host:storagePort — unlike vmcluster's two internal TCP ports.
+//
+// Topology:
+//   - Converged single-host (default): all three roles on one host using host
+//     networking.
+//   - Cross-host: --roles selects which roles THIS host runs; --storage-node
+//     lists ALL vlstorage addresses in the cluster (repeatable, host:port).
+//     Each host runs its own `pg addon install vlcluster`.
+//
+// Three ports per instance are allocated consecutively from
+// vlcluster_start_port (default 9430): InsertPort, SelectPort, StoragePort.
+// Only vlstorage keeps persistent data; vlinsert and vlselect are stateless.
+// The image runs as root, so no pre-chown of the data dir is needed.
+type VLClusterConfig struct {
+	Name            string `yaml:"name,omitempty"`
+	ContainerPrefix string `yaml:"container_prefix,omitempty"` // pgcli-vlcluster<ns>-<name>
+
+	ImageTag string `yaml:"image_tag,omitempty"`
+
+	Listen string `yaml:"listen,omitempty"` // default 0.0.0.0
+
+	// HTTP ports (pool-allocated, 3 consecutive from vlcluster_start_port)
+	InsertPort  int `yaml:"insert_port,omitempty"`  // vlinsert HTTP (ingest)
+	SelectPort  int `yaml:"select_port,omitempty"`  // vlselect HTTP (query)
+	StoragePort int `yaml:"storage_port,omitempty"` // vlstorage HTTP (internal APIs + admin)
+
+	// Roles is the subset of {insert,select,storage} THIS host runs.
+	// Empty = all three (converged single-host cluster).
+	Roles []string `yaml:"roles,omitempty"`
+
+	// StorageNodes lists ALL vlstorage addresses in the cluster, each
+	// host:storagePort. vlinsert and vlselect use these to build -storageNode
+	// flags. Empty on a converged host → auto-derived as 127.0.0.1:<StoragePort>.
+	StorageNodes []string `yaml:"storage_nodes,omitempty"`
+
+	// DataDir is only used when this host runs the storage role.
+	DataDir string `yaml:"data_dir,omitempty"`
+	// Retention is the -retentionPeriod value (e.g. "30d"). Deliberately not
+	// defaulted: empty means the binary's own default (1 month).
+	Retention string `yaml:"retention,omitempty"`
+
+	InsertExtraArgs  []string `yaml:"insert_extra_args,omitempty"`
+	SelectExtraArgs  []string `yaml:"select_extra_args,omitempty"`
+	StorageExtraArgs []string `yaml:"storage_extra_args,omitempty"`
+
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// ContainerName returns one component's container name: the shared prefix plus
+// the role suffix (pgcli-vlcluster<ns>-<name>-{insert,select,storage}).
+func (v *VLClusterConfig) ContainerName(role string) string {
+	return v.ContainerPrefix + "-" + role
+}
+
+// RolesInOrder returns the components this host runs, in startup dependency
+// order (storage → insert → select). An empty Roles (converged) yields all
+// three; otherwise the stored Roles filtered to the known set and reordered.
+func (v *VLClusterConfig) RolesInOrder() []string {
+	return orderVLClusterRoles(v.Roles)
+}
+
+// RunsRole reports whether this host runs the given component role.
+func (v *VLClusterConfig) RunsRole(role string) bool {
+	return slices.Contains(v.RolesInOrder(), role)
+}
+
+// EffectiveStorageNodes returns the explicit StorageNodes or auto-derives a
+// single-node entry for converged deployments (127.0.0.1:<StoragePort>).
+func (v *VLClusterConfig) EffectiveStorageNodes() []string {
+	if len(v.StorageNodes) > 0 {
+		return v.StorageNodes
+	}
+	host := v.Listen
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return []string{net.JoinHostPort(host, fmt.Sprintf("%d", v.StoragePort))}
+}
+
+// VLCluster component roles, mirrored in the CLI flag help. These live in
+// config so both config normalisation and the podman manager share one source.
+const (
+	VLClusterRoleInsert  = "insert"
+	VLClusterRoleSelect  = "select"
+	VLClusterRoleStorage = "storage"
+)
+
+// allVLClusterRoles is the canonical startup order a full cluster uses:
+// storage first (insert/select need it), then insert, then select.
+var allVLClusterRoles = []string{VLClusterRoleStorage, VLClusterRoleInsert, VLClusterRoleSelect}
+
+// orderVLClusterRoles dedupes roles and returns them in canonical order,
+// dropping nothing unknown (validation rejects those separately).
+func orderVLClusterRoles(roles []string) []string {
+	if len(roles) == 0 {
+		return allVLClusterRoles
+	}
+	set := make(map[string]bool, len(roles))
+	for _, r := range roles {
+		set[r] = true
+	}
+	out := make([]string, 0, len(set))
+	for _, s := range allVLClusterRoles {
+		if set[s] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // VictoriaLogsConfig holds a standalone VictoriaLogs addon — the log database
 // from the VictoriaMetrics family (https://docs.victoriametrics.com/victorialogs/).
 // It is the exact mirror of VictoriaMetricsConfig: one binary in one container,
@@ -2344,6 +2461,7 @@ func Default() *Config {
 		VMClusterStartPort:       8480,
 		VictoriaLogsStartPort:    9428,
 		VlagentStartPort:         9429,
+		VLClusterStartPort:       9430,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -2557,6 +2675,7 @@ type displayConfig struct {
 	VMClusterStartPort       int                      `yaml:"vmcluster_start_port,omitempty"`
 	VictoriaLogsStartPort    int                      `yaml:"victorialogs_start_port,omitempty"`
 	VlagentStartPort         int                      `yaml:"vlagent_start_port,omitempty"`
+	VLClusterStartPort       int                      `yaml:"vlcluster_start_port,omitempty"`
 	Logging                 LoggingConfig             `yaml:"logging"`
 	Backup                  BackupConfig              `yaml:"backup"`
 	Pigsty                  PigstyConfig              `yaml:"pigsty"`
@@ -2595,6 +2714,7 @@ func (c *Config) Display() displayConfig {
 		VMClusterStartPort:      c.VMClusterStartPort,
 		VictoriaLogsStartPort:   c.VictoriaLogsStartPort,
 		VlagentStartPort:        c.VlagentStartPort,
+		VLClusterStartPort:      c.VLClusterStartPort,
 		Logging:                 c.Logging,
 		Backup:                  c.Backup,
 		Pigsty:                  c.Pigsty,
@@ -2841,6 +2961,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.VlagentStartPort == 0 {
 		c.VlagentStartPort = d.VlagentStartPort
+	}
+	if c.VLClusterStartPort == 0 {
+		c.VLClusterStartPort = d.VLClusterStartPort
 	}
 
 	// Postgres
@@ -3651,6 +3774,29 @@ func (c *Config) ApplyDefaults() {
 		}
 		addon.Roles = orderVMClusterRoles(addon.Roles)
 		c.Addons.VMCluster[name] = addon
+	}
+
+	// Top-level addons defaults (VLCluster — VictoriaLogs cluster edition).
+	// One image reused by all three roles, three HTTP ports per instance, host
+	// network only on Linux. Unlike VMCluster, Retention is deliberately NOT
+	// defaulted: empty means the victoria-logs binary default, and forcing a
+	// value here would silently change retention everywhere. StorageNodes also
+	// stays empty — EffectiveStorageNodes() derives it for converged setups.
+	for name, addon := range c.Addons.VLCluster {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerPrefix == "" {
+			addon.ContainerPrefix = "pgcli-vlcluster" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultVictoriaLogsImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "0.0.0.0"
+		}
+		addon.Roles = orderVLClusterRoles(addon.Roles)
+		c.Addons.VLCluster[name] = addon
 	}
 
 	// Top-level addons defaults (JuiceFS). These are host binaries, so the
@@ -4483,6 +4629,16 @@ func (c *Config) autoAssignPorts() {
 				assignedVL[addon.HostPort] = true
 			}
 		}
+		// vlcluster's pool starts just above this one (9430+), so seed its
+		// ports here — otherwise an extra VictoriaLogs instance could grow
+		// into a port a vlcluster already holds (or vice versa).
+		for _, addon := range c.Addons.VLCluster {
+			for _, p := range []int{addon.InsertPort, addon.SelectPort, addon.StoragePort} {
+				if p != 0 {
+					assignedVL[p] = true
+				}
+			}
+		}
 		next := vlBase
 		nextFreeVL := func() int {
 			for (usedPorts != nil && usedPorts[next]) || assignedVL[next] {
@@ -4519,6 +4675,15 @@ func (c *Config) autoAssignPorts() {
 		for _, addon := range c.Addons.Vlagent {
 			if addon.HostPort != 0 {
 				assignedVA[addon.HostPort] = true
+			}
+		}
+		// Same cross-pool guard as the VictoriaLogs block: vlagent's pool can
+		// grow into vlcluster's 9430+ range.
+		for _, addon := range c.Addons.VLCluster {
+			for _, p := range []int{addon.InsertPort, addon.SelectPort, addon.StoragePort} {
+				if p != 0 {
+					assignedVA[p] = true
+				}
 			}
 		}
 		next := vaBase
@@ -4652,6 +4817,101 @@ func (c *Config) autoAssignPorts() {
 				next = addon.InsertPort + 5
 			}
 			c.Addons.VMCluster[name] = addon
+		}
+	}
+
+	// Allocate ports for VLCluster addons from their own pool
+	// (vlcluster_start_port, default 9430 — just past VictoriaLogs 9428 and
+	// vlagent 9429). Each instance gets 3 consecutive ports:
+	//   +0  InsertPort  (vlinsert HTTP — ingestion endpoint)
+	//   +1  SelectPort  (vlselect HTTP — query endpoint)
+	//   +2  StoragePort (vlstorage HTTP — internal insert/select APIs + admin)
+	// All three are allocated even on hosts that don't run every role, so a
+	// storage node's address is predictable across hosts. The VictoriaLogs and
+	// vlagent pools can grow up into this range, so their ports are seeded here
+	// and vlcluster's ports are seeded into those two blocks above.
+	{
+		vlcBase := c.VLClusterStartPort
+		assignedVLC := map[int]bool{}
+		for _, addon := range c.Addons.VLCluster {
+			for _, p := range []int{addon.InsertPort, addon.SelectPort, addon.StoragePort} {
+				if p != 0 {
+					assignedVLC[p] = true
+				}
+			}
+		}
+		for _, addon := range c.Addons.VictoriaLogs {
+			if addon.HostPort != 0 {
+				assignedVLC[addon.HostPort] = true
+			}
+		}
+		for _, addon := range c.Addons.Vlagent {
+			if addon.HostPort != 0 {
+				assignedVLC[addon.HostPort] = true
+			}
+		}
+		next := vlcBase
+		nextFreeVLCPort := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedVLC[next] {
+				next++
+			}
+			p := next
+			assignedVLC[p] = true
+			next++
+			return p
+		}
+		nextFreeVLCBlock := func() int {
+			// Find 3 consecutive free ports.
+			candidate := next
+			for {
+				ok := true
+				for i := range 3 {
+					if (usedPorts != nil && usedPorts[candidate+i]) || assignedVLC[candidate+i] {
+						ok = false
+						candidate = candidate + i + 1
+						break
+					}
+				}
+				if ok {
+					break
+				}
+			}
+			for i := range 3 {
+				assignedVLC[candidate+i] = true
+			}
+			next = candidate + 3
+			return candidate
+		}
+		names := make([]string, 0, len(c.Addons.VLCluster))
+		for name := range c.Addons.VLCluster {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.VLCluster[name]
+			explicit := addon.InsertPort != 0 || addon.SelectPort != 0 || addon.StoragePort != 0
+			if !explicit && vlcBase > 0 {
+				base := nextFreeVLCBlock()
+				addon.InsertPort = base
+				addon.SelectPort = base + 1
+				addon.StoragePort = base + 2
+			} else {
+				if addon.InsertPort == 0 && vlcBase > 0 {
+					addon.InsertPort = nextFreeVLCPort()
+				}
+				if addon.SelectPort == 0 && vlcBase > 0 {
+					addon.SelectPort = nextFreeVLCPort()
+				}
+				if addon.StoragePort == 0 && vlcBase > 0 {
+					addon.StoragePort = nextFreeVLCPort()
+				}
+				for _, p := range []int{addon.InsertPort, addon.SelectPort, addon.StoragePort} {
+					if p >= next {
+						next = p + 1
+					}
+				}
+			}
+			c.Addons.VLCluster[name] = addon
 		}
 	}
 

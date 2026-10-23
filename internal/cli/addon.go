@@ -329,6 +329,7 @@ Currently supported add-ons:
   prometheus  Prometheus — the metrics collection backend Grafana reads from (single container from docker.io/prom/prometheus; rendered prometheus.yml or --conf-file, --scrape targets, --alertmanager-url to forward alerts + watch Alertmanager, --rule-file to load alerting rules, SIGHUP reload; NO web login — defaults to 0.0.0.0 guarded only by the network, use --listen 127.0.0.1 for loopback; Linux host network, macOS bridge)
   victoriametrics VictoriaMetrics — fast, Prometheus-compatible time-series database (single container from docker.io/victoriametrics/victoria-metrics; pure CLI flags, no config file; --retention-months for data retention, --extra-arg for custom flags like -search.maxUniqueTimeseries; NO web login — defaults to 0.0.0.0 guarded only by the network, use --listen 127.0.0.1 for loopback; Linux host network, macOS bridge)
   vmcluster   VMCluster — VictoriaMetrics cluster edition: 3 components (vminsert + vmselect + vmstorage) from docker.io/victoriametrics/{vminsert,vmselect,vmstorage}:v1.154.1-cluster; --roles selects which components THIS host runs (default: all three = converged single-host cluster); --storage-node lists ALL vmstorage addresses (repeatable, enables multi-node sharding + replication); pure CLI flags, no config file; 5 ports from vmcluster_start_port (default 8480-8484); NO auth — defaults to 0.0.0.0, use --listen 127.0.0.1 for loopback; Linux host network only
+  vlcluster   VLCluster — VictoriaLogs cluster edition: 3 components (vlinsert + vlselect + vlstorage) from ONE image, docker.io/victoriametrics/victoria-logs:v1.53.0; --roles selects which components THIS host runs (default: all three = converged single-host cluster); --storage-node lists ALL vlstorage addresses (repeatable, format host:storagePort, e.g. 10.0.0.1:9432) for sharding — there is NO replication, so losing any vlstorage makes queries return 502; pure CLI flags, no config file; 3 ports from vlcluster_start_port (default 9430-9432); NO auth — defaults to 0.0.0.0, use --listen 127.0.0.1 for loopback; Linux host network only
   victorialogs VictoriaLogs — the log database of the VictoriaMetrics family (single container from docker.io/victoriametrics/victoria-logs; pure CLI flags, no config file; one HTTP port from victorialogs_start_port (default 9428) serving ingest + LogsQL queries + built-in UI; --retention for a duration like 30d (omit to keep the binary's default), --extra-arg for custom flags; NO web login — defaults to 0.0.0.0 guarded only by the network, use --listen 127.0.0.1 for loopback; Linux host network, macOS bridge)
   vlagent     vlagent — the official VictoriaLogs log agent (single container from docker.io/victoriametrics/vlagent; pure CLI flags, no config file; one HTTP ingest port from vlagent_start_port (default 9429); --remote-write-url URL(s) ending in /insert/native forward collected logs to VictoriaLogs; --log-path mounts any host file/dir read-only at the same path and --include/--exclude select files with vlagent's native glob syntax (*, /**/, ?, [a-z], {a,b}) — no regex; no --include means <dir>/**/*.log for dirs and the file itself for files; NO auth — defaults to 0.0.0.0, use --listen 127.0.0.1 for loopback; Linux host network, macOS bridge)
   alertmanager Alertmanager — the alert dedup/grouping/routing frontend of the Prometheus stack (single container from docker.io/prom/alertmanager; rendered alertmanager.yml with a no-op or --webhook-url web.hook receiver, or --conf-file; SIGHUP reload; cluster gossip disabled; NO web login — defaults to 0.0.0.0 guarded only by the network, and silences are dangerous, use --listen 127.0.0.1 for loopback; wired to Prometheus from the Prometheus side via --alertmanager-url; Linux host network, macOS bridge)
@@ -1114,10 +1115,10 @@ func init() {
 	addonRemoveCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to remove")
 
 	// etcd flags (top-level shared-infrastructure addon)
-	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea or beegfs instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"gitea\"/\"beegfs\")")
+	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, vmcluster, vlcluster, alertmanager, gitea or beegfs instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"vmc\"/\"vlc\"/\"alertmanager\"/\"gitea\"/\"beegfs\")")
 	addonInstallCmd.Flags().Int("client-port", 0, "etcd client host port (0=auto-assign from etcd_start_port)")
 	addonInstallCmd.Flags().Int("peer-port", 0, "etcd peer host port (0=auto-assign, next free port after client)")
-	addonInstallCmd.Flags().String("image", "", "override the addon image tag verbatim (etcd default quay.io/coreos/etcd:v3.5.30; redis default resolved from --version, e.g. docker.io/library/redis:8.10.2; predixy default ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine; pgadmin default docker.io/dpage/pgadmin4:9.18; grafana default docker.io/grafana/grafana:13.2.4; prometheus default docker.io/prom/prometheus:v3.15.0; alertmanager default docker.io/prom/alertmanager:v0.34.1; gitea default docker.io/gitea/gitea:28.1.0)")
+	addonInstallCmd.Flags().String("image", "", "override the addon image tag verbatim (etcd default quay.io/coreos/etcd:v3.5.30; redis default resolved from --version, e.g. docker.io/library/redis:8.10.2; predixy default ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine; pgadmin default docker.io/dpage/pgadmin4:9.18; grafana default docker.io/grafana/grafana:13.2.4; prometheus default docker.io/prom/prometheus:v3.15.0; vmcluster/insert-image/select-image/storage-image override the per-role vm* images; vlcluster default docker.io/victoriametrics/victoria-logs:v1.53.0 for all three roles; alertmanager default docker.io/prom/alertmanager:v0.34.1; gitea default docker.io/gitea/gitea:28.1.0)")
 	addonInstallCmd.Flags().String("cluster", "", "cluster grouping token: etcd --initial-cluster-token (default \"pgcli-etcd\"); redis native-cluster name (--cluster-enabled yes, members sharing it form one cluster you assemble once with `pg redis-cli -- --cluster create ...`); garage — switch on multi-node mode (members sharing the name join one Garage cluster; requires --advertise-host); seaweedfs — switch on multi-node mode (members sharing the name join one Raft cluster via the full --peer list; requires --advertise-host, a shared --dsn metadata database, and the SAME --root-user/--root-password on every node)")
 	addonInstallCmd.Flags().StringArray("peer", nil, "cluster peer list (repeat one per peer): garage — an existing member's <id>@<addr> to connect to (a joiner usually needs just one — peering is transitive; printed by the bootstrap node's install summary). seaweedfs — a member's <ip>:<master_port> Raft address; pass the FULL list on EVERY node (weed requires the complete membership, MNMD-style, no bootstrap/join distinction), your own entry optional")
 	addonInstallCmd.Flags().String("replication", "", "seaweedfs cluster only: placement code XYZ (X=remote copies, Y=distinct racks, Z=distinct data centers; each digit 0-3), e.g. 001 = one remote copy. Default \"000\" (single-node — no peers to copy to). Immutable once set in a cluster")
@@ -1128,11 +1129,11 @@ func init() {
 	addonInstallCmd.Flags().Int("replication-factor", 0, "garage cluster only: object replication factor (garage.toml replication_factor; must be <= node count — a 3-node cluster with rf 3 tolerates losing 2; set it on EVERY member, the value is per-node config). Empty for garage = default 1 (single-node); etcd/redis ignore it")
 	addonInstallCmd.Flags().String("rpc-secret", "", "garage cluster only: the shared 64-hex cluster RPC secret (garage.toml rpc_secret) — generated by the bootstrap node and printed once; every joiner MUST pass the same value (pgcli never executes remotely, so you carry it). Invalid on a single-node install")
 	addonInstallCmd.Flags().Int("cluster-replicas", 0, "redis native-cluster only: per-master replica count for the --cluster create you will run (default 0 = masters-only). Only shapes the suggested assemble command and node-count guidance — which nodes become followers is decided by Redis at create time, not here; the whole group inherits the first member's value")
-	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs, garage, redis, pgAdmin, Grafana, Gitea or DuckDB instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; garage default <base_dir>/addon/garage/<name>/data (its metadata dir is a sibling .../meta); seaweedfs default <base_dir>/addon/seaweedfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data; pgadmin default <base_dir>/addon/pgadmin/<name>/data; grafana default <base_dir>/addon/grafana/<name>/data; prometheus default <base_dir>/addon/prometheus/<name>/data; alertmanager default <base_dir>/addon/alertmanager/<name>/data; gitea default <base_dir>/addon/gitea/<name>/data; beegfs — ONE dir for the whole filesystem, its three services use <dir>/mgmtd, <dir>/meta and <dir>/storage, default root <base_dir>/addon/beegfs/<name>; duckdb default <base_dir>/addon/duckdb/<name>)")
+	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs, garage, redis, pgAdmin, Grafana, Gitea, DuckDB, VMCluster or VLCluster instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; garage default <base_dir>/addon/garage/<name>/data (its metadata dir is a sibling .../meta); seaweedfs default <base_dir>/addon/seaweedfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data; pgadmin default <base_dir>/addon/pgadmin/<name>/data; grafana default <base_dir>/addon/grafana/<name>/data; prometheus default <base_dir>/addon/prometheus/<name>/data; vmcluster default <base_dir>/addon/vmcluster/<name>/data (vmstorage only); vlcluster default <base_dir>/addon/vlcluster/<name>/data (vlstorage only); alertmanager default <base_dir>/addon/alertmanager/<name>/data; gitea default <base_dir>/addon/gitea/<name>/data; beegfs — ONE dir for the whole filesystem, its three services use <dir>/mgmtd, <dir>/meta and <dir>/storage, default root <base_dir>/addon/beegfs/<name>; duckdb default <base_dir>/addon/duckdb/<name>)")
 	addonInstallCmd.Flags().String("advertise-host", "", "peer-visible host: etcd member peer/client URLs, redis native-cluster --cluster-announce-ip, , garage cluster rpc_public_addr, and seaweedfs cluster weed -ip that peers dial (empty=127.0.0.1 single-host; set a LAN IP or FQDN for cross-host clusters — required on every garage or seaweedfs --cluster member)")
 	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.0.0.12:2379 (implies --initial-cluster-state existing; requires --advertise-host)")
-	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea or beegfs instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"gitea\"/\"beegfs\")")
-	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/garage/seaweedfs/redis/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea data directory (object storage / backup repository / key-value data / pgAdmin config+sessions, Grafana dashboards sqlite DB, Prometheus TSDB, Alertmanager silences+notification state, or Gitea repos + app.ini + its default SQLite DB) and pgcli-rendered files beside it, or the juicefs/zerofs host per-instance dir (cache, logs, sqlite meta); never the S3 bucket or a PG metadata database. No-op for predixy, which is stateless. Never drops a seaweedfs filer metadata database or a Gitea --dsn PostgreSQL database")
+	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, vmcluster, vlcluster, alertmanager, gitea or beegfs instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"vmc\"/\"vlc\"/\"alertmanager\"/\"gitea\"/\"beegfs\")")
+	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/garage/seaweedfs/redis/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea/VMCluster/VLCluster data directory (object storage / backup repository / key-value data / pgAdmin config+sessions, Grafana dashboards sqlite DB, Prometheus TSDB, Alertmanager silences+notification state, or Gitea repos + app.ini + its default SQLite DB; VMCluster vmstorage TSDB; VLCluster vlstorage logs) and pgcli-rendered files beside it, or the juicefs/zerofs host per-instance dir (cache, logs, sqlite meta); never the S3 bucket or a PG metadata database. No-op for predixy, which is stateless. Never drops a seaweedfs filer metadata database or a Gitea --dsn PostgreSQL database")
 
 	// haproxy flags (top-level load balancer in front of a Patroni cluster)
 	addonInstallCmd.Flags().String("mode", "", "HAProxy routing mode: unified (default, all traffic to the leader) or split (separate read listener for replicas)")
@@ -1152,7 +1153,7 @@ func init() {
 	addonInstallCmd.Flags().Bool("reload", false, "haproxy --conf-file only: hot-reload the running instance (validate with haproxy -c, then SIGUSR2) instead of recreating the container — no dropped connections; ignored otherwise")
 
 	// prometheus flags (top-level metrics collection backend)
-	addonInstallCmd.Flags().String("retention", "", "data retention: Prometheus TSDB retention (--storage.tsdb.retention.time), e.g. 15d, 6mo, 2y (default \"15d\"); VictoriaLogs retention as a duration the binary parses (e.g. 30d, 3months, 1y), passed verbatim as -retentionPeriod — omit to keep the victoria-logs default")
+	addonInstallCmd.Flags().String("retention", "", "data retention: Prometheus TSDB retention (--storage.tsdb.retention.time), e.g. 15d, 6mo, 2y (default \"15d\"); VictoriaLogs retention as a duration the binary parses (e.g. 30d, 3months, 1y), passed verbatim as -retentionPeriod — omit to keep the victoria-logs default. For vlcluster it applies to vlstorage only (same flag, same default)")
 	addonInstallCmd.Flags().String("scrape-interval", "", "Prometheus global scrape_interval in the rendered prometheus.yml (default \"15s\"); mutually exclusive with --conf-file")
 	addonInstallCmd.Flags().StringArray("scrape", nil, "Prometheus scrape spec JOB=HOST:PORT[,HOST:PORT...] [KEY=VALUE...] (repeatable; the JOB name is required, several comma-separated targets share one job, and bare KEY=VALUE tokens after them become per-target labels — the same node named by several specs merges its labels and is scraped once, different label sets split into separate static_configs blocks) — declares the FULL job set (replaces the stored list), each rendering one static_configs job alongside the self-monitoring job; e.g. --scrape postgres-exporter=127.0.0.1:9187. Mutually exclusive with --scrape-append and --conf-file")
 	addonInstallCmd.Flags().StringArray("scrape-append", nil, "Prometheus scrape spec(s) JOB=HOST:PORT[,HOST:PORT...] [KEY=VALUE...] to ADD to the instance's stored --scrape list (same form as --scrape, repeatable) instead of replacing it; folds each appended target (and its labels) into the same-named job. Every appended target is probed with GET /metrics and install aborts, touching nothing, if any returns no data. Mutually exclusive with --scrape and --conf-file")
@@ -1166,19 +1167,19 @@ func init() {
 	addonInstallCmd.Flags().String("retention-months", "", "VictoriaMetrics data retention in months (default \"1\"); e.g. 3 = 3 months")
 	addonInstallCmd.Flags().StringArray("extra-arg", nil, "VictoriaMetrics/VictoriaLogs/vlagent: extra CLI flag passed to the binary (repeatable), e.g. --extra-arg -search.maxUniqueTimeseries=1000000 — appended last so last-wins overrides earlier flags")
 
-	// vmcluster flags (VictoriaMetrics cluster — cross-host, horizontal scaling)
-	addonInstallCmd.Flags().StringArray("storage-node", nil, "VMCluster: vmstorage address (repeatable; format host:insertPort:selectPort, e.g. 10.0.0.1:8483:8484). Lists ALL vmstorage nodes in the cluster for sharding/replication. Omit for converged single-host (auto-derived)")
-	addonInstallCmd.Flags().Int("insert-port", 0, "VMCluster: vminsert HTTP port")
-	addonInstallCmd.Flags().Int("select-port", 0, "VMCluster: vmselect HTTP port")
-	addonInstallCmd.Flags().Int("storage-port", 0, "VMCluster: vmstorage HTTP port")
+	// vmcluster/vlcluster flags (VictoriaMetrics / VictoriaLogs cluster — cross-host, horizontal scaling)
+	addonInstallCmd.Flags().StringArray("storage-node", nil, "cluster storage node address (repeatable). vmcluster: host:insertPort:selectPort, e.g. 10.0.0.1:8483:8484 — lists ALL vmstorage nodes for sharding/replication. vlcluster: host:storagePort, e.g. 10.0.0.1:9432 — lists ALL vlstorage nodes for sharding (no replication). Omit for converged single-host (auto-derived)")
+	addonInstallCmd.Flags().Int("insert-port", 0, "cluster insert HTTP port (vmcluster: vminsert; vlcluster: vlinsert)")
+	addonInstallCmd.Flags().Int("select-port", 0, "cluster select HTTP port (vmcluster: vmselect; vlcluster: vlselect)")
+	addonInstallCmd.Flags().Int("storage-port", 0, "cluster storage HTTP port (vmcluster: vmstorage; vlcluster: vlstorage — also serves the internal insert/select APIs)")
 	addonInstallCmd.Flags().Int("internal-insert-port", 0, "VMCluster: vmstorage TCP port for vminsert protocol")
 	addonInstallCmd.Flags().Int("internal-select-port", 0, "VMCluster: vmstorage TCP port for vmselect protocol")
 	addonInstallCmd.Flags().String("insert-image", "", "VMCluster: vminsert image override")
 	addonInstallCmd.Flags().String("select-image", "", "VMCluster: vmselect image override")
 	addonInstallCmd.Flags().String("storage-image", "", "VMCluster: vmstorage image override")
-	addonInstallCmd.Flags().StringArray("insert-extra-arg", nil, "VMCluster: extra CLI flag for vminsert (repeatable)")
-	addonInstallCmd.Flags().StringArray("select-extra-arg", nil, "VMCluster: extra CLI flag for vmselect (repeatable)")
-	addonInstallCmd.Flags().StringArray("storage-extra-arg", nil, "VMCluster: extra CLI flag for vmstorage (repeatable)")
+	addonInstallCmd.Flags().StringArray("insert-extra-arg", nil, "cluster insert extra CLI flag (repeatable; vmcluster: vminsert; vlcluster: vlinsert) — appended last so last-wins overrides earlier flags")
+	addonInstallCmd.Flags().StringArray("select-extra-arg", nil, "cluster select extra CLI flag (repeatable; vmcluster: vmselect; vlcluster: vlselect) — appended last so last-wins overrides earlier flags")
+	addonInstallCmd.Flags().StringArray("storage-extra-arg", nil, "cluster storage extra CLI flag (repeatable; vmcluster: vmstorage; vlcluster: vlstorage) — appended last so last-wins overrides earlier flags")
 
 	// vlagent flags (VictoriaLogs log agent — collect host files, forward to VictoriaLogs)
 	addonInstallCmd.Flags().StringArray("log-path", nil, "vlagent: host file or directory to track (repeatable). It is bind-mounted READ-ONLY into the container at the SAME absolute path, so a directory also covers every file below it. Replace the stored list by passing the flag again; with no --include, a directory defaults to <dir>/**/*.log and a file to itself")
@@ -1188,7 +1189,7 @@ func init() {
 	// minio flags (top-level single-node S3-compatible object storage)
 	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo/rustfs S3 API host port (0=auto-assign from the shared minio_start_port pool); for garage, the S3 API port (0=auto from garage_start_port, default 3900 — garage takes four consecutive ports API/RPC/Web/Admin)")
 	addonInstallCmd.Flags().Int("console-port", 0, "MinIO/silo/rustfs web console host port (0=auto-assign, next free port)")
-	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo, rustfs, garage or seaweedfs server / PostgREST HTTP server / pgAdmin web server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network) — Redis, Predixy and Grafana default to \"0.0.0.0\" instead, since their password is always required (and a dashboard is meant to be viewed remotely); pass 127.0.0.1 to keep them loopback-only. Gitea also defaults to \"0.0.0.0\" — a Git host is pushed to from other machines, and its generated admin login plus closed self-registration are the gate. Prometheus and Alertmanager ALSO default to 0.0.0.0 but have NO auth at all — Alertmanager worse: anyone reaching its port can create silences (mute on-call). Both are guarded only by the network boundary, so pass 127.0.0.1 to keep them loopback-only. BeeGFS is a different shape again: its daemons always bind the fixed protocol ports on the host network, so --listen does NOT gate anything there — it only picks the address the cluster self-references and clients dial for mgmtd (sysMgmtdHost), defaulting to \"0.0.0.0\" because a parallel filesystem is mounted from other machines")
+	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo, rustfs, garage or seaweedfs server / PostgREST HTTP server / pgAdmin web server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network) — Redis, Predixy and Grafana default to \"0.0.0.0\" instead, since their password is always required (and a dashboard is meant to be viewed remotely); pass 127.0.0.1 to keep them loopback-only. Gitea also defaults to \"0.0.0.0\" — a Git host is pushed to from other machines, and its generated admin login plus closed self-registration are the gate. Prometheus and Alertmanager ALSO default to 0.0.0.0 but have NO auth at all — Alertmanager worse: anyone reaching its port can create silences (mute on-call). VMCluster and VLCluster are the same story: no auth at all, so 0.0.0.0 means anyone who reaches the port can ingest, query, or delete data; pass 127.0.0.1 to keep the cluster loopback-only. Both are guarded only by the network boundary, so pass 127.0.0.1 to keep them loopback-only. BeeGFS is a different shape again: its daemons always bind the fixed protocol ports on the host network, so --listen does NOT gate anything there — it only picks the address the cluster self-references and clients dial for mgmtd (sysMgmtdHost), defaulting to \"0.0.0.0\" because a parallel filesystem is mounted from other machines")
 	addonInstallCmd.Flags().String("root-user", "", "MinIO/silo/rustfs root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config). For garage this is the seeded access key: omit it to auto-generate a GK-prefixed key (garage has no \"admin\" user). For seaweedfs it is the s3.json identity access key: omit it to auto-generate an SW-prefixed key on a SINGLE-NODE install only — under --cluster both it and --root-password are REQUIRED, since each node reads only its own s3.json and must present the identical identity")
 	addonInstallCmd.Flags().String("root-password", "", "MinIO/silo/rustfs root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand). For garage this is the seeded secret key; for seaweedfs the s3.json identity secret key — required (with --root-user) on every node of a --cluster install")
 	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO/silo/rustfs distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (MinIO/silo: path is the in-container export dir — /data with a plain --data-dir node, or /data1../dataN on a --drive node (MNMD); repeat for every node's every drive. rustfs: one endpoint per node — scheme://host:port, no path; it has no multi-node single-drive mode so --drive is required, and it derives the /data/rustfs0../rustfsN suffix itself. The list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
@@ -1196,7 +1197,7 @@ func init() {
 	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo/rustfs/seaweedfs: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo|rustfs>/<name>/, or the addon dir for seaweedfs; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Seaweedfs serves TLS natively: the S3 port becomes HTTPS-only (cleartext listener off). Changing this needs --force to recreate. NOT for garage: it has no native TLS (rejects --tls); front it with the nginx addon")
 	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo/rustfs: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt for MinIO/silo, rustfs_cert.pem for rustfs, cert.pem for seaweedfs). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
 	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo/rustfs: private key for --tls-cert (PEM; mounted read-only as private.key for MinIO/silo, rustfs_key.pem for rustfs, key.pem for seaweedfs). Must pair with the cert; both are required to enable BYO TLS")
-	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/PostgREST/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea container (or, for BeeGFS, the whole 3-container filesystem cluster) even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, a changed pgAdmin --email/--dsn/--pg-name, Grafana --admin-user or Gitea --admin-user/--ssh-port/--dsn seed/--allow-registration, or to force-recreate a Prometheus instance instead of hot-reloading its config). For juicefs it rebuilds the config entry from the flags (format is still skipped when the volume already exists in the metadata engine); for zerofs it re-renders config.toml and restarts the server/client, KEEPING the stored encryption password (a fresh one could not unwrap the bucket's existing data); for duckdb it rebuilds the config entry from the flags")
+	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/PostgREST/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea container (or, for BeeGFS, the whole 3-container filesystem cluster) even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, a changed pgAdmin --email/--dsn/--pg-name, Grafana --admin-user or Gitea --admin-user/--ssh-port/--dsn seed/--allow-registration, a changed VMCluster/VLCluster port/roles/storage-node/image, or to force-recreate a Prometheus instance instead of hot-reloading its config). For juicefs it rebuilds the config entry from the flags (format is still skipped when the volume already exists in the metadata engine); for zerofs it re-renders config.toml and restarts the server/client, KEEPING the stored encryption password (a fresh one could not unwrap the bucket's existing data); for duckdb it rebuilds the config entry from the flags")
 
 	// redis flags (top-level standalone KV store — the first version-selectable addon)
 	addonInstallCmd.Flags().String("version", "", "Redis major version to install: 7 or 8 (default \"8\"); each maps to a pinned upstream docker.io/library/redis tag. For juicefs/zerofs/duckdb it instead pins the host binary release to download (default: the version's pinned sha256). Ignored for every other addon")
@@ -1279,6 +1280,8 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallVictoriaMetrics(cmd)
 	case "vmcluster":
 		return runAddonInstallVMCluster(cmd)
+	case "vlcluster":
+		return runAddonInstallVLCluster(cmd)
 	case "victorialogs":
 		return runAddonInstallVictoriaLogs(cmd)
 	case "vlagent":
@@ -1300,7 +1303,7 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -5583,6 +5586,47 @@ func runAddonList(showPassword bool) error {
 		}
 	}
 
+	// vlcluster (VictoriaLogs cluster — cross-host, horizontal scaling)
+	section("Cluster add-ons (vlcluster):", len(cfg.Addons.VLCluster) > 0)
+	if vlc, err := podman.NewVLClusterManager(cfg); err == nil {
+		for _, name := range sortedAddonNames(cfg.Addons.VLCluster) {
+			vc := cfg.Addons.VLCluster[name]
+			st, _ := vlc.ClusterStatus(&vc)
+			fmt.Printf("  %s (name: %s)\n", "vlcluster", name)
+			fmt.Printf("    Status:      %s\n", st.String())
+			fmt.Printf("    Roles:       %s\n", strings.Join(vc.RolesInOrder(), ", "))
+			if vc.RunsRole(config.VLClusterRoleInsert) {
+				fmt.Printf("    Insert URL:  http://%s:%d/\n", vc.Listen, vc.InsertPort)
+			}
+			if vc.RunsRole(config.VLClusterRoleSelect) {
+				fmt.Printf("    Select URL:  http://%s:%d/\n", vc.Listen, vc.SelectPort)
+			}
+			if vc.RunsRole(config.VLClusterRoleStorage) {
+				fmt.Printf("    Storage URL: http://%s:%d/\n", vc.Listen, vc.StoragePort)
+				if vc.Retention != "" {
+					fmt.Printf("    Retention:   %s\n", vc.Retention)
+				} else {
+					fmt.Println("    Retention:   binary default")
+				}
+				fmt.Printf("    Data:        %s\n", vlc.DataDir(&vc))
+			}
+			fmt.Printf("    Image:       %s\n", vc.ImageTag)
+			if nodes := vc.EffectiveStorageNodes(); len(nodes) > 0 {
+				fmt.Printf("    Storage nodes: %s\n", strings.Join(nodes, ", "))
+			}
+			for _, role := range vc.RolesInOrder() {
+				fmt.Printf("    Container:   %s (%s)\n", vc.ContainerName(role), role)
+			}
+		}
+	} else if len(cfg.Addons.VLCluster) > 0 {
+		for _, name := range sortedAddonNames(cfg.Addons.VLCluster) {
+			vc := cfg.Addons.VLCluster[name]
+			fmt.Printf("  %s (name: %s)\n", "vlcluster", name)
+			fmt.Printf("    Status:      n/a (%v)\n", err)
+			fmt.Printf("    Roles:       %s\n", strings.Join(vc.RolesInOrder(), ", "))
+		}
+	}
+
 	// victorialogs (log database, top-level addon; Linux host network, macOS bridge)
 	section("Web add-ons (victorialogs):", len(cfg.Addons.VictoriaLogs) > 0)
 	if vl, err := podman.NewVictoriaLogsManager(cfg); err == nil {
@@ -6063,6 +6107,8 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemoveVictoriaMetrics(cmd)
 	case "vmcluster":
 		return runAddonRemoveVMCluster(cmd)
+	case "vlcluster":
+		return runAddonRemoveVLCluster(cmd)
 	case "victorialogs":
 		return runAddonRemoveVictoriaLogs(cmd)
 	case "vlagent":
@@ -6084,7 +6130,7 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -6395,6 +6441,8 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartVictoriaMetrics(cmd)
 	case "vmcluster":
 		return runAddonStartVMCluster(cmd)
+	case "vlcluster":
+		return runAddonStartVLCluster(cmd)
 	case "victorialogs":
 		return runAddonStartVictoriaLogs(cmd)
 	case "vlagent":
@@ -6416,7 +6464,7 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		fmt.Println("Run 'pg addon duckdb shell' to launch an interactive session.")
 		return nil
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
 	}
 }
 
@@ -6456,6 +6504,8 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopVictoriaMetrics(cmd)
 	case "vmcluster":
 		return runAddonStopVMCluster(cmd)
+	case "vlcluster":
+		return runAddonStopVLCluster(cmd)
 	case "victorialogs":
 		return runAddonStopVictoriaLogs(cmd)
 	case "vlagent":
@@ -6476,7 +6526,7 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		fmt.Println("DuckDB is a CLI tool, not a daemon — start/stop are not applicable.")
 		return nil
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
 	}
 }
 

@@ -76,8 +76,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartVMCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartNginx(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --nginx)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartNginx(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --nginx)")
 		return nil
 	}
 
@@ -239,6 +239,13 @@ func startAutostart() error {
 	// containers up in dependency order (storage → insert → select); each host
 	// only starts the roles it runs. No dependency on the PostgreSQL stack.
 	if err := startAutostartVMClusters(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// VLCluster instances (top-level cluster addon). Same cluster-granular
+	// model as VMCluster: only THIS host's role containers start, in
+	// dependency order (storage → insert → select).
+	if err := startAutostartVLClusters(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -1376,6 +1383,51 @@ func startAutostartVMClusters(c *config.Config) error {
 		vc := c.Addons.VMCluster[name]
 		if err := vm.StartCluster(&vc); err != nil {
 			fmt.Printf("  [X] vmcluster autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartVLCluster reports whether any VLCluster instance is
+// autostart-enabled.
+func hasAutostartVLCluster(c *config.Config) bool {
+	for _, vc := range c.Addons.VLCluster {
+		if vc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartVLClusters starts each autostart-enabled VLCluster instance.
+// Like VMCluster, StartCluster brings up THIS host's role containers in
+// dependency order (storage → insert → select), starting existing containers
+// and recreating only what is missing. Order is sorted by instance name for
+// deterministic boot logs.
+func startAutostartVLClusters(c *config.Config) error {
+	var names []string
+	for name, vc := range c.Addons.VLCluster {
+		if vc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	vlc, err := podman.NewVLClusterManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		vc := c.Addons.VLCluster[name]
+		if err := vlc.StartCluster(&vc); err != nil {
+			fmt.Printf("  [X] vlcluster autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}

@@ -69,11 +69,11 @@ var logsAddonCmd = &cobra.Command{
 	Short: "Show addon console output logs",
 	Long: `Show addon console output logs.
 
-Requires the addon type (pgbouncer, postgrest, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, vmcluster, juicefs, zerofs, patroni).
+Requires the addon type (pgbouncer, postgrest, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, patroni).
 Use -i for local instance addons, --pg-name for remote addons,
 --name for an etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage,
-seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, vmcluster, juicefs or zerofs instance, or Patroni member (default
-"etcd"/"pgdog"/"haproxy"/"minio"/"silo"/"rustfs"/"garage"/"seaweedfs"/"redis"/"predixy"/"pgadmin"/"grafana"/"prometheus"/"alertmanager"/"gitea"/"beegfs"/"vmcluster"/"juicefs"/"zerofs"; Patroni members have
+seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, vmcluster, vlcluster, juicefs or zerofs instance, or Patroni member (default
+"etcd"/"pgdog"/"haproxy"/"minio"/"silo"/"rustfs"/"garage"/"seaweedfs"/"redis"/"predixy"/"pgadmin"/"grafana"/"prometheus"/"alertmanager"/"gitea"/"beegfs"/"vmc"/"vlc"/"juicefs"/"zerofs"; Patroni members have
 no default and also require --scope).
 
 juicefs and zerofs are host-binary addons, so their logs are plain files, not
@@ -122,6 +122,9 @@ Examples:
   pg logs addon vmcluster              # VMCluster storage logs (default service)
   pg logs addon vmcluster --service insert  # the vminsert logs
   pg logs addon vmcluster --service select  # the vmselect logs
+  pg logs addon vlcluster              # VLCluster storage logs (default service)
+  pg logs addon vlcluster --service insert  # the vlinsert logs
+  pg logs addon vlcluster --service select  # the vlselect logs
   pg logs addon juicefs --name vol1            # JuiceFS mount daemon log
   pg logs addon juicefs --name vol1 -f
   pg logs addon zerofs --name z1               # ZeroFS server log (default service)
@@ -151,8 +154,8 @@ Examples:
 		if scope != "" && addonType != "patroni" {
 			return fmt.Errorf("--scope only applies to the patroni addon type")
 		}
-		if service != "" && addonType != "beegfs" && addonType != "zerofs" && addonType != "vmcluster" {
-			return fmt.Errorf("--service only applies to the beegfs, zerofs and vmcluster addon types")
+		if service != "" && addonType != "beegfs" && addonType != "zerofs" && addonType != "vmcluster" && addonType != "vlcluster" {
+			return fmt.Errorf("--service only applies to the beegfs, zerofs, vmcluster and vlcluster addon types")
 		}
 
 		var containerName string
@@ -173,12 +176,18 @@ Examples:
 			if err != nil {
 				return err
 			}
-		case "etcd", "pgdog", "haproxy", "minio", "silo", "rustfs", "garage", "seaweedfs", "redis", "predixy", "pgadmin", "grafana", "prometheus", "alertmanager", "gitea", "beegfs", "nginx", "vmcluster":
+		case "etcd", "pgdog", "haproxy", "minio", "silo", "rustfs", "garage", "seaweedfs", "redis", "predixy", "pgadmin", "grafana", "prometheus", "alertmanager", "gitea", "beegfs", "nginx", "vmcluster", "vlcluster":
 			// (patroni is handled above; it shares --name but requires --scope.)
 			if pgName != "" {
 				return fmt.Errorf("--pg-name selects a remote PgBouncer or PostgREST; use --name for an %s", addonType)
 			}
 			deflt := addonType
+			switch addonType {
+			case "vmcluster":
+				deflt = "vmc"
+			case "vlcluster":
+				deflt = "vlc"
+			}
 			name := etcdName
 			if name == "" {
 				name = deflt
@@ -368,10 +377,33 @@ Examples:
 					return fmt.Errorf("--service must be storage, insert or select, got %q", svc)
 				}
 				containerName = vc.ContainerName(svc)
+			case "vlcluster":
+				if cfg.Addons.VLCluster == nil {
+					return fmt.Errorf("no vlcluster addons configured")
+				}
+				vc, ok := cfg.Addons.VLCluster[name]
+				if !ok {
+					return fmt.Errorf("vlcluster instance %q not found (use 'pg addon list' to see available)", name)
+				}
+				// One cluster = three containers; --service picks which
+				// component's logs to read (default storage, the data node).
+				svc := service
+				if svc == "" {
+					svc = "storage"
+				}
+				switch svc {
+				case "storage", "insert", "select": // vlcluster role names
+				default:
+					return fmt.Errorf("--service must be storage, insert or select, got %q", svc)
+				}
+				if !vc.RunsRole(svc) {
+					return fmt.Errorf("vlcluster instance %q does not run the %s role on this host (roles: %s)", name, svc, strings.Join(vc.RolesInOrder(), ", "))
+				}
+				containerName = vc.ContainerName(svc)
 			}
 		case "pgbouncer":
 			if etcdName != "" {
-				return fmt.Errorf("--name selects an etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, vmcluster instance, or Patroni member; use -i or --pg-name for PgBouncer")
+				return fmt.Errorf("--name selects an etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, vmcluster, vlcluster instance, or Patroni member; use -i or --pg-name for PgBouncer")
 			}
 			if pgName != "" {
 				// Remote mode
@@ -397,7 +429,7 @@ Examples:
 			}
 		case "postgrest":
 			if etcdName != "" {
-				return fmt.Errorf("--name selects an etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, vmcluster instance, or Patroni member; use -i or --pg-name for PostgREST")
+				return fmt.Errorf("--name selects an etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, vmcluster, vlcluster instance, or Patroni member; use -i or --pg-name for PostgREST")
 			}
 			if pgName != "" {
 				// Remote mode
@@ -434,7 +466,7 @@ Examples:
 			}
 			return tailHostLog(m, tail, follow)
 		default:
-			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, vmcluster, juicefs, zerofs, nginx, patroni)", addonType)
+			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, nginx, patroni)", addonType)
 		}
 
 		return runPodmanLogs(containerName, tail, follow)
@@ -510,9 +542,9 @@ func init() {
 	logsAddonCmd.Flags().BoolP("follow", "f", false, "Stream logs continuously")
 	logsAddonCmd.Flags().IntP("tail", "n", 50, "Number of lines to show (0 = all)")
 	logsAddonCmd.Flags().String("pg-name", "", "Remote addon name (for remote PgBouncer or PostgREST)")
-	logsAddonCmd.Flags().String("name", "", "etcd member name, pgdog proxy name, haproxy instance name, minio/silo/rustfs/garage/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/beegfs/vmcluster instance name, or Patroni member name")
+	logsAddonCmd.Flags().String("name", "", "etcd member name, pgdog proxy name, haproxy instance name, minio/silo/rustfs/garage/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/beegfs/vmcluster/vlcluster instance name, or Patroni member name")
 	logsAddonCmd.Flags().String("scope", "", "Patroni cluster scope (required only with addon type patroni)")
-	logsAddonCmd.Flags().String("service", "", "beegfs: which container of the filesystem to read — mgmtd, meta or storage (default \"mgmtd\"); zerofs: server or mount (the FUSE client) (default \"server\"); vmcluster: storage, insert or select (default \"storage\")")
+	logsAddonCmd.Flags().String("service", "", "beegfs: which container of the filesystem to read — mgmtd, meta or storage (default \"mgmtd\"); zerofs: server or mount (the FUSE client) (default \"server\"); vmcluster/vlcluster: storage, insert or select (default \"storage\")")
 
 	// Flags on ha subcommand
 	logsHaCmd.Flags().BoolP("follow", "f", false, "Stream logs continuously")
