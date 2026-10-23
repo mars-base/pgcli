@@ -52,7 +52,7 @@ The command pulls the image if needed, creates the container, and prints the URL
   URL:        http://0.0.0.0:9428/
 ```
 
-VictoriaLogs is ready to ingest and query immediately. Open `http://<host>:9428/` for the built-in UI, or query via the HTTP API:
+VictoriaLogs is ready to ingest and query immediately. Open `http://<host>:9428/select/vmui/` for the built-in web UI (the root path `/` is just an index of useful endpoints), or query via the HTTP API:
 
 ```bash
 # ingest a JSON Lines log entry (the JSON content type is REQUIRED —
@@ -69,6 +69,108 @@ curl -s http://127.0.0.1:9428/select/logsql/query \
 Re-running `install` on a running instance **recreates** it when the config actually changed (ports, listen, retention, extra-args), and leaves it alone when it didn't; `--force` recreates the container even when config is unchanged.
 
 VictoriaLogs does **not** support hot config reload, so all changes require container recreation — same as VictoriaMetrics. This is simpler than Prometheus (no config file to render, no reload signal), but means brief interruption when changing settings.
+
+## Web UI
+
+Every VictoriaLogs instance ships with a built-in web UI (VMUI) — there is no extra component to install. Open:
+
+```
+http://<host>:<port>/select/vmui/
+```
+
+The root path (`/`) is only an index of useful HTTP endpoints; the UI lives under `/select/vmui/`.
+
+The UI is a LogsQL console for logs:
+
+- **Query** — type a [LogsQL](https://docs.victoriametrics.com/victorialogs/logsql/) query (e.g. `app:demo`, `level:error`, `error app:demo-api`) and pick the time range; results update as you run the query.
+- **Views** — switch between `Group` (rows grouped by stream fields), `Table` (click a row to expand every field), `JSON` (raw `/select/logsql/query` response), and `Live` (live tail of matching logs as they arrive).
+- **Exploration** — field and stream pickers list the stored field names/values (backed by `/select/logsql/field_names`, `field_values`, `facets`, ...), so you can build queries without knowing the schema up front.
+
+For example, ingest one line and search for it in the UI (`app:demo`):
+
+```bash
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"_msg":"hello from pgcli","app":"demo"}' \
+  http://127.0.0.1:9428/insert/jsonline
+```
+
+The UI shares the same port and the same **no-authentication** posture as the HTTP API: anyone who can reach the port can search and also ingest logs. Restrict it with `--listen 127.0.0.1` or a firewall, as described above.
+
+## Ingestion: vlagent, HTTP APIs, collectors
+
+pgcli runs the VictoriaLogs backend only — how logs reach it is up to you. There are three routes.
+
+### vlagent (official agent)
+
+[`vlagent`](https://docs.victoriametrics.com/victorialogs/vlagent/) is the official log agent for VictoriaLogs — the **log** counterpart of `vmagent` (`vmagent` ships metrics only; do not use it for logs). It accepts the same HTTP ingestion protocols as VictoriaLogs on port `9429` (change with `-httpListenAddr`) and forwards everything to VictoriaLogs via `-remoteWrite.url`, which **must end with `/insert/native`**:
+
+```bash
+podman run -d --name vlagent --network host \
+  -v /var/lib/vlagent:/var/lib/vlagent \
+  docker.io/victoriametrics/vlagent:v1.53.0 \
+  -remoteWrite.url=http://127.0.0.1:9428/insert/native \
+  -tmpDataPath=/var/lib/vlagent
+```
+
+This command tracks **no log files**: without `-kubernetesCollector` or `-fileCollector.glob`, vlagent only receives logs pushed to it over HTTP on port `9429` and forwards them. To tail files on the host they must be mounted into the container and matched by a glob:
+
+```bash
+podman run -d --name vlagent --network host \
+  -v /var/lib/vlagent:/var/lib/vlagent \
+  -v /var/log/nginx:/var/log/nginx:ro \
+  docker.io/victoriametrics/vlagent:v1.53.0 \
+  -remoteWrite.url=http://127.0.0.1:9428/insert/native \
+  -tmpDataPath=/var/lib/vlagent \
+  -fileCollector.glob='/var/log/nginx/*.log'
+```
+
+Use vlagent when you need:
+
+- **Replication / HA** — repeat `-remoteWrite.url` for every VictoriaLogs instance. vlagent copies each log to all of them and keeps an independent on-disk buffer per URL (`-remoteWrite.tmpDataPath`, capped by `-remoteWrite.maxDiskUsagePerURL`); logs collected while a backend is down are replayed when it returns.
+- **Kubernetes Pod logs** — run it as a DaemonSet with `-kubernetesCollector` (or use the `victoria-logs-collector` Helm chart). It follows the node's container logs under `/var/log/pods` and `/var/log/containers` (mount the host's `/var/log` read-only; with the Docker runtime also mount `/var/lib` so runtime symlinks resolve), adds container metadata, and checkpoints its read position under `-tmpDataPath`.
+- **Files on disk** — `-fileCollector.glob='/var/log/nginx/*.log'` (repeatable; globs must point at files, not directories). The path is resolved **inside the container**, so mount the host directory first. By default `hostname` and `file` become stream fields, and reading checkpoints/buffers live under `-tmpDataPath`.
+
+For a single, stable VictoriaLogs instance, sending logs directly (below) is simpler — that is the recommended default.
+
+### HTTP APIs
+
+VictoriaLogs exposes several ingestion endpoints on the same port as the UI and query API:
+
+| Endpoint | Format | Notes |
+|---|---|---|
+| `/insert/jsonline` | JSON Lines (ndjson) | Requires `Content-Type: application/json`; without it the request returns 200 but the payload is silently dropped |
+| `/insert/elasticsearch/_bulk` | Elasticsearch / OpenSearch bulk | Point Filebeat / Logstash / Fluent Bit Elasticsearch outputs here |
+| `/insert/loki/api/v1/push` | Loki JSON push | Point Promtail / Grafana Alloy / Loki clients here |
+| `/insert/opentelemetry/v1/logs` | OTLP/HTTP logs | Point an OpenTelemetry Collector exporter here |
+| syslog TCP / UDP / Unix | RFC3164 / RFC5424 | Enable via `--extra-arg -syslog.listenAddr.tcp=:514` (or `.udp` / `.unix`), then recreate |
+
+All HTTP ingestion endpoints accept the same tuning parameters, either as query-string args or `VL-*` headers: `_msg_field` (field holding the log message, e.g. `message`), `_time_field` (e.g. `@timestamp`), `_stream_fields` (comma-separated fields that define a log stream), `extra_fields` (`env=prod`), `ignore_fields`, `decolorize_fields`, and `debug=1` (log the payload instead of storing it). Use them when your collector emits a schema VictoriaLogs does not auto-detect.
+
+```bash
+# JSON Lines with explicit field mapping
+curl -s -X POST -H 'Content-Type: application/json' \
+  --data-binary @app.jsonl \
+  'http://127.0.0.1:9428/insert/jsonline?_stream_fields=host,app&_time_field=@timestamp&_msg_field=message'
+```
+
+### Log collectors
+
+Any collector that can speak one of the formats above works; pgcli installs and configures none of them. Commonly used ones, each with an official setup guide:
+
+| Collector | Send to |
+|---|---|
+| [Filebeat](https://docs.victoriametrics.com/victorialogs/data-ingestion/filebeat/) | Elasticsearch output → `/insert/elasticsearch/_bulk` |
+| [Logstash](https://docs.victoriametrics.com/victorialogs/data-ingestion/logstash/) | Elasticsearch or HTTP output |
+| [Fluent Bit](https://docs.victoriametrics.com/victorialogs/data-ingestion/fluentbit/) / [Fluentd](https://docs.victoriametrics.com/victorialogs/data-ingestion/fluentd/) | Elasticsearch or HTTP output |
+| [Vector](https://docs.victoriametrics.com/victorialogs/data-ingestion/vector/) | `http` sink → `/insert/jsonline`, or Elasticsearch sink |
+| [Promtail](https://docs.victoriametrics.com/victorialogs/data-ingestion/promtail/) / Grafana Alloy | Loki push → `/insert/loki/api/v1/push` |
+| [OpenTelemetry Collector](https://docs.victoriametrics.com/victorialogs/data-ingestion/opentelemetry/) | OTLP/HTTP exporter → `/insert/opentelemetry/v1/logs` |
+| [Telegraf](https://docs.victoriametrics.com/victorialogs/data-ingestion/telegraf/) | `http` output → jsonline |
+| [journald](https://docs.victoriametrics.com/victorialogs/data-ingestion/journald/) | Vector / Fluent Bit journald source → jsonline, or vlagent |
+| [rsyslog / syslog-ng](https://docs.victoriametrics.com/victorialogs/data-ingestion/syslog/) | syslog listener (`-syslog.listenAddr.*`) |
+| [Datadog Agent](https://docs.victoriametrics.com/victorialogs/data-ingestion/datadog-agent/) | Datadog intake API |
+
+Collectors can also point at a **vlagent** instance (port `9429`) instead of VictoriaLogs directly — useful when you want buffering, replication, or a single egress point.
 
 ## Custom flags (`--extra-arg`)
 
@@ -167,7 +269,7 @@ Under rootless podman, `--clean-data` deletes the data dir through `podman unsha
 
 ## Known limitations
 
-- v1 is a bare log backend: pgcli does not install any log shipper (point Vector, Promtail, Filebeat, syslog or journald at it separately — VictoriaLogs accepts all of them over HTTP/TCP) and no alerting (use `vlalert` separately). It is the long-term log store you point Grafana (VictoriaLogs datasource) and your shippers at.
+- v1 is a bare log backend: pgcli does not install any log shipper — use `vlagent`, a direct HTTP ingestion API, or a third-party collector as described in the Ingestion section above — and does no alerting (use `vlalert` separately). It is the long-term log store you point Grafana (VictoriaLogs datasource) and your shippers at.
 - **No authentication.** VictoriaLogs's API ingests and queries arbitrary logs; the only protection for a `0.0.0.0` bind is the network boundary. This is the same posture as VictoriaMetrics — do not expose it on an untrusted network.
 - pgcli does not validate `--extra-arg` values (there is no pre-flight check at install). A bad flag surfaces only in the container logs on startup.
 - On macOS the container runs inside the podman machine; it has been validated on Linux only.

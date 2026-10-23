@@ -49,7 +49,7 @@ pg addon install victorialogs
   URL:        http://0.0.0.0:9428/
 ```
 
-VictoriaLogs 立即可摄入和查询。打开 `http://<host>:9428/` 进入内置 UI，或用 HTTP API 查询：
+VictoriaLogs 立即可摄入和查询。打开 `http://<host>:9428/select/vmui/` 进入内置 Web UI（根路径 `/` 只是可用端点索引页），或用 HTTP API 查询：
 
 ```bash
 # 摄入一条 JSON Lines 日志（Content-Type 必须为 application/json——
@@ -66,6 +66,108 @@ curl -s http://127.0.0.1:9428/select/logsql/query \
 对运行中的实例重复 `install`：当配置**确实变了**（端口、监听、保留期、额外参数）时**重建**，没变则原样不动；`--force` 即使配置未变也重建容器。
 
 VictoriaLogs **不**支持热配置重载，所以所有变更都需要重建容器——与 VictoriaMetrics 一致。这比 Prometheus 简单（无配置文件要渲染、无 reload 信号），但意味着改配置时会有短暂中断。
+
+## Web UI
+
+每个 VictoriaLogs 实例都自带 Web UI（VMUI），无需额外安装任何组件。打开：
+
+```
+http://<host>:<port>/select/vmui/
+```
+
+根路径（`/`）只是可用 HTTP 端点的索引页；UI 位于 `/select/vmui/`。
+
+UI 是一个面向日志的 [LogsQL](https://docs.victoriametrics.com/victorialogs/logsql/) 控制台：
+
+- **查询** —— 输入 LogsQL 查询（如 `app:demo`、`level:error`、`error app:demo-api`）并选择时间范围，执行后即时返回结果。
+- **视图** —— 可在 `Group`（按 stream 字段分组）、`Table`（点击行展开全部字段）、`JSON`（`/select/logsql/query` 原始响应）与 `Live`（实时 tail 新到日志）之间切换。
+- **探索** —— 字段与 stream 选择器会列出已存储的字段名/值（底层调用 `/select/logsql/field_names`、`field_values`、`facets` 等），无需预先了解 schema 即可构造查询。
+
+例如，摄入一条日志后在 UI 里搜索它（查询 `app:demo`）：
+
+```bash
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"_msg":"hello from pgcli","app":"demo"}' \
+  http://127.0.0.1:9428/insert/jsonline
+```
+
+UI 与 HTTP API 共享同一端口，也共享同样的**无鉴权**态势：任何能连到端口的人都能查询、也能写入日志。按上文所述用 `--listen 127.0.0.1` 或防火墙限制访问。
+
+## 日志写入：vlagent、HTTP API、采集器
+
+pgcli 只负责运行 VictoriaLogs 后端——日志怎么进来由你决定。共有三种方式。
+
+### vlagent（官方 agent）
+
+[`vlagent`](https://docs.victoriametrics.com/victorialogs/vlagent/) 是 VictoriaLogs 的官方日志 agent——`vmagent` 的**日志**对应物（`vmagent` 只负责指标，不要用它写日志）。它在端口 `9429`（可用 `-httpListenAddr` 修改）上接受与 VictoriaLogs 相同的 HTTP 摄入协议，并通过 `-remoteWrite.url` 转发到 VictoriaLogs，该 URL **必须以 `/insert/native` 结尾**：
+
+```bash
+podman run -d --name vlagent --network host \
+  -v /var/lib/vlagent:/var/lib/vlagent \
+  docker.io/victoriametrics/vlagent:v1.53.0 \
+  -remoteWrite.url=http://127.0.0.1:9428/insert/native \
+  -tmpDataPath=/var/lib/vlagent
+```
+
+这条命令**不跟踪任何日志文件**：在没有 `-kubernetesCollector` 或 `-fileCollector.glob` 时，vlagent 只接收推到端口 `9429` 的 HTTP 日志并转发。要跟踪宿主文件，必须先把目录挂进容器，再用 glob 匹配：
+
+```bash
+podman run -d --name vlagent --network host \
+  -v /var/lib/vlagent:/var/lib/vlagent \
+  -v /var/log/nginx:/var/log/nginx:ro \
+  docker.io/victoriametrics/vlagent:v1.53.0 \
+  -remoteWrite.url=http://127.0.0.1:9428/insert/native \
+  -tmpDataPath=/var/lib/vlagent \
+  -fileCollector.glob='/var/log/nginx/*.log'
+```
+
+适合使用 vlagent 的场景：
+
+- **复制 / 高可用** —— 为每个 VictoriaLogs 实例重复传 `-remoteWrite.url`。vlagent 会把每条日志复制到所有目标，并为每个 URL 维护独立磁盘缓冲（`-remoteWrite.tmpDataPath`，可用 `-remoteWrite.maxDiskUsagePerURL` 限制大小）；后端宕机期间采集的日志会在其恢复后重放。
+- **Kubernetes Pod 日志** —— 以 DaemonSet 方式运行并加 `-kubernetesCollector`（或使用 `victoria-logs-collector` Helm chart）。它跟踪节点上的 `/var/log/pods` 与 `/var/log/containers`（需把宿主 `/var/log` 只读挂入；使用 Docker runtime 时还要挂 `/var/lib` 以解析 runtime 符号链接），自动附加容器元数据，并把读取位点持久化在 `-tmpDataPath` 下。
+- **磁盘文件** —— `-fileCollector.glob='/var/log/nginx/*.log'`（可重复；glob 必须指向文件而非目录）。路径是在**容器内**解析的，所以要先挂载宿主目录。默认 `hostname` 与 `file` 成为 stream 字段，读取位点与缓冲位于 `-tmpDataPath` 下。
+
+如果只有单个、网络稳定的 VictoriaLogs 实例，直接发送（见下）更简单——这是推荐的默认方式。
+
+### HTTP API
+
+VictoriaLogs 在 UI/查询 API 的同一端口上提供多个摄入端点：
+
+| 端点 | 格式 | 说明 |
+|---|---|---|
+| `/insert/jsonline` | JSON Lines（ndjson） | 必须带 `Content-Type: application/json`；缺失时返回 200 但数据被静默丢弃 |
+| `/insert/elasticsearch/_bulk` | Elasticsearch / OpenSearch bulk | Filebeat / Logstash / Fluent Bit 的 Elasticsearch output 指向这里 |
+| `/insert/loki/api/v1/push` | Loki JSON push | Promtail / Grafana Alloy / Loki 客户端指向这里 |
+| `/insert/opentelemetry/v1/logs` | OTLP/HTTP logs | OpenTelemetry Collector 的 exporter 指向这里 |
+| syslog TCP / UDP / Unix | RFC3164 / RFC5424 | 经 `--extra-arg -syslog.listenAddr.tcp=:514`（或 `.udp` / `.unix`）启用并重建 |
+
+所有 HTTP 摄入端点都接受同一组调优参数（query string 或 `VL-*` 请求头）：`_msg_field`（日志消息所在字段，如 `message`）、`_time_field`（如 `@timestamp`）、`_stream_fields`（用逗号分隔的 stream 字段）、`extra_fields`（`env=prod`）、`ignore_fields`、`decolorize_fields`，以及 `debug=1`（只记录 payload 而不入库）。当采集器输出的 schema 无法被自动识别时用它们做映射。
+
+```bash
+# JSON Lines，显式字段映射
+curl -s -X POST -H 'Content-Type: application/json' \
+  --data-binary @app.jsonl \
+  'http://127.0.0.1:9428/insert/jsonline?_stream_fields=host,app&_time_field=@timestamp&_msg_field=message'
+```
+
+### 日志采集器
+
+任何能使用上述格式之一的采集器都可以；pgcli 不安装也不配置它们。常用采集器及官方配置指南：
+
+| 采集器 | 发往 |
+|---|---|
+| [Filebeat](https://docs.victoriametrics.com/victorialogs/data-ingestion/filebeat/) | Elasticsearch output → `/insert/elasticsearch/_bulk` |
+| [Logstash](https://docs.victoriametrics.com/victorialogs/data-ingestion/logstash/) | Elasticsearch 或 HTTP output |
+| [Fluent Bit](https://docs.victoriametrics.com/victorialogs/data-ingestion/fluentbit/) / [Fluentd](https://docs.victoriametrics.com/victorialogs/data-ingestion/fluentd/) | Elasticsearch 或 HTTP output |
+| [Vector](https://docs.victoriametrics.com/victorialogs/data-ingestion/vector/) | `http` sink → `/insert/jsonline`，或 Elasticsearch sink |
+| [Promtail](https://docs.victoriametrics.com/victorialogs/data-ingestion/promtail/) / Grafana Alloy | Loki push → `/insert/loki/api/v1/push` |
+| [OpenTelemetry Collector](https://docs.victoriametrics.com/victorialogs/data-ingestion/opentelemetry/) | OTLP/HTTP exporter → `/insert/opentelemetry/v1/logs` |
+| [Telegraf](https://docs.victoriametrics.com/victorialogs/data-ingestion/telegraf/) | `http` output → jsonline |
+| [journald](https://docs.victoriametrics.com/victorialogs/data-ingestion/journald/) | Vector / Fluent Bit 的 journald source → jsonline，或用 vlagent |
+| [rsyslog / syslog-ng](https://docs.victoriametrics.com/victorialogs/data-ingestion/syslog/) | syslog listener（`-syslog.listenAddr.*`） |
+| [Datadog Agent](https://docs.victoriametrics.com/victorialogs/data-ingestion/datadog-agent/) | Datadog intake API |
+
+采集器也可以不直接连 VictoriaLogs，而是指向 **vlagent**（端口 `9429`）——需要缓冲、复制或统一出口时更合适。
 
 ## 自定义参数（`--extra-arg`）
 
@@ -164,7 +266,7 @@ rootless podman 下，`--clean-data` 经 `podman unshare rm` 删除数据目录�
 
 ## 已知限制
 
-- v1 是裸日志后端：pgcli 不安装任何日志采集器（自行把 Vector、Promtail、Filebeat、syslog 或 journald 指向它——VictoriaLogs 全部经 HTTP/TCP 接受），也不做告警（自行跑 `vlalert`）。它是你让 Grafana（VictoriaLogs 数据源）和采集器连的长期日志存储。
+- v1 是裸日志后端：pgcli 不安装任何日志采集器——按上文「日志写入」一节使用 `vlagent`、直接 HTTP API 或第三方采集器；也不做告警（自行跑 `vlalert`）。它是你让 Grafana（VictoriaLogs 数据源）和采集器连的长期日志存储。
 - **无鉴权。** VictoriaLogs 的 API 摄入并查询任意日志；`0.0.0.0` 绑定的唯一保护是网络边界。这与 VictoriaMetrics 同一态势——不要把它暴露到不可信网络。
 - pgcli 不校验 `--extra-arg` 值（install 阶段没有 pre-flight 检查）。有错的 flag 只会在启动时从容器日志里暴露。
 - macOS 上容器跑在 podman machine 里；目前只在 Linux 上验证过。
