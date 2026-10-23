@@ -1699,7 +1699,7 @@ type PrometheusConfig struct {
 	Listen         string   `yaml:"listen,omitempty"`          // --web.listen-address bind, default 0.0.0.0 (see ApplyDefaults walk for rationale)
 	DataDir        string   `yaml:"data_dir,omitempty"`        // host dir mounted at /prometheus (tsdb); default <base>/addon/prometheus/<name>/data
 	Retention      string   `yaml:"retention,omitempty"`       // --storage.tsdb.retention.time, default 15d
-	Scrape         []string `yaml:"scrape,omitempty"`          // JOB=host:port[,host:port...] scrape specs, each rendering one static_configs job in the rendered prometheus.yml (render-mode only)
+	Scrape         []string `yaml:"scrape,omitempty"`          // JOB=host:port[,host:port...] [key=value...] scrape specs (bare key=value tokens = per-target labels), rendering one static_configs job per JOB in the rendered prometheus.yml (render-mode only)
 	ScrapeInterval string   `yaml:"scrape_interval,omitempty"` // global scrape_interval in the rendered prometheus.yml, default 15s (render-mode only)
 	// Alertmanager lists the Alertmanager instances this Prometheus forwards fired
 	// alerts to — bare host[:port] or http(s)://host[:port][/path] URLs, rendered

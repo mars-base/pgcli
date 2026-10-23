@@ -28,8 +28,8 @@ Prometheus diverges from Grafana in **how it is configured**. Grafana is env-onl
 | `--image` | `docker.io/prom/prometheus:v3.15.0` | Image override |
 | `--port` | auto (base 9090) | Host web port; auto-allocated from `prometheus_start_port` |
 | `--listen` | `0.0.0.0` | Bind address — defaults to every interface; use `127.0.0.1` for loopback-only (see the exposure warning above) |
-| `--scrape` | — (self job always present) | Scrape spec `JOB=HOST:PORT[,HOST:PORT...]` (repeatable) — the job name is required and every comma-separated target joins that one `static_configs` job in the generated `prometheus.yml`. Declares the FULL job set (replaces the stored list). Targets are probed with `GET /metrics` from the host; unreachable ones only warn |
-| `--scrape-append` | — | Same spec form, but folds the appended jobs' targets into the stored `--scrape` list (same-named job merges, new names append) instead of replacing it. Every appended target is probed and the install ABORTS — writing nothing — if any returns no data. Mutually exclusive with `--scrape` and `--conf-file` |
+| `--scrape` | — (self job always present) | Scrape spec `JOB=HOST:PORT[,HOST:PORT...] [KEY=VALUE...]` (repeatable) — the job name is required, every comma-separated target joins that one `static_configs` job in the generated `prometheus.yml`, and bare `KEY=VALUE` tokens after the target list become **per-target labels** applied to that spec's targets. Declares the FULL job set (replaces the stored list). Same job name across specs folds into one job; a node named by two specs merges both label sets and is scraped **once**, while nodes carrying different label sets split into separate `static_configs` blocks (Prometheus's native shape for `nodename=api1`-style per-node labels). Targets are probed with `GET /metrics` from the host; unreachable ones only warn |
+| `--scrape-append` | — | Same spec form (labels included), but folds the appended jobs' targets — and their labels — into the stored `--scrape` list (same-named job merges, new names append) instead of replacing it. Every appended target is probed and the install ABORTS — writing nothing — if any returns no data. Mutually exclusive with `--scrape` and `--conf-file` |
 | `--scrape-interval` | `15s` | Global `scrape_interval` in the rendered config; mutually exclusive with `--conf-file` |
 | `--retention` | `15d` | TSDB retention (`--storage.tsdb.retention.time`); a duration like `15d`, `6mo`, `2y`. A CLI flag, so it stays valid alongside `--conf-file` |
 | `--conf-file` | — | Path to your own `prometheus.yml` — skip rendering entirely (mutually exclusive with `--scrape`/`--scrape-append`/`--scrape-interval`/`--alertmanager-url`/`--remote-write-url`/`--remote-write-queue`); see below |
@@ -63,17 +63,56 @@ The command pulls the image if needed, renders a `prometheus.yml`, creates the c
 The rendered config **always** contains a self-monitoring job that scrapes this server's own `/metrics`, so it is never idle; `--scrape` adds more jobs. Point Grafana at `http://<host>:9090/` as a Prometheus datasource and you can query immediately.
 
 ```bash
-# each --scrape spec is one job; the name before = is required, and several
+# each --scrape spec declares a job; the name before = is required, and several
 # comma-separated targets share that one job (the shape for a fleet of exporters)
 pg addon install prometheus --name p1 \
   --scrape postgres-exporter=127.0.0.1:9187 \
   --scrape node=10.0.0.5:9100,10.0.0.6:9100
 ```
 
-Re-running install with `--scrape` **replaces** the whole stored job set. To add to it instead, use `--scrape-append` — it folds each appended job's targets into the stored job of the same name (de-duplicating) and appends unseen names, then hot-reloads:
+Per-target labels (the `nodename: api1` your Ansible-rendered config carries) are
+bare `KEY=VALUE` tokens after the target list — one spec per labelled node:
+
+```bash
+# one windows job, three targets, each labelled with its node name
+pg addon install prometheus --name p1 \
+  --scrape windows=10.0.0.1:9182 nodename=api1 \
+  --scrape windows=10.0.0.2:9182 nodename=api2 \
+  --scrape windows=10.0.0.3:9182 nodename=api3
+```
+
+```yaml
+# renders exactly the native per-node shape: one job_name, one labelled
+# static_configs block per distinct label set
+  - job_name: windows
+    static_configs:
+      - targets: ["10.0.0.1:9182"]
+        labels:
+          nodename: "api1"
+      - targets: ["10.0.0.2:9182"]
+        labels:
+          nodename: "api2"
+      - targets: ["10.0.0.3:9182"]
+        labels:
+          nodename: "api3"
+```
+
+Grouping is **target-centric**, so naming the same node twice never scrapes it
+twice: two specs carrying the same `10.0.0.5:9100` merge into ONE target with the
+union of their labels (`node=a:1 nodename=api1` + `node=a:1 env=prod` → `a:1`
+carrying both). The only rejection is a contradiction — the same node labelled
+with the same key to two different values aborts instead of silently dropping
+one. Label values may not contain whitespace (a `device="eth0, eth1"` needs
+`--conf-file`), and label keys must be `[A-Za-z_][A-Za-z0-9_]*`; values are
+emitted quoted, so `yes` or `2` cannot retype under YAML.
+
+Re-running install with `--scrape` **replaces** the whole stored job set. To add to it instead, use `--scrape-append` — same spec form, labels included; it folds each appended target (and its labels) into the stored job of the same name and appends unseen names, then hot-reloads:
 
 ```bash
 pg addon install prometheus --name p1 --scrape-append node=10.0.0.7:9100
+# the stored node job grows a third target; its labels are untouched
+pg addon install prometheus --name p1 --scrape-append node=10.0.0.5:9100 env=prod
+# ...or an existing target gains a label in place (merged, still one scrape)
 ```
 
 The two flags probe differently, on purpose: a freshly **appended** target must answer `GET /metrics` with 200 or the command aborts before writing anything (pg.yaml and the running container untouched); with plain `--scrape` an unreachable target is only a warning and the install proceeds — Prometheus will surface it as `DOWN`, and a full-list declaration is often pointed at endpoints that are legitimately not up yet. The probe dials from the host — on Linux (host network) that is the same namespace the container scrapes from; on the macOS bridge it differs, so the probe is skipped there.
@@ -243,6 +282,11 @@ scrape_configs:
           nodename: lhcloud3
 ```
 
+That labelled `nodes` shape is exactly what render mode now emits — the three
+`--scrape node=…:9100 nodename=…` specs fold into one `nodes` job carrying one
+labelled `static_configs` block each; the hand-written file remains the way to
+add per-job extras (scrape timeouts, relabels) the renderer does not expose.
+
 `localhost:9090` and `localhost:9093` work because Linux containers run on the **host network** — `localhost` inside Prometheus is the host, where both web ports listen. The two pieces pgcli contributes are visible in the file: `--rule-file` copies your rule files into `<base>/addon/prometheus/<name>/rules/` and bind-mounts that directory at `/etc/prometheus/rules`, which is why the `rule_files:` glob above resolves; the `alerting:` block, on the other hand, is yours to write — in `--conf-file` mode pgcli adds nothing to the file, does not derive the `alertmanager` scrape job either, and rejects `--alertmanager-url` as a render knob. Check a hand-written file before relying on `pg addon prometheus reload` to surface errors in the log:
 
 ```bash
@@ -288,6 +332,8 @@ addons:
       scrape:
         - postgres-exporter=127.0.0.1:9187
         - node=10.0.0.5:9100,10.0.0.6:9100
+        - node=10.0.0.5:9100 env=prod   # same node again → ONE scrape carrying the union of labels
+        - windows=10.0.0.1:9182 nodename=api1   # bare KEY=VALUE tokens = per-target labels
       scrape_interval: 15s
       autostart: false
       # alertmanager: [127.0.0.1:9093]        # render-mode only: forward fired alerts + a derived scrape job
@@ -298,7 +344,7 @@ addons:
       # data_dir: /srv/prometheus-data      # optional, overrides the default location
 ```
 
-The rendered `prometheus.yml` carries the global `scrape_interval`, the always-present self job, and one `static_configs` job per `scrape` JOB (folding every target that job's spec lists); `--alertmanager-url` adds the `alerting:` section plus its `alertmanager` scrape job, `--remote-write-url` adds a top-level `remote_write:` section (`--remote-write-queue` fills each entry with a `queue_config:` block), and `--rule-file` adds a `rule_files:` section. `retention` and the listener bind are **not** in that file — they are passed to the `prometheus` binary as CLI flags (`--storage.tsdb.retention.time`, `--web.listen-address`), which is why they remain settable alongside `--conf-file`.
+The rendered `prometheus.yml` carries the global `scrape_interval`, the always-present self job, and one `static_configs` job per `scrape` JOB — every target a job's specs list folds into that job, bucketed by merged label set so each distinct `KEY=VALUE` combination becomes its own `- targets:/labels:` block; `--alertmanager-url` adds the `alerting:` section plus its `alertmanager` scrape job, `--remote-write-url` adds a top-level `remote_write:` section (`--remote-write-queue` fills each entry with a `queue_config:` block), and `--rule-file` adds a `rule_files:` section. `retention` and the listener bind are **not** in that file — they are passed to the `prometheus` binary as CLI flags (`--storage.tsdb.retention.time`, `--web.listen-address`), which is why they remain settable alongside `--conf-file`.
 
 ### List
 

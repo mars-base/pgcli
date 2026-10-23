@@ -131,11 +131,13 @@ func (m *PrometheusManager) RulesDir(pc *config.PrometheusConfig) string {
 // renderPrometheusConfig builds the prometheus.yml text for a rendered-mode
 // instance. Pure function of the config so it can be unit-tested without
 // podman. It always emits a self-scrape job (so the server monitors itself and
-// is never idle), then one static_configs job per SCRAPE JOB: specs are
-// "JOB=host:port[,host:port...]" and share a job_name, so groupScrapeSpecs folds
-// them into one job per name carrying every listed target (the natural shape for
-// a fleet of identical exporters). Retention is NOT rendered here — it is a CLI
-// flag (--storage.tsdb.retention.time), see prometheusArgsAndEnv.
+// is never idle), then one scrape job per SCRAPE JOB NAME: specs are
+// "JOB=host:port[,host:port...] [key=value...]" and share a job_name, so
+// groupScrapeSpecs folds them into one job per name carrying every listed
+// target (the natural shape for a fleet of identical exporters), bucketed into
+// static_configs blocks by each target's merged label set (per-node labels like
+// nodename=api1 are one spec per node). Retention is NOT rendered here — it is
+// a CLI flag (--storage.tsdb.retention.time), see prometheusArgsAndEnv.
 //
 // Alertmanager, when set, folds in two things: an `alerting:` section listing
 // the normalized host:port targets (Prometheus pushes fired alerts there), and
@@ -201,7 +203,17 @@ func renderPrometheusConfig(pc *config.PrometheusConfig) (string, error) {
 	for _, j := range jobs {
 		b.WriteString("  - job_name: " + j.Name + "\n")
 		b.WriteString("    static_configs:\n")
-		b.WriteString("      - targets: [" + quoteTargets(j.Targets) + "]\n")
+		for _, g := range j.Groups {
+			fmt.Fprintf(&b, "      - targets: [%s]\n", quoteTargets(g.Targets))
+			if len(g.Labels) > 0 {
+				// Label values are quoted (unlike the job name): a nodename of
+				// "yes" or "2" must not type as bool/int on Prometheus's side.
+				b.WriteString("        labels:\n")
+				for _, l := range g.Labels {
+					fmt.Fprintf(&b, "          %s: %q\n", l[0], l[1])
+				}
+			}
+		}
 	}
 	if len(amTargets) > 0 {
 		// Derived from the same --alertmanager-url list as the alerting section
@@ -242,11 +254,37 @@ func renderPrometheusConfig(pc *config.PrometheusConfig) (string, error) {
 	return b.String(), nil
 }
 
-// scrapeJob is one rendered static_configs job: a name and its (already
-// de-duplicated) target list.
-type scrapeJob struct {
-	Name    string
+// CountScrapeJobs returns how many distinct scrape jobs a stored --scrape list
+// renders (one per job NAME — specs sharing a name, or splitting one name across
+// label sets, all fold into that job). It exists for the install summary:
+// len(scrape) would count SPECS, which per-node label use inflates. A malformed
+// spec returns an error; the install path has validated already, so callers
+// fall back to the spec count rather than fail a summary line.
+func CountScrapeJobs(scrape []string) (int, error) {
+	jobs, err := groupScrapeSpecs(scrape)
+	if err != nil {
+		return 0, err
+	}
+	return len(jobs), nil
+}
+
+// scrapeGroup is one static_configs block: a target list plus the labels that
+// apply to exactly that group. A label-free group is what a plain
+// "JOB=host:port" spec produces.
+type scrapeGroup struct {
 	Targets []string
+	Labels  [][2]string // ordered k=v pairs, first-seen spec order
+}
+
+// scrapeJob is one rendered scrape job: a name and its static_configs groups in
+// first-appearance order. A target lands in the group matching its MERGED label
+// set — the union of every --scrape spec naming it — so one node repeated across
+// specs is scraped once with all its labels, while nodes carrying different
+// labels split into separate blocks under one job_name (Prometheus's native
+// per-node-label shape: nodename=api1 vs nodename=api2).
+type scrapeJob struct {
+	Name   string
+	Groups []scrapeGroup
 }
 
 // prometheusContainerRulesDir is where pgcli bind-mounts the per-instance rules
@@ -423,35 +461,98 @@ func normalizeRuleNames(paths []string) ([]string, error) {
 	return seen, nil
 }
 
-// groupScrapeSpecs parses each "JOB=host:port[,host:port...]" spec and folds the
-// results into one scrapeJob per distinct job name, preserving first-appearance
-// order of both jobs and targets and de-duplicating a target repeated within a
-// job (the same target across two jobs is NOT a duplicate — it is scraped twice,
-// once per job). It is the single grouping used by both the renderer and the
-// append merge, so a hand-edited pg.yaml that reuses a job name across two
-// entries still renders as one job. A malformed spec (no name, empty target)
-// returns an error and nothing partial.
+// groupScrapeSpecs parses each "JOB=host:port[,host:port...] [key=value...]"
+// spec and folds the results into one scrapeJob per distinct job name. Grouping
+// is TARGET-centric: every spec naming a target contributes its labels to that
+// target's merged label set, and targets are then bucketed by the final set, so
+// the SAME node repeated across specs (with or without labels) is scraped ONCE
+// with the UNION of its labels — "node=a:1 nodename=api1" + "node=a:1 env=prod"
+// yields one a:1 carrying both labels, and one spec naming several nodes shares
+// its labels across them. Distinct final label sets become distinct
+// static_configs groups under the one job_name, which is Prometheus's native
+// per-node-label shape. Order is preserved throughout: jobs, groups, targets
+// within a group, and label keys all appear first-seen-first. The only error
+// beyond malformed specs is a genuine contradiction — the same target labelled
+// with the same key twice with DIFFERENT values; first-wins would silently drop
+// one operator's intent, so it aborts.
 func groupScrapeSpecs(specs []string) ([]scrapeJob, error) {
+	// Accumulator per job while specs stream in: the ordered target list and
+	// each target's merged label set (map + first-seen key order).
+	type jobAcc struct {
+		targets    []string
+		labels     map[string]map[string]string // target → key → value
+		labelKeys  map[string][]string          // target → key order, spec order preserved
+		targetSeen map[string]bool
+	}
 	var jobs []scrapeJob
 	index := map[string]int{} // job name → position in jobs
+	acc := []*jobAcc{}
 	for _, spec := range specs {
-		name, targets, err := parseScrapeSpec(spec)
+		name, targets, labels, err := parseScrapeSpec(spec)
 		if err != nil {
 			return nil, err
 		}
 		i, seen := index[name]
 		if !seen {
-			index[name] = len(jobs)
 			i = len(jobs)
+			index[name] = i
 			jobs = append(jobs, scrapeJob{Name: name})
+			acc = append(acc, &jobAcc{labels: map[string]map[string]string{}, labelKeys: map[string][]string{}, targetSeen: map[string]bool{}})
 		}
+		a := acc[i]
 		for _, t := range targets {
-			if !slices.Contains(jobs[i].Targets, t) {
-				jobs[i].Targets = append(jobs[i].Targets, t)
+			if !a.targetSeen[t] {
+				a.targetSeen[t] = true
+				a.targets = append(a.targets, t)
+			}
+			for _, l := range labels {
+				if prev, has := a.labels[t][l[0]]; has {
+					if prev != l[1] {
+						return nil, fmt.Errorf("target %q in job %q is labelled %s twice with different values (%q and %q) — the same node must not carry contradictory labels across --scrape specs", t, name, l[0], prev, l[1])
+					}
+					continue
+				}
+				if a.labels[t] == nil {
+					a.labels[t] = map[string]string{}
+				}
+				a.labels[t][l[0]] = l[1]
+				a.labelKeys[t] = append(a.labelKeys[t], l[0])
 			}
 		}
 	}
+	// Bucket each job's targets by their FINAL merged label set, in
+	// first-appearance order of the bucket.
+	for i := range jobs {
+		groups := map[string]int{} // label signature → position in Groups
+		for _, t := range acc[i].targets {
+			var labels [][2]string
+			for _, k := range acc[i].labelKeys[t] {
+				labels = append(labels, [2]string{k, acc[i].labels[t][k]})
+			}
+			sig := labelSignature(labels)
+			g, seen := groups[sig]
+			if !seen {
+				g = len(jobs[i].Groups)
+				groups[sig] = g
+				jobs[i].Groups = append(jobs[i].Groups, scrapeGroup{Labels: labels})
+			}
+			jobs[i].Groups[g].Targets = append(jobs[i].Groups[g].Targets, t)
+		}
+	}
 	return jobs, nil
+}
+
+// labelSignature keys a group by its exact ordered label set. "k=v;" joined
+// with a separator that cannot appear in a bare key=value token (spaces were
+// rejected at parse, so ";" plus the field boundary is unambiguous for lookup
+// only — collisions between "a=1;b=2" written as one token and two tokens are
+// impossible because token splitting is on whitespace).
+func labelSignature(labels [][2]string) string {
+	parts := make([]string, len(labels))
+	for i, l := range labels {
+		parts[i] = l[0] + "=" + l[1]
+	}
+	return strings.Join(parts, ";")
 }
 
 // quoteTargets renders a targets slice as the inline YAML flow-sequence body
@@ -465,29 +566,120 @@ func quoteTargets(targets []string) string {
 	return strings.Join(parts, ", ")
 }
 
-// parseScrapeSpec turns one --scrape value into a job_name and its target list.
-// The ONLY accepted form is "JOB=host:port[,host:port...]" — the job name is
-// REQUIRED, and one spec may carry several comma-separated targets. The
-// job_name is emitted as a YAML plain scalar, so a name with spaces or YAML
-// metacharacters is the operator's responsibility — it is a label, not data
-// pgcli interprets. Target de-duplication happens in groupScrapeSpecs, not here.
-func parseScrapeSpec(spec string) (job string, targets []string, err error) {
-	name, list, ok := strings.Cut(spec, "=")
+// parseScrapeSpec turns one --scrape value into a job_name, its target list,
+// and the labels to attach to those targets. The accepted form is
+// "JOB=host:port[,host:port...] [key=value ...]" — the job name is REQUIRED, one
+// spec may carry several comma-separated targets, and every bare key=value
+// token after them applies as labels to those targets. Per-node labels
+// (nodename=api1) are therefore one spec per node; cross-spec merging (a node
+// named twice carries the UNION of its labels, one scrape) happens in
+// groupScrapeSpecs, not here. Label keys must be valid Prometheus label names
+// ([A-Za-z_][A-Za-z0-9_]*) and values any printable character except whitespace;
+// label values are emitted quoted, so YAML metacharacters cannot retype them.
+// Target de-duplication likewise happens in groupScrapeSpecs, not here.
+func parseScrapeSpec(spec string) (job string, targets []string, labels [][2]string, err error) {
+	name, rest, ok := strings.Cut(spec, "=")
 	job = strings.TrimSpace(name)
 	if !ok || job == "" {
-		return "", nil, fmt.Errorf("scrape spec %q has no job name (want JOB=host:port[,host:port...])", spec)
+		return "", nil, nil, fmt.Errorf("scrape spec %q has no job name (want JOB=host:port[,host:port...] [key=value...])", spec)
 	}
-	for _, t := range strings.Split(list, ",") {
+	// Find the label region: the FIRST whitespace-delimited token shaped
+	// key=value whose key is a valid Prometheus label name. The target list is
+	// everything in the RAW text before that token's byte offset — split on
+	// commas exactly as it always was, so every long-tolerated spacing shape
+	// ("a:1, b:2", "a:1 , b:2") keeps parsing — and from the offset on every
+	// token must be a bare label. Testing the KEY side only means a hyphenated
+	// legacy job never misreads as a label, and a malformed k=v that is NOT
+	// label-shaped falls into the target region, where its '=' errors.
+	fields := scrapeFields(rest)
+	labelStart := len(rest) // byte offset; end-of-string = no labels
+	for _, f := range fields {
+		key, _, hasEq := strings.Cut(f.text, "=")
+		if hasEq && isLabelName(key) {
+			labelStart = f.start
+			break
+		}
+	}
+	for _, t := range strings.Split(rest[:labelStart], ",") {
 		t = strings.TrimSpace(t)
 		if t == "" {
-			return "", nil, fmt.Errorf("empty target in scrape spec %q", spec)
+			return "", nil, nil, fmt.Errorf("empty target in scrape spec %q", spec)
+		}
+		if strings.Contains(t, "=") {
+			return "", nil, nil, fmt.Errorf("target %q in scrape spec %q: want host:port (label values may not contain whitespace — list each target's labels as bare key=value tokens after the target list)", t, spec)
 		}
 		targets = append(targets, t)
 	}
 	if len(targets) == 0 {
-		return "", nil, fmt.Errorf("scrape spec %q has no targets", spec)
+		return "", nil, nil, fmt.Errorf("scrape spec %q has no targets", spec)
 	}
-	return job, targets, nil
+	seen := map[string]bool{}
+	for _, f := range fields {
+		if f.start < labelStart {
+			continue
+		}
+		key, val, hasEq := strings.Cut(f.text, "=")
+		if !hasEq || !isLabelName(key) {
+			return "", nil, nil, fmt.Errorf("scrape spec %q: %q is neither host:port nor a key=value label (label names are [A-Za-z_][A-Za-z0-9_]*)", spec, f.text)
+		}
+		if val == "" {
+			return "", nil, nil, fmt.Errorf("scrape label %q in spec %q has an empty value", f.text, spec)
+		}
+		if seen[key] {
+			return "", nil, nil, fmt.Errorf("scrape label key %q given twice in spec %q", key, spec)
+		}
+		seen[key] = true
+		labels = append(labels, [2]string{key, val})
+	}
+	return job, targets, labels, nil
+}
+
+// scrapeField is one whitespace-delimited token of a scrape spec with the byte
+// offset where it starts, so the target region can split on commas against the
+// RAW string (preserving the long-tolerated "a:1 , b:2" forms) while the label
+// region is still detected token-wise.
+type scrapeField struct {
+	text  string
+	start int
+}
+
+// scrapeFields splits s on whitespace, recording each token's start offset.
+func scrapeFields(s string) []scrapeField {
+	isSpace := func(c byte) bool {
+		switch c {
+		case ' ', '\t', '\n', '\r', '\v', '\f':
+			return true
+		}
+		return false
+	}
+	var out []scrapeField
+	for i := 0; i < len(s); {
+		if isSpace(s[i]) {
+			i++
+			continue
+		}
+		j := i
+		for j < len(s) && !isSpace(s[j]) {
+			j++
+		}
+		out = append(out, scrapeField{text: s[i:j], start: i})
+		i = j
+	}
+	return out
+}
+
+// isLabelName reports whether s is a valid Prometheus label name.
+func isLabelName(s string) bool {
+	if s == "" || !((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z') || s[0] == '_') {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 // MergeScrapeSpecs folds --scrape-append values into an instance's stored
@@ -497,50 +689,37 @@ func parseScrapeSpec(spec string) (job string, targets []string, err error) {
 // both pg.yaml and the running container untouched rather than half-applying a
 // bad target list.
 //
-// The merge is job-aware: an appended job name folds its targets into the
-// existing job of that name (de-duplicating targets already present), and an
-// unseen job name appends at the end. The result is re-serialised canonically —
-// one "JOB=t1,t2,..." spec per job — so a stored list built up over several
-// appends stays tidy and an append that changes nothing reproduces the exact
-// input bytes (keeping the unchanged-config check, and thus the reload skip,
-// working).
+// The merge is a plain concatenation run back through groupScrapeSpecs, which
+// is target-centric: an appended spec folds its targets into the existing job of
+// that name, de-duplicating a target already present and merging labels onto it,
+// while an unseen job name lands at the end. Appending a target that already
+// carries a DIFFERENT value for one of its label keys is a contradiction and
+// aborts, exactly as it would for two --scrape flags.
+//
+// The result is re-serialised canonically — one "JOB=t1,t2 k=v ..." spec per
+// (job, merged-label-set) — so a stored list built up over several appends stays
+// tidy and an append that changes nothing reproduces the exact input bytes
+// (keeping the unchanged-config check, and thus the reload skip, working).
 func MergeScrapeSpecs(existing, appended []string) ([]string, error) {
-	existingJobs, err := groupScrapeSpecs(existing)
-	if err != nil {
+	if _, err := groupScrapeSpecs(existing); err != nil {
 		return nil, fmt.Errorf("existing scrape list: %w", err)
 	}
-	appendedJobs, err := groupScrapeSpecs(appended)
-	if err != nil {
+	if _, err := groupScrapeSpecs(appended); err != nil {
 		return nil, fmt.Errorf("--scrape-append: %w", err)
 	}
-
-	// Seed with the existing jobs, then fold appended jobs in by name.
-	merged := make([]scrapeJob, len(existingJobs))
-	copy(merged, existingJobs)
-	index := map[string]int{}
-	for i, j := range merged {
-		// Copy the target slice so appending a target to an existing job does not
-		// mutate the shared backing array behind existingJobs.
-		merged[i].Targets = append([]string(nil), j.Targets...)
-		index[j.Name] = i
+	jobs, err := groupScrapeSpecs(append(append([]string(nil), existing...), appended...))
+	if err != nil {
+		return nil, err
 	}
-	for _, a := range appendedJobs {
-		i, seen := index[a.Name]
-		if !seen {
-			index[a.Name] = len(merged)
-			merged = append(merged, scrapeJob{Name: a.Name, Targets: append([]string(nil), a.Targets...)})
-			continue
-		}
-		for _, t := range a.Targets {
-			if !slices.Contains(merged[i].Targets, t) {
-				merged[i].Targets = append(merged[i].Targets, t)
+	var out []string
+	for _, j := range jobs {
+		for _, g := range j.Groups {
+			spec := j.Name + "=" + strings.Join(g.Targets, ",")
+			for _, l := range g.Labels {
+				spec += " " + l[0] + "=" + l[1]
 			}
+			out = append(out, spec)
 		}
-	}
-
-	out := make([]string, 0, len(merged))
-	for _, j := range merged {
-		out = append(out, j.Name+"="+strings.Join(j.Targets, ","))
 	}
 	return out, nil
 }
@@ -574,7 +753,7 @@ func ProbeScrapeTargets(scrape []string) (unreachable []string, err error) {
 	}
 	client := &http.Client{Timeout: scrapeProbeTimeout}
 	for _, spec := range scrape {
-		job, targets, perr := parseScrapeSpec(spec)
+		job, targets, _, perr := parseScrapeSpec(spec)
 		if perr != nil {
 			return nil, perr
 		}

@@ -234,6 +234,86 @@ func TestRenderPrometheusConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("per-target labels render as labelled static_configs groups", func(t *testing.T) {
+		pc := base()
+		pc.Scrape = []string{
+			"windows=10.0.0.1:9182 nodename=api1",
+			"windows=10.0.0.2:9182 nodename=api2",
+		}
+		out, err := renderPrometheusConfig(pc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// ONE job_name, TWO static_configs groups, each target carrying its
+		// own labels — Prometheus's native per-node-label shape. Values are
+		// quoted even when they'd retype as YAML bool/int.
+		want := "  - job_name: windows\n" +
+			"    static_configs:\n" +
+			"      - targets: [\"10.0.0.1:9182\"]\n" +
+			"        labels:\n" +
+			"          nodename: \"api1\"\n" +
+			"      - targets: [\"10.0.0.2:9182\"]\n" +
+			"        labels:\n" +
+			"          nodename: \"api2\"\n"
+		if !strings.Contains(out, want) {
+			t.Errorf("labelled static_configs groups malformed:\n%s", out)
+		}
+	})
+
+	t.Run("same node across specs merges labels into one scrape", func(t *testing.T) {
+		pc := base()
+		// Two specs, same job, same target, different label keys: the node is
+		// scraped ONCE carrying the union — not twice under two groups.
+		pc.Scrape = []string{
+			"node=10.0.0.5:9100 nodename=api1",
+			"node=10.0.0.5:9100 env=prod",
+			"node=10.0.0.6:9100 nodename=api2 env=prod",
+		}
+		out, err := renderPrometheusConfig(pc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Count(out, "10.0.0.5:9100"); got != 1 {
+			t.Errorf("merged node must appear exactly once, got %d:\n%s", got, out)
+		}
+		want := "  - job_name: node\n" +
+			"    static_configs:\n" +
+			"      - targets: [\"10.0.0.5:9100\"]\n" +
+			"        labels:\n" +
+			"          nodename: \"api1\"\n" +
+			"          env: \"prod\"\n" +
+			"      - targets: [\"10.0.0.6:9100\"]\n" +
+			"        labels:\n" +
+			"          nodename: \"api2\"\n" +
+			"          env: \"prod\"\n"
+		if !strings.Contains(out, want) {
+			t.Errorf("merged label sets malformed:\n%s", out)
+		}
+	})
+
+	t.Run("contradictory labels on one node abort rendering", func(t *testing.T) {
+		pc := base()
+		pc.Scrape = []string{
+			"node=10.0.0.5:9100 nodename=api1",
+			"node=10.0.0.5:9100 nodename=api2",
+		}
+		if _, err := renderPrometheusConfig(pc); err == nil {
+			t.Error("want an error for nodename given twice with different values, got nil")
+		}
+	})
+
+	t.Run("label-free job renders no labels block", func(t *testing.T) {
+		pc := base()
+		pc.Scrape = []string{"node=10.0.0.5:9100,10.0.0.6:9100"}
+		out, err := renderPrometheusConfig(pc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out, "labels:") {
+			t.Errorf("unlabelled job must not grow a labels block:\n%s", out)
+		}
+	})
+
 	t.Run("malformed spec errors instead of rendering", func(t *testing.T) {
 		pc := base()
 		pc.Scrape = []string{"10.0.0.5:9100"} // no JOB= prefix
@@ -420,30 +500,49 @@ func TestParseScrapeSpec(t *testing.T) {
 		spec       string
 		wantJob    string
 		wantTarget []string
+		wantLabels [][2]string
 	}{
-		{"node=10.0.0.5:9100", "node", []string{"10.0.0.5:9100"}},
-		{"node=10.0.0.5:9100,10.0.0.6:9100", "node", []string{"10.0.0.5:9100", "10.0.0.6:9100"}},
-		{" node-exporter = 10.0.0.5:9100 , 10.0.0.6:9100 ", "node-exporter", []string{"10.0.0.5:9100", "10.0.0.6:9100"}},
+		{"node=10.0.0.5:9100", "node", []string{"10.0.0.5:9100"}, nil},
+		{"node=10.0.0.5:9100,10.0.0.6:9100", "node", []string{"10.0.0.5:9100", "10.0.0.6:9100"}, nil},
+		{" node-exporter = 10.0.0.5:9100 , 10.0.0.6:9100 ", "node-exporter", []string{"10.0.0.5:9100", "10.0.0.6:9100"}, nil},
+		// Legacy comma-with-attached-space must keep parsing (the raw-offset
+		// split; the token-rebuild era turned this into "a:1,,b:2").
+		{"node=10.0.0.5:9100, 10.0.0.6:9100", "node", []string{"10.0.0.5:9100", "10.0.0.6:9100"}, nil},
+		{"node=10.0.0.5:9100 ,10.0.0.6:9100", "node", []string{"10.0.0.5:9100", "10.0.0.6:9100"}, nil},
+		// Labels: bare key=value tokens after the target list.
+		{"windows=10.0.0.1:9182 nodename=api1", "windows", []string{"10.0.0.1:9182"}, [][2]string{{"nodename", "api1"}}},
+		{"windows=10.0.0.1:9182,10.0.0.2:9182 nodename=api1 env=prod", "windows",
+			[]string{"10.0.0.1:9182", "10.0.0.2:9182"}, [][2]string{{"nodename", "api1"}, {"env", "prod"}}},
+		// Label values may be YAML-nasty — quoted at render, parsed as-is here.
+		{"node=10.0.0.5:9100 tier=2 zone=yes", "node", []string{"10.0.0.5:9100"}, [][2]string{{"tier", "2"}, {"zone", "yes"}}},
 	}
 	for _, c := range cases {
-		job, targets, err := parseScrapeSpec(c.spec)
+		job, targets, labels, err := parseScrapeSpec(c.spec)
 		if err != nil {
 			t.Errorf("parseScrapeSpec(%q): %v", c.spec, err)
 			continue
 		}
-		if job != c.wantJob || !slices.Equal(targets, c.wantTarget) {
-			t.Errorf("parseScrapeSpec(%q) = (%q,%v), want (%q,%v)", c.spec, job, targets, c.wantJob, c.wantTarget)
+		if job != c.wantJob || !slices.Equal(targets, c.wantTarget) || !slices.Equal(labels, c.wantLabels) {
+			t.Errorf("parseScrapeSpec(%q) = (%q,%v,%v), want (%q,%v,%v)", c.spec, job, targets, labels, c.wantJob, c.wantTarget, c.wantLabels)
 		}
 	}
 	for _, bad := range []string{
-		"10.0.0.5:9100",        // no job name at all
-		"=10.0.0.5:9100",       // empty job name
-		"node=",                // job but no targets
-		"node= ,10.0.0.5:9100", // empty target between commas
+		"10.0.0.5:9100",                  // no job name at all
+		"=10.0.0.5:9100",                 // empty job name
+		"node=",                          // job but no targets
+		"node= ,10.0.0.5:9100",           // empty target between commas
+		"node=a:1 nodename=",             // empty label value
+		"node=a:1 9nodename=x",           // label name must not start with a digit
+		"node=a:1 nodename=x nodename=y", // duplicate label key
 	} {
-		if _, _, err := parseScrapeSpec(bad); err == nil {
+		if _, _, _, err := parseScrapeSpec(bad); err == nil {
 			t.Errorf("want an error for %q, got nil", bad)
 		}
+	}
+	// A '=' glued INSIDE a target region (not label-shaped, so the split never
+	// left the targets) must error rather than emit a bogus host:port.
+	if _, _, _, err := parseScrapeSpec("node=a=b:9100"); err == nil {
+		t.Error("want an error for a target carrying '=', got nil")
 	}
 }
 
@@ -503,6 +602,62 @@ func TestMergeScrapeSpecs(t *testing.T) {
 		}
 		if !slices.Equal(got, existing) {
 			t.Errorf("no-op append changed the list: %v, want %v", got, existing)
+		}
+	})
+
+	t.Run("same target across specs merges labels and is scraped once", func(t *testing.T) {
+		// Target-centric grouping: one node named by two specs with DIFFERENT
+		// label keys carries the UNION, in one static_configs group — not two.
+		got, err := MergeScrapeSpecs(
+			[]string{"node=10.0.0.5:9100 nodename=api1"},
+			[]string{"node=10.0.0.5:9100 env=prod"},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"node=10.0.0.5:9100 nodename=api1 env=prod"}
+		if !slices.Equal(got, want) {
+			t.Errorf("merge = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("distinct label sets split into separate groups", func(t *testing.T) {
+		// Two nodes with genuinely different labels stay two static_configs
+		// blocks — re-serialised one spec per (job, merged label set).
+		got, err := MergeScrapeSpecs(
+			[]string{"windows=10.0.0.1:9182 nodename=api1"},
+			[]string{"windows=10.0.0.2:9182 nodename=api2"},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"windows=10.0.0.1:9182 nodename=api1", "windows=10.0.0.2:9182 nodename=api2"}
+		if !slices.Equal(got, want) {
+			t.Errorf("merge = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("contradictory label for one target errors", func(t *testing.T) {
+		// The same node labelled with the same key to DIFFERENT values across
+		// the stored list + append is unresolvable — abort, write nothing.
+		if _, err := MergeScrapeSpecs(
+			[]string{"node=10.0.0.5:9100 nodename=api1"},
+			[]string{"node=10.0.0.5:9100 nodename=api2"},
+		); err == nil {
+			t.Error("want an error for contradictory nodename, got nil")
+		}
+	})
+
+	t.Run("no-op labelled append reproduces the stored bytes", func(t *testing.T) {
+		// Appending a target/label already present changes nothing and must not
+		// reorder — the install path relies on this to skip a pointless reload.
+		existing := []string{"node=10.0.0.5:9100 nodename=api1 env=prod"}
+		got, err := MergeScrapeSpecs(existing, []string{"node=10.0.0.5:9100 nodename=api1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(got, existing) {
+			t.Errorf("no-op labelled append changed the list: %v, want %v", got, existing)
 		}
 	})
 

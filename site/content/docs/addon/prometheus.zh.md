@@ -26,8 +26,8 @@ Prometheus 与 Grafana 的分歧在**配置方式**。Grafana 只经环境变量
 | `--image` | `docker.io/prom/prometheus:v3.15.0` | 覆盖镜像 |
 | `--port` | 自动（基址 9090） | Web 宿主端口；自 `prometheus_start_port` 自动分配 |
 | `--listen` | `0.0.0.0` | 绑定地址——默认开放全部网卡；`127.0.0.1` 收紧为仅回环（见上方暴露警告） |
-| `--scrape` | —（自带自监控 job） | 抓取声明 `JOB=HOST:PORT[,HOST:PORT...]`（可重复）——job 名必填，逗号分隔的多个 target 全部并入这一个 job，在渲染的 `prometheus.yml` 里成一个 `static_configs` job。声明的是**完整** job 集合（整体替换已存列表）。目标会被宿主侧 `GET /metrics` 探测，探测不通仅告警 |
-| `--scrape-append` | — | 同样的声明格式，但把追加的 job **合并**进已存的 `--scrape` 列表（同名 job 并入 target、新名字排到末尾）而非替换。每个被追加的目标都会探测，任一拉不到数据即**中止 install**——什么都不写。与 `--scrape`、`--conf-file` 互斥 |
+| `--scrape` | —（自带自监控 job） | 抓取声明 `JOB=HOST:PORT[,HOST:PORT...] [KEY=VALUE...]`（可重复）——job 名必填，逗号分隔的多个 target 全部并入这一个 job，在渲染的 `prometheus.yml` 里成一个 `static_configs` job；target 列表之后的裸 `KEY=VALUE` token 成为**逐 target 标签**，作用于该 spec 的所有 target。同一 job 名跨 spec 折叠为一个 job；同一 node 被两个 spec 提到时标签合并、只抓**一次**，而标签集不同的 node 拆成同 job 下多个 `static_configs` 块（即 `nodename=api1` 这类按节点打标签的原生形状）。声明的是**完整** job 集合（整体替换已存列表）。目标会被宿主侧 `GET /metrics` 探测，探测不通仅告警 |
+| `--scrape-append` | — | 同样的声明格式（标签同样支持），但把追加的 target **连同其标签**合并进已存的 `--scrape` 列表（同名 job 并入、新名字排到末尾）而非替换。每个被追加的目标都会探测，任一拉不到数据即**中止 install**——什么都不写。与 `--scrape`、`--conf-file` 互斥 |
 | `--scrape-interval` | `15s` | 渲染配置里的全局 `scrape_interval`；与 `--conf-file` 互斥 |
 | `--retention` | `15d` | TSDB 保留期（`--storage.tsdb.retention.time`）；时长如 `15d`、`6mo`、`2y`。是 CLI flag，故与 `--conf-file` 可并存 |
 | `--conf-file` | — | 你自己的 `prometheus.yml` 路径——完全跳过渲染（与 `--scrape`/`--scrape-append`/`--scrape-interval`/`--alertmanager-url`/`--remote-write-url`/`--remote-write-queue` 互斥）；见下 |
@@ -61,17 +61,55 @@ pg addon install prometheus
 渲染的配置**始终**含一个抓取本服务自身 `/metrics` 的自监控 job，所以绝不会空转；`--scrape` 添加更多 job。在 Grafana 里把 `http://<host>:9090/` 加成 Prometheus 数据源，即可立刻查询。
 
 ```bash
-# 每个 --scrape 声明就是一个 job；= 前的 job 名必填，
+# 每个 --scrape 声明一个 job；= 前的 job 名必填，
 # 逗号分隔的多个 target 共用这一个 job（同构 exporter 舰队的自然形状）
 pg addon install prometheus --name p1 \
   --scrape postgres-exporter=127.0.0.1:9187 \
   --scrape node=10.0.0.5:9100,10.0.0.6:9100
 ```
 
-带 `--scrape` 重复 install 会**整体替换**已存的 job 集合。想增量追加就用 `--scrape-append`——它把每个被追加 job 的 target 并入同名已存 job（自动去重）、新 job 名排到末尾，然后热加载：
+给 target 打标签（Ansible 渲染配置里那种 `nodename: api1`）就是在 target 列表后面
+追加裸 `KEY=VALUE` token——每个带标签的 node 各一条 `--scrape`：
+
+```bash
+# 一个 windows job，三个 target，各带自己的节点名
+pg addon install prometheus --name p1 \
+  --scrape windows=10.0.0.1:9182 nodename=api1 \
+  --scrape windows=10.0.0.2:9182 nodename=api2 \
+  --scrape windows=10.0.0.3:9182 nodename=api3
+```
+
+```yaml
+# 渲染出的正是原生的按节点标签形状：一个 job_name，
+# 每组不同的标签集一个带 labels 的 static_configs 块
+  - job_name: windows
+    static_configs:
+      - targets: ["10.0.0.1:9182"]
+        labels:
+          nodename: "api1"
+      - targets: ["10.0.0.2:9182"]
+        labels:
+          nodename: "api2"
+      - targets: ["10.0.0.3:9182"]
+        labels:
+          nodename: "api3"
+```
+
+分组以 **target 为中心**，所以同一个 node 被提两次绝不会抓两遍：两条 spec 都提到
+`10.0.0.5:9100` 时，它合并两边的标签集、只成为**一个** target
+（`node=a:1 nodename=api1` + `node=a:1 env=prod` → `a:1` 同时带两个标签）。
+唯一被拒绝的是矛盾——同一 node 的同一个标签键给了两个不同值，直接中止而不是
+悄悄丢掉一个。标签值不能含空白（`device="eth0, eth1"` 请改用 `--conf-file`），
+标签键必须满足 `[A-Za-z_][A-Za-z0-9_]*`；值以引号渲染，所以 `yes`、`2`
+不会在 YAML 里改变类型。
+
+带 `--scrape` 重复 install 会**整体替换**已存的 job 集合。想增量追加就用 `--scrape-append`——格式与 `--scrape` 完全一致（标签同理），它把每个被追加 target（连同其标签）并入同名已存 job、新 job 名排到末尾，然后热加载：
 
 ```bash
 pg addon install prometheus --name p1 --scrape-append node=10.0.0.7:9100
+# 已存的 node job 多出第三个 target，标签不动
+pg addon install prometheus --name p1 --scrape-append node=10.0.0.5:9100 env=prod
+# ……或者给一个已存 target 就地补一个标签（合并，仍然只抓一次）
 ```
 
 两个 flag 的探测策略刻意不同：被**追加**的目标必须以 200 应答 `GET /metrics`，否则命令在写入任何东西之前就中止（pg.yaml 与运行中的容器分毫未动）；而 `--scrape` 声明完整集合时，探测不通只告警、install 照常——Prometheus 自己会把它标成 `DOWN`，且全量声明时常包含尚未就绪的端点。探测从**宿主**拨号——Linux（宿主网络）上与容器抓取处于同一命名空间，判定即容器所见；macOS bridge 下两者不同，故直接跳过探测。
@@ -241,6 +279,10 @@ scrape_configs:
           nodename: lhcloud3
 ```
 
+上面这种带标签的 `nodes` 形状，正是如今渲染模式会产出的——三条
+`--scrape node=…:9100 nodename=…` 折叠成一个 `nodes` job、各带一个有标签的
+`static_configs` 块；渲染器没有暴露的按 job 附加项（抓取超时、relabel 等）仍归手写文件管。
+
 `localhost:9090`、`localhost:9093` 能通，是因为 Linux 上容器跑在**宿主网络**里——Prometheus 容器内的 `localhost` 就是宿主，两个 web 端口都在上面监听。这份配置里能看到 pgcli 只参与了一处：`--rule-file` 会把你的 rule 文件拷进 `<base>/addon/prometheus/<name>/rules/` 并把该目录挂到 `/etc/prometheus/rules`，所以上面的 `rule_files:` glob 才解析得到；而 `alerting:` 段完全由你自己写——`--conf-file` 模式下 pgcli 不往文件里加任何东西，也不派生 `alertmanager` 抓取 job，且 `--alertmanager-url` 作为渲染旋钮会被拒绝。手写文件别等 reload 后才从日志里发现错误，先自查一遍：
 
 ```bash
@@ -285,6 +327,8 @@ addons:
       scrape:
         - postgres-exporter=127.0.0.1:9187
         - node=10.0.0.5:9100,10.0.0.6:9100
+        - node=10.0.0.5:9100 env=prod   # 同一 node 再次出现 → 一次抓取，标签取并集
+        - windows=10.0.0.1:9182 nodename=api1   # 裸 KEY=VALUE token = 逐 target 标签
       scrape_interval: 15s
       autostart: false
       # alertmanager: [127.0.0.1:9093]            # 仅渲染模式：转发已触发告警 + 派生的抓取 job
@@ -295,7 +339,7 @@ addons:
       # data_dir: /srv/prometheus-data      # 可选，覆盖默认位置
 ```
 
-渲染的 `prometheus.yml` 承载全局 `scrape_interval`、始终存在的自监控 job、以及每个 `scrape` **JOB** 一个 `static_configs` job（该 job 声明的所有 target 折叠进同一行）；`--alertmanager-url` 会加上 `alerting:` 段与随之而来的 `alertmanager` 抓取 job，`--remote-write-url` 会加上一段顶级 `remote_write:`（`--remote-write-queue` 在每个条目下填充 `queue_config:` 块），`--rule-file` 会加上 `rule_files:` 段。`retention` 与监听绑定**不在**那个文件里——它们作为 CLI flag 传给 `prometheus` 二进制（`--storage.tsdb.retention.time`、`--web.listen-address`），这正是它们能与 `--conf-file` 并存的原因。
+渲染的 `prometheus.yml` 承载全局 `scrape_interval`、始终存在的自监控 job、以及每个 `scrape` **JOB 名**一个抓取 job——该 job 各条 spec 列出的所有 target 折叠进去，再按合并后的标签集分桶，于是每一组不同的 `KEY=VALUE` 组合成为自己单独的 `- targets:/labels:` 块；`--alertmanager-url` 会加上 `alerting:` 段与随之而来的 `alertmanager` 抓取 job，`--remote-write-url` 会加上一段顶级 `remote_write:`（`--remote-write-queue` 在每个条目下填充 `queue_config:` 块），`--rule-file` 会加上 `rule_files:` 段。`retention` 与监听绑定**不在**那个文件里——它们作为 CLI flag 传给 `prometheus` 二进制（`--storage.tsdb.retention.time`、`--web.listen-address`），这正是它们能与 `--conf-file` 并存的原因。
 
 ### 列出
 

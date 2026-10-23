@@ -551,8 +551,8 @@ Grafana (the open-source observability dashboard; top-level addon, Linux and mac
   changed --port/--listen/--admin-user/--password.
 
 Prometheus (the metrics collection backend; top-level addon, Linux and macOS):
-  pg addon install prometheus [--name p1] [--scrape JOB=HOST:PORT[,HOST:PORT...]] (repeatable)
-                              [--scrape-append JOB=HOST:PORT[,HOST:PORT...]] (repeatable)
+  pg addon install prometheus [--name p1] [--scrape JOB=HOST:PORT[,HOST:PORT...] [KEY=VALUE...]] (repeatable)
+                              [--scrape-append JOB=HOST:PORT[,HOST:PORT...] [KEY=VALUE...]] (repeatable)
                               [--scrape-interval 15s] [--retention 15d]
                               [--alertmanager-url URL] (repeatable)
                               [--remote-write-url URL] (repeatable)
@@ -568,10 +568,17 @@ Prometheus (the metrics collection backend; top-level addon, Linux and macOS):
   passes as --config.file, alongside --web.listen-address and
   --storage.tsdb.retention.time. A --scrape spec MUST carry a job name
   (JOB=host:port...; there is no bare-target form) and may list several
-  comma-separated targets. --scrape declares the FULL job set (replaces the stored
-  list); --scrape-append MERGES into it (folding each appended job's targets into
-  the same-named job) — every appended target is probed with GET /metrics and
-  install aborts, touching nothing, if any returns no data. The two are mutually
+  comma-separated targets. Bare KEY=VALUE tokens after the target list become
+  per-target LABELS (nodename=api1 env=prod): the same node named by several
+  specs is scraped ONCE with the UNION of its labels, while nodes carrying
+  different labels split into separate static_configs blocks under one job_name —
+  so per-node labels are one --scrape per node (a label whose value has a
+  whitespace cannot be expressed; use --conf-file). Contradictory values for one
+  label key on one node abort the install. --scrape declares the FULL job set
+  (replaces the stored list); --scrape-append MERGES into it (folding each
+  appended target's labels into the same node's set) — every appended target is
+  probed with GET /metrics and install aborts, touching nothing, if any returns
+  no data. The two are mutually
   exclusive. --conf-file instead copies YOUR prometheus.yml into pgcli's managed
   path (mutually exclusive with --scrape/--scrape-append/--scrape-interval,
   --alertmanager-url and --remote-write-url/--remote-write-queue, which all only
@@ -768,6 +775,7 @@ Examples:
   pg addon install prometheus
   pg addon install prometheus --name p1 --scrape postgres-exporter=127.0.0.1:9187 --retention 30d
   pg addon install prometheus --name p1 --scrape node=10.0.0.5:9100,10.0.0.6:9100   # one job, two targets
+  pg addon install prometheus --name p1 --scrape windows=10.0.0.1:9182 nodename=api1 --scrape windows=10.0.0.2:9182 nodename=api2   # per-target labels: one job, two labelled static_configs groups
   pg addon install prometheus --name p1 --scrape-append node=10.0.0.7:9100           # add a target to the node job (probed; aborts if down)
   pg addon install prometheus --name local --listen 127.0.0.1   # loopback-only (Prometheus has no auth)
   pg addon install prometheus --name p1 --conf-file /etc/prometheus/my.yml   # run your own prometheus.yml verbatim
@@ -1144,8 +1152,8 @@ func init() {
 	// prometheus flags (top-level metrics collection backend)
 	addonInstallCmd.Flags().String("retention", "", "Prometheus TSDB retention (--storage.tsdb.retention.time), e.g. 15d, 6mo, 2y (default \"15d\")")
 	addonInstallCmd.Flags().String("scrape-interval", "", "Prometheus global scrape_interval in the rendered prometheus.yml (default \"15s\"); mutually exclusive with --conf-file")
-	addonInstallCmd.Flags().StringArray("scrape", nil, "Prometheus scrape spec JOB=HOST:PORT[,HOST:PORT...] (repeatable; the JOB name is required, and several comma-separated targets share one job) — declares the FULL job set (replaces the stored list), each rendering one static_configs job alongside the self-monitoring job; e.g. --scrape postgres-exporter=127.0.0.1:9187. Mutually exclusive with --scrape-append and --conf-file")
-	addonInstallCmd.Flags().StringArray("scrape-append", nil, "Prometheus scrape spec(s) JOB=HOST:PORT[,HOST:PORT...] to ADD to the instance's stored --scrape list (same form as --scrape, repeatable) instead of replacing it; folds each appended job's targets into the same-named job. Every appended target is probed with GET /metrics and install aborts, touching nothing, if any returns no data. Mutually exclusive with --scrape and --conf-file")
+	addonInstallCmd.Flags().StringArray("scrape", nil, "Prometheus scrape spec JOB=HOST:PORT[,HOST:PORT...] [KEY=VALUE...] (repeatable; the JOB name is required, several comma-separated targets share one job, and bare KEY=VALUE tokens after them become per-target labels — the same node named by several specs merges its labels and is scraped once, different label sets split into separate static_configs blocks) — declares the FULL job set (replaces the stored list), each rendering one static_configs job alongside the self-monitoring job; e.g. --scrape postgres-exporter=127.0.0.1:9187. Mutually exclusive with --scrape-append and --conf-file")
+	addonInstallCmd.Flags().StringArray("scrape-append", nil, "Prometheus scrape spec(s) JOB=HOST:PORT[,HOST:PORT...] [KEY=VALUE...] to ADD to the instance's stored --scrape list (same form as --scrape, repeatable) instead of replacing it; folds each appended target (and its labels) into the same-named job. Every appended target is probed with GET /metrics and install aborts, touching nothing, if any returns no data. Mutually exclusive with --scrape and --conf-file")
 	addonInstallCmd.Flags().StringArray("alertmanager-url", nil, "Prometheus: Alertmanager instance(s) to forward fired alerts to (repeatable; bare HOST[:PORT] — a portless entry gets Alertmanager's 9093 — or http(s)://HOST[:PORT][/path]). The rendered prometheus.yml gains an alerting: section pushing there PLUS a matching alertmanager scrape job (so Alertmanager's own /metrics is watched; not a separate opt-in). All entries are validated (and must share ONE scheme — mixing http and https aborts) BEFORE anything is written; connectivity is NOT probed (Prometheus shows a dead alertmanager itself). Mutually exclusive with --conf-file, which owns the whole file — write your own alerting: section there")
 	addonInstallCmd.Flags().StringArray("rule-file", nil, "Prometheus: path to a rule file (*.rules.yml with a top-level groups: block; repeatable) — pgcli copies each into its managed rules dir (basename only; two files sharing a basename abort), bind-mounts that dir read-only at /etc/prometheus/rules, and the rendered prometheus.yml loads the copies via rule_files. Valid alongside --conf-file: the copy and mount happen either way, and your own file decides whether to reference /etc/prometheus/rules. A missing or empty file aborts, touching nothing")
 	addonInstallCmd.Flags().StringArray("remote-write-url", nil, "Prometheus: remote-write URL(s) to push scraped samples to (repeatable; full http(s):// URL, e.g. http://127.0.0.1:8480/insert/0/prometheus/api/v1/write for the vmcluster addon, http://127.0.0.1:8428/api/v1/write for the victoriametrics addon). The rendered prometheus.yml gains a remote_write: section; the local TSDB keeps its own retention regardless (the remote is a copy, WAL-backed so a dead remote replays once it returns). Each URL is validated (must parse as http(s) with a host) BEFORE anything is written; connectivity is NOT probed. Mutually exclusive with --conf-file, which owns the whole file — write your own remote_write: section there")
@@ -5521,7 +5529,11 @@ func runAddonList(showPassword bool) error {
 			fmt.Printf("  %s (name: %s)\n", "prometheus", name)
 			fmt.Printf("    Status:      %s\n", status)
 			fmt.Printf("    URL:         http://%s:%d/\n", pc.Listen, pc.HostPort)
-			mode := fmt.Sprintf("rendered (%d scrape job(s))", len(pc.Scrape))
+			jobCount, jerr := podman.CountScrapeJobs(pc.Scrape)
+			if jerr != nil {
+				jobCount = len(pc.Scrape) // hand-edited list: fall back to counting specs
+			}
+			mode := fmt.Sprintf("rendered (%d scrape job(s))", jobCount)
 			if len(pc.Alertmanager) > 0 {
 				mode += fmt.Sprintf(" + alertmanager x%d", len(pc.Alertmanager))
 			}
@@ -8530,7 +8542,10 @@ func runAddonInstallPrometheus(cmd *cobra.Command) error {
 	if pc.ConfFile != "" {
 		fmt.Printf(" (from --conf-file %s)\n", pc.ConfFile)
 	} else {
-		jobs := len(pc.Scrape)
+		jobs, jerr := podman.CountScrapeJobs(pc.Scrape)
+		if jerr != nil {
+			jobs = len(pc.Scrape) // already validated at write time; count specs as a fallback
+		}
 		if len(pc.Alertmanager) > 0 {
 			jobs++ // the derived alertmanager scrape job
 		}
