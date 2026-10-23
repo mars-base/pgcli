@@ -46,6 +46,7 @@ type Config struct {
 	SeaweedfsStartPort      int                       `yaml:"seaweedfs_start_port,omitempty"`       // starting SeaweedFS master host port, default 8400 (volume, filer, s3 take the next three free ports; gRPC twins at +10000 are reserved)
 	VictoriaMetricsStartPort int                      `yaml:"victoriametrics_start_port,omitempty"` // starting VictoriaMetrics HTTP host port, default 8428
 	VMClusterStartPort       int                      `yaml:"vmcluster_start_port,omitempty"`       // starting VMCluster port, default 8480 (5 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP, internal insert TCP, internal select TCP)
+	VictoriaLogsStartPort    int                      `yaml:"victorialogs_start_port,omitempty"`    // starting VictoriaLogs HTTP host port, default 9428
 	Postgres                PostgresConfig            `yaml:"postgres"`
 	Podman                  PodmanConfig              `yaml:"podman"`
 	PITR                    PITRConfig                `yaml:"pitr"`
@@ -138,6 +139,7 @@ type TopAddonsConfig struct {
 	Duckdb       map[string]DuckdbConfig         `yaml:"duckdb,omitempty"`
 	VictoriaMetrics map[string]VictoriaMetricsConfig `yaml:"victoriametrics,omitempty"`
 	VMCluster      map[string]VMClusterConfig       `yaml:"vmcluster,omitempty"`
+	VictoriaLogs   map[string]VictoriaLogsConfig    `yaml:"victorialogs,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -658,6 +660,13 @@ const DefaultVMSelectImageTag = "docker.io/victoriametrics/vmselect:v1.154.1-clu
 // DefaultVMStorageImageTag pins the VictoriaMetrics cluster vmstorage image.
 // Same release cadence as the single-node image.
 const DefaultVMStorageImageTag = "docker.io/victoriametrics/vmstorage:v1.154.1-cluster"
+
+// DefaultVictoriaLogsImageTag pins the VictoriaLogs single-node image.
+// victoriametrics/victoria-logs is the official multi-arch image on docker.io
+// (pull-only — pgcli never builds it). VictoriaLogs is the log database from the
+// same family: one binary, one container, one HTTP port (9428) serving ingest,
+// query, and the built-in UI.
+const DefaultVictoriaLogsImageTag = "docker.io/victoriametrics/victoria-logs:v1.53.0"
 
 // DefaultGiteaImageTag pins the Gitea image. gitea/gitea is the official
 // multi-arch image on docker.io (pull-only — pgcli never builds it). Note the
@@ -1895,7 +1904,32 @@ func orderVMClusterRoles(roles []string) []string {
 	return out
 }
 
-// AlertmanagerConfig holds a standalone Alertmanager addon — the alert
+// VictoriaLogsConfig holds a standalone VictoriaLogs addon — the log database
+// from the VictoriaMetrics family (https://docs.victoriametrics.com/victorialogs/).
+// It is the exact mirror of VictoriaMetricsConfig: one binary in one container,
+// one HTTP port (default 9428) serving ingest, LogsQL queries, and the built-in
+// UI. No rendered config file; everything is CLI flags after the image name.
+//
+// There is NO login/password: VictoriaLogs has no authentication by default.
+// Its HTTP API can ingest and query arbitrary logs, so a remote-exposed
+// instance is guarded only by the network boundary (firewall / --listen
+// 127.0.0.1), same as VictoriaMetrics.
+//
+// The image runs as root, so no pre-chown of the data dir is needed (unlike
+// Prometheus's uid 65534).
+type VictoriaLogsConfig struct {
+	ContainerName string   `yaml:"container_name"`       // pgcli-victorialogs<ns>-<name>
+	Name          string   `yaml:"name,omitempty"`       // addon key
+	ImageTag      string   `yaml:"image_tag,omitempty"`  // docker.io/victoriametrics/victoria-logs:v1.53.0
+	HostPort      int      `yaml:"host_port,omitempty"`  // HTTP port, 9428+ auto-assigned
+	Listen        string   `yaml:"listen,omitempty"`     // -httpListenAddr bind, default 0.0.0.0
+	DataDir       string   `yaml:"data_dir,omitempty"`   // host dir mounted at /victoria-logs-data
+	Retention     string   `yaml:"retention,omitempty"`  // -retentionPeriod value (e.g. "30d", "3months"; the binary's own default is "1" month)
+	ExtraArgs     []string `yaml:"extra_args,omitempty"` // additional CLI flags, e.g. ["-search.maxQueryDuration=60s"]
+	// Autostart brings this container up on host boot via the boot service.
+	// Start-only: it starts the existing container, so install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
 // dedup/grouping/routing frontend of the Prometheus stack
 // (https://prometheus.io/docs/alerting/latest/alertmanager/). Shape mirrors
 // PrometheusConfig: a web UI on one host port, a persistent data dir outliving
@@ -2259,6 +2293,7 @@ func Default() *Config {
 		SeaweedfsStartPort:      8400,
 		VictoriaMetricsStartPort: 8428,
 		VMClusterStartPort:       8480,
+		VictoriaLogsStartPort:    9428,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -2470,6 +2505,7 @@ type displayConfig struct {
 	SeaweedfsStartPort      int                       `yaml:"seaweedfs_start_port,omitempty"`
 	VictoriaMetricsStartPort int                      `yaml:"victoriametrics_start_port,omitempty"`
 	VMClusterStartPort       int                      `yaml:"vmcluster_start_port,omitempty"`
+	VictoriaLogsStartPort    int                      `yaml:"victorialogs_start_port,omitempty"`
 	Logging                 LoggingConfig             `yaml:"logging"`
 	Backup                  BackupConfig              `yaml:"backup"`
 	Pigsty                  PigstyConfig              `yaml:"pigsty"`
@@ -2506,6 +2542,7 @@ func (c *Config) Display() displayConfig {
 		SeaweedfsStartPort:      c.SeaweedfsStartPort,
 		VictoriaMetricsStartPort: c.VictoriaMetricsStartPort,
 		VMClusterStartPort:      c.VMClusterStartPort,
+		VictoriaLogsStartPort:   c.VictoriaLogsStartPort,
 		Logging:                 c.Logging,
 		Backup:                  c.Backup,
 		Pigsty:                  c.Pigsty,
@@ -2746,6 +2783,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.VMClusterStartPort == 0 {
 		c.VMClusterStartPort = d.VMClusterStartPort
+	}
+	if c.VictoriaLogsStartPort == 0 {
+		c.VictoriaLogsStartPort = d.VictoriaLogsStartPort
 	}
 
 	// Postgres
@@ -3375,6 +3415,28 @@ func (c *Config) ApplyDefaults() {
 			addon.Retention = "1"
 		}
 		c.Addons.VictoriaMetrics[name] = addon
+	}
+
+	// Top-level addons defaults (VictoriaLogs). Exact mirror of the
+	// VictoriaMetrics block above: one container, one port, pure CLI flags,
+	// no auth — guarded only by the network boundary. Retention is NOT
+	// defaulted here: an empty value simply omits -retentionPeriod and lets
+	// the victoria-logs binary apply its own default, so pgcli never shadows
+	// an upstream default that may change between releases.
+	for name, addon := range c.Addons.VictoriaLogs {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-victorialogs" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultVictoriaLogsImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "0.0.0.0"
+		}
+		c.Addons.VictoriaLogs[name] = addon
 	}
 
 	// Top-level addons defaults (Alertmanager). Same shape as Prometheus above:
@@ -4329,6 +4391,44 @@ func (c *Config) autoAssignPorts() {
 				next = addon.HostPort + 1
 			}
 			c.Addons.VictoriaMetrics[name] = addon
+		}
+	}
+
+	// Allocate ports for VictoriaLogs addons from their own pool
+	// (victorialogs_start_port, default 9428 — VictoriaLogs's default HTTP
+	// port). One port per instance, same shape as the VictoriaMetrics block
+	// above. 9428 shares no base with VictoriaMetrics (8428), vmcluster
+	// (8480-8484) or Prometheus (9090).
+	{
+		vlBase := c.VictoriaLogsStartPort
+		assignedVL := map[int]bool{}
+		for _, addon := range c.Addons.VictoriaLogs {
+			if addon.HostPort != 0 {
+				assignedVL[addon.HostPort] = true
+			}
+		}
+		next := vlBase
+		nextFreeVL := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedVL[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.VictoriaLogs))
+		for name := range c.Addons.VictoriaLogs {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.VictoriaLogs[name]
+			if addon.HostPort == 0 && vlBase > 0 {
+				addon.HostPort = nextFreeVL()
+			} else if addon.HostPort >= next {
+				next = addon.HostPort + 1
+			}
+			c.Addons.VictoriaLogs[name] = addon
 		}
 	}
 
