@@ -1752,7 +1752,7 @@ type VictoriaMetricsConfig struct {
 }
 
 // VMClusterStorageNode is one vmstorage address that vminsert/vmselect dial.
-// Address is host:port for the insert protocol (e.g. "10.241.20.147:8483");
+// Address is host:port for the insert protocol (e.g. "10.0.0.1:8483");
 // SelectPort is the select protocol port on the same host (e.g. 8484).
 type VMClusterStorageNode struct {
 	Address    string `yaml:"address"`     // host:insertInternalPort

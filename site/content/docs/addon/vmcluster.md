@@ -40,15 +40,15 @@ pg addon install vmcluster --name vmc
 
 ```bash
 # Host A — storage node 1
-pg addon install vmcluster --name vmc --roles storage --listen 10.241.20.147
+pg addon install vmcluster --name vmc --roles storage --listen 10.0.0.1
 
 # Host B — storage node 2
-pg addon install vmcluster --name vmc --roles storage --listen 10.241.20.148
+pg addon install vmcluster --name vmc --roles storage --listen 10.0.0.2
 
 # Host C — ingestion + query layer
 pg addon install vmcluster --name vmc --roles insert,select \
-  --storage-node 10.241.20.147:8483:8484 \
-  --storage-node 10.241.20.148:8483:8484
+  --storage-node 10.0.0.1:8483:8484 \
+  --storage-node 10.0.0.2:8483:8484
 ```
 
 ### Model 3 — Horizontal scaling with replication
@@ -57,8 +57,8 @@ pg addon install vmcluster --name vmc --roles insert,select \
 # replicationFactor=2 → each write goes to 2 vmstorage nodes
 pg addon install vmcluster --name vmc --roles insert,select \
   --replication-factor 2 \
-  --storage-node 10.241.20.147:8483:8484 \
-  --storage-node 10.241.20.148:8483:8484
+  --storage-node 10.0.0.1:8483:8484 \
+  --storage-node 10.0.0.2:8483:8484
 ```
 
 ## Parameters
@@ -176,9 +176,9 @@ addons:
         - insert
         - select
       storage_nodes:
-        - address: "10.241.20.147:8483"
+        - address: "10.0.0.1:8483"
           select_port: 8484
-        - address: "10.241.20.148:8483"
+        - address: "10.0.0.2:8483"
           select_port: 8484
       replication_factor: 1
       retention: "1"
@@ -199,16 +199,16 @@ VictoriaMetrics cluster has no dynamic discovery — the `-storageNode` list is 
 
 ```bash
 # Host C — new storage node
-pg addon install vmcluster --name vmc --roles storage --listen 10.241.20.153
+pg addon install vmcluster --name vmc --roles storage --listen 10.0.0.3
 ```
 
 2. **Recreate vminsert + vmselect** on the access-layer host, appending the new `--storage-node`:
 
 ```bash
 pg addon install vmcluster --name vmc --roles insert,select --force \
-  --storage-node 10.241.20.147:8483:8484 \
-  --storage-node 10.241.20.148:8483:8484 \
-  --storage-node 10.241.20.153:8483:8484
+  --storage-node 10.0.0.1:8483:8484 \
+  --storage-node 10.0.0.2:8483:8484 \
+  --storage-node 10.0.0.3:8483:8484
 ```
 
 `--force` drops and recreates the vminsert/vmselect containers. There is a **few-second write interruption**; existing vmstorage data is untouched (only the access-layer containers are replaced).

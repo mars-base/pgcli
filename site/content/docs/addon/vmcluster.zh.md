@@ -38,15 +38,15 @@ pg addon install vmcluster --name vmc
 
 ```bash
 # Host A — 存储节点 1
-pg addon install vmcluster --name vmc --roles storage --listen 10.241.20.147
+pg addon install vmcluster --name vmc --roles storage --listen 10.0.0.1
 
 # Host B — 存储节点 2
-pg addon install vmcluster --name vmc --roles storage --listen 10.241.20.148
+pg addon install vmcluster --name vmc --roles storage --listen 10.0.0.2
 
 # Host C — 接入层（vminsert + vmselect）
 pg addon install vmcluster --name vmc --roles insert,select \
-  --storage-node 10.241.20.147:8483:8484 \
-  --storage-node 10.241.20.148:8483:8484
+  --storage-node 10.0.0.1:8483:8484 \
+  --storage-node 10.0.0.2:8483:8484
 ```
 
 ### 形态 3 — 水平扩展 + 副本
@@ -55,8 +55,8 @@ pg addon install vmcluster --name vmc --roles insert,select \
 # replicationFactor=2 → 每条数据写 2 个 vmstorage
 pg addon install vmcluster --name vmc --roles insert,select \
   --replication-factor 2 \
-  --storage-node 10.241.20.147:8483:8484 \
-  --storage-node 10.241.20.148:8483:8484
+  --storage-node 10.0.0.1:8483:8484 \
+  --storage-node 10.0.0.2:8483:8484
 ```
 
 ## 参数
@@ -174,9 +174,9 @@ addons:
         - insert
         - select
       storage_nodes:
-        - address: "10.241.20.147:8483"
+        - address: "10.0.0.1:8483"
           select_port: 8484
-        - address: "10.241.20.148:8483"
+        - address: "10.0.0.2:8483"
           select_port: 8484
       replication_factor: 1
       retention: "1"
@@ -197,16 +197,16 @@ VictoriaMetrics 集群版没有动态发现机制——`-storageNode` 列表在 
 
 ```bash
 # Host C — 新存储节点
-pg addon install vmcluster --name vmc --roles storage --listen 10.241.20.153
+pg addon install vmcluster --name vmc --roles storage --listen 10.0.0.3
 ```
 
 2. **在接入层主机上重建 vminsert + vmselect**，追加新的 `--storage-node`：
 
 ```bash
 pg addon install vmcluster --name vmc --roles insert,select --force \
-  --storage-node 10.241.20.147:8483:8484 \
-  --storage-node 10.241.20.148:8483:8484 \
-  --storage-node 10.241.20.153:8483:8484
+  --storage-node 10.0.0.1:8483:8484 \
+  --storage-node 10.0.0.2:8483:8484 \
+  --storage-node 10.0.0.3:8483:8484
 ```
 
 `--force` 会删掉并重建 vminsert/vmselect 容器，中间有**几秒写入中断**。已有的 vmstorage 数据完全不受影响（只有接入层容器被替换）。

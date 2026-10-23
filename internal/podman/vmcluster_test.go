@@ -124,11 +124,11 @@ func TestVMinInsertArgs(t *testing.T) {
 			Name:            "vmc",
 			ContainerPrefix: "pgcli-vmcluster-default-vmc",
 			InsertImageTag:  config.DefaultVMInsertImageTag,
-			Listen:          "10.241.20.153",
+			Listen:          "10.0.0.3",
 			InsertPort:      8480,
 			StorageNodes: []config.VMClusterStorageNode{
-				{Address: "10.241.20.147:8483", SelectPort: 8484},
-				{Address: "10.241.20.148:8483", SelectPort: 8484},
+				{Address: "10.0.0.1:8483", SelectPort: 8484},
+				{Address: "10.0.0.2:8483", SelectPort: 8484},
 			},
 			ReplicationFactor: 2,
 		}
@@ -138,10 +138,10 @@ func TestVMinInsertArgs(t *testing.T) {
 		trailing := args[imgIdx+1:]
 
 		// Both storage nodes present.
-		if !slices.Contains(trailing, "-storageNode=10.241.20.147:8483") {
+		if !slices.Contains(trailing, "-storageNode=10.0.0.1:8483") {
 			t.Errorf("first -storageNode missing: %v", trailing)
 		}
-		if !slices.Contains(trailing, "-storageNode=10.241.20.148:8483") {
+		if !slices.Contains(trailing, "-storageNode=10.0.0.2:8483") {
 			t.Errorf("second -storageNode missing: %v", trailing)
 		}
 		if !slices.Contains(trailing, "-replicationFactor=2") {
@@ -201,11 +201,11 @@ func TestVMSelectArgs(t *testing.T) {
 			Name:            "vmc",
 			ContainerPrefix: "pgcli-vmcluster-default-vmc",
 			SelectImageTag:  config.DefaultVMSelectImageTag,
-			Listen:          "10.241.20.153",
+			Listen:          "10.0.0.3",
 			SelectPort:      8481,
 			StorageNodes: []config.VMClusterStorageNode{
-				{Address: "10.241.20.147:8483", SelectPort: 8484},
-				{Address: "10.241.20.148:8483", SelectPort: 8484},
+				{Address: "10.0.0.1:8483", SelectPort: 8484},
+				{Address: "10.0.0.2:8483", SelectPort: 8484},
 			},
 		}
 
@@ -214,10 +214,10 @@ func TestVMSelectArgs(t *testing.T) {
 		trailing := args[imgIdx+1:]
 
 		// vmselect uses host:SelectPort (select protocol).
-		if !slices.Contains(trailing, "-storageNode=10.241.20.147:8484") {
+		if !slices.Contains(trailing, "-storageNode=10.0.0.1:8484") {
 			t.Errorf("first -storageNode (select port) missing: %v", trailing)
 		}
-		if !slices.Contains(trailing, "-storageNode=10.241.20.148:8484") {
+		if !slices.Contains(trailing, "-storageNode=10.0.0.2:8484") {
 			t.Errorf("second -storageNode (select port) missing: %v", trailing)
 		}
 		// Must NOT use the insert protocol port.
@@ -270,22 +270,22 @@ func TestVMClusterEffectiveStorageNodes(t *testing.T) {
 
 	t.Run("explicit listen IP", func(t *testing.T) {
 		vc := &config.VMClusterConfig{
-			Listen:             "10.241.20.147",
+			Listen:             "10.0.0.1",
 			InternalInsertPort: 8483,
 			InternalSelectPort: 8484,
 		}
 		nodes := vc.EffectiveStorageNodes()
-		if nodes[0].Address != "10.241.20.147:8483" {
-			t.Errorf("Address = %q, want 10.241.20.147:8483", nodes[0].Address)
+		if nodes[0].Address != "10.0.0.1:8483" {
+			t.Errorf("Address = %q, want 10.0.0.1:8483", nodes[0].Address)
 		}
 	})
 
 	t.Run("explicit storage nodes override", func(t *testing.T) {
 		vc := &config.VMClusterConfig{
-			Listen: "10.241.20.153",
+			Listen: "10.0.0.3",
 			StorageNodes: []config.VMClusterStorageNode{
-				{Address: "10.241.20.147:8483", SelectPort: 8484},
-				{Address: "10.241.20.148:8483", SelectPort: 8484},
+				{Address: "10.0.0.1:8483", SelectPort: 8484},
+				{Address: "10.0.0.2:8483", SelectPort: 8484},
 			},
 		}
 		nodes := vc.EffectiveStorageNodes()
@@ -303,7 +303,7 @@ func TestVMClusterHostFromAddress(t *testing.T) {
 		addr string
 		want string
 	}{
-		{"10.241.20.147:8483", "10.241.20.147"},
+		{"10.0.0.1:8483", "10.0.0.1"},
 		{"127.0.0.1:8483", "127.0.0.1"},
 		{"myhost:9000", "myhost"},
 	}
