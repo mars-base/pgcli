@@ -4761,15 +4761,34 @@ func runAddonList(showPassword bool) error {
 	em, _ := podman.NewEtcdManager(cfg)
 	dm, _ := podman.NewPgDogManager(cfg)
 
+	// Empty add-on types are omitted entirely; printed sections are separated
+	// by a blank line so the first one does not start with a leading newline.
+	printedSection := false
+	section := func(title string, has bool) {
+		if !has {
+			return
+		}
+		if printedSection {
+			fmt.Println()
+		}
+		fmt.Println(title)
+		printedSection = true
+	}
+
 	// Local add-ons (from instances)
-	fmt.Println("Local add-ons:")
 	hasLocal := false
+	for _, inst := range cfg.Instances {
+		if inst.Addons.PgBouncer != nil || inst.Addons.Postgrest != nil {
+			hasLocal = true
+			break
+		}
+	}
+	section("Local add-ons:", hasLocal)
 	for name, inst := range cfg.Instances {
 		if inst.Addons.PgBouncer == nil && inst.Addons.Postgrest == nil {
 			continue
 		}
 		if pb := inst.Addons.PgBouncer; pb != nil {
-			hasLocal = true
 			status := "stopped"
 			if pbMgr != nil {
 				if running, err := pbMgr.ContainerRunning(pb.ContainerName); err == nil && running {
@@ -4785,7 +4804,6 @@ func runAddonList(showPassword bool) error {
 			fmt.Printf("    Container:   %s\n", pb.ContainerName)
 		}
 		if pr := inst.Addons.Postgrest; pr != nil {
-			hasLocal = true
 			status := "stopped"
 			if pgm != nil {
 				if running, err := pgm.ContainerRunning(pr.ContainerName); err == nil && running {
@@ -4803,17 +4821,11 @@ func runAddonList(showPassword bool) error {
 			fmt.Printf("    Container:   %s\n", pr.ContainerName)
 		}
 	}
-	if !hasLocal {
-		fmt.Println("  (none)")
-	}
 
 	// Remote add-ons (from top-level addons)
-	fmt.Println()
-	fmt.Println("Remote add-ons:")
-	hasRemote := false
+	section("Remote add-ons:", len(cfg.Addons.PgBouncer) > 0 || len(cfg.Addons.Postgrest) > 0)
 	if cfg.Addons.PgBouncer != nil {
 		for name, pb := range cfg.Addons.PgBouncer {
-			hasRemote = true
 			status := "stopped"
 			if pbMgr != nil {
 				if running, err := pbMgr.ContainerRunning(pb.ContainerName); err == nil && running {
@@ -4830,7 +4842,6 @@ func runAddonList(showPassword bool) error {
 		}
 	}
 	for name, pr := range cfg.Addons.Postgrest {
-		hasRemote = true
 		status := "stopped"
 		if pgm != nil {
 			if running, err := pgm.ContainerRunning(pr.ContainerName); err == nil && running {
@@ -4847,16 +4858,10 @@ func runAddonList(showPassword bool) error {
 		fmt.Printf("    JWT auth:    %s\n", postgrestJwtDisplay(pr.JwtSecret))
 		fmt.Printf("    Container:   %s\n", pr.ContainerName)
 	}
-	if !hasRemote {
-		fmt.Println("  (none)")
-	}
 
 	// etcd (shared infrastructure, top-level addon)
-	fmt.Println()
-	fmt.Println("Infra add-ons (etcd):")
-	hasEtcd := false
+	section("Infra add-ons (etcd):", len(cfg.Addons.Etcd) > 0)
 	for name, ec := range cfg.Addons.Etcd {
-		hasEtcd = true
 		status := "stopped"
 		if em != nil {
 			if running, err := em.ContainerRunning(ec.ContainerName); err == nil && running {
@@ -4872,16 +4877,10 @@ func runAddonList(showPassword bool) error {
 		fmt.Printf("    Image:       %s\n", ec.ImageTag)
 		fmt.Printf("    Container:   %s\n", ec.ContainerName)
 	}
-	if !hasEtcd {
-		fmt.Println("  (none)")
-	}
 
 	// pgdog (shared infrastructure proxy, top-level addon)
-	fmt.Println()
-	fmt.Println("Infra add-ons (pgdog):")
-	hasPgDog := false
+	section("Infra add-ons (pgdog):", len(cfg.Addons.PgDog) > 0)
 	for name, pd := range cfg.Addons.PgDog {
-		hasPgDog = true
 		status := "stopped"
 		if dm != nil {
 			if running, err := dm.ContainerRunning(pd.ContainerName); err == nil && running {
@@ -4899,17 +4898,11 @@ func runAddonList(showPassword bool) error {
 		fmt.Printf("    Image:       %s\n", pd.ImageTag)
 		fmt.Printf("    Container:   %s\n", pd.ContainerName)
 	}
-	if !hasPgDog {
-		fmt.Println("  (none)")
-	}
 
 	// haproxy (Patroni load balancer, top-level addon; Linux-only manager)
-	fmt.Println()
-	fmt.Println("Infra add-ons (haproxy):")
-	hasHAProxy := false
+	section("Infra add-ons (haproxy):", len(cfg.Addons.HAProxy) > 0)
 	if hm, err := podman.NewHAProxyManager(cfg); err == nil {
 		for name, hc := range cfg.Addons.HAProxy {
-			hasHAProxy = true
 			status := "stopped"
 			if running, err := hm.ContainerRunning(hc.ContainerName); err == nil && running {
 				status = "running"
@@ -4942,7 +4935,6 @@ func runAddonList(showPassword bool) error {
 	} else if len(cfg.Addons.HAProxy) > 0 {
 		// Configured but the manager is unavailable (macOS): still show them.
 		for name, hc := range cfg.Addons.HAProxy {
-			hasHAProxy = true
 			fmt.Printf("  %s (name: %s)\n", "haproxy", name)
 			fmt.Printf("    Status:      n/a (%v)\n", err)
 			fmt.Printf("    Mode:        %s\n", hc.EffectiveMode())
@@ -4954,17 +4946,11 @@ func runAddonList(showPassword bool) error {
 			fmt.Printf("    Container:   %s\n", hc.ContainerName)
 		}
 	}
-	if !hasHAProxy {
-		fmt.Println("  (none)")
-	}
 
 	// minio (single-node object storage, top-level addon; Linux-only manager)
-	fmt.Println()
-	fmt.Println("Infra add-ons (minio):")
-	hasMinio := false
+	section("Infra add-ons (minio):", len(cfg.Addons.Minio) > 0)
 	if mm, err := podman.NewMinioManager(cfg); err == nil {
 		for name, mc := range cfg.Addons.Minio {
-			hasMinio = true
 			status := "stopped"
 			if running, err := mm.ContainerRunning(mc.ContainerName); err == nil && running {
 				status = "running"
@@ -5022,7 +5008,6 @@ func runAddonList(showPassword bool) error {
 	} else if len(cfg.Addons.Minio) > 0 {
 		// Configured but the manager is unavailable (macOS/arm): still show them.
 		for name, mc := range cfg.Addons.Minio {
-			hasMinio = true
 			fmt.Printf("  %s (name: %s)\n", "minio", name)
 			fmt.Printf("    Status:      n/a (%v)\n", err)
 			fmt.Printf("    Listen:      %s\n", mc.Listen)
@@ -5031,17 +5016,11 @@ func runAddonList(showPassword bool) error {
 			fmt.Printf("    Container:   %s\n", mc.ContainerName)
 		}
 	}
-	if !hasMinio {
-		fmt.Println("  (none)")
-	}
 
 	// silo (Pigsty MinIO fork — S3 object storage, top-level addon)
-	fmt.Println()
-	fmt.Println("Infra add-ons (silo):")
-	hasSilo := false
+	section("Infra add-ons (silo):", len(cfg.Addons.Silo) > 0)
 	if sm, err := podman.NewSiloManager(cfg); err == nil {
 		for name, sc := range cfg.Addons.Silo {
-			hasSilo = true
 			status := "stopped"
 			if running, err := sm.ContainerRunning(sc.ContainerName); err == nil && running {
 				status = "running"
@@ -5099,7 +5078,6 @@ func runAddonList(showPassword bool) error {
 	} else if len(cfg.Addons.Silo) > 0 {
 		// Configured but the manager is unavailable (macOS/arm): still show them.
 		for name, sc := range cfg.Addons.Silo {
-			hasSilo = true
 			fmt.Printf("  %s (name: %s)\n", "silo", name)
 			fmt.Printf("    Status:      n/a (%v)\n", err)
 			fmt.Printf("    Listen:      %s\n", sc.Listen)
@@ -5108,17 +5086,11 @@ func runAddonList(showPassword bool) error {
 			fmt.Printf("    Container:   %s\n", sc.ContainerName)
 		}
 	}
-	if !hasSilo {
-		fmt.Println("  (none)")
-	}
 
 	// rustfs (S3-compatible object storage — third store addon; Linux-only manager)
-	fmt.Println()
-	fmt.Println("Infra add-ons (rustfs):")
-	hasRustfs := false
+	section("Infra add-ons (rustfs):", len(cfg.Addons.Rustfs) > 0)
 	if rm, err := podman.NewRustfsManager(cfg); err == nil {
 		for name, rc := range cfg.Addons.Rustfs {
-			hasRustfs = true
 			status := "stopped"
 			if running, err := rm.ContainerRunning(rc.ContainerName); err == nil && running {
 				status = "running"
@@ -5172,7 +5144,6 @@ func runAddonList(showPassword bool) error {
 	} else if len(cfg.Addons.Rustfs) > 0 {
 		// Configured but the manager is unavailable (macOS/arm): still show them.
 		for name, rc := range cfg.Addons.Rustfs {
-			hasRustfs = true
 			fmt.Printf("  %s (name: %s)\n", "rustfs", name)
 			fmt.Printf("    Status:      n/a (%v)\n", err)
 			fmt.Printf("    Listen:      %s\n", rc.Listen)
@@ -5181,18 +5152,12 @@ func runAddonList(showPassword bool) error {
 			fmt.Printf("    Container:   %s\n", rc.ContainerName)
 		}
 	}
-	if !hasRustfs {
-		fmt.Println("  (none)")
-	}
 
 	// garage (S3-compatible object storage — fourth store addon; single-node
 	// or one member of a multi-node cluster)
-	fmt.Println()
-	fmt.Println("Infra add-ons (garage):")
-	hasGarage := false
+	section("Infra add-ons (garage):", len(cfg.Addons.Garage) > 0)
 	if gm, err := podman.NewGarageManager(cfg); err == nil {
 		for name, gc := range cfg.Addons.Garage {
-			hasGarage = true
 			status := "stopped"
 			running, err := gm.ContainerRunning(gc.ContainerName)
 			if err == nil && running {
@@ -5244,7 +5209,6 @@ func runAddonList(showPassword bool) error {
 	} else if len(cfg.Addons.Garage) > 0 {
 		// Configured but the manager is unavailable (macOS/arm): still show them.
 		for name, gc := range cfg.Addons.Garage {
-			hasGarage = true
 			fmt.Printf("  %s (name: %s)\n", "garage", name)
 			fmt.Printf("    Status:      n/a (%v)\n", err)
 			fmt.Printf("    Listen:      %s\n", gc.Listen)
@@ -5252,18 +5216,12 @@ func runAddonList(showPassword bool) error {
 			fmt.Printf("    Container:   %s\n", gc.ContainerName)
 		}
 	}
-	if !hasGarage {
-		fmt.Println("  (none)")
-	}
 
 	// seaweedfs (S3-compatible object storage — volume-granularity store;
 	// single-node "weed mini" or one member of an MNMD Raft cluster)
-	fmt.Println()
-	fmt.Println("Infra add-ons (seaweedfs):")
-	hasSeaweedfs := false
+	section("Infra add-ons (seaweedfs):", len(cfg.Addons.Seaweedfs) > 0)
 	if sm, err := podman.NewSeaweedfsManager(cfg); err == nil {
 		for name, sc := range cfg.Addons.Seaweedfs {
-			hasSeaweedfs = true
 			status := "stopped"
 			running, err := sm.ContainerRunning(sc.ContainerName)
 			if err == nil && running {
@@ -5321,7 +5279,6 @@ func runAddonList(showPassword bool) error {
 	} else if len(cfg.Addons.Seaweedfs) > 0 {
 		// Configured but the manager is unavailable (no podman): still show them.
 		for name, sc := range cfg.Addons.Seaweedfs {
-			hasSeaweedfs = true
 			scheme := "http"
 			if sc.TLSOn() {
 				scheme = "https"
@@ -5338,18 +5295,12 @@ func runAddonList(showPassword bool) error {
 			fmt.Printf("    Container:   %s\n", sc.ContainerName)
 		}
 	}
-	if !hasSeaweedfs {
-		fmt.Println("  (none)")
-	}
 
 	// redis (standalone KV store — cache/session/ranking/counters)
-	fmt.Println()
-	fmt.Println("Infra add-ons (redis):")
-	hasRedis := false
+	section("Infra add-ons (redis):", len(cfg.Addons.Redis) > 0)
 	if rm, err := podman.NewRedisManager(cfg); err == nil {
 		for _, name := range sortedAddonNames(cfg.Addons.Redis) {
 			rc := cfg.Addons.Redis[name]
-			hasRedis = true
 			status := "stopped"
 			if running, err := rm.ContainerRunning(rc.ContainerName); err == nil && running {
 				status = "running"
@@ -5394,25 +5345,18 @@ func runAddonList(showPassword bool) error {
 		// Configured but the manager is unavailable (podman missing): still show them.
 		for _, name := range sortedAddonNames(cfg.Addons.Redis) {
 			rc := cfg.Addons.Redis[name]
-			hasRedis = true
 			fmt.Printf("  %s (name: %s)\n", "redis", name)
 			fmt.Printf("    Status:      n/a (%v)\n", err)
 			fmt.Printf("    Address:     %s:%d\n", rc.Listen, rc.Port)
 			fmt.Printf("    Container:   %s\n", rc.ContainerName)
 		}
 	}
-	if !hasRedis {
-		fmt.Println("  (none)")
-	}
 
 	// predixy (Redis cluster proxy — one plain endpoint in front of a cluster)
-	fmt.Println()
-	fmt.Println("Infra add-ons (predixy):")
-	hasPredixy := false
+	section("Infra add-ons (predixy):", len(cfg.Addons.Predixy) > 0)
 	if pm, err := podman.NewPredixyManager(cfg); err == nil {
 		for _, name := range sortedAddonNames(cfg.Addons.Predixy) {
 			pc := cfg.Addons.Predixy[name]
-			hasPredixy = true
 			status := "stopped"
 			if running, err := pm.ContainerRunning(pc.ContainerName); err == nil && running {
 				status = "running"
@@ -5435,25 +5379,18 @@ func runAddonList(showPassword bool) error {
 		// still show them.
 		for _, name := range sortedAddonNames(cfg.Addons.Predixy) {
 			pc := cfg.Addons.Predixy[name]
-			hasPredixy = true
 			fmt.Printf("  %s (name: %s)\n", "predixy", name)
 			fmt.Printf("    Status:      n/a (%v)\n", err)
 			fmt.Printf("    Address:     %s:%d\n", pc.Listen, pc.Port)
 			fmt.Printf("    Container:   %s\n", pc.ContainerName)
 		}
 	}
-	if !hasPredixy {
-		fmt.Println("  (none)")
-	}
 
 	// pgAdmin (web administration UI — top-level, one container, persistent data dir)
-	fmt.Println()
-	fmt.Println("Web add-ons (pgadmin):")
-	hasPgAdmin := false
+	section("Web add-ons (pgadmin):", len(cfg.Addons.PgAdmin) > 0)
 	if pgm, err := podman.NewPgAdminManager(cfg); err == nil {
 		for _, name := range sortedAddonNames(cfg.Addons.PgAdmin) {
 			ac := cfg.Addons.PgAdmin[name]
-			hasPgAdmin = true
 			status := "stopped"
 			if running, err := pgm.ContainerRunning(ac.ContainerName); err == nil && running {
 				status = "running"
@@ -5476,25 +5413,18 @@ func runAddonList(showPassword bool) error {
 		// Configured but the manager is unavailable (podman missing): still show them.
 		for _, name := range sortedAddonNames(cfg.Addons.PgAdmin) {
 			ac := cfg.Addons.PgAdmin[name]
-			hasPgAdmin = true
 			fmt.Printf("  %s (name: %s)\n", "pgadmin", name)
 			fmt.Printf("    Status:      n/a (%v)\n", err)
 			fmt.Printf("    URL:         http://%s:%d/\n", ac.Listen, ac.HostPort)
 			fmt.Printf("    Container:   %s\n", ac.ContainerName)
 		}
 	}
-	if !hasPgAdmin {
-		fmt.Println("  (none)")
-	}
 
 	// Grafana (observability dashboard — top-level, one container, persistent data dir)
-	fmt.Println()
-	fmt.Println("Web add-ons (grafana):")
-	hasGrafana := false
+	section("Web add-ons (grafana):", len(cfg.Addons.Grafana) > 0)
 	if gm, err := podman.NewGrafanaManager(cfg); err == nil {
 		for _, name := range sortedAddonNames(cfg.Addons.Grafana) {
 			gc := cfg.Addons.Grafana[name]
-			hasGrafana = true
 			status := "stopped"
 			if running, err := gm.ContainerRunning(gc.ContainerName); err == nil && running {
 				status = "running"
@@ -5514,25 +5444,18 @@ func runAddonList(showPassword bool) error {
 		// Configured but the manager is unavailable (podman missing): still show them.
 		for _, name := range sortedAddonNames(cfg.Addons.Grafana) {
 			gc := cfg.Addons.Grafana[name]
-			hasGrafana = true
 			fmt.Printf("  %s (name: %s)\n", "grafana", name)
 			fmt.Printf("    Status:      n/a (%v)\n", err)
 			fmt.Printf("    URL:         http://%s:%d/\n", gc.Listen, gc.HostPort)
 			fmt.Printf("    Container:   %s\n", gc.ContainerName)
 		}
 	}
-	if !hasGrafana {
-		fmt.Println("  (none)")
-	}
 
 	// prometheus (metrics collection backend, top-level addon; Linux host network, macOS bridge)
-	fmt.Println()
-	fmt.Println("Web add-ons (prometheus):")
-	hasPrometheus := false
+	section("Web add-ons (prometheus):", len(cfg.Addons.Prometheus) > 0)
 	if pm, err := podman.NewPrometheusManager(cfg); err == nil {
 		for _, name := range sortedAddonNames(cfg.Addons.Prometheus) {
 			pc := cfg.Addons.Prometheus[name]
-			hasPrometheus = true
 			status := "stopped"
 			if running, err := pm.ContainerRunning(pc.ContainerName); err == nil && running {
 				status = "running"
@@ -5567,25 +5490,18 @@ func runAddonList(showPassword bool) error {
 		// Configured but the manager is unavailable (podman missing): still show them.
 		for _, name := range sortedAddonNames(cfg.Addons.Prometheus) {
 			pc := cfg.Addons.Prometheus[name]
-			hasPrometheus = true
 			fmt.Printf("  %s (name: %s)\n", "prometheus", name)
 			fmt.Printf("    Status:      n/a (%v)\n", err)
 			fmt.Printf("    URL:         http://%s:%d/\n", pc.Listen, pc.HostPort)
 			fmt.Printf("    Container:   %s\n", pc.ContainerName)
 		}
 	}
-	if !hasPrometheus {
-		fmt.Println("  (none)")
-	}
 
 	// victoriametrics (time-series database, top-level addon; Linux host network, macOS bridge)
-	fmt.Println()
-	fmt.Println("Web add-ons (victoriametrics):")
-	hasVM := false
+	section("Web add-ons (victoriametrics):", len(cfg.Addons.VictoriaMetrics) > 0)
 	if vm, err := podman.NewVictoriaMetricsManager(cfg); err == nil {
 		for _, name := range sortedAddonNames(cfg.Addons.VictoriaMetrics) {
 			vc := cfg.Addons.VictoriaMetrics[name]
-			hasVM = true
 			status := "stopped"
 			if running, err := vm.ContainerRunning(vc.ContainerName); err == nil && running {
 				status = "running"
@@ -5604,25 +5520,18 @@ func runAddonList(showPassword bool) error {
 	} else if len(cfg.Addons.VictoriaMetrics) > 0 {
 		for _, name := range sortedAddonNames(cfg.Addons.VictoriaMetrics) {
 			vc := cfg.Addons.VictoriaMetrics[name]
-			hasVM = true
 			fmt.Printf("  %s (name: %s)\n", "victoriametrics", name)
 			fmt.Printf("    Status:      n/a (%v)\n", err)
 			fmt.Printf("    URL:         http://%s:%d/\n", vc.Listen, vc.HostPort)
 			fmt.Printf("    Container:   %s\n", vc.ContainerName)
 		}
 	}
-	if !hasVM {
-		fmt.Println("  (none)")
-	}
 
 	// vmcluster (VictoriaMetrics cluster — cross-host, horizontal scaling)
-	fmt.Println()
-	fmt.Println("Cluster add-ons (vmcluster):")
-	hasVMC := false
+	section("Cluster add-ons (vmcluster):", len(cfg.Addons.VMCluster) > 0)
 	if vmc, err := podman.NewVMClusterManager(cfg); err == nil {
 		for _, name := range sortedAddonNames(cfg.Addons.VMCluster) {
 			vc := cfg.Addons.VMCluster[name]
-			hasVMC = true
 			st, _ := vmc.ClusterStatus(&vc)
 			fmt.Printf("  %s (name: %s)\n", "vmcluster", name)
 			fmt.Printf("    Status:      %s\n", st.String())
@@ -5668,24 +5577,17 @@ func runAddonList(showPassword bool) error {
 	} else if len(cfg.Addons.VMCluster) > 0 {
 		for _, name := range sortedAddonNames(cfg.Addons.VMCluster) {
 			vc := cfg.Addons.VMCluster[name]
-			hasVMC = true
 			fmt.Printf("  %s (name: %s)\n", "vmcluster", name)
 			fmt.Printf("    Status:      n/a (%v)\n", err)
 			fmt.Printf("    Roles:       %s\n", strings.Join(vc.RolesInOrder(), ", "))
 		}
 	}
-	if !hasVMC {
-		fmt.Println("  (none)")
-	}
 
 	// victorialogs (log database, top-level addon; Linux host network, macOS bridge)
-	fmt.Println()
-	fmt.Println("Web add-ons (victorialogs):")
-	hasVL := false
+	section("Web add-ons (victorialogs):", len(cfg.Addons.VictoriaLogs) > 0)
 	if vl, err := podman.NewVictoriaLogsManager(cfg); err == nil {
 		for _, name := range sortedAddonNames(cfg.Addons.VictoriaLogs) {
 			lc := cfg.Addons.VictoriaLogs[name]
-			hasVL = true
 			status := "stopped"
 			if running, err := vl.ContainerRunning(lc.ContainerName); err == nil && running {
 				status = "running"
@@ -5706,25 +5608,18 @@ func runAddonList(showPassword bool) error {
 	} else if len(cfg.Addons.VictoriaLogs) > 0 {
 		for _, name := range sortedAddonNames(cfg.Addons.VictoriaLogs) {
 			lc := cfg.Addons.VictoriaLogs[name]
-			hasVL = true
 			fmt.Printf("  %s (name: %s)\n", "victorialogs", name)
 			fmt.Printf("    Status:      n/a (%v)\n", err)
 			fmt.Printf("    URL:         http://%s:%d/\n", lc.Listen, lc.HostPort)
 			fmt.Printf("    Container:   %s\n", lc.ContainerName)
 		}
 	}
-	if !hasVL {
-		fmt.Println("  (none)")
-	}
 
 	// vlagent (log agent, top-level addon; Linux host network, macOS bridge)
-	fmt.Println()
-	fmt.Println("Log agents (vlagent):")
-	hasVA := false
+	section("Log agents (vlagent):", len(cfg.Addons.Vlagent) > 0)
 	if va, err := podman.NewVlagentManager(cfg); err == nil {
 		for _, name := range sortedAddonNames(cfg.Addons.Vlagent) {
 			vc := cfg.Addons.Vlagent[name]
-			hasVA = true
 			status := "stopped"
 			if running, err := va.ContainerRunning(vc.ContainerName); err == nil && running {
 				status = "running"
@@ -5754,25 +5649,18 @@ func runAddonList(showPassword bool) error {
 	} else if len(cfg.Addons.Vlagent) > 0 {
 		for _, name := range sortedAddonNames(cfg.Addons.Vlagent) {
 			vc := cfg.Addons.Vlagent[name]
-			hasVA = true
 			fmt.Printf("  %s (name: %s)\n", "vlagent", name)
 			fmt.Printf("    Status:      n/a (%v)\n", err)
 			fmt.Printf("    Listen:      http://%s:%d/\n", vc.Listen, vc.HostPort)
 			fmt.Printf("    Container:   %s\n", vc.ContainerName)
 		}
 	}
-	if !hasVA {
-		fmt.Println("  (none)")
-	}
 
 	// alertmanager (alert routing frontend, top-level addon; Linux host network, macOS bridge)
-	fmt.Println()
-	fmt.Println("Web add-ons (alertmanager):")
-	hasAlertmanager := false
+	section("Web add-ons (alertmanager):", len(cfg.Addons.Alertmanager) > 0)
 	if am, err := podman.NewAlertmanagerManager(cfg); err == nil {
 		for _, name := range sortedAddonNames(cfg.Addons.Alertmanager) {
 			ac := cfg.Addons.Alertmanager[name]
-			hasAlertmanager = true
 			status := "stopped"
 			if running, err := am.ContainerRunning(ac.ContainerName); err == nil && running {
 				status = "running"
@@ -5793,25 +5681,18 @@ func runAddonList(showPassword bool) error {
 		// Configured but the manager is unavailable (podman missing): still show them.
 		for _, name := range sortedAddonNames(cfg.Addons.Alertmanager) {
 			ac := cfg.Addons.Alertmanager[name]
-			hasAlertmanager = true
 			fmt.Printf("  %s (name: %s)\n", "alertmanager", name)
 			fmt.Printf("    Status:      n/a (%v)\n", err)
 			fmt.Printf("    URL:         http://%s:%d/\n", ac.Listen, ac.HostPort)
 			fmt.Printf("    Container:   %s\n", ac.ContainerName)
 		}
 	}
-	if !hasAlertmanager {
-		fmt.Println("  (none)")
-	}
 
 	// gitea (self-hosted Git service — top-level, one container, persistent data dir)
-	fmt.Println()
-	fmt.Println("Web add-ons (gitea):")
-	hasGitea := false
+	section("Web add-ons (gitea):", len(cfg.Addons.Gitea) > 0)
 	if gm, err := podman.NewGiteaManager(cfg); err == nil {
 		for _, name := range sortedAddonNames(cfg.Addons.Gitea) {
 			gc := cfg.Addons.Gitea[name]
-			hasGitea = true
 			status := "stopped"
 			if running, err := gm.ContainerRunning(gc.ContainerName); err == nil && running {
 				status = "running"
@@ -5837,27 +5718,20 @@ func runAddonList(showPassword bool) error {
 		// Configured but the manager is unavailable (podman missing): still show them.
 		for _, name := range sortedAddonNames(cfg.Addons.Gitea) {
 			gc := cfg.Addons.Gitea[name]
-			hasGitea = true
 			fmt.Printf("  %s (name: %s)\n", "gitea", name)
 			fmt.Printf("    Status:      n/a (%v)\n", err)
 			fmt.Printf("    Web URL:     http://%s:%d/\n", podman.GiteaDisplayHost(gc.Listen), gc.HostPort)
 			fmt.Printf("    Container:   %s\n", gc.ContainerName)
 		}
 	}
-	if !hasGitea {
-		fmt.Println("  (none)")
-	}
 
 	// beegfs (parallel filesystem — top-level, THREE containers per filesystem;
 	// the list unit is the cluster, so its status is the aggregate of mgmtd +
 	// meta + storage, not one container's running flag)
-	fmt.Println()
-	fmt.Println("Infra add-ons (beegfs):")
-	hasBeeGFS := false
+	section("Infra add-ons (beegfs):", len(cfg.Addons.BeeGFS) > 0)
 	if bm, err := podman.NewBeeGFSManager(cfg); err == nil {
 		for _, name := range sortedAddonNames(cfg.Addons.BeeGFS) {
 			bc := cfg.Addons.BeeGFS[name]
-			hasBeeGFS = true
 			status := "n/a"
 			if st, err := bm.ClusterStatus(&bc); err == nil {
 				status = st.String()
@@ -5893,7 +5767,6 @@ func runAddonList(showPassword bool) error {
 		// Configured but the manager is unavailable (podman missing): still show them.
 		for _, name := range sortedAddonNames(cfg.Addons.BeeGFS) {
 			bc := cfg.Addons.BeeGFS[name]
-			hasBeeGFS = true
 			containers := make([]string, 0, 3)
 			for _, role := range bc.RolesInOrder() {
 				containers = append(containers, bc.ContainerName(role))
@@ -5905,17 +5778,11 @@ func runAddonList(showPassword bool) error {
 			fmt.Printf("    Containers:  %s\n", strings.Join(containers, ", "))
 		}
 	}
-	if !hasBeeGFS {
-		fmt.Println("  (none)")
-	}
 
 	// juicefs (host-binary FUSE volume over an external S3 service)
-	fmt.Println()
-	fmt.Println("Filesystem add-ons (juicefs):")
-	hasJuicefs := false
+	section("Filesystem add-ons (juicefs):", len(cfg.Addons.Juicefs) > 0)
 	for _, name := range sortedAddonNames(cfg.Addons.Juicefs) {
 		jc := cfg.Addons.Juicefs[name]
-		hasJuicefs = true
 		state := "not mounted"
 		if isMountPoint(jc.MountPoint) {
 			state = "mounted"
@@ -5931,17 +5798,11 @@ func runAddonList(showPassword bool) error {
 			fmt.Printf("    S3 secret:   %s\n", jc.SecretKey)
 		}
 	}
-	if !hasJuicefs {
-		fmt.Println("  (none)")
-	}
 
 	// zerofs (host-binary 9P volume over an external S3 service, dual process)
-	fmt.Println()
-	fmt.Println("Filesystem add-ons (zerofs):")
-	hasZerofs := false
+	section("Filesystem add-ons (zerofs):", len(cfg.Addons.Zerofs) > 0)
 	for _, name := range sortedAddonNames(cfg.Addons.Zerofs) {
 		zc := cfg.Addons.Zerofs[name]
-		hasZerofs = true
 		srv := "stopped"
 		if hostbin.Alive(zc.ServerPidFile) {
 			srv = "running"
@@ -5961,17 +5822,11 @@ func runAddonList(showPassword bool) error {
 			fmt.Printf("    Encryption:  %s\n", zc.EncryptionPassword)
 		}
 	}
-	if !hasZerofs {
-		fmt.Println("  (none)")
-	}
 
 	// duckdb (host-binary embedded OLAP, no daemon)
-	fmt.Println()
-	fmt.Println("Analytics add-ons (duckdb):")
-	hasDuckdb := false
+	section("Analytics add-ons (duckdb):", len(cfg.Addons.Duckdb) > 0)
 	for _, name := range sortedAddonNames(cfg.Addons.Duckdb) {
 		dc := cfg.Addons.Duckdb[name]
-		hasDuckdb = true
 		state := "not found"
 		if _, err := os.Stat(dc.BinaryPath); err == nil {
 			// Try to extract version
@@ -5989,18 +5844,12 @@ func runAddonList(showPassword bool) error {
 		fmt.Printf("    Version:     %s (configured)\n", dc.Version)
 		fmt.Printf("    Data dir:    %s\n", dc.DataDir)
 	}
-	if !hasDuckdb {
-		fmt.Println("  (none)")
-	}
 
 	// nginx (HTTP reverse proxy, top-level addon; Linux + macOS)
-	fmt.Println()
-	fmt.Println("Web add-ons (nginx):")
-	hasNginx := false
+	section("Web add-ons (nginx):", len(cfg.Addons.Nginx) > 0)
 	if nm, err := podman.NewNginxManager(cfg); err == nil {
 		for _, name := range sortedAddonNames(cfg.Addons.Nginx) {
 			nc := cfg.Addons.Nginx[name]
-			hasNginx = true
 			status := "stopped"
 			if running, err := nm.ContainerRunning(nc.ContainerName); err == nil && running {
 				status = "running"
@@ -6021,15 +5870,11 @@ func runAddonList(showPassword bool) error {
 	} else if len(cfg.Addons.Nginx) > 0 {
 		for _, name := range sortedAddonNames(cfg.Addons.Nginx) {
 			nc := cfg.Addons.Nginx[name]
-			hasNginx = true
 			fmt.Printf("  %s (name: %s)\n", "nginx", name)
 			fmt.Printf("    Status:      n/a (%v)\n", err)
 			fmt.Printf("    HTTP:        http://%s:%d/\n", nc.Listen, nc.HTTPPort)
 			fmt.Printf("    Container:   %s\n", nc.ContainerName)
 		}
-	}
-	if !hasNginx {
-		fmt.Println("  (none)")
 	}
 
 	return nil
