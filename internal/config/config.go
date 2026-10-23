@@ -45,6 +45,7 @@ type Config struct {
 	GarageStartPort         int                       `yaml:"garage_start_port,omitempty"`          // starting Garage S3 API host port, default 3900 (RPC, web, admin take the next three free ports)
 	SeaweedfsStartPort      int                       `yaml:"seaweedfs_start_port,omitempty"`       // starting SeaweedFS master host port, default 8400 (volume, filer, s3 take the next three free ports; gRPC twins at +10000 are reserved)
 	VictoriaMetricsStartPort int                      `yaml:"victoriametrics_start_port,omitempty"` // starting VictoriaMetrics HTTP host port, default 8428
+	VMClusterStartPort       int                      `yaml:"vmcluster_start_port,omitempty"`       // starting VMCluster port, default 8480 (5 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP, internal insert TCP, internal select TCP)
 	Postgres                PostgresConfig            `yaml:"postgres"`
 	Podman                  PodmanConfig              `yaml:"podman"`
 	PITR                    PITRConfig                `yaml:"pitr"`
@@ -136,6 +137,7 @@ type TopAddonsConfig struct {
 	Zerofs       map[string]ZerofsConfig         `yaml:"zerofs,omitempty"`
 	Duckdb       map[string]DuckdbConfig         `yaml:"duckdb,omitempty"`
 	VictoriaMetrics map[string]VictoriaMetricsConfig `yaml:"victoriametrics,omitempty"`
+	VMCluster      map[string]VMClusterConfig       `yaml:"vmcluster,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -642,6 +644,20 @@ const DefaultAlertmanagerImageTag = "docker.io/prom/alertmanager:v0.34.1"
 // release (2026-10-19). The image runs as root, so no pre-chown of the data
 // dir is needed (unlike Prometheus's uid 65534). Keep this in sync when bumping.
 const DefaultVictoriaMetricsImageTag = "docker.io/victoriametrics/victoria-metrics:v1.154.1"
+
+// DefaultVMInsertImageTag pins the VictoriaMetrics cluster vminsert image.
+// victoriametrics/vminsert is the official image on docker.io (pull-only — pgcli
+// never builds it). The -cluster suffix is the cluster variant; without it the
+// image is the single-node binary. v1.154.1-cluster matches the single-node pin.
+const DefaultVMInsertImageTag = "docker.io/victoriametrics/vminsert:v1.154.1-cluster"
+
+// DefaultVMSelectImageTag pins the VictoriaMetrics cluster vmselect image.
+// Same release cadence as vminsert.
+const DefaultVMSelectImageTag = "docker.io/victoriametrics/vmselect:v1.154.1-cluster"
+
+// DefaultVMStorageImageTag pins the VictoriaMetrics cluster vmstorage image.
+// Same release cadence as the single-node image.
+const DefaultVMStorageImageTag = "docker.io/victoriametrics/vmstorage:v1.154.1-cluster"
 
 // DefaultGiteaImageTag pins the Gitea image. gitea/gitea is the official
 // multi-arch image on docker.io (pull-only — pgcli never builds it). Note the
@@ -1735,6 +1751,133 @@ type VictoriaMetricsConfig struct {
 	Autostart bool `yaml:"autostart,omitempty"`
 }
 
+// VMClusterStorageNode is one vmstorage address that vminsert/vmselect dial.
+// Address is host:port for the insert protocol (e.g. "10.241.20.147:8483");
+// SelectPort is the select protocol port on the same host (e.g. 8484).
+type VMClusterStorageNode struct {
+	Address    string `yaml:"address"`     // host:insertInternalPort
+	SelectPort int    `yaml:"select_port"` // selectInternalPort on the same host
+}
+
+// VMClusterConfig holds a VictoriaMetrics cluster addon — three components
+// (vminsert, vmselect, vmstorage) each running as a separate container.
+// Unlike the single-node victoriametrics addon (one container, one port, one
+// image), vmcluster manages up to three containers with three separate images
+// and five ports (3 HTTP + 2 internal TCP for inter-component communication).
+//
+// Topology:
+//   - Converged single-host (default): all three components on one host using
+//     host networking. Analogous to BeeGFS v1.
+//   - Cross-host (v1): --roles selects which components THIS host runs;
+//     --storage-node lists ALL vmstorage addresses in the cluster for sharding
+//     and replication. Each host runs its own `pg addon install vmcluster`.
+//
+// Like the single-node VictoriaMetrics, all three images run as root, so no
+// pre-chown of the data dir is needed. Only vmstorage has persistent data;
+// vminsert and vmselect are stateless.
+type VMClusterConfig struct {
+	Name            string `yaml:"name,omitempty"`
+	ContainerPrefix string `yaml:"container_prefix,omitempty"` // pgcli-vmcluster<ns>-<name>
+
+	InsertImageTag  string `yaml:"insert_image_tag,omitempty"`
+	SelectImageTag  string `yaml:"select_image_tag,omitempty"`
+	StorageImageTag string `yaml:"storage_image_tag,omitempty"`
+
+	Listen string `yaml:"listen,omitempty"` // default 0.0.0.0
+
+	// HTTP ports (pool-allocated, 5 consecutive from vmcluster_start_port)
+	InsertPort         int `yaml:"insert_port,omitempty"`          // vminsert HTTP
+	SelectPort         int `yaml:"select_port,omitempty"`          // vmselect HTTP
+	StoragePort        int `yaml:"storage_port,omitempty"`         // vmstorage HTTP
+	InternalInsertPort int `yaml:"internal_insert_port,omitempty"` // vmstorage TCP (vminsert protocol)
+	InternalSelectPort int `yaml:"internal_select_port,omitempty"` // vmstorage TCP (vmselect protocol)
+
+	// Roles is the subset of {insert,select,storage} THIS host runs.
+	// Empty = all three (converged single-host cluster).
+	Roles []string `yaml:"roles,omitempty"`
+
+	// StorageNodes lists ALL vmstorage addresses in the cluster.
+	// vminsert and vmselect use this to build -storageNode flags.
+	// Empty on a converged host → auto-derived as 127.0.0.1:<internalPorts>.
+	StorageNodes []VMClusterStorageNode `yaml:"storage_nodes,omitempty"`
+
+	// StorageDataDir: only used when this host runs the storage role.
+	StorageDataDir string `yaml:"storage_data_dir,omitempty"`
+	Retention      string `yaml:"retention,omitempty"`
+	ReplicationFactor int `yaml:"replication_factor,omitempty"` // vminsert flag
+
+	InsertExtraArgs  []string `yaml:"insert_extra_args,omitempty"`
+	SelectExtraArgs  []string `yaml:"select_extra_args,omitempty"`
+	StorageExtraArgs []string `yaml:"storage_extra_args,omitempty"`
+
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// ContainerName returns one component's container name: the shared prefix plus
+// the role suffix (pgcli-vmcluster<ns>-<name>-{insert,select,storage}).
+func (v *VMClusterConfig) ContainerName(role string) string {
+	return v.ContainerPrefix + "-" + role
+}
+
+// RolesInOrder returns the components this host runs, in startup dependency
+// order (storage → insert → select). An empty Roles (converged) yields all
+// three; otherwise the stored Roles filtered to the known set and reordered.
+func (v *VMClusterConfig) RolesInOrder() []string {
+	return orderVMClusterRoles(v.Roles)
+}
+
+// RunsRole reports whether this host runs the given component role.
+func (v *VMClusterConfig) RunsRole(role string) bool {
+	return slices.Contains(v.RolesInOrder(), role)
+}
+
+// EffectiveStorageNodes returns the explicit StorageNodes or auto-derives a
+// single-node entry for converged deployments (127.0.0.1:<internalPorts>).
+func (v *VMClusterConfig) EffectiveStorageNodes() []VMClusterStorageNode {
+	if len(v.StorageNodes) > 0 {
+		return v.StorageNodes
+	}
+	host := v.Listen
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return []VMClusterStorageNode{{
+		Address:    fmt.Sprintf("%s:%d", host, v.InternalInsertPort),
+		SelectPort: v.InternalSelectPort,
+	}}
+}
+
+// VMCluster component roles, mirrored in the CLI flag help. These live in
+// config so both config normalisation and the podman manager share one source.
+const (
+	VMClusterRoleInsert  = "insert"
+	VMClusterRoleSelect  = "select"
+	VMClusterRoleStorage = "storage"
+)
+
+// allVMClusterRoles is the canonical startup order a full cluster uses:
+// storage first (insert/select need it), then insert, then select.
+var allVMClusterRoles = []string{VMClusterRoleStorage, VMClusterRoleInsert, VMClusterRoleSelect}
+
+// orderVMClusterRoles dedupes roles and returns them in canonical order,
+// dropping nothing unknown (validation rejects those separately).
+func orderVMClusterRoles(roles []string) []string {
+	if len(roles) == 0 {
+		return allVMClusterRoles
+	}
+	set := make(map[string]bool, len(roles))
+	for _, r := range roles {
+		set[r] = true
+	}
+	out := make([]string, 0, len(set))
+	for _, s := range allVMClusterRoles {
+		if set[s] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // AlertmanagerConfig holds a standalone Alertmanager addon — the alert
 // dedup/grouping/routing frontend of the Prometheus stack
 // (https://prometheus.io/docs/alerting/latest/alertmanager/). Shape mirrors
@@ -2098,6 +2241,7 @@ func Default() *Config {
 		GarageStartPort:         3900,
 		SeaweedfsStartPort:      8400,
 		VictoriaMetricsStartPort: 8428,
+		VMClusterStartPort:       8480,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -2308,6 +2452,7 @@ type displayConfig struct {
 	GarageStartPort         int                       `yaml:"garage_start_port,omitempty"`
 	SeaweedfsStartPort      int                       `yaml:"seaweedfs_start_port,omitempty"`
 	VictoriaMetricsStartPort int                      `yaml:"victoriametrics_start_port,omitempty"`
+	VMClusterStartPort       int                      `yaml:"vmcluster_start_port,omitempty"`
 	Logging                 LoggingConfig             `yaml:"logging"`
 	Backup                  BackupConfig              `yaml:"backup"`
 	Pigsty                  PigstyConfig              `yaml:"pigsty"`
@@ -2342,6 +2487,8 @@ func (c *Config) Display() displayConfig {
 		NginxStartPort:          c.NginxStartPort,
 		GarageStartPort:         c.GarageStartPort,
 		SeaweedfsStartPort:      c.SeaweedfsStartPort,
+		VictoriaMetricsStartPort: c.VictoriaMetricsStartPort,
+		VMClusterStartPort:      c.VMClusterStartPort,
 		Logging:                 c.Logging,
 		Backup:                  c.Backup,
 		Pigsty:                  c.Pigsty,
@@ -2579,6 +2726,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.VictoriaMetricsStartPort == 0 {
 		c.VictoriaMetricsStartPort = d.VictoriaMetricsStartPort
+	}
+	if c.VMClusterStartPort == 0 {
+		c.VMClusterStartPort = d.VMClusterStartPort
 	}
 
 	// Postgres
@@ -3310,6 +3460,42 @@ func (c *Config) ApplyDefaults() {
 			addon.NodeID = 1
 		}
 		c.Addons.BeeGFS[name] = addon
+	}
+
+	// Top-level addons defaults (VMCluster — VictoriaMetrics cluster edition).
+	// Three images (vminsert / vmselect / vmstorage), five ports per instance
+	// (3 HTTP + 2 internal TCP), host-network only on Linux. Same shape as
+	// BeeGFS above: Listen defaults to 0.0.0.0, Roles ordered storage → insert
+	// → select (startup dependency order), ReplicationFactor defaults to 1.
+	// StorageNodes is deliberately NOT defaulted here — the CLI handler or
+	// EffectiveStorageNodes() derives it at use time.
+	for name, addon := range c.Addons.VMCluster {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerPrefix == "" {
+			addon.ContainerPrefix = "pgcli-vmcluster" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.InsertImageTag == "" {
+			addon.InsertImageTag = DefaultVMInsertImageTag
+		}
+		if addon.SelectImageTag == "" {
+			addon.SelectImageTag = DefaultVMSelectImageTag
+		}
+		if addon.StorageImageTag == "" {
+			addon.StorageImageTag = DefaultVMStorageImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "0.0.0.0"
+		}
+		if addon.ReplicationFactor == 0 {
+			addon.ReplicationFactor = 1
+		}
+		if addon.Retention == "" {
+			addon.Retention = "1"
+		}
+		addon.Roles = orderVMClusterRoles(addon.Roles)
+		c.Addons.VMCluster[name] = addon
 	}
 
 	// Top-level addons defaults (JuiceFS). These are host binaries, so the
@@ -4166,6 +4352,75 @@ func (c *Config) autoAssignPorts() {
 				next = addon.HostPort + 1
 			}
 			c.Addons.Alertmanager[name] = addon
+		}
+	}
+
+	// Allocate ports for VMCluster addons from their own pool
+	// (vmcluster_start_port, default 8480 — VictoriaMetrics cluster's
+	// conventional insert HTTP port). Each instance gets 5 consecutive ports:
+	//   +0  InsertPort         (vminsert HTTP — ingestion endpoint)
+	//   +1  SelectPort         (vmselect HTTP — query endpoint)
+	//   +2  StoragePort        (vmstorage HTTP — admin/metrics endpoint)
+	//   +3  InternalInsertPort (vmstorage TCP — vminsert dials this)
+	//   +4  InternalSelectPort (vmstorage TCP — vmselect dials this)
+	// 5 consecutive ports per instance, same shape as BeeGFS's 4-port block.
+	// The consecutive allocation matters because --storage-node references
+	// the internal TCP ports explicitly, so the block must stay together.
+	// 8480 shares no number with VictoriaMetrics (8428), Prometheus (9090),
+	// Grafana (3000), pgAdmin (5050), or nginx (8080).
+	{
+		vmcBase := c.VMClusterStartPort
+		assignedVMC := map[int]bool{}
+		for _, addon := range c.Addons.VMCluster {
+			for _, p := range []int{addon.InsertPort, addon.SelectPort, addon.StoragePort,
+				addon.InternalInsertPort, addon.InternalSelectPort} {
+				if p != 0 {
+					assignedVMC[p] = true
+				}
+			}
+		}
+		next := vmcBase
+		nextFreeVMC := func() int {
+			// Find 5 consecutive free ports.
+			candidate := next
+			for {
+				ok := true
+				for i := range 5 {
+					if (usedPorts != nil && usedPorts[candidate+i]) || assignedVMC[candidate+i] {
+						ok = false
+						candidate = candidate + i + 1
+						break
+					}
+				}
+				if ok {
+					break
+				}
+			}
+			p := candidate
+			for i := range 5 {
+				assignedVMC[p+i] = true
+			}
+			next = p + 5
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.VMCluster))
+		for name := range c.Addons.VMCluster {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.VMCluster[name]
+			if addon.InsertPort == 0 && vmcBase > 0 {
+				base := nextFreeVMC()
+				addon.InsertPort = base
+				addon.SelectPort = base + 1
+				addon.StoragePort = base + 2
+				addon.InternalInsertPort = base + 3
+				addon.InternalSelectPort = base + 4
+			} else if addon.InsertPort >= next {
+				next = addon.InsertPort + 5
+			}
+			c.Addons.VMCluster[name] = addon
 		}
 	}
 

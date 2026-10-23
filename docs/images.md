@@ -38,6 +38,9 @@ pgcli 使用的容器镜像及其默认 tag。
 | `ghcr.io/thinkparq/beegfs-meta` | `8.4.0` | BeeGFS 元数据服务（三容器之二），固定监听 8005 | 同上 |
 | `ghcr.io/thinkparq/beegfs-storage` | `8.4.0` | BeeGFS 数据目标（三容器之三），固定监听 8003 | 同上 |
 | `docker.io/victoriametrics/victoria-metrics` | `v1.154.1` | VictoriaMetrics（高性能 Prometheus 兼容时序数据库），纯上游官方镜像无 wrapper；单架构 amd64，以 root 运行 | `DefaultVictoriaMetricsImageTag` |
+| `docker.io/victoriametrics/vminsert` | `v1.154.1-cluster` | VMCluster 摄入端（集群版三组件之一），纯上游官方镜像无 wrapper；单架构 amd64，以 root 运行 | `DefaultVMInsertImageTag` |
+| `docker.io/victoriametrics/vmselect` | `v1.154.1-cluster` | VMCluster 查询端（集群版三组件之二），纯上游官方镜像无 wrapper；单架构 amd64，以 root 运行 | `DefaultVMSelectImageTag` |
+| `docker.io/victoriametrics/vmstorage` | `v1.154.1-cluster` | VMCluster 数据存储（集群版三组件之三），纯上游官方镜像无 wrapper；单架构 amd64，以 root 运行 | `DefaultVMStorageImageTag` |
 
 ## 镜像导出
 
@@ -129,6 +132,13 @@ done
 podman pull --platform linux/amd64 docker.io/victoriametrics/victoria-metrics:v1.154.1
 podman save -o "$TARGET/victoriametrics_v1.154.1.tar" \
   docker.io/victoriametrics/victoria-metrics:v1.154.1
+
+# vmcluster 三个集群版镜像（单架构 amd64，root 运行），直接 save
+for svc in vminsert vmselect vmstorage; do
+  podman pull --platform linux/amd64 docker.io/victoriametrics/${svc}:v1.154.1-cluster
+  podman save -o "$TARGET/${svc}_v1.154.1-cluster.tar" \
+    docker.io/victoriametrics/${svc}:v1.154.1-cluster
+done
 ```
 
 ### rustfs（双架构 manifest 不能直接 save）
@@ -261,11 +271,20 @@ done
   配置文件**——一切都作为镜像名之后的 CLI flag 传入（`-storageDataPath` /
   `-httpListenAddr` / `-retentionPeriod` / `--extra-arg` 自定义 flags），故
   没有 SIGHUP reload，所有变更需重建容器
+- **vmcluster**：纯上游官方 `docker.io/victoriametrics/{vminsert,vmselect,vmstorage}`，
+  无 wrapper，三个镜像共用版本 pin `v1.154.1-cluster`（`-cluster` 后缀区分于单机版）。
+  与单机版相同的运维形态：以 **root** 运行（宿主数据目录无需预 chown）、**完全不需要
+  配置文件**（一切经 CLI flag）、**完全没有鉴权**。三个组件各跑一个容器——vminsert
+  （摄入端，按 metric hash 分片写入所有 vmstorage）、vmselect（查询端，从所有
+  vmstorage 合并结果）、vmstorage（数据存储，可多节点分片+副本）。只有 vmstorage 有
+  持久数据目录；vminsert/vmselect 是 stateless。支持跨主机部署（`--roles` 选组件子集、
+  `--storage-node` 列出所有 vmstorage 地址）和水平扩展（多 vmstorage 节点做数据分片，
+  `--replication-factor` 做写入副本）
 - **pgbouncer** / **postgrest** / **haproxy** / **etcd** / **pgdog**：上游官方或社区维护的稳定版本
 
 ---
 
-**最后更新**：2026-10-22（新增 victoriametrics 镜像；此前补录 juicefs / zerofs 宿主二进制的无镜像说明；
+**最后更新**：2026-10-22（新增 vmcluster 三镜像；此前新增 victoriametrics 镜像；
 此前新增 beegfs 三镜像于 2026-10-19，gitea 于 2026-10-16
 合入时补录，alertmanager 于 2026-10-15
 合入时补录，grafana 与 prometheus 于 2026-10-14 合入时补录，再往前 garage 与

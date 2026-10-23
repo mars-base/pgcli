@@ -220,7 +220,11 @@ IMAGES := \
 	docker.io/gitea/gitea:28.1.0 \
 	ghcr.io/thinkparq/beegfs-mgmtd:8.4.0 \
 	ghcr.io/thinkparq/beegfs-meta:8.4.0 \
-	ghcr.io/thinkparq/beegfs-storage:8.4.0
+	ghcr.io/thinkparq/beegfs-storage:8.4.0 \
+	docker.io/victoriametrics/victoria-metrics:v1.154.1 \
+	docker.io/victoriametrics/vminsert:v1.154.1-cluster \
+	docker.io/victoriametrics/vmselect:v1.154.1-cluster \
+	docker.io/victoriametrics/vmstorage:v1.154.1-cluster
 
 container-images-export:
 	@mkdir -p images

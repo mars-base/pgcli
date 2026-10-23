@@ -328,6 +328,7 @@ Currently supported add-ons:
   grafana     Grafana — the open-source observability dashboard (single container from docker.io/grafana; web login auto-generated; defaults to 0.0.0.0 since a dashboard is meant to be viewed remotely; Linux host network, macOS bridge)
   prometheus  Prometheus — the metrics collection backend Grafana reads from (single container from docker.io/prom/prometheus; rendered prometheus.yml or --conf-file, --scrape targets, --alertmanager-url to forward alerts + watch Alertmanager, --rule-file to load alerting rules, SIGHUP reload; NO web login — defaults to 0.0.0.0 guarded only by the network, use --listen 127.0.0.1 for loopback; Linux host network, macOS bridge)
   victoriametrics VictoriaMetrics — fast, Prometheus-compatible time-series database (single container from docker.io/victoriametrics/victoria-metrics; pure CLI flags, no config file; --retention-months for data retention, --extra-arg for custom flags like -search.maxUniqueTimeseries; NO web login — defaults to 0.0.0.0 guarded only by the network, use --listen 127.0.0.1 for loopback; Linux host network, macOS bridge)
+  vmcluster   VMCluster — VictoriaMetrics cluster edition: 3 components (vminsert + vmselect + vmstorage) from docker.io/victoriametrics/{vminsert,vmselect,vmstorage}:v1.154.1-cluster; --roles selects which components THIS host runs (default: all three = converged single-host cluster); --storage-node lists ALL vmstorage addresses (repeatable, enables multi-node sharding + replication); pure CLI flags, no config file; 5 ports from vmcluster_start_port (default 8480-8484); NO auth — defaults to 0.0.0.0, use --listen 127.0.0.1 for loopback; Linux host network only
   alertmanager Alertmanager — the alert dedup/grouping/routing frontend of the Prometheus stack (single container from docker.io/prom/alertmanager; rendered alertmanager.yml with a no-op or --webhook-url web.hook receiver, or --conf-file; SIGHUP reload; cluster gossip disabled; NO web login — defaults to 0.0.0.0 guarded only by the network, and silences are dangerous, use --listen 127.0.0.1 for loopback; wired to Prometheus from the Prometheus side via --alertmanager-url; Linux host network, macOS bridge)
   gitea       Gitea — the self-hosted Git service (single container from docker.io/gitea/gitea; web login auto-generated and created via "gitea admin user create"; optional --ssh-port for clone/push over SSH; SQLite by default or --dsn to put its metadata in a PostgreSQL you already run; defaults to 0.0.0.0 since a Git host is reached from other machines; Linux host network, macOS bridge)
   beegfs      BeeGFS — the scale-out parallel filesystem (mgmtd/meta/storage services from ghcr.io/thinkparq/beegfs — brought up in dependency order by one install; by default all three on this host = a converged single-host filesystem, --roles scopes it to a subset and a --roles-without-mgmtd host joins an existing cluster via --mgmtd-host/--node-id/--password — every host runs its own pgcli, pgcli never SSHes; --storage-target repeats for multiple disks/targets; fixed protocol ports 8008/8010/8005/8003, meta/storage cannot move so one filesystem per host; shared conn-auth secret (generated on the mgmtd host), mgmtd TLS disabled; an unlicensed build caps client mounts at five — pgcli never generates a license but CARRIES a ThinkParQ PEM via --license-file / "pg addon beegfs license" (mgmtd-only); the kernel-module client is never installed — "pg addon beegfs mount-hint" prints its config, "join-hint" the per-host join commands; Linux host network only)
@@ -1133,6 +1134,20 @@ func init() {
 	addonInstallCmd.Flags().String("retention-months", "", "VictoriaMetrics data retention in months (default \"1\"); e.g. 3 = 3 months")
 	addonInstallCmd.Flags().StringArray("extra-arg", nil, "VictoriaMetrics: extra CLI flag passed to the binary (repeatable), e.g. --extra-arg -search.maxUniqueTimeseries=1000000 — appended last so last-wins overrides earlier flags")
 
+	// vmcluster flags (VictoriaMetrics cluster — cross-host, horizontal scaling)
+	addonInstallCmd.Flags().StringArray("storage-node", nil, "VMCluster: vmstorage address (repeatable; format host:insertPort:selectPort, e.g. 10.0.0.1:8483:8484). Lists ALL vmstorage nodes in the cluster for sharding/replication. Omit for converged single-host (auto-derived)")
+	addonInstallCmd.Flags().Int("insert-port", 0, "VMCluster: vminsert HTTP port")
+	addonInstallCmd.Flags().Int("select-port", 0, "VMCluster: vmselect HTTP port")
+	addonInstallCmd.Flags().Int("storage-port", 0, "VMCluster: vmstorage HTTP port")
+	addonInstallCmd.Flags().Int("internal-insert-port", 0, "VMCluster: vmstorage TCP port for vminsert protocol")
+	addonInstallCmd.Flags().Int("internal-select-port", 0, "VMCluster: vmstorage TCP port for vmselect protocol")
+	addonInstallCmd.Flags().String("insert-image", "", "VMCluster: vminsert image override")
+	addonInstallCmd.Flags().String("select-image", "", "VMCluster: vmselect image override")
+	addonInstallCmd.Flags().String("storage-image", "", "VMCluster: vmstorage image override")
+	addonInstallCmd.Flags().StringArray("insert-extra-arg", nil, "VMCluster: extra CLI flag for vminsert (repeatable)")
+	addonInstallCmd.Flags().StringArray("select-extra-arg", nil, "VMCluster: extra CLI flag for vmselect (repeatable)")
+	addonInstallCmd.Flags().StringArray("storage-extra-arg", nil, "VMCluster: extra CLI flag for vmstorage (repeatable)")
+
 	// minio flags (top-level single-node S3-compatible object storage)
 	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo/rustfs S3 API host port (0=auto-assign from the shared minio_start_port pool); for garage, the S3 API port (0=auto from garage_start_port, default 3900 — garage takes four consecutive ports API/RPC/Web/Admin)")
 	addonInstallCmd.Flags().Int("console-port", 0, "MinIO/silo/rustfs web console host port (0=auto-assign, next free port)")
@@ -1225,6 +1240,8 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallPrometheus(cmd)
 	case "victoriametrics":
 		return runAddonInstallVictoriaMetrics(cmd)
+	case "vmcluster":
+		return runAddonInstallVMCluster(cmd)
 	case "alertmanager":
 		return runAddonInstallAlertmanager(cmd)
 	case "gitea":
@@ -1242,7 +1259,7 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -5553,6 +5570,69 @@ func runAddonList(showPassword bool) error {
 		fmt.Println("  (none)")
 	}
 
+	// vmcluster (VictoriaMetrics cluster — cross-host, horizontal scaling)
+	fmt.Println()
+	fmt.Println("Cluster add-ons (vmcluster):")
+	hasVMC := false
+	if vmc, err := podman.NewVMClusterManager(cfg); err == nil {
+		for _, name := range sortedAddonNames(cfg.Addons.VMCluster) {
+			vc := cfg.Addons.VMCluster[name]
+			hasVMC = true
+			st, _ := vmc.ClusterStatus(&vc)
+			fmt.Printf("  %s (name: %s)\n", "vmcluster", name)
+			fmt.Printf("    Status:      %s\n", st.String())
+			fmt.Printf("    Roles:       %s\n", strings.Join(vc.RolesInOrder(), ", "))
+			if vc.RunsRole(config.VMClusterRoleInsert) {
+				fmt.Printf("    Insert URL:  http://%s:%d/\n", vc.Listen, vc.InsertPort)
+			}
+			if vc.RunsRole(config.VMClusterRoleSelect) {
+				fmt.Printf("    Select URL:  http://%s:%d/\n", vc.Listen, vc.SelectPort)
+			}
+			if vc.RunsRole(config.VMClusterRoleStorage) {
+				fmt.Printf("    Storage URL: http://%s:%d/\n", vc.Listen, vc.StoragePort)
+				fmt.Printf("    Internal:    TCP %d (insert), %d (select)\n", vc.InternalInsertPort, vc.InternalSelectPort)
+				fmt.Printf("    Retention:   %s month(s)\n", vc.Retention)
+				fmt.Printf("    Data:        %s\n", vmc.DataDir(&vc))
+				fmt.Printf("    Image:       %s\n", vc.StorageImageTag)
+			}
+			if vc.RunsRole(config.VMClusterRoleInsert) && !vc.RunsRole(config.VMClusterRoleStorage) {
+				fmt.Printf("    Image:       %s\n", vc.InsertImageTag)
+			}
+			if vc.RunsRole(config.VMClusterRoleSelect) && !vc.RunsRole(config.VMClusterRoleStorage) && !vc.RunsRole(config.VMClusterRoleInsert) {
+				fmt.Printf("    Image:       %s\n", vc.SelectImageTag)
+			}
+			// Containers.
+			for _, role := range vc.RolesInOrder() {
+				fmt.Printf("    Container:   %s (%s)\n", vc.ContainerName(role), role)
+			}
+			// Storage nodes.
+			nodes := vc.EffectiveStorageNodes()
+			if len(nodes) > 0 {
+				fmt.Print("    Storage nodes: ")
+				for i, sn := range nodes {
+					if i > 0 {
+						fmt.Print(", ")
+					}
+					host := strings.Split(sn.Address, ":")[0]
+					insertPort := strings.Split(sn.Address, ":")[1]
+					fmt.Printf("%s:%s:%d", host, insertPort, sn.SelectPort)
+				}
+				fmt.Println()
+			}
+		}
+	} else if len(cfg.Addons.VMCluster) > 0 {
+		for _, name := range sortedAddonNames(cfg.Addons.VMCluster) {
+			vc := cfg.Addons.VMCluster[name]
+			hasVMC = true
+			fmt.Printf("  %s (name: %s)\n", "vmcluster", name)
+			fmt.Printf("    Status:      n/a (%v)\n", err)
+			fmt.Printf("    Roles:       %s\n", strings.Join(vc.RolesInOrder(), ", "))
+		}
+	}
+	if !hasVMC {
+		fmt.Println("  (none)")
+	}
+
 	// alertmanager (alert routing frontend, top-level addon; Linux host network, macOS bridge)
 	fmt.Println()
 	fmt.Println("Web add-ons (alertmanager):")
@@ -6004,6 +6084,8 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemovePrometheus(cmd)
 	case "victoriametrics":
 		return runAddonRemoveVictoriaMetrics(cmd)
+	case "vmcluster":
+		return runAddonRemoveVMCluster(cmd)
 	case "alertmanager":
 		return runAddonRemoveAlertmanager(cmd)
 	case "gitea":
@@ -6021,7 +6103,7 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -6330,6 +6412,8 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartPrometheus(cmd)
 	case "victoriametrics":
 		return runAddonStartVictoriaMetrics(cmd)
+	case "vmcluster":
+		return runAddonStartVMCluster(cmd)
 	case "alertmanager":
 		return runAddonStartAlertmanager(cmd)
 	case "gitea":
@@ -6347,7 +6431,7 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		fmt.Println("Run 'pg addon duckdb shell' to launch an interactive session.")
 		return nil
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
 	}
 }
 
@@ -6385,6 +6469,8 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopPrometheus(cmd)
 	case "victoriametrics":
 		return runAddonStopVictoriaMetrics(cmd)
+	case "vmcluster":
+		return runAddonStopVMCluster(cmd)
 	case "alertmanager":
 		return runAddonStopAlertmanager(cmd)
 	case "gitea":
@@ -6401,7 +6487,7 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		fmt.Println("DuckDB is a CLI tool, not a daemon — start/stop are not applicable.")
 		return nil
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb)", addonName)
 	}
 }
 
