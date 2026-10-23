@@ -25,7 +25,7 @@ func init() {
 		c.Flags().Bool("postgrest", false, "select the PostgREST addon (use with -i for a local one, --pg-name for a remote one)")
 		c.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST (top-level addons)")
 		c.Flags().Bool("etcd", false, "select an etcd member (top-level addons)")
-		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, juicefs, zerofs or nginx instance, or Patroni member")
+		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, victoriametrics, vmcluster, victorialogs or vlagent instance, gitea, beegfs, juicefs, zerofs or nginx instance, or Patroni member")
 		c.Flags().Bool("pgdog", false, "select a PgDog proxy (top-level addons)")
 		c.Flags().Bool("ha", false, "select Patroni HA members (top-level addons; requires --scope)")
 		c.Flags().Bool("haproxy", false, "select an HAProxy instance (top-level addons)")
@@ -40,6 +40,10 @@ func init() {
 		c.Flags().Bool("grafana", false, "select a Grafana instance (top-level addons)")
 		c.Flags().Bool("prometheus", false, "select a Prometheus instance (top-level addons)")
 		c.Flags().Bool("alertmanager", false, "select an Alertmanager instance (top-level addons)")
+		c.Flags().Bool("victoriametrics", false, "select a VictoriaMetrics instance (top-level addons)")
+		c.Flags().Bool("vmcluster", false, "select a VMCluster instance (top-level addons)")
+		c.Flags().Bool("victorialogs", false, "select a VictoriaLogs instance (top-level addons)")
+		c.Flags().Bool("vlagent", false, "select a vlagent instance (top-level addons)")
 		c.Flags().Bool("gitea", false, "select a Gitea instance (top-level addons)")
 		c.Flags().Bool("beegfs", false, "select a BeeGFS filesystem (top-level addons; autostart starts the whole 3-container cluster)")
 		c.Flags().Bool("juicefs", false, "select a JuiceFS volume (top-level host-binary addons; autostart re-mounts it)")
@@ -62,7 +66,7 @@ Use 'pg autostart disable' to opt out.`,
 
 var autostartEnableCmd = &cobra.Command{
 	Use:   "enable",
-	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/beegfs/juicefs/zerofs instance, or a Patroni member",
+	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/victoriametrics/vmcluster/victorialogs/vlagent/gitea/beegfs/juicefs/zerofs instance, or a Patroni member",
 	Long: `Enable auto-start on boot for exactly one target:
 
   pg autostart enable -i myinst          # instance
@@ -85,6 +89,10 @@ var autostartEnableCmd = &cobra.Command{
   pg autostart enable --grafana --name ui            # Grafana (default name "grafana")
   pg autostart enable --prometheus --name p1         # Prometheus (default name "prometheus")
   pg autostart enable --alertmanager --name am1      # Alertmanager (default name "alertmanager")
+  pg autostart enable --victoriametrics --name vm1   # VictoriaMetrics (default name "victoriametrics")
+  pg autostart enable --vmcluster --name vmc         # VMCluster — starts this host's role containers (default name "vmcluster")
+  pg autostart enable --victorialogs --name vl        # VictoriaLogs (default name "victorialogs")
+  pg autostart enable --vlagent --name va             # vlagent (default name "vlagent")
   pg autostart enable --gitea --name git1            # Gitea (default name "gitea")
   pg autostart enable --beegfs --name fs1            # BeeGFS filesystem — starts the whole mgmtd+meta+storage cluster (default name "beegfs")
   pg autostart enable --juicefs --name vol1          # JuiceFS volume — remounts it (default name "juicefs")
@@ -138,6 +146,22 @@ alertmanager), reading the managed alertmanager.yml already on disk. Its state d
 was pre-chowned to the image's uid/gid 65534 (nobody) at install time (the image
 does no ownership work), so a boot-time start needs no special host privileges;
 silences and notification state persist in the data dir.
+VictoriaMetrics autostart likewise only starts the existing container (pg addon
+install victoriametrics), reading the flags already in the config. The image runs
+as root, so a boot-time start needs no special host privileges; the TSDB data dir
+persists across reboots.
+VMCluster autostart brings THIS host's role containers up in dependency order
+(storage → insert → select, pg addon install vmcluster first) and never
+re-creates running services — boot must be quick. Each host starts only the
+roles it runs; remote vmstorage peers are the operator's reachability concern.
+VictoriaLogs autostart likewise only starts the existing container (pg addon
+install victorialogs), reading the flags already in the config. The image runs
+as root, so a boot-time start needs no special host privileges; the log data dir
+persists across reboots.
+vlagent autostart likewise only starts the existing container (pg addon install
+vlagent), reading the flags already in the config. It starts after VictoriaLogs
+in the boot sequence so its remote-write target is listening first; the file
+checkpoints and remote-write buffers persist in the data dir.
 Gitea autostart likewise only starts the existing container (pg addon install
 gitea), reading the app.ini already rendered into its /data volume. The data dir
 was pre-chowned to the image's git user uid/gid 1000 at install time (the image
@@ -237,6 +261,10 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	grafanaSel, _ := cmd.Flags().GetBool("grafana")
 	prometheusSel, _ := cmd.Flags().GetBool("prometheus")
 	alertmanagerSel, _ := cmd.Flags().GetBool("alertmanager")
+	victoriaMetricsSel, _ := cmd.Flags().GetBool("victoriametrics")
+	vmclusterSel, _ := cmd.Flags().GetBool("vmcluster")
+	victoriaLogsSel, _ := cmd.Flags().GetBool("victorialogs")
+	vlagentSel, _ := cmd.Flags().GetBool("vlagent")
 	giteaSel, _ := cmd.Flags().GetBool("gitea")
 	beegfsSel, _ := cmd.Flags().GetBool("beegfs")
 	nginxSel, _ := cmd.Flags().GetBool("nginx")
@@ -306,6 +334,18 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	if alertmanagerSel {
 		sel++
 	}
+	if victoriaMetricsSel {
+		sel++
+	}
+	if vmclusterSel {
+		sel++
+	}
+	if victoriaLogsSel {
+		sel++
+	}
+	if vlagentSel {
+		sel++
+	}
 	if giteaSel {
 		sel++
 	}
@@ -322,13 +362,13 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		sel++
 	}
 	if sel != 1 {
-		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --gitea, --beegfs, --juicefs, --zerofs, or --nginx")
+		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --vmcluster, --victorialogs, --vlagent, --gitea, --beegfs, --juicefs, --zerofs, or --nginx")
 	}
 	if pgName != "" && !pgbSel && !prSel {
 		return fmt.Errorf("--pg-name requires --pgbouncer or --postgrest")
 	}
-	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !garageSel && !seaweedfsSel && !redisSel && !predixySel && !pgadminSel && !grafanaSel && !prometheusSel && !alertmanagerSel && !giteaSel && !beegfsSel && !juicefsSel && !zerofsSel && !nginxSel {
-		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --gitea, --beegfs, --juicefs, --zerofs, or --nginx")
+	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !garageSel && !seaweedfsSel && !redisSel && !predixySel && !pgadminSel && !grafanaSel && !prometheusSel && !alertmanagerSel && !victoriaMetricsSel && !vmclusterSel && !victoriaLogsSel && !vlagentSel && !giteaSel && !beegfsSel && !juicefsSel && !zerofsSel && !nginxSel {
+		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --vmcluster, --victorialogs, --vlagent, --gitea, --beegfs, --juicefs, --zerofs, or --nginx")
 	}
 	if scope != "" && !haSel {
 		return fmt.Errorf("--scope requires --ha")
@@ -486,6 +526,54 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		amc.Autostart = enable
 		cfg.Addons.Alertmanager[proxyName] = amc
 		targetDesc = fmt.Sprintf("alertmanager instance %q", proxyName)
+	case victoriaMetricsSel:
+		proxyName := addonName
+		if proxyName == "" {
+			proxyName = "victoriametrics"
+		}
+		vc, ok := cfg.Addons.VictoriaMetrics[proxyName]
+		if !ok {
+			return fmt.Errorf("victoriametrics instance %q not found in config", proxyName)
+		}
+		vc.Autostart = enable
+		cfg.Addons.VictoriaMetrics[proxyName] = vc
+		targetDesc = fmt.Sprintf("victoriametrics instance %q", proxyName)
+	case vmclusterSel:
+		proxyName := addonName
+		if proxyName == "" {
+			proxyName = "vmcluster"
+		}
+		vc, ok := cfg.Addons.VMCluster[proxyName]
+		if !ok {
+			return fmt.Errorf("vmcluster instance %q not found in config", proxyName)
+		}
+		vc.Autostart = enable
+		cfg.Addons.VMCluster[proxyName] = vc
+		targetDesc = fmt.Sprintf("vmcluster instance %q", proxyName)
+	case victoriaLogsSel:
+		proxyName := addonName
+		if proxyName == "" {
+			proxyName = "victorialogs"
+		}
+		lc, ok := cfg.Addons.VictoriaLogs[proxyName]
+		if !ok {
+			return fmt.Errorf("victorialogs instance %q not found in config", proxyName)
+		}
+		lc.Autostart = enable
+		cfg.Addons.VictoriaLogs[proxyName] = lc
+		targetDesc = fmt.Sprintf("victorialogs instance %q", proxyName)
+	case vlagentSel:
+		proxyName := addonName
+		if proxyName == "" {
+			proxyName = "vlagent"
+		}
+		vc, ok := cfg.Addons.Vlagent[proxyName]
+		if !ok {
+			return fmt.Errorf("vlagent instance %q not found in config", proxyName)
+		}
+		vc.Autostart = enable
+		cfg.Addons.Vlagent[proxyName] = vc
+		targetDesc = fmt.Sprintf("vlagent instance %q", proxyName)
 	case giteaSel:
 		proxyName := addonName
 		if proxyName == "" {
@@ -769,6 +857,26 @@ func countAutostartTargets(c *config.Config) int {
 			n++
 		}
 	}
+	for _, vc := range c.Addons.VictoriaMetrics {
+		if vc.Autostart {
+			n++
+		}
+	}
+	for _, vc := range c.Addons.VMCluster {
+		if vc.Autostart {
+			n++
+		}
+	}
+	for _, lc := range c.Addons.VictoriaLogs {
+		if lc.Autostart {
+			n++
+		}
+	}
+	for _, vc := range c.Addons.Vlagent {
+		if vc.Autostart {
+			n++
+		}
+	}
 	for _, gtc := range c.Addons.Gitea {
 		if gtc.Autostart {
 			n++
@@ -858,6 +966,18 @@ func runAutostartStatus(cmd *cobra.Command, args []string) error {
 	}
 	for name, ac := range cfg.Addons.Alertmanager {
 		fmt.Printf("  alertmanager %-5s %s\n", name, onOff(ac.Autostart))
+	}
+	for name, vc := range cfg.Addons.VictoriaMetrics {
+		fmt.Printf("  victoriametrics %-2s %s\n", name, onOff(vc.Autostart))
+	}
+	for name, vc := range cfg.Addons.VMCluster {
+		fmt.Printf("  vmcluster %-8s %s\n", name, onOff(vc.Autostart))
+	}
+	for name, lc := range cfg.Addons.VictoriaLogs {
+		fmt.Printf("  victorialogs %-4s %s\n", name, onOff(lc.Autostart))
+	}
+	for name, vc := range cfg.Addons.Vlagent {
+		fmt.Printf("  vlagent %-10s %s\n", name, onOff(vc.Autostart))
 	}
 	for name, gtc := range cfg.Addons.Gitea {
 		fmt.Printf("  gitea %-14s %s\n", name, onOff(gtc.Autostart))

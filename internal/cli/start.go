@@ -76,8 +76,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartNginx(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --gitea / --beegfs / --juicefs / --zerofs / --nginx)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartVMCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartNginx(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --nginx)")
 		return nil
 	}
 
@@ -225,6 +225,33 @@ func startAutostart() error {
 	// the natural companion to the collector above (v1 does not wire the two
 	// together, but boot order anticipates a future link-up).
 	if err := startAutostartAlertmanager(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// VictoriaMetrics instances (top-level web addon, the long-term metrics
+	// store Grafana can also read from). Started after Prometheus — same role,
+	// no dependency on the PostgreSQL stack, a plausible reverse-proxy backend.
+	if err := startAutostartVictoriaMetrics(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// VMCluster instances (top-level cluster addon). Brings THIS host's role
+	// containers up in dependency order (storage → insert → select); each host
+	// only starts the roles it runs. No dependency on the PostgreSQL stack.
+	if err := startAutostartVMClusters(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// VictoriaLogs instances (top-level web addon, the log database). Before
+	// vlagent below so the agents' remote-write targets are listening first.
+	if err := startAutostartVictoriaLogs(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// vlagent instances (top-level log agents). Strictly after VictoriaLogs:
+	// the agent warns about an unreachable remote-write target at startup
+	// (it buffers and replays, but boot order avoids the noise).
+	if err := startAutostartVlagents(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -1259,6 +1286,186 @@ func startAutostartNginx(c *config.Config) error {
 		nc := c.Addons.Nginx[name]
 		if err := nm.StartContainer(&nc); err != nil {
 			fmt.Printf("  [X] nginx autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartVictoriaMetrics reports whether any VictoriaMetrics instance is
+// autostart-enabled.
+func hasAutostartVictoriaMetrics(c *config.Config) bool {
+	for _, vc := range c.Addons.VictoriaMetrics {
+		if vc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartVictoriaMetrics starts each autostart-enabled VictoriaMetrics
+// instance. Start-only like the other web addons: the container comes up with
+// the flags already in the config, recreating it if it was removed. The image
+// runs as root, so no ownership work is needed. Order is sorted by instance
+// name for deterministic boot logs.
+func startAutostartVictoriaMetrics(c *config.Config) error {
+	var names []string
+	for name, vc := range c.Addons.VictoriaMetrics {
+		if vc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	vm, err := podman.NewVictoriaMetricsManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		vc := c.Addons.VictoriaMetrics[name]
+		if err := vm.StartContainer(&vc); err != nil {
+			fmt.Printf("  [X] victoriametrics autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartVMCluster reports whether any VMCluster instance is
+// autostart-enabled.
+func hasAutostartVMCluster(c *config.Config) bool {
+	for _, vc := range c.Addons.VMCluster {
+		if vc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartVMClusters starts each autostart-enabled VMCluster instance.
+// Cluster-granular like BeeGFS: StartCluster brings up THIS host's role
+// containers in dependency order (storage → insert → select), starting existing
+// containers and recreating only what is missing. Order is sorted by instance
+// name for deterministic boot logs.
+func startAutostartVMClusters(c *config.Config) error {
+	var names []string
+	for name, vc := range c.Addons.VMCluster {
+		if vc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	vm, err := podman.NewVMClusterManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		vc := c.Addons.VMCluster[name]
+		if err := vm.StartCluster(&vc); err != nil {
+			fmt.Printf("  [X] vmcluster autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartVictoriaLogs reports whether any VictoriaLogs instance is
+// autostart-enabled.
+func hasAutostartVictoriaLogs(c *config.Config) bool {
+	for _, lc := range c.Addons.VictoriaLogs {
+		if lc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartVictoriaLogs starts each autostart-enabled VictoriaLogs
+// instance. Start-only like the other web addons: the container comes up with
+// the flags already in the config, recreating it if it was removed. The image
+// runs as root, so no ownership work is needed. Order is sorted by instance
+// name for deterministic boot logs.
+func startAutostartVictoriaLogs(c *config.Config) error {
+	var names []string
+	for name, lc := range c.Addons.VictoriaLogs {
+		if lc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	lm, err := podman.NewVictoriaLogsManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		lc := c.Addons.VictoriaLogs[name]
+		if err := lm.StartContainer(&lc); err != nil {
+			fmt.Printf("  [X] victorialogs autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartVlagent reports whether any vlagent instance is autostart-enabled.
+func hasAutostartVlagent(c *config.Config) bool {
+	for _, vc := range c.Addons.Vlagent {
+		if vc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartVlagents starts each autostart-enabled vlagent instance.
+// Start-only like the other web addons: the container comes up with the flags
+// already in the config, recreating it if it was removed. File-collector
+// checkpoints and remote-write buffers live in the data dir, so a rebooted
+// agent resumes where it stopped. The image runs as root, so no ownership work
+// is needed. Order is sorted by instance name for deterministic boot logs.
+func startAutostartVlagents(c *config.Config) error {
+	var names []string
+	for name, vc := range c.Addons.Vlagent {
+		if vc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	vm, err := podman.NewVlagentManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		vc := c.Addons.Vlagent[name]
+		if err := vm.StartContainer(&vc); err != nil {
+			fmt.Printf("  [X] vlagent autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}
