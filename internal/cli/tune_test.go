@@ -32,7 +32,7 @@ func TestTuneFlagsRegistered(t *testing.T) {
 		"type": "string", "hd": "string", "ram": "string", "cpus": "int",
 		"conns": "int", "db-size": "string", "apply": "bool", "revert": "bool",
 		"apply-conf": "string", "dsn": "string", "ha": "string",
-		"auto-restart": "bool", "web-tune": "string", "open": "bool",
+		"auto-restart": "bool", "web-tune": "bool", "open": "bool",
 	}
 	for name, typ := range want {
 		f := c.Flags().Lookup(name)
