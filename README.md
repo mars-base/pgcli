@@ -90,6 +90,7 @@ The installer automatically detects available privileges and adapts accordingly.
 - **Instance Cloning** — Copy an instance into a new one via logical dump pipe with live progress and pre-flight connectivity checks
 - **Interactive Shell** — Open psql or bash sessions directly in containers, or connect to remote databases via `--dsn`
 - **Addons** — Standalone companions managed via `pg addon install/start/stop/remove`: PgBouncer (connection pooling), etcd (DCS for HA), PgDog (pooling/load-balancing/sharding), PostgREST (schema-as-REST-API), HAProxy (TCP load balancer for Patroni clusters), MinIO / silo / rustfs (S3-compatible object storage, standalone or distributed erasure-coded), Redis (key-value store for cache/session/ranking/counter data, majors 7/8 selectable, native cluster sharding via `--cluster`), Predixy (Redis protocol proxy — fronts a native cluster as one plain `redis://` endpoint for cluster-unaware clients, Linux only), JuiceFS / ZeroFS (S3-backed POSIX filesystems — the first **host-binary** addons: the binary is downloaded + sha256-verified and mounted on the host, no container; Linux only)
+- **ZFS Storage** — Install ZFS on Debian/Ubuntu/Fedora/Rocky and manage pools, datasets and snapshots with `pg zfs`: automatic stripe/mirror/raidz layouts, multi-vdev pools, SLOG/special/cache/spare devices and strict whole-disk safety checks
 - **Linux + macOS** — Native Podman on Linux, podman machine on macOS with automatic setup
 
 ## Install
