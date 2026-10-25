@@ -266,6 +266,33 @@ pg zfs pool destroy tank
 不加 `--force` 时，所有破坏性命令都会要求确认；EOF 和默认答案均为“否”。
 非交互自动化必须显式传 `--force`。
 
+## 持久化与开机自动导入
+
+pool 和 dataset 默认在重启后自动恢复，无需额外配置：
+
+- `pg zfs install` 会启用 `zfs-load-module`、`zfs-import-cache`、`zfs-mount`
+  和 `zfs-zed`（单元存在时）。
+- `zpool create` 会把 pool 记录到 `/etc/zfs/zpool.cache`；开机时
+  `zfs-import-cache` 据此导入。
+- ZFS 不使用 `/etc/fstab`。每个 dataset 的 `mountpoint` 是 ZFS 属性，开机时
+  由 `zfs-mount` 完成挂载。pool 的根 dataset 挂载在 `/<pool>`，子 dataset
+  挂载在其下（例如 `/fast/data`）。
+- pool 状态保存在成员盘上，异常断电或非正常关机后数据仍可导入。
+
+检查配置：
+
+```bash
+systemctl is-enabled zfs-load-module zfs-import-cache zfs-mount zfs-zed
+pg zfs raw zpool get cachefile fast
+pg zfs raw zfs get mountpoint fast
+```
+
+重启后 `pg zfs pool list` 应能看到该 pool，`findmnt /fast` 应显示已挂载。
+
+真实硬件上建议用 `/dev/disk/by-id/...` 等稳定路径创建 pool。`/dev/sdX`
+名称可能在重启后变化，设备找不到时 pool 不会导入。把磁盘移到其他主机前先执行
+`pg zfs pool export tank`，对方即可用 `pg zfs pool import tank` 接管。
+
 ## Dataset 与 snapshot
 
 ```bash

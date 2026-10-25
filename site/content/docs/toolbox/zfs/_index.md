@@ -273,6 +273,36 @@ pg zfs pool destroy tank
 Without `--force` every destructive command asks for confirmation; EOF and the
 default answer mean "no". Non-interactive automation must pass `--force`.
 
+## Persistence and boot
+
+Pools and datasets survive reboots without any extra steps:
+
+- `pg zfs install` enables `zfs-load-module`, `zfs-import-cache`, `zfs-mount`
+  and `zfs-zed` (when the unit exists).
+- `zpool create` records the pool in `/etc/zfs/zpool.cache`; on boot
+  `zfs-import-cache` imports it.
+- ZFS does not use `/etc/fstab`. Each dataset's `mountpoint` is a ZFS property,
+  and `zfs-mount` mounts them at boot. A pool's root dataset mounts at
+  `/<pool>`, and child datasets mount under it (for example `/fast/data`).
+- The pool state lives on the member disks, so data survives a crash or power
+  loss even if the host did not shut down cleanly.
+
+Verify the setup:
+
+```bash
+systemctl is-enabled zfs-load-module zfs-import-cache zfs-mount zfs-zed
+pg zfs raw zpool get cachefile fast
+pg zfs raw zfs get mountpoint fast
+```
+
+After a reboot `pg zfs pool list` should list the pool and `findmnt /fast`
+should show it mounted.
+
+On real hardware, create pools from stable paths such as `/dev/disk/by-id/...`.
+`/dev/sdX` names can change across boots, and a pool whose devices are missing
+will not import. Run `pg zfs pool export tank` before moving disks to another
+host; the destination can then adopt them with `pg zfs pool import tank`.
+
 ## Datasets and snapshots
 
 ```bash
