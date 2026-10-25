@@ -1,13 +1,14 @@
 ---
 title: "ZFS Storage"
 description: "Install ZFS and manage pools, datasets and snapshots directly from pgcli"
-weight: 88
+weight: 10
 icon: fa-solid fa-hard-drive
+aliases: ["/docs/zfs/", "/toolbox/zfs/"]
 menus:
   main:
-    identifier: docs-zfs
-    parent: docs
-    weight: 88
+    identifier: docs-toolbox-zfs
+    parent: docs-toolbox
+    weight: 10
     params:
       icon: fa-solid fa-hard-drive
 cascade:

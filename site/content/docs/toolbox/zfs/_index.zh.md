@@ -1,8 +1,16 @@
 ---
 title: ZFS 存储管理
 description: 在 pgcli 中安装 ZFS 并管理 pool、dataset 和 snapshot
-weight: 88
+weight: 10
 icon: fa-solid fa-hard-drive
+aliases: ["/docs/zfs/", "/toolbox/zfs/"]
+menus:
+  main:
+    identifier: docs-toolbox-zfs
+    parent: docs-toolbox
+    weight: 10
+    params:
+      icon: fa-solid fa-hard-drive
 cascade:
   type: docs
   footer_style: slim

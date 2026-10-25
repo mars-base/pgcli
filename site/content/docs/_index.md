@@ -26,5 +26,5 @@ Complete guide to managing PostgreSQL databases with pgcli.
 - [Addons](/docs/addon/) — PgBouncer connection pooler and other addons
 - [KV Cache](/docs/kv/) — Lightweight Redis alternative for key-value caching
 - [Auto-start on Boot](/docs/autostart/) — Start instances and services automatically after reboot
-- [ZFS Storage](/docs/zfs/) — Install ZFS and manage pools, datasets and snapshots
+- [Toolbox](/docs/toolbox/) — Standalone utilities, including ZFS storage management
 {.cards}

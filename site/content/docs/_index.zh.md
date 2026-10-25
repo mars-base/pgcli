@@ -24,5 +24,5 @@ cascade:
 - [复制](/docs/replica/) — 只读副本与故障转移
 - [扩展](/docs/extensions/) — 安装和管理 PostgreSQL 扩展
 - [开机自启](/docs/autostart/) — 重启后自动启动实例和服务
-- [ZFS 存储](/docs/zfs/) — 安装 ZFS 并管理 pool、dataset 和快照
+- [工具箱](/docs/toolbox/) — 独立工具，包括 ZFS 存储管理
 {.cards}
