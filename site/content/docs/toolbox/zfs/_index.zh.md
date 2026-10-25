@@ -104,14 +104,43 @@ pg zfs disk list
 # 3. 两块整盘 -> 自动创建 mirror
 pg zfs pool create tank /dev/vdb /dev/vdc
 
-# 4. 为备份创建 dataset
+# 4. 确认 pool 在线
+pg zfs pool list
+
+# 5. 为备份创建 dataset
 pg zfs dataset create tank/backups
 
-# 5. 升级前创建快照
+# 6. 升级前创建快照
 pg zfs snapshot create tank/backups@before-upgrade
+
+# 7. 升级失败时回滚
+pg zfs snapshot rollback tank/backups@before-upgrade
 ```
 
-pool 挂载在 `/tank`，dataset 挂载在 `/tank/backups`。
+pool 挂载在 `/tank`，dataset 挂载在 `/tank/backups`。回滚会丢弃快照之后的所有
+改动，执行前需要确认。
+
+### 复用旧 pool 的磁盘
+
+ZFS 会在盘上保留 vdev 分区和标签，`export` 不会清除它们，因此安全校验会拒绝
+这些盘。创建新 pool 前先销毁旧 pool 并清理残留：
+
+```bash
+# 1. 旧 pool 的数据不再需要时，先导入再销毁
+pg zfs pool import fast
+pg zfs pool destroy fast --force
+
+# 2. 清除 ZFS 标签和分区表
+pg zfs raw zpool labelclear -f /dev/vdd
+pg zfs raw zpool labelclear -f /dev/vde
+wipefs -a /dev/vdd /dev/vde
+
+# 3. 创建新 pool
+pg zfs pool create tank /dev/vdd /dev/vde
+```
+
+如果整盘 `labelclear` 报错，改清成员分区（`/dev/vdd1`、`/dev/vde1`）。旧 pool
+已被销毁时跳过第 1 步。
 
 ## 磁盘安全
 
@@ -156,6 +185,10 @@ pg zfs pool create fast /dev/vdb /dev/vdc /dev/vdd /dev/vde --type mirror
 pg zfs pool create safe /dev/vdb /dev/vdc /dev/vdd /dev/vde /dev/vdf --type raidz3
 ```
 
+同一 vdev 内请尽量使用容量一致的磁盘（性能也应相近）。ZFS 不会拒绝混合容量，
+但 vdev 的可用容量由最小的成员盘决定，大盘多出的空间会被浪费。同一 pool 的不同
+vdev 之间可以容量不同。
+
 ### 多个 vdev
 
 使用可重复的 `--data` 分组，并显式给出 `--type`。每个分组是一个 vdev，pool 在
@@ -172,6 +205,14 @@ pg zfs pool create bulk --type raidz2 \
   --data /dev/vdf,/dev/vdg,/dev/vdh,/dev/vdi
 ```
 
+`--type` 作用于每个 `--data` 组内部，而不是 pool 整体：每个组建成该布局的一个
+vdev，pool 在这些 vdev 之上条带。所有组共用同一个 `--type`；`pg zfs` 不支持
+一次创建中混用 mirror、raidz2 等布局，混合拓扑需使用
+`pg zfs raw zpool create`。
+
+pool 容量为各 vdev 可用容量之和；冗余按 vdev 计算，任一 vdev 失去超出其容错能力
+的磁盘都会导致整个 pool 不可用。
+
 ### SLOG、special、cache 与热备
 
 ```bash
@@ -187,6 +228,12 @@ pg zfs pool create tank /dev/vdb /dev/vdc \
 stripe 并给出告警。`--cache` 与 `--spare` 接受独立的设备列表。
 
 同一块盘只能出现在 data、special、log、cache、spare 中的一处。
+
+建池后也可以用 `pool add` 追加热备盘：
+
+```bash
+pg zfs pool add tank --class spare /dev/vdi
+```
 
 ### 默认属性
 
@@ -248,23 +295,39 @@ pg zfs pool online tank /dev/vdc
 OpenZFS 2.3 及以上；Debian 12（2.1）和 Ubuntu 24.04（2.2）不支持。新版本上可用
 `pg zfs raw zpool attach` 操作。
 
-导出与导入：
+### 卸载与彻底删除 pool
+
+`pg zfs pool export` 会卸载所有 dataset 并把 pool 从主机上分离，但数据仍完整
+保存在成员盘上：
 
 ```bash
 pg zfs pool export tank
+```
+
+已 export 的 pool 不会在开机时自动导入。重新接管时先列出可导入的 pool，再导入：
+
+```bash
 pg zfs pool import                  # 列出可导入的 pool
 pg zfs pool import tank
 pg zfs pool import tank --dir /dev/disk/by-id --no-mount
 ```
 
-销毁 pool 会删除所有 dataset 和数据：
+`pg zfs pool destroy` 会删除 pool、所有 dataset 和全部数据：
 
 ```bash
 pg zfs pool destroy tank
 ```
 
-不加 `--force` 时，所有破坏性命令都会要求确认；EOF 和默认答案均为“否”。
-非交互自动化必须显式传 `--force`。
+`destroy` 只能作用于已导入的 pool。如果 pool 已 export，需要先导入再销毁：
+
+```bash
+pg zfs pool import tank
+pg zfs pool destroy tank
+```
+
+不加 `--force` 时这两个命令都会要求确认；EOF 和默认答案均为“否”。非交互自动化
+必须显式传 `--force`。`--force` 只跳过确认，绝不会映射为 ZFS 的 `-f`，也不绕过
+任何安全校验。export 可逆，destroy 不可逆。
 
 ## 持久化与开机自动导入
 
@@ -316,8 +379,55 @@ pg zfs dataset destroy tank/clone
 pg zfs dataset destroy tank/a --recursive
 ```
 
-带子 dataset 的 dataset 必须加 `--recursive` 才能销毁。rollback 会丢弃快照之后
-的所有改动。
+带子 dataset 的 dataset 必须加 `--recursive` 才能销毁。
+
+### 回滚
+
+`pg zfs snapshot rollback tank/data@snap1` 把 dataset 恢复到快照记录的状态，
+之后的所有改动都会被丢弃。如果存在更新的快照，ZFS 会拒绝回滚；加 `--recursive`
+会先删除这些更新的快照。依赖该快照的 clone 也会阻止回滚——先删除 clone，或用
+`pg zfs raw zfs rollback -R`（会一并删除依赖的 clone）。非交互运行需加
+`--force` 跳过确认。
+
+```bash
+# 升级前创建快照
+pg zfs snapshot create tank/data@before-upgrade
+
+# 回滚（需要确认）
+pg zfs snapshot rollback tank/data@before-upgrade
+
+# 非交互自动化
+pg zfs snapshot rollback tank/data@before-upgrade --force
+
+# 存在更新的快照：--recursive 会一并删除
+pg zfs snapshot rollback tank/data@before-upgrade --recursive --force
+
+# clone 阻止回滚：-R 会一并删除依赖的 clone
+pg zfs raw zfs rollback -R tank/data@before-upgrade
+```
+
+### 克隆
+
+`pg zfs dataset clone tank/data@snap1 tank/clone` 从快照创建一个新的可写
+dataset。未改动的数据块按写时复制共享，不会复制整份数据。用 `--prop` 设置新
+dataset 的属性：
+
+```bash
+# 从快照创建可写副本
+pg zfs dataset clone tank/data@snap1 tank/clone
+
+# 为副本设置属性
+pg zfs dataset clone tank/data@snap1 tank/clone \
+  --prop compression=off --prop mountpoint=/tank/clone
+
+# 提升 clone 断开依赖，之后可删除原快照
+pg zfs raw zfs promote tank/clone
+pg zfs snapshot destroy tank/data@snap1
+pg zfs dataset destroy tank/clone --force
+```
+
+clone 依赖的快照在 clone 存在期间不能销毁。需要删除旧快照时，先用
+`pg zfs raw zfs promote tank/clone` 提升 clone，使其独立于原 dataset。
 
 ## raw 透传
 

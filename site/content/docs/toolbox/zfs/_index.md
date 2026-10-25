@@ -109,14 +109,44 @@ pg zfs disk list
 # 3. Two whole disks -> mirror automatically
 pg zfs pool create tank /dev/vdb /dev/vdc
 
-# 4. A dataset for backups
+# 4. Confirm the pool is online
+pg zfs pool list
+
+# 5. A dataset for backups
 pg zfs dataset create tank/backups
 
-# 5. Snapshot before an upgrade
+# 6. Snapshot before an upgrade
 pg zfs snapshot create tank/backups@before-upgrade
+
+# 7. Roll back if the upgrade went wrong
+pg zfs snapshot rollback tank/backups@before-upgrade
 ```
 
-The pool is mounted at `/tank`, the dataset at `/tank/backups`.
+The pool is mounted at `/tank`, the dataset at `/tank/backups`. Rollback
+discards every change made after the snapshot and asks for confirmation.
+
+### Reusing disks from an old pool
+
+ZFS keeps its vdev partitions and labels on the disks, and `export` does not
+remove them, so the safety check refuses such disks. Destroy the old pool and
+clear the leftovers before creating a new one:
+
+```bash
+# 1. Import and destroy the old pool if its data is no longer needed
+pg zfs pool import fast
+pg zfs pool destroy fast --force
+
+# 2. Clear the ZFS labels and the partition table
+pg zfs raw zpool labelclear -f /dev/vdd
+pg zfs raw zpool labelclear -f /dev/vde
+wipefs -a /dev/vdd /dev/vde
+
+# 3. Create the new pool
+pg zfs pool create tank /dev/vdd /dev/vde
+```
+
+If `labelclear` fails on the whole disk, clear the member partitions instead
+(`/dev/vdd1`, `/dev/vde1`). Skip step 1 when the old pool was already destroyed.
 
 ## Disk safety
 
@@ -162,6 +192,11 @@ pg zfs pool create fast /dev/vdb /dev/vdc /dev/vdd /dev/vde --type mirror
 pg zfs pool create safe /dev/vdb /dev/vdc /dev/vdd /dev/vde /dev/vdf --type raidz3
 ```
 
+Use disks of the same capacity (and similar performance) within a vdev. ZFS
+does not reject mixed sizes, but a vdev's usable capacity is limited by its
+smallest member, so the extra space on larger disks is wasted. Different vdevs
+in one pool may have different capacities.
+
 ### Multiple vdevs
 
 Use repeatable `--data` groups together with an explicit `--type`. Each group is
@@ -177,6 +212,15 @@ pg zfs pool create bulk --type raidz2 \
   --data /dev/vdb,/dev/vdc,/dev/vdd,/dev/vde \
   --data /dev/vdf,/dev/vdg,/dev/vdh,/dev/vdi
 ```
+
+`--type` applies inside each `--data` group, not to the pool as a whole: every
+group becomes one vdev of that layout, and the pool stripes across the vdevs.
+All groups share the same `--type`; `pg zfs` cannot mix, for example, one mirror
+vdev and one raidz2 vdev in a single create. Use `pg zfs raw zpool create` for a
+mixed topology.
+
+Capacity is the sum of the vdev capacities. Redundancy is per vdev: losing more
+disks than one vdev can tolerate takes down the whole pool.
 
 ### SLOG, special, cache and spares
 
@@ -194,6 +238,12 @@ a mirror; a single device is a stripe and is warned about. `--cache` and
 `--spare` take independent device lists.
 
 A device may appear only once across data, special, log, cache and spare.
+
+Add a spare to an existing pool with `pool add`:
+
+```bash
+pg zfs pool add tank --class spare /dev/vdi
+```
 
 ### Default properties
 
@@ -255,23 +305,42 @@ pg zfs pool online tank /dev/vdc
 requires OpenZFS 2.3 or newer; Debian 12 (2.1) and Ubuntu 24.04 (2.2) cannot do
 it. Use `pg zfs raw zpool attach` on a recent release if you need it.
 
-Export and import:
+### Unmounting and destroying a pool
+
+`pg zfs pool export` unmounts every dataset and detaches the pool from the
+host, but keeps all data on the member disks:
 
 ```bash
 pg zfs pool export tank
+```
+
+An exported pool is not imported at boot. Attach it again by listing the
+importable pools and importing it:
+
+```bash
 pg zfs pool import                  # list importable pools
 pg zfs pool import tank
 pg zfs pool import tank --dir /dev/disk/by-id --no-mount
 ```
 
-Destroying a pool removes all datasets and data:
+`pg zfs pool destroy` deletes the pool, every dataset and all data:
 
 ```bash
 pg zfs pool destroy tank
 ```
 
-Without `--force` every destructive command asks for confirmation; EOF and the
-default answer mean "no". Non-interactive automation must pass `--force`.
+`destroy` only works on an imported pool. If the pool was exported, import it
+first:
+
+```bash
+pg zfs pool import tank
+pg zfs pool destroy tank
+```
+
+Without `--force` both commands ask for confirmation; EOF and the default
+answer mean "no". Non-interactive automation must pass `--force`. `--force`
+only skips the prompt — it is never passed to ZFS as `-f` and does not bypass
+safety checks. Export is reversible; destroy is not.
 
 ## Persistence and boot
 
@@ -328,6 +397,58 @@ pg zfs dataset destroy tank/a --recursive
 
 A dataset with children requires `--recursive` to destroy. Rollback discards all
 changes made after the snapshot.
+
+### Rollback
+
+`pg zfs snapshot rollback tank/data@snap1` returns the dataset to the state
+captured by the snapshot; every change made after it is discarded. If newer
+snapshots exist, ZFS refuses the rollback unless `--recursive` is given, which
+deletes those newer snapshots. Clones that depend on the snapshot also block the
+rollback — remove them first, or use `pg zfs raw zfs rollback -R` (which
+destroys the dependent clones). Non-interactive runs need `--force` to skip the
+confirmation prompt.
+
+```bash
+# Snapshot before an upgrade
+pg zfs snapshot create tank/data@before-upgrade
+
+# Roll back (asks for confirmation)
+pg zfs snapshot rollback tank/data@before-upgrade
+
+# Non-interactive automation
+pg zfs snapshot rollback tank/data@before-upgrade --force
+
+# Newer snapshots exist: --recursive also destroys them
+pg zfs snapshot rollback tank/data@before-upgrade --recursive --force
+
+# Clones block the rollback: -R also destroys dependent clones
+pg zfs raw zfs rollback -R tank/data@before-upgrade
+```
+
+### Clone
+
+`pg zfs dataset clone tank/data@snap1 tank/clone` creates a new, writable
+dataset from the snapshot. Unchanged blocks are shared copy-on-write, so the
+clone does not duplicate the full data. Pass `--prop` to set properties on the
+new dataset:
+
+```bash
+# Create a writable copy of a snapshot
+pg zfs dataset clone tank/data@snap1 tank/clone
+
+# Set properties on the clone
+pg zfs dataset clone tank/data@snap1 tank/clone \
+  --prop compression=off --prop mountpoint=/tank/clone
+
+# Detach the clone; the original snapshot can then be destroyed
+pg zfs raw zfs promote tank/clone
+pg zfs snapshot destroy tank/data@snap1
+pg zfs dataset destroy tank/clone --force
+```
+
+While a clone depends on a snapshot, the snapshot cannot be destroyed. Promote
+the clone (`pg zfs raw zfs promote tank/clone`) to make it independent of the
+original dataset before removing the old snapshot.
 
 ## Raw passthrough
 
