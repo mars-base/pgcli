@@ -31,14 +31,14 @@ pg extension install pgmq -i pg01
 同一实例的其他数据库需要单独创建扩展：
 
 ```bash
-pg psql pg01 -- -d appdb
+pg psql -i pg01 -- -d appdb
 CREATE EXTENSION IF NOT EXISTS pgmq;
 ```
 
 查看扩展版本：
 
 ```bash
-pg exec pg01 -c "SELECT extversion FROM pg_extension WHERE extname = 'pgmq'"
+pg exec -i pg01 "SELECT extversion FROM pg_extension WHERE extname = 'pgmq'"
 ```
 
 ## 快速开始
@@ -61,8 +61,8 @@ SELECT pgmq.delete('jobs', 1);
 通过 pgcli 执行同样的语句：
 
 ```bash
-pg exec pg01 -c "SELECT pgmq.send('jobs', '{\"task\": \"resize\"}')"
-pg psql pg01
+pg exec -i pg01 "SELECT pgmq.send('jobs', '{\"task\": \"resize\"}')"
+pg psql -i pg01
 ```
 
 ## 队列在磁盘上的形态
@@ -206,13 +206,15 @@ LIMIT 5;
 SELECT * FROM pgmq.list_queues();
 
 SELECT pgmq.create_unlogged('scratch');                    -- 不写 WAL，崩溃后丢失
+-- 分区队列依赖 pg_partman：pg extension install pg_partman -i pg01
 SELECT pgmq.create_partitioned('events', '10000', '100000');
 SELECT pgmq.purge_queue('jobs');                           -- 清空消息，保留队列
 SELECT pgmq.drop_queue('jobs');                            -- 删除队列和归档表
 ```
 
 - `create_unlogged` 用崩溃安全性换写入速度，只用于可重新生成的数据。
-- `create_partitioned` 避免超高吞吐队列把单表撑大；旧分区会自动丢弃。
+- `create_partitioned` 依赖 `pg_partman` 扩展。它避免超高吞吐队列把单表撑大；
+  旧分区会自动丢弃。
 - `purge_queue` 清空但保留队列；`drop_queue` 彻底删除。
 - 队列名最长 47 个字符。
 

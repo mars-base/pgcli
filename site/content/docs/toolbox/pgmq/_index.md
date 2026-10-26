@@ -32,14 +32,14 @@ pg extension install pgmq -i pg01
 To use it from another database in the same instance:
 
 ```bash
-pg psql pg01 -- -d appdb
+pg psql -i pg01 -- -d appdb
 CREATE EXTENSION IF NOT EXISTS pgmq;
 ```
 
 Check the installed version:
 
 ```bash
-pg exec pg01 -c "SELECT extversion FROM pg_extension WHERE extname = 'pgmq'"
+pg exec -i pg01 "SELECT extversion FROM pg_extension WHERE extname = 'pgmq'"
 ```
 
 ## Quick start
@@ -62,8 +62,8 @@ SELECT pgmq.delete('jobs', 1);
 Run the same statements through pgcli:
 
 ```bash
-pg exec pg01 -c "SELECT pgmq.send('jobs', '{\"task\": \"resize\"}')"
-pg psql pg01
+pg exec -i pg01 "SELECT pgmq.send('jobs', '{\"task\": \"resize\"}')"
+pg psql -i pg01
 ```
 
 ## Queues on disk
@@ -214,6 +214,7 @@ consumers are down or they cannot keep up.
 SELECT * FROM pgmq.list_queues();
 
 SELECT pgmq.create_unlogged('scratch');                    -- no WAL, lost on crash
+-- Partitioned queues require pg_partman: pg extension install pg_partman -i pg01
 SELECT pgmq.create_partitioned('events', '10000', '100000');
 SELECT pgmq.purge_queue('jobs');                           -- delete all messages, keep queue
 SELECT pgmq.drop_queue('jobs');                            -- queue and archive tables
@@ -221,8 +222,9 @@ SELECT pgmq.drop_queue('jobs');                            -- queue and archive 
 
 - `create_unlogged` trades crash safety for write speed. Use it only for data
   that can be regenerated.
-- `create_partitioned` keeps a very high-throughput queue from bloating a single
-  table; old partitions are dropped automatically.
+- `create_partitioned` requires the `pg_partman` extension. It keeps a very
+  high-throughput queue from bloating a single table; old partitions are
+  dropped automatically.
 - `purge_queue` empties a queue but keeps it; `drop_queue` removes it entirely.
 - Queue names are limited to 47 characters.
 
