@@ -17,6 +17,12 @@ import (
 // survives pgcli exiting, with all stdio appended to logFile, and records the
 // pid in pidFile.
 func StartDetached(bin string, args []string, logFile, pidFile string) error {
+	return StartDetachedEnv(bin, args, nil, logFile, pidFile)
+}
+
+// StartDetachedEnv is StartDetached with extra environment entries. Values in
+// extraEnv override the inherited environment (e.g. SSL_CERT_FILE).
+func StartDetachedEnv(bin string, args, extraEnv []string, logFile, pidFile string) error {
 	if err := os.MkdirAll(filepath.Dir(logFile), 0o755); err != nil {
 		return fmt.Errorf("hostbin: log dir: %w", err)
 	}
@@ -33,7 +39,7 @@ func StartDetached(bin string, args []string, logFile, pidFile string) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Stdout = lf
 	cmd.Stderr = lf
-	cmd.Env = append(os.Environ(), "NO_COLOR=1")
+	cmd.Env = mergeEnv(os.Environ(), append([]string{"NO_COLOR=1"}, extraEnv...))
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("hostbin: starting %s: %w", bin, err)
 	}
@@ -45,6 +51,25 @@ func StartDetached(bin string, args []string, logFile, pidFile string) error {
 		return err
 	}
 	return nil
+}
+
+// mergeEnv overlays override onto base: keys set in override replace the
+// inherited value and new keys are appended, so the caller always wins.
+func mergeEnv(base, override []string) []string {
+	keys := make(map[string]bool, len(override))
+	for _, kv := range override {
+		if i := strings.IndexByte(kv, '='); i > 0 {
+			keys[kv[:i]] = true
+		}
+	}
+	merged := make([]string, 0, len(base)+len(override))
+	for _, kv := range base {
+		if i := strings.IndexByte(kv, '='); i > 0 && keys[kv[:i]] {
+			continue
+		}
+		merged = append(merged, kv)
+	}
+	return append(merged, override...)
 }
 
 // Stop signals the recorded process (via its process group, so a daemon that

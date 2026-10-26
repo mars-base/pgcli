@@ -5,7 +5,7 @@ weight: 60
 icon: fa-solid fa-power-off
 ---
 
-pgcli can automatically start PostgreSQL instances, backup containers, PgBouncer services, and etcd members after a host reboot. This feature uses system service managers:
+pgcli can automatically start PostgreSQL instances, backup containers, PgBouncer services, etcd members, and the other supported addons after a host reboot. This feature uses system service managers:
 - **Linux**: systemd user units
 - **macOS**: launchd LaunchAgents
 
@@ -77,6 +77,30 @@ reachable first. Starting members before quorum forms briefly reports
 `etcdserver: no leader`; that is normal and resolves once enough members are
 up.
 
+### For a SQLite Database
+
+Enable auto-start for a managed SQLite database (Linux only):
+```bash
+pg autostart enable --sqlite --name <database>
+```
+
+`--name` is required — SQLite has no default database name. Replication must
+already be enabled and its `litestream.yml` must exist:
+```bash
+pg sqlite replication enable appdb --s3-bucket sqlite-backups ...
+pg autostart enable --sqlite --name appdb
+```
+
+At boot pgcli restarts the database's `litestream replicate` process — there is
+no container and the database file itself has nothing to start. The process
+starts after the object-storage addons in the boot sequence, so a same-host
+MinIO/silo/rustfs/garage/SeaweedFS backend is listening first. If the database
+file is missing, that database's autostart reports an error (and the rest of
+the boot pass continues); restore the file or disable that target.
+
+`pg sqlite replication disable` also clears the database's autostart flag,
+because Litestream cannot run without replication configured.
+
 ## Disable Auto-start
 
 ```bash
@@ -85,6 +109,7 @@ pg autostart disable --backup
 pg autostart disable --pgbouncer -i <instance-name>
 pg autostart disable --pgbouncer --pg-name <remote-name>
 pg autostart disable --etcd --name <member-name>
+pg autostart disable --sqlite --name <database>
 ```
 
 When all auto-start targets are disabled, the boot service is automatically removed.
@@ -216,6 +241,11 @@ addons:
     m1:
       # ... other settings ...
       autostart: true
+  # For SQLite databases (requires replication)
+  sqlite:
+    appdb:
+      # ... other settings ...
+      autostart: true
 ```
 
 ## Boot Service Behavior
@@ -225,6 +255,8 @@ The boot service runs `pg start --autostart`, which:
 2. Starts the backup container if `backup.autostart: true`
 3. Starts PgBouncer services with `autostart: true`
 4. Starts etcd members with `autostart: true` (start-only; see above)
+5. Starts the other addons with `autostart: true`; SQLite databases restart
+   their Litestream replication after the object-storage addons
 
 If no auto-start targets are configured, the service exits successfully (no error).
 
@@ -282,6 +314,9 @@ pg autostart enable --pgbouncer -i default
 # Enable etcd members m1 and m2 (names from pg addon list / pg.yaml)
 pg autostart enable --etcd --name m1
 pg autostart enable --etcd --name m2
+
+# Restart Litestream for a SQLite database (replication must be enabled first)
+pg autostart enable --sqlite --name appdb
 
 # Check the status
 pg autostart status

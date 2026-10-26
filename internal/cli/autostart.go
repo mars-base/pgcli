@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/mars-base/pgcli/internal/autostart"
 	"github.com/mars-base/pgcli/internal/config"
 	"github.com/mars-base/pgcli/internal/platform"
+	"github.com/mars-base/pgcli/internal/sqlite"
 )
 
 func init() {
@@ -25,7 +27,7 @@ func init() {
 		c.Flags().Bool("postgrest", false, "select the PostgREST addon (use with -i for a local one, --pg-name for a remote one)")
 		c.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST (top-level addons)")
 		c.Flags().Bool("etcd", false, "select an etcd member (top-level addons)")
-		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, victoriametrics, vmcluster, vlcluster, victorialogs or vlagent instance, gitea, beegfs, juicefs, zerofs or nginx instance, or Patroni member")
+		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, victoriametrics, vmcluster, vlcluster, victorialogs or vlagent instance, gitea, beegfs, juicefs, zerofs, nginx or SQLite database, or Patroni member")
 		c.Flags().Bool("pgdog", false, "select a PgDog proxy (top-level addons)")
 		c.Flags().Bool("ha", false, "select Patroni HA members (top-level addons; requires --scope)")
 		c.Flags().Bool("haproxy", false, "select an HAProxy instance (top-level addons)")
@@ -49,6 +51,7 @@ func init() {
 		c.Flags().Bool("beegfs", false, "select a BeeGFS filesystem (top-level addons; autostart starts the whole 3-container cluster)")
 		c.Flags().Bool("juicefs", false, "select a JuiceFS volume (top-level host-binary addons; autostart re-mounts it)")
 		c.Flags().Bool("zerofs", false, "select a ZeroFS volume (top-level host-binary addons; autostart starts the 9P server and FUSE client)")
+		c.Flags().Bool("sqlite", false, "select a SQLite database (top-level host-binary addons; autostart restarts Litestream replication)")
 		c.Flags().Bool("nginx", false, "select an nginx instance (top-level addons)")
 		c.Flags().String("scope", "", "Patroni cluster scope (required only with --ha)")
 	}
@@ -67,7 +70,7 @@ Use 'pg autostart disable' to opt out.`,
 
 var autostartEnableCmd = &cobra.Command{
 	Use:   "enable",
-	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/victoriametrics/vmcluster/vlcluster/victorialogs/vlagent/gitea/beegfs/juicefs/zerofs instance, or a Patroni member",
+	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/victoriametrics/vmcluster/vlcluster/victorialogs/vlagent/gitea/beegfs/juicefs/zerofs instance, a SQLite database, or a Patroni member",
 	Long: `Enable auto-start on boot for exactly one target:
 
   pg autostart enable -i myinst          # instance
@@ -99,6 +102,7 @@ var autostartEnableCmd = &cobra.Command{
   pg autostart enable --beegfs --name fs1            # BeeGFS filesystem — starts the whole mgmtd+meta+storage cluster (default name "beegfs")
   pg autostart enable --juicefs --name vol1          # JuiceFS volume — remounts it (default name "juicefs")
   pg autostart enable --zerofs --name z1             # ZeroFS volume — 9P server + FUSE client (default name "zerofs")
+  pg autostart enable --sqlite --name appdb          # SQLite database — restarts Litestream replication
   pg autostart enable --ha --scope app --name node1  # Patroni member (one at a time)
 
 Etcd autostart only starts the member's existing container at boot; it never
@@ -188,6 +192,12 @@ ZeroFS brings up its 9P server and then the FUSE client. Both run after the
 object-storage addons in the boot sequence, so the S3 backend is listening
 before the filesystem reaches for it. They mount as the user the boot service
 runs as (root here), same as a manual "pg addon ... mount".
+SQLite autostart restarts the database's Litestream replication process (the
+database file itself has nothing to start). Replication must already be
+configured with a litestream.yml on disk — run "pg sqlite replication enable"
+first; "pg sqlite replication disable" also turns its autostart off. The
+process starts after the object-storage addons, so a same-host S3 backend is
+listening first.
 Patroni member autostart only brings that member's existing container up,
 reading the patroni.yml already on disk — create the member first (pg ha
 create). Start order relative to the DCS doesn't matter: Patroni retries until
@@ -276,6 +286,7 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	nginxSel, _ := cmd.Flags().GetBool("nginx")
 	juicefsSel, _ := cmd.Flags().GetBool("juicefs")
 	zerofsSel, _ := cmd.Flags().GetBool("zerofs")
+	sqliteSel, _ := cmd.Flags().GetBool("sqlite")
 	pgName, _ := cmd.Flags().GetString("pg-name")
 	addonName, _ := cmd.Flags().GetString("name")
 	scope, _ := cmd.Flags().GetString("scope")
@@ -367,17 +378,23 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	if zerofsSel {
 		sel++
 	}
+	if sqliteSel {
+		sel++
+	}
 	if nginxSel {
 		sel++
 	}
 	if sel != 1 {
-		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --vmcluster, --vlcluster, --victorialogs, --vlagent, --gitea, --beegfs, --juicefs, --zerofs, or --nginx")
+		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --vmcluster, --vlcluster, --victorialogs, --vlagent, --gitea, --beegfs, --juicefs, --zerofs, --sqlite, or --nginx")
 	}
 	if pgName != "" && !pgbSel && !prSel {
 		return fmt.Errorf("--pg-name requires --pgbouncer or --postgrest")
 	}
-	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !garageSel && !seaweedfsSel && !redisSel && !predixySel && !pgadminSel && !grafanaSel && !prometheusSel && !alertmanagerSel && !victoriaMetricsSel && !vmclusterSel && !vlclusterSel && !victoriaLogsSel && !vlagentSel && !giteaSel && !beegfsSel && !juicefsSel && !zerofsSel && !nginxSel {
-		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --vmcluster, --vlcluster, --victorialogs, --vlagent, --gitea, --beegfs, --juicefs, --zerofs, or --nginx")
+	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !garageSel && !seaweedfsSel && !redisSel && !predixySel && !pgadminSel && !grafanaSel && !prometheusSel && !alertmanagerSel && !victoriaMetricsSel && !vmclusterSel && !vlclusterSel && !victoriaLogsSel && !vlagentSel && !giteaSel && !beegfsSel && !juicefsSel && !zerofsSel && !sqliteSel && !nginxSel {
+		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --vmcluster, --vlcluster, --victorialogs, --vlagent, --gitea, --beegfs, --juicefs, --zerofs, --sqlite, or --nginx")
+	}
+	if sqliteSel && addonName == "" {
+		return fmt.Errorf("--sqlite requires --name <database>")
 	}
 	if scope != "" && !haSel {
 		return fmt.Errorf("--scope requires --ha")
@@ -643,6 +660,23 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		zc.Autostart = enable
 		cfg.Addons.Zerofs[proxyName] = zc
 		targetDesc = fmt.Sprintf("zerofs volume %q", proxyName)
+	case sqliteSel:
+		db, ok := cfg.Addons.SQLite[addonName]
+		if !ok {
+			return fmt.Errorf("SQLite database %q not found in config", addonName)
+		}
+		if enable {
+			if db.Replication == nil {
+				return fmt.Errorf("replication is not enabled for SQLite database %q — run \"pg sqlite replication enable %s\" first", addonName, addonName)
+			}
+			layout := sqlite.NewLayout(sqlite.BaseDir(cfg), db)
+			if _, err := os.Stat(layout.ConfigFile); err != nil {
+				return fmt.Errorf("litestream.yml not found at %s — run \"pg sqlite replication enable %s\" again", layout.ConfigFile, addonName)
+			}
+		}
+		db.Autostart = enable
+		cfg.Addons.SQLite[addonName] = db
+		targetDesc = fmt.Sprintf("SQLite database %q", addonName)
 	case nginxSel:
 		proxyName := addonName
 		if proxyName == "" {
@@ -913,6 +947,11 @@ func countAutostartTargets(c *config.Config) int {
 			n++
 		}
 	}
+	for _, db := range c.Addons.SQLite {
+		if db.Autostart {
+			n++
+		}
+	}
 	for _, nc := range c.Addons.Nginx {
 		if nc.Autostart {
 			n++
@@ -1019,6 +1058,9 @@ func runAutostartStatus(cmd *cobra.Command, args []string) error {
 	}
 	for name, zc := range cfg.Addons.Zerofs {
 		fmt.Printf("  zerofs %-13s %s\n", name, onOff(zc.Autostart))
+	}
+	for name, db := range cfg.Addons.SQLite {
+		fmt.Printf("  sqlite %-14s %s\n", name, onOff(db.Autostart))
 	}
 	for name, nc := range cfg.Addons.Nginx {
 		fmt.Printf("  nginx %-15s %s\n", name, onOff(nc.Autostart))

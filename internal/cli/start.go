@@ -13,6 +13,7 @@ import (
 	"github.com/mars-base/pgcli/internal/pitr"
 	"github.com/mars-base/pgcli/internal/platform"
 	"github.com/mars-base/pgcli/internal/podman"
+	"github.com/mars-base/pgcli/internal/sqlite"
 )
 
 func init() {
@@ -76,8 +77,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartNginx(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --nginx)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartNginx(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --nginx)")
 		return nil
 	}
 
@@ -180,6 +181,14 @@ func startAutostart() error {
 	// as minio/silo/rustfs/garage: a cluster member's filer metadata lives in a
 	// pgcli instance, which is already up earlier in this chain.
 	if err := startAutostartSeaweedfs(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// SQLite Litestream replication. Strictly after every object-storage addon
+	// above: Litestream uploads to one of them, so a same-host backend is
+	// listening when it starts. Start-only — the database and litestream.yml
+	// already exist on disk.
+	if err := startAutostartSQLite(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -786,6 +795,53 @@ func startAutostartSeaweedfs(c *config.Config) error {
 		sc := c.Addons.Seaweedfs[name]
 		if err := sm.StartContainer(&sc); err != nil {
 			fmt.Printf("  [X] seaweedfs autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartSQLite reports whether any host-local SQLite database restarts
+// its Litestream replication on boot.
+func hasAutostartSQLite(c *config.Config) bool {
+	for _, db := range c.Addons.SQLite {
+		if db.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartSQLite restarts Litestream for each autostart-enabled database.
+// A plain SQLite file has nothing to start, so replication must already be
+// configured; startSQLiteReplication is idempotent and reports a missing
+// litestream.yml with a re-enable hint. Sorted by name for deterministic logs.
+func startAutostartSQLite(c *config.Config) error {
+	var names []string
+	for name, db := range c.Addons.SQLite {
+		if db.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	var firstErr error
+	for _, name := range names {
+		db := c.Addons.SQLite[name]
+		if db.Replication == nil {
+			err := fmt.Errorf("replication is not configured")
+			fmt.Printf("  [X] sqlite autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if err := startSQLiteReplication(sqlite.NewLayout(sqlite.BaseDir(c), db), db); err != nil {
+			fmt.Printf("  [X] sqlite autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}

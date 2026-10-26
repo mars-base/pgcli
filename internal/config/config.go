@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -139,6 +140,7 @@ type TopAddonsConfig struct {
 	Juicefs      map[string]JuicefsConfig        `yaml:"juicefs,omitempty"`
 	Zerofs       map[string]ZerofsConfig         `yaml:"zerofs,omitempty"`
 	Duckdb       map[string]DuckdbConfig         `yaml:"duckdb,omitempty"`
+	SQLite       map[string]SQLiteConfig         `yaml:"sqlite,omitempty"`
 	VictoriaMetrics map[string]VictoriaMetricsConfig `yaml:"victoriametrics,omitempty"`
 	VMCluster      map[string]VMClusterConfig       `yaml:"vmcluster,omitempty"`
 	VLCluster      map[string]VLClusterConfig       `yaml:"vlcluster,omitempty"`
@@ -1150,6 +1152,47 @@ type DuckdbConfig struct {
 	Version    string `yaml:"version,omitempty"`     // pinned release tag, e.g. "1.5.6"
 	BinaryPath string `yaml:"binary_path,omitempty"` // resolved path to duckdb binary
 	DataDir    string `yaml:"data_dir,omitempty"`    // default database directory, <base>/addon/duckdb/<name>
+}
+
+// SQLiteConfig describes one host-local SQLite database managed by
+// `pg sqlite`. Object-store credentials are deliberately absent: they are
+// rendered only into the 0600 litestream.yml stored next to the database.
+type SQLiteConfig struct {
+	Name              string                   `yaml:"name,omitempty"`
+	Path              string                   `yaml:"path,omitempty"`
+	LitestreamBinary  string                   `yaml:"litestream_binary,omitempty"`
+	LitestreamVersion string                   `yaml:"litestream_version,omitempty"`
+	Replication       *SQLiteReplicationConfig `yaml:"replication,omitempty"`
+	// Autostart restarts Litestream replication on host boot via the boot
+	// service. It requires replication to be configured: a plain SQLite file
+	// has no long-running process to start.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// SQLiteReplicationConfig is the non-secret half of a Litestream
+// configuration; the S3 access/secret keys live only in litestream.yml.
+type SQLiteReplicationConfig struct {
+	SyncInterval     string          `yaml:"sync_interval,omitempty"`
+	SnapshotInterval string          `yaml:"snapshot_interval,omitempty"`
+	Retention        string          `yaml:"retention,omitempty"`
+	S3               *SQLiteS3Config `yaml:"s3,omitempty"`
+}
+
+// SQLiteS3Config points Litestream at an S3-compatible bucket.
+type SQLiteS3Config struct {
+	Endpoint   string `yaml:"endpoint,omitempty"` // full http(s)://host[:port]; empty = AWS default
+	Bucket     string `yaml:"bucket"`
+	Path       string `yaml:"path,omitempty"` // object key prefix, no leading slash
+	Region     string `yaml:"region,omitempty"`
+	URIStyle   string `yaml:"uri_style,omitempty"` // path | virtual-host
+	CAFile     string `yaml:"ca_file,omitempty"`
+	SkipVerify bool   `yaml:"skip_verify,omitempty"`
+}
+
+// ValidSQLiteName reports whether name is a safe SQLite database key.
+func ValidSQLiteName(name string) bool {
+	ok, _ := regexp.MatchString(`^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$`, name)
+	return ok
 }
 
 // RustfsConfig holds a standalone rustfs addon. Its field set is a
@@ -2827,6 +2870,59 @@ func (c *Config) Validate() error {
 			zports[zc.ListenPort] = name
 		}
 	}
+	// SQLite databases: names are directory keys, paths must be absolute and
+	// unique, and an enabled replication block must be renderable into
+	// litestream.yml without touching the network.
+	sqlitePaths := make(map[string]string, len(c.Addons.SQLite))
+	for name, db := range c.Addons.SQLite {
+		if !ValidSQLiteName(db.Name) {
+			return fmt.Errorf("addons.sqlite.%s.name %q must match [A-Za-z0-9][A-Za-z0-9_-]{0,47}", name, db.Name)
+		}
+		if db.Path == "" || !filepath.IsAbs(db.Path) {
+			return fmt.Errorf("addons.sqlite.%s.path must be an absolute path, got %q", name, db.Path)
+		}
+		clean := filepath.Clean(db.Path)
+		if prev, dup := sqlitePaths[clean]; dup {
+			return fmt.Errorf("addons.sqlite.%s.path %q is already used by %s", name, clean, prev)
+		}
+		sqlitePaths[clean] = name
+
+		if db.Autostart && db.Replication == nil {
+			return fmt.Errorf("addons.sqlite.%s.autostart requires replication to be enabled", name)
+		}
+		r := db.Replication
+		if r == nil {
+			continue
+		}
+		if r.S3 == nil {
+			return fmt.Errorf("addons.sqlite.%s.replication.s3 is required when replication is enabled", name)
+		}
+		if r.S3.Bucket == "" {
+			return fmt.Errorf("addons.sqlite.%s.replication.s3.bucket must not be empty", name)
+		}
+		if r.S3.Path == "" {
+			return fmt.Errorf("addons.sqlite.%s.replication.s3.path must not be empty", name)
+		}
+		if strings.HasPrefix(r.S3.Path, "/") {
+			return fmt.Errorf("addons.sqlite.%s.replication.s3.path %q must not start with '/' (Litestream concatenates the prefix into object keys)", name, r.S3.Path)
+		}
+		if err := ValidateS3Endpoint("addons.sqlite."+name+".replication", r.S3.Endpoint); err != nil {
+			return err
+		}
+		if r.S3.URIStyle != "path" && r.S3.URIStyle != "virtual-host" {
+			return fmt.Errorf("addons.sqlite.%s.replication.s3.uri_style %q is not one of path, virtual-host", name, r.S3.URIStyle)
+		}
+		for _, field := range []struct{ name, value string }{
+			{"sync_interval", r.SyncInterval},
+			{"snapshot_interval", r.SnapshotInterval},
+			{"retention", r.Retention},
+		} {
+			d, err := time.ParseDuration(field.value)
+			if err != nil || d <= 0 {
+				return fmt.Errorf("addons.sqlite.%s.replication.%s must be a positive duration, got %q", name, field.name, field.value)
+			}
+		}
+	}
 	return nil
 }
 
@@ -3907,6 +4003,46 @@ func (c *Config) ApplyDefaults() {
 			addon.BinaryPath = "/usr/local/bin/duckdb"
 		}
 		c.Addons.Duckdb[name] = addon
+	}
+
+	// Top-level sqlite databases. Paths are real host files; replication
+	// fields are only defaulted when replication is enabled, since a plain
+	// database has no object store at all.
+	sqliteBaseDir := platform.DefaultConfigDir()
+	if c.BaseDir != "" {
+		sqliteBaseDir = c.BaseDir
+	}
+	for name, db := range c.Addons.SQLite {
+		if db.Name == "" {
+			db.Name = name
+		}
+		if db.Path == "" {
+			db.Path = filepath.Join(sqliteBaseDir, "sqlite", name, name+".db")
+		}
+		if r := db.Replication; r != nil {
+			if r.SyncInterval == "" {
+				r.SyncInterval = "1s"
+			}
+			if r.SnapshotInterval == "" {
+				r.SnapshotInterval = "24h"
+			}
+			if r.Retention == "" {
+				r.Retention = "24h"
+			}
+			if r.S3 == nil {
+				r.S3 = &SQLiteS3Config{}
+			}
+			if r.S3.Path == "" {
+				r.S3.Path = "sqlite/" + name
+			}
+			if r.S3.Region == "" {
+				r.S3.Region = "us-east-1"
+			}
+			if r.S3.URIStyle == "" {
+				r.S3.URIStyle = "path"
+			}
+		}
+		c.Addons.SQLite[name] = db
 	}
 
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.

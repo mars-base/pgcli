@@ -5,7 +5,7 @@ weight: 60
 icon: fa-solid fa-power-off
 ---
 
-pgcli 可以在主机重启后自动启动 PostgreSQL 实例、备份容器、PgBouncer 服务和 etcd 成员。此功能使用系统服务管理器：
+pgcli 可以在主机重启后自动启动 PostgreSQL 实例、备份容器、PgBouncer 服务、etcd 成员以及其他受支持的 addon。此功能使用系统服务管理器：
 - **Linux**: systemd 用户单元
 - **macOS**: launchd LaunchAgents
 
@@ -74,6 +74,28 @@ pg autostart enable --etcd
 quorum 尚未形成前会短暂报 `etcdserver: no leader`，属正常现象，足够多成员
 起来后即恢复。
 
+### SQLite 数据库
+
+为受管的 SQLite 数据库启用开机自启（仅 Linux）：
+```bash
+pg autostart enable --sqlite --name <数据库名>
+```
+
+`--name` 必填——SQLite 没有默认数据库名。复制必须已经启用，且
+`litestream.yml` 必须存在：
+```bash
+pg sqlite replication enable appdb --s3-bucket sqlite-backups ...
+pg autostart enable --sqlite --name appdb
+```
+
+开机时 pgcli 重启该数据库的 `litestream replicate` 进程——没有容器，数据库
+文件本身也没有可启动的服务。该进程在对象存储 addon 之后启动，因此同机的
+MinIO/silo/rustfs/garage/SeaweedFS 已经先开始监听。如果数据库文件丢失，该
+数据库的自启会报错（其余自启目标继续执行）；请恢复文件或禁用该目标。
+
+`pg sqlite replication disable` 会同时清除该数据库的 autostart 标志，因为
+没有复制配置时 Litestream 无法运行。
+
 ## 禁用开机自启
 
 ```bash
@@ -82,6 +104,7 @@ pg autostart disable --backup
 pg autostart disable --pgbouncer -i <实例名>
 pg autostart disable --pgbouncer --pg-name <远程名称>
 pg autostart disable --etcd --name <成员名>
+pg autostart disable --sqlite --name <数据库名>
 ```
 
 当所有开机自启目标都被禁用后，开机服务会被自动移除。
@@ -213,6 +236,11 @@ addons:
     m1:
       # ... 其他设置 ...
       autostart: true
+  # 对于 SQLite 数据库（需要先启用复制）
+  sqlite:
+    appdb:
+      # ... 其他设置 ...
+      autostart: true
 ```
 
 ## 开机服务行为
@@ -222,6 +250,8 @@ addons:
 2. 如果 `backup.autostart: true`，启动备份容器
 3. 启动 `autostart: true` 的 PgBouncer 服务
 4. 启动 `autostart: true` 的 etcd 成员（只做启动；见上文）
+5. 启动其他 `autostart: true` 的 addon；SQLite 数据库在对象存储 addon 之后
+   重启其 Litestream 复制
 
 如果没有配置任何开机自启目标，服务会正常退出（无错误）。
 
@@ -278,6 +308,9 @@ pg autostart enable --pgbouncer -i default
 # 为 etcd 成员 m1、m2 启用（成员名来自 pg addon list / pg.yaml）
 pg autostart enable --etcd --name m1
 pg autostart enable --etcd --name m2
+
+# 为 SQLite 数据库重启 Litestream（需先启用复制）
+pg autostart enable --sqlite --name appdb
 
 # 检查状态
 pg autostart status
