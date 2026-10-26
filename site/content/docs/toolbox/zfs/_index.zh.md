@@ -277,13 +277,13 @@ pg zfs pool scrub tank --stop
 # 增加一个 mirror vdev
 pg zfs pool add tank /dev/vdd /dev/vde --type mirror
 
-# 把 mirror 从 2 盘扩到 3 盘
+# 把 /dev/vdd 附加到 /dev/vdc 所在的 mirror（2 盘扩成 3 盘）
 pg zfs pool attach tank /dev/vdc /dev/vdd
 
 # 再缩回 2 盘
 pg zfs pool detach tank /dev/vdd
 
-# 替换故障盘
+# 用新盘 /dev/vde 替换故障盘 /dev/vdc
 pg zfs pool replace tank /dev/vdc /dev/vde
 
 # 临时下线/上线

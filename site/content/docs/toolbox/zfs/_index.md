@@ -287,13 +287,13 @@ Growth and repair:
 # Add another mirror vdev
 pg zfs pool add tank /dev/vdd /dev/vde --type mirror
 
-# Grow a mirror from 2-way to 3-way
+# Attach /dev/vdd to the mirror holding /dev/vdc (2-way to 3-way)
 pg zfs pool attach tank /dev/vdc /dev/vdd
 
 # Shrink it back
 pg zfs pool detach tank /dev/vdd
 
-# Replace a failing disk
+# Replace the failing /dev/vdc with the new /dev/vde
 pg zfs pool replace tank /dev/vdc /dev/vde
 
 # Temporarily take a disk out
