@@ -16,7 +16,8 @@ cascade:
   footer_style: slim
 ---
 
-Utilities that complement pgcli without requiring a PostgreSQL instance.
+Tools and guides that extend pgcli beyond core instance management.
 
 - [ZFS Storage](./zfs/) — Install ZFS and manage pools, datasets and snapshots
+- [PGMQ Queues](./pgmq/) — Build durable message queues inside PostgreSQL
 {.cards}

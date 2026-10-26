@@ -16,7 +16,8 @@ cascade:
   footer_style: slim
 ---
 
-用于扩展 pgcli 的独立工具，无需 PostgreSQL 实例即可使用。
+在核心实例管理之外扩展 pgcli 能力的工具与使用指南。
 
 - [ZFS 存储](./zfs/) — 安装 ZFS 并管理 pool、dataset 和快照
+- [PGMQ 消息队列](./pgmq/) — 在 PostgreSQL 内部实现持久化消息队列
 {.cards}
