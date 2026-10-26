@@ -371,6 +371,15 @@ install_podman_launcher() {
     rm -rf "$tmp"
     green "  [OK] podman-launcher installed to $podman_dir/podman"
 
+    # podman-launcher keeps per-uid state in /var/tmp/podman-static/<uid>.
+    # The first user to run it creates the parent directory; without the
+    # sticky bit and world-writable mode, every other local user silently
+    # fails to initialize their own store.
+    if [ "$(id -u)" -eq 0 ] || { command -v sudo &>/dev/null && sudo -n true 2>/dev/null; }; then
+        as_root mkdir -p /var/tmp/podman-static
+        as_root chmod 1777 /var/tmp/podman-static
+    fi
+
     # Trigger podman-launcher to download the actual podman binary.
     export PATH="$podman_dir:$PATH"
     yellow "-> Triggering podman binary download..."
