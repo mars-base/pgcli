@@ -106,17 +106,22 @@ func (b *extImageBuilder) build(fromTag string, pkgList []string, pigstyRepo str
 		return fromTag, nil
 	}
 
+	// The final image must keep the base image's runtime user: pgcli-pg runs
+	// as root (its entrypoint starts sshd), pgcli-patroni runs as postgres.
+	baseUser := b.imageUser(BaseImageTag(fromTag))
+
 	// Decide the build base: if the -ext image already exists (even without
 	// all required packages), build on top of it — Pigsty repo is already
 	// configured and apt install is idempotent.  Only fall back to the plain
 	// base image when no -ext image exists at all.
 	buildFrom := newTag
 	if exists, _ := b.imageExists(newTag); exists {
-		if b.extImageHasPackages(newTag, aptPkgs) {
+		if b.extImageHasPackages(newTag, aptPkgs) && sameImageUser(b.imageUser(newTag), baseUser) {
 			fmt.Printf("-> Extension image %s already has all required packages\n", newTag)
 			return newTag, nil
 		}
-		// -ext image exists but missing packages — rebuild on top of it.
+		// -ext image exists but missing packages or has a stale runtime user
+		// (older builds forced USER postgres) — rebuild on top of it.
 		fmt.Printf("-> Extension image %s exists, installing missing packages on top...\n", newTag)
 	} else {
 		// No -ext image at all — first-time build from the plain base image.
@@ -124,42 +129,7 @@ func (b *extImageBuilder) build(fromTag string, pkgList []string, pigstyRepo str
 		fmt.Printf("-> Building extension image with %d package(s) (from %s)...\n", len(aptPkgs), buildFrom)
 	}
 
-	var dockerfile string
-	if strings.HasSuffix(buildFrom, "-ext") {
-		// Building from an existing -ext image: Pigsty repo already configured,
-		// just install additional packages (apt install is idempotent).
-		dockerfile = fmt.Sprintf(`FROM %s
-
-ENV http_proxy="" HTTP_PROXY="" https_proxy="" HTTPS_PROXY="" no_proxy="" NO_PROXY=""
-ENV DEBIAN_FRONTEND=noninteractive
-
-USER root
-RUN apt-get update \
-    && apt-get install -y %s \
-    && rm -rf /var/lib/apt/lists/*
-USER postgres
-`, buildFrom, strings.Join(aptPkgs, " "))
-	} else {
-		// First-time ext build from the plain base image: set up Pigsty repo
-		dockerfile = fmt.Sprintf(`FROM %s
-
-ENV http_proxy="" HTTP_PROXY="" https_proxy="" HTTPS_PROXY="" no_proxy="" NO_PROXY=""
-ENV DEBIAN_FRONTEND=noninteractive
-
-USER root
-# Pigsty DEB repository (https://pigsty.io/ext/) — 576+ PG extensions
-RUN apt-get update && apt-get install -y curl gnupg2 lsb-release \
-    && curl -fsSL %s/key | gpg --dearmor -o /etc/apt/keyrings/pigsty.gpg \
-    && . /etc/os-release \
-    && echo "deb [signed-by=/etc/apt/keyrings/pigsty.gpg] %s/apt/infra generic main" > /etc/apt/sources.list.d/pigsty.list \
-    && echo "deb [signed-by=/etc/apt/keyrings/pigsty.gpg] %s/apt/pgsql/${VERSION_CODENAME} ${VERSION_CODENAME} main" >> /etc/apt/sources.list.d/pigsty.list \
-    && apt-get update \
-    && apt-get install -y %s \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get purge -y --auto-remove curl gnupg2 lsb-release
-USER postgres
-`, buildFrom, pigstyRepo, pigstyRepo, pigstyRepo, strings.Join(aptPkgs, " "))
-	}
+	dockerfile := extContainerfile(buildFrom, aptPkgs, pigstyRepo, baseUser)
 
 	buildDir := filepath.Join(b.dataDir, "ext-build")
 	if err := os.MkdirAll(buildDir, 0755); err != nil {
@@ -177,6 +147,74 @@ USER postgres
 
 	fmt.Printf("  [OK] Extension image built: %s\n", newTag)
 	return newTag, nil
+}
+
+// extContainerfile renders the extension image build file. baseUser is the
+// runtime user configured on the base image; an empty value means the image
+// inherits root, so no trailing USER instruction is needed.
+func extContainerfile(buildFrom string, aptPkgs []string, pigstyRepo, baseUser string) string {
+	userLine := ""
+	if baseUser != "" {
+		userLine = "USER " + baseUser + "\n"
+	}
+
+	if strings.HasSuffix(buildFrom, "-ext") {
+		// Building from an existing -ext image: Pigsty repo already configured,
+		// just install additional packages (apt install is idempotent).
+		return fmt.Sprintf(`FROM %s
+
+ENV http_proxy="" HTTP_PROXY="" https_proxy="" HTTPS_PROXY="" no_proxy="" NO_PROXY=""
+ENV DEBIAN_FRONTEND=noninteractive
+
+USER root
+RUN apt-get update \
+    && apt-get install -y %s \
+    && rm -rf /var/lib/apt/lists/*
+%s`, buildFrom, strings.Join(aptPkgs, " "), userLine)
+	}
+
+	// First-time ext build from the plain base image: set up Pigsty repo.
+	return fmt.Sprintf(`FROM %s
+
+ENV http_proxy="" HTTP_PROXY="" https_proxy="" HTTPS_PROXY="" no_proxy="" NO_PROXY=""
+ENV DEBIAN_FRONTEND=noninteractive
+
+USER root
+# Pigsty DEB repository (https://pigsty.io/ext/) — 576+ PG extensions
+RUN apt-get update && apt-get install -y curl gnupg2 lsb-release \
+    && curl -fsSL %s/key | gpg --dearmor -o /etc/apt/keyrings/pigsty.gpg \
+    && . /etc/os-release \
+    && echo "deb [signed-by=/etc/apt/keyrings/pigsty.gpg] %s/apt/infra generic main" > /etc/apt/sources.list.d/pigsty.list \
+    && echo "deb [signed-by=/etc/apt/keyrings/pigsty.gpg] %s/apt/pgsql/${VERSION_CODENAME} ${VERSION_CODENAME} main" >> /etc/apt/sources.list.d/pigsty.list \
+    && apt-get update \
+    && apt-get install -y %s \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get purge -y --auto-remove curl gnupg2 lsb-release
+%s`, buildFrom, pigstyRepo, pigstyRepo, pigstyRepo, strings.Join(aptPkgs, " "), userLine)
+}
+
+// imageUser returns the runtime user configured in an image, or "" when the
+// image has no explicit user (root).
+func (b *extImageBuilder) imageUser(tag string) string {
+	out, err := b.run("image", "inspect", "--format", "{{.Config.User}}", tag)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+// sameImageUser compares runtime users, treating an empty user and "root" as
+// equivalent.
+func sameImageUser(a, b string) bool {
+	return normalizeImageUser(a) == normalizeImageUser(b)
+}
+
+func normalizeImageUser(user string) string {
+	user = strings.TrimSpace(user)
+	if user == "" || user == "root" || user == "0" || user == "0:0" {
+		return "root"
+	}
+	return user
 }
 
 // extImageHasPackages checks if the given image already contains all the

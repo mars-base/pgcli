@@ -1,8 +1,75 @@
 package podman
 
 import (
+	"strings"
 	"testing"
 )
+
+func TestExtContainerfileRuntimeUser(t *testing.T) {
+	tests := []struct {
+		name      string
+		buildFrom string
+		baseUser  string
+		wantLast  string
+	}{
+		{
+			name:      "root base image keeps root runtime user",
+			buildFrom: "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0",
+			baseUser:  "",
+			wantLast:  "",
+		},
+		{
+			name:      "patroni base image keeps postgres runtime user",
+			buildFrom: "ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5",
+			baseUser:  "postgres",
+			wantLast:  "USER postgres\n",
+		},
+		{
+			name:      "ext base image keeps postgres runtime user",
+			buildFrom: "ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5-ext",
+			baseUser:  "postgres",
+			wantLast:  "USER postgres\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extContainerfile(tt.buildFrom, []string{"postgresql-18-pgmq"}, "https://repo.pigsty.io", tt.baseUser)
+			if !strings.Contains(got, "USER root") {
+				t.Errorf("containerfile missing USER root for apt install:\n%s", got)
+			}
+			if tt.wantLast == "" {
+				if strings.Contains(got, "USER postgres") {
+					t.Errorf("containerfile must not force postgres for a root base image:\n%s", got)
+				}
+				return
+			}
+			if !strings.HasSuffix(got, tt.wantLast) {
+				t.Errorf("containerfile should end with %q, got:\n%s", tt.wantLast, got)
+			}
+		})
+	}
+}
+
+func TestSameImageUser(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want bool
+	}{
+		{"", "", true},
+		{"", "root", true},
+		{"root", "0", true},
+		{"0:0", "", true},
+		{"postgres", "postgres", true},
+		{"postgres", "", false},
+		{"postgres", "root", false},
+	}
+	for _, tt := range tests {
+		if got := sameImageUser(tt.a, tt.b); got != tt.want {
+			t.Errorf("sameImageUser(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
+		}
+	}
+}
 
 func TestBuildPreloadCSV(t *testing.T) {
 	tests := []struct {
