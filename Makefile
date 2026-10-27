@@ -280,7 +280,10 @@ IMAGES := \
 	docker.io/victoriametrics/victoria-metrics:v1.154.1 \
 	docker.io/victoriametrics/vminsert:v1.154.1-cluster \
 	docker.io/victoriametrics/vmselect:v1.154.1-cluster \
-	docker.io/victoriametrics/vmstorage:v1.154.1-cluster
+	docker.io/victoriametrics/vmstorage:v1.154.1-cluster \
+	docker.io/victoriametrics/victoria-logs:v1.53.0 \
+	docker.io/victoriametrics/vlagent:v1.53.0 \
+	docker.io/clickhouse/clickhouse-server:26.8.36.3
 
 container-images-export:
 	@mkdir -p images

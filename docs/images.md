@@ -19,6 +19,8 @@ pgcli 使用的容器镜像及其默认 tag。
 | `docker.io/pgsty/silo` | `RELEASE.2026-09-16T00-00-00Z` | silo（Pigsty 的 MinIO 分支）S3 存储 + `mcli` 客户端 | `DefaultSiloImageTag` |
 | `ghcr.io/mars-base/pgcli/pgcli-rustfs` | `1.0.0` | rustfs（Rust 实现的 S3 存储），建立在 `docker.io/rustfs/rustfs:1.0.0` 之上的 wrapper | `DefaultRustfsImageTag` |
 | `ghcr.io/mars-base/pgcli/pgcli-influxdb` | `1.13.1` | InfluxDB 1.x 单节点时序库（官方 linux/amd64 1.13.1 二进制 + Alpine），单架构；`pg addon influxdb` 与 `pg influx` 共用 | `DefaultInfluxDBImageTag` |
+| `ghcr.io/mars-base/pgcli/pgcli-influx2tsdb` | `1.3.2` | influx2tsdb-proxy：在 PostgreSQL + TimescaleDB 上提供 InfluxDB 1.x HTTP API（Line Protocol + InfluxQL），单架构 amd64、无状态；目标库可为本地实例或远程 `--dsn` | `DefaultInflux2TSDBImageTag` |
+| `docker.io/clickhouse/clickhouse-server` | `26.8.36.3` | ClickHouse 单机列式 OLAP（26.8 LTS），纯上游官方镜像无 wrapper，多架构 manifest list；host 网络 | `DefaultClickHouseImageTag`（`ClickHouseImageTagForVersion`） |
 | `docker.io/edoburu/pgbouncer` | `v1.25.2-p0` | PostgreSQL 连接池 | `DefaultPgBouncerImageTag` |
 | `docker.io/postgrest/postgrest` | `v16.3` | PostgREST（REST API over PostgreSQL） | `DefaultPostgrestImageTag` |
 | `docker.io/library/haproxy` | `3.2.23-alpine` | HTTP/TCP 负载均衡 | `DefaultHAProxyImageTag` |
@@ -105,6 +107,16 @@ podman save -o "$TARGET/predixy_7.0.1-alpine.tar" \
 podman pull ghcr.io/mars-base/pgcli/pgcli-influxdb:1.13.1
 podman save -o "$TARGET/pgcli-influxdb_1.13.1.tar" \
   ghcr.io/mars-base/pgcli/pgcli-influxdb:1.13.1
+
+# influx2tsdb 镜像同为单架构 amd64，直接 save
+podman pull ghcr.io/mars-base/pgcli/pgcli-influx2tsdb:1.3.2
+podman save -o "$TARGET/pgcli-influx2tsdb_1.3.2.tar" \
+  ghcr.io/mars-base/pgcli/pgcli-influx2tsdb:1.3.2
+
+# clickhouse 上游镜像是多架构 manifest list，先按 amd64 pull 再 save
+podman pull --platform linux/amd64 docker.io/clickhouse/clickhouse-server:26.8.36.3
+podman save -o "$TARGET/clickhouse-server_26.8.36.3.tar" \
+  docker.io/clickhouse/clickhouse-server:26.8.36.3
 
 # pgAdmin 上游镜像与 redis 一样是双架构 manifest list，先按 amd64 pull 再 save
 podman pull --platform linux/amd64 docker.io/dpage/pgadmin4:9.18
@@ -218,6 +230,18 @@ done
   （可直接 `podman save`）。`pg addon influxdb` 与顶层 `pg influx` 透传共用此镜像；
   版本固定为 v1 最后一个发行版（v1 已进入维护模式），`make container-build-influxdb`
   会下载并校验 sha256，支持 `INFLUXDB_PACKAGE=/path/to.tar.gz` 离线构建
+- **pgcli-influx2tsdb**：pgcli 自建镜像（`ghcr.io/mars-base/pgcli/pgcli-influx2tsdb`），
+  把上游 influx2tsdb-proxy 1.3.2 放到 Debian 上；上游只发 amd64，所以是**单架构镜像**
+  （可直接 `podman save`）。代理本身**无状态**，数据全部落在 PostgreSQL + TimescaleDB；
+  无认证、无 TLS（需要时用 nginx 前置）；`make container-build-influx2tsdb` 构建
+- **clickhouse**：纯上游官方 `docker.io/clickhouse/clickhouse-server`，无 wrapper，
+  pin 到当前 LTS 线 `26.8.36.3`（多架构 manifest list，amd64 + arm64）。entrypoint
+  以 **root** 运行，先修复 bind mount 目录属主，再 `su clickhouse` 降权到 uid/gid
+  **101**，所以 pgcli 不需要宿主预 chown；但清理数据时需要 `podman unshare` 处理
+  uid 101 属主的文件。配置交付方式是**整目录只读挂载 `config.d`**（`zz-pgcli.xml`
+  覆盖镜像自带的 wildcard 监听），数据/日志/备份/密码 secret 也都是 bind mount。
+  认证始终开启（`CLICKHOUSE_USER` + `CLICKHOUSE_PASSWORD_FILE`）；**无 TLS 监听**
+  （用 nginx 前置）、单节点无复制/HA；以 **host 网络**运行
 - **pgadmin4**：纯上游 `docker.io/dpage/pgadmin4`，无 wrapper（镜像自己的
   entrypoint 把 `/var/lib/pgadmin` chown 给 uid 5050 后降权，所以 pgcli 不需要
   rustfs 那套属主机制）；pin 到发布时的 `latest`（当前 `9.18`，双架构 manifest
@@ -326,7 +350,7 @@ done
 
 ---
 
-**最后更新**：2026-10-23（新增 vlagent 镜像；同日新增 victorialogs 镜像；此前新增 vmcluster 三镜像于 2026-10-22；
+**最后更新**：2026-10-27（新增 clickhouse 与 influx2tsdb 镜像；2026-10-23 新增 vlagent 镜像；同日新增 victorialogs 镜像；此前新增 vmcluster 三镜像于 2026-10-22；
 此前新增 victoriametrics 镜像；
 此前新增 beegfs 三镜像于 2026-10-19，gitea 于 2026-10-16
 合入时补录，alertmanager 于 2026-10-15
