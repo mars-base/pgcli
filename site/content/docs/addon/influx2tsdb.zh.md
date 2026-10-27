@@ -88,7 +88,7 @@ DSN（含密码）会存入 `pg.yaml`，同时出现在容器命令行里，可�
 第二个实例会从 `influx2tsdb_start_port`（默认 `8087`）起自动分配下一个空闲端口：
 
 ```bash
-pg addon install influx2tsdb --name metrics2 --pg-name tsdb2
+pg addon install influx2tsdb --name metrics2 --pg-name tsdb
 ```
 
 不带 `--force` 重复 `install` 是幂等空操作。`--force` 会重写目标/端口设置并重建

@@ -102,7 +102,7 @@ Second instances take the next free port from `influx2tsdb_start_port` (default
 `8087`):
 
 ```bash
-pg addon install influx2tsdb --name metrics2 --pg-name tsdb2
+pg addon install influx2tsdb --name metrics2 --pg-name tsdb
 ```
 
 Re-running `install` without `--force` is a no-op. `--force` rewrites the target/port
