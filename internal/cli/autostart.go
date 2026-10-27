@@ -27,7 +27,7 @@ func init() {
 		c.Flags().Bool("postgrest", false, "select the PostgREST addon (use with -i for a local one, --pg-name for a remote one)")
 		c.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST (top-level addons)")
 		c.Flags().Bool("etcd", false, "select an etcd member (top-level addons)")
-		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, victoriametrics, vmcluster, vlcluster, victorialogs or vlagent instance, gitea, beegfs, juicefs, zerofs, influxdb, influx2tsdb, nginx or SQLite database, or Patroni member")
+		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, victoriametrics, vmcluster, vlcluster, victorialogs or vlagent instance, gitea, beegfs, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, nginx or SQLite database, or Patroni member")
 		c.Flags().Bool("pgdog", false, "select a PgDog proxy (top-level addons)")
 		c.Flags().Bool("ha", false, "select Patroni HA members (top-level addons; requires --scope)")
 		c.Flags().Bool("haproxy", false, "select an HAProxy instance (top-level addons)")
@@ -53,6 +53,7 @@ func init() {
 		c.Flags().Bool("zerofs", false, "select a ZeroFS volume (top-level host-binary addons; autostart starts the 9P server and FUSE client)")
 		c.Flags().Bool("influxdb", false, "select an InfluxDB instance (containerized addon; autostart starts the container)")
 		c.Flags().Bool("influx2tsdb", false, "select an influx2tsdb proxy (stateless container in front of TimescaleDB; autostart recreates it)")
+		c.Flags().Bool("clickhouse", false, "select a ClickHouse instance (containerized addon; autostart starts the container)")
 		c.Flags().Bool("sqlite", false, "select a SQLite database (top-level host-binary addons; autostart restarts Litestream replication)")
 		c.Flags().Bool("nginx", false, "select an nginx instance (top-level addons)")
 		c.Flags().String("scope", "", "Patroni cluster scope (required only with --ha)")
@@ -72,7 +73,7 @@ Use 'pg autostart disable' to opt out.`,
 
 var autostartEnableCmd = &cobra.Command{
 	Use:   "enable",
-	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/victoriametrics/vmcluster/vlcluster/victorialogs/vlagent/gitea/beegfs/juicefs/zerofs/influxdb/influx2tsdb instance, a SQLite database, or a Patroni member",
+	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/victoriametrics/vmcluster/vlcluster/victorialogs/vlagent/gitea/beegfs/juicefs/zerofs/influxdb/influx2tsdb/clickhouse instance, a SQLite database, or a Patroni member",
 	Long: `Enable auto-start on boot for exactly one target:
 
   pg autostart enable -i myinst          # instance
@@ -106,6 +107,7 @@ var autostartEnableCmd = &cobra.Command{
   pg autostart enable --zerofs --name z1             # ZeroFS volume — 9P server + FUSE client (default name "zerofs")
   pg autostart enable --influxdb --name metrics      # InfluxDB — starts the container (default name "influxdb")
   pg autostart enable --influx2tsdb --name tsproxy   # influx2tsdb — recreates the stateless proxy container (default name "influx2tsdb")
+  pg autostart enable --clickhouse --name ch1        # ClickHouse — starts the container (default name "clickhouse")
   pg autostart enable --sqlite --name appdb          # SQLite database — restarts Litestream replication
   pg autostart enable --ha --scope app --name node1  # Patroni member (one at a time)
 
@@ -207,6 +209,10 @@ database is up. A local target instance (--pg-name) is started first by the
 same boot run, and its DSN is re-derived at that moment, so a changed port or
 password stays in sync. The proxy holds no data of its own — everything lives
 in the target PostgreSQL database, including across reboots.
+ClickHouse autostart only starts the existing container, re-rendering the
+config and secret from pg.yaml first so "pg addon clickhouse config set"
+changes made while the container was stopped still apply — install the
+instance first (pg addon install clickhouse).
 Patroni member autostart only brings that member's existing container up,
 reading the patroni.yml already on disk — create the member first (pg ha
 create). Start order relative to the DCS doesn't matter: Patroni retries until
@@ -297,6 +303,7 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	zerofsSel, _ := cmd.Flags().GetBool("zerofs")
 	influxdbSel, _ := cmd.Flags().GetBool("influxdb")
 	influx2tsdbSel, _ := cmd.Flags().GetBool("influx2tsdb")
+	clickhouseSel, _ := cmd.Flags().GetBool("clickhouse")
 	sqliteSel, _ := cmd.Flags().GetBool("sqlite")
 	pgName, _ := cmd.Flags().GetString("pg-name")
 	addonName, _ := cmd.Flags().GetString("name")
@@ -395,6 +402,9 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	if influx2tsdbSel {
 		sel++
 	}
+	if clickhouseSel {
+		sel++
+	}
 	if sqliteSel {
 		sel++
 	}
@@ -402,13 +412,13 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		sel++
 	}
 	if sel != 1 {
-		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --vmcluster, --vlcluster, --victorialogs, --vlagent, --gitea, --beegfs, --juicefs, --zerofs, --influxdb, --influx2tsdb, --sqlite, or --nginx")
+		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --vmcluster, --vlcluster, --victorialogs, --vlagent, --gitea, --beegfs, --juicefs, --zerofs, --influxdb, --influx2tsdb, --clickhouse, --sqlite, or --nginx")
 	}
 	if pgName != "" && !pgbSel && !prSel {
 		return fmt.Errorf("--pg-name requires --pgbouncer or --postgrest")
 	}
-	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !garageSel && !seaweedfsSel && !redisSel && !predixySel && !pgadminSel && !grafanaSel && !prometheusSel && !alertmanagerSel && !victoriaMetricsSel && !vmclusterSel && !vlclusterSel && !victoriaLogsSel && !vlagentSel && !giteaSel && !beegfsSel && !juicefsSel && !zerofsSel && !influxdbSel && !influx2tsdbSel && !sqliteSel && !nginxSel {
-		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --vmcluster, --vlcluster, --victorialogs, --vlagent, --gitea, --beegfs, --juicefs, --zerofs, --influxdb, --influx2tsdb, --sqlite, or --nginx")
+	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !garageSel && !seaweedfsSel && !redisSel && !predixySel && !pgadminSel && !grafanaSel && !prometheusSel && !alertmanagerSel && !victoriaMetricsSel && !vmclusterSel && !vlclusterSel && !victoriaLogsSel && !vlagentSel && !giteaSel && !beegfsSel && !juicefsSel && !zerofsSel && !influxdbSel && !influx2tsdbSel && !clickhouseSel && !sqliteSel && !nginxSel {
+		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --vmcluster, --vlcluster, --victorialogs, --vlagent, --gitea, --beegfs, --juicefs, --zerofs, --influxdb, --influx2tsdb, --clickhouse, --sqlite, or --nginx")
 	}
 	if sqliteSel && addonName == "" {
 		return fmt.Errorf("--sqlite requires --name <database>")
@@ -701,6 +711,18 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		ic.Autostart = enable
 		cfg.Addons.Influx2TSDB[proxyName] = ic
 		targetDesc = fmt.Sprintf("influx2tsdb instance %q", proxyName)
+	case clickhouseSel:
+		proxyName := addonName
+		if proxyName == "" {
+			proxyName = "clickhouse"
+		}
+		cc, ok := cfg.Addons.ClickHouse[proxyName]
+		if !ok {
+			return fmt.Errorf("clickhouse instance %q not found in config", proxyName)
+		}
+		cc.Autostart = enable
+		cfg.Addons.ClickHouse[proxyName] = cc
+		targetDesc = fmt.Sprintf("clickhouse instance %q", proxyName)
 	case sqliteSel:
 		db, ok := cfg.Addons.SQLite[addonName]
 		if !ok {
@@ -1105,6 +1127,9 @@ func runAutostartStatus(cmd *cobra.Command, args []string) error {
 	}
 	for name, ic := range cfg.Addons.Influx2TSDB {
 		fmt.Printf("  influx2tsdb %-9s %s\n", name, onOff(ic.Autostart))
+	}
+	for name, cc := range cfg.Addons.ClickHouse {
+		fmt.Printf("  clickhouse %-10s %s\n", name, onOff(cc.Autostart))
 	}
 	for name, db := range cfg.Addons.SQLite {
 		fmt.Printf("  sqlite %-14s %s\n", name, onOff(db.Autostart))

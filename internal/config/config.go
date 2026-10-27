@@ -52,6 +52,8 @@ type Config struct {
 	VLClusterStartPort       int                       `yaml:"vlcluster_start_port,omitempty"`       // starting VLCluster port, default 9430 (3 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP)
 	InfluxDBStartPort        int                       `yaml:"influxdb_start_port,omitempty"`        // starting InfluxDB HTTP API host port, default 8086
 	Influx2TSDBStartPort     int                       `yaml:"influx2tsdb_start_port,omitempty"`     // starting influx2tsdb-proxy HTTP API host port, default 8087
+	ClickHouseHTTPStartPort  int                       `yaml:"clickhouse_http_start_port,omitempty"` // starting ClickHouse HTTP host port, default 8123
+	ClickHouseTCPStartPort   int                       `yaml:"clickhouse_tcp_start_port,omitempty"`  // starting ClickHouse native TCP host port, default 9000 (shared with the S3 API pool)
 	Postgres                 PostgresConfig            `yaml:"postgres"`
 	Podman                   PodmanConfig              `yaml:"podman"`
 	PITR                     PITRConfig                `yaml:"pitr"`
@@ -150,6 +152,7 @@ type TopAddonsConfig struct {
 	Vlagent         map[string]VlagentConfig         `yaml:"vlagent,omitempty"`
 	InfluxDB        map[string]InfluxDBConfig        `yaml:"influxdb,omitempty"`
 	Influx2TSDB     map[string]Influx2TSDBConfig     `yaml:"influx2tsdb,omitempty"`
+	ClickHouse      map[string]ClickHouseConfig      `yaml:"clickhouse,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -1317,6 +1320,158 @@ type Influx2TSDBConfig struct {
 func ValidInflux2TSDBName(name string) bool {
 	ok, _ := regexp.MatchString(`^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$`, name)
 	return ok
+}
+
+// DefaultClickHouseVersion pins the ClickHouse LTS release pulled from the
+// official multi-arch image. ClickHouse 26.8 is the current LTS line.
+const DefaultClickHouseVersion = "26.8.36.3"
+
+// DefaultClickHouseImageTag is the official upstream image. pgcli pulls it
+// directly; ClickHouse is not wrapped in a pgcli-built image.
+const DefaultClickHouseImageTag = "docker.io/clickhouse/clickhouse-server:26.8.36.3"
+
+// ClickHouseConfig holds a managed single-node ClickHouse container. The
+// official image runs with host networking and its data, log, config and
+// backup directories bind-mounted from <base>/addon/clickhouse/<name>/.
+// HTTP (native clients, curl) and TCP (clickhouse-client) each get a host
+// port; HTTPPort and TCPPort must be unique per instance and the TCP pool
+// shares its default range with the S3 API pool.
+type ClickHouseConfig struct {
+	ContainerName string `yaml:"container_name,omitempty"` // pgcli-clickhouse[-ns]-<name>
+	Name          string `yaml:"name,omitempty"`           // addon key, defaults to the map key
+	Version       string `yaml:"version,omitempty"`        // upstream image tag, e.g. "26.8.36.3"
+	ImageTag      string `yaml:"image_tag,omitempty"`      // docker.io/clickhouse/clickhouse-server:<version>
+
+	// ConfigPath is the generated config.d override mounted read-only at
+	// /etc/clickhouse-server/config.d/pgcli.xml.
+	ConfigPath string `yaml:"config_path,omitempty"`
+	DataDir    string `yaml:"data_dir,omitempty"`   // mounted at /var/lib/clickhouse
+	LogDir     string `yaml:"log_dir,omitempty"`    // mounted at /var/log/clickhouse-server
+	BackupDir  string `yaml:"backup_dir,omitempty"` // exposed as the `backups` disk, mounted at /var/lib/clickhouse-backups
+	// SecretPath holds the admin password for CLICKHOUSE_PASSWORD_FILE. The
+	// file is owned by the container uid; the containing directory stays
+	// host-owned so pgcli can rewrite it.
+	SecretPath string `yaml:"secret_path,omitempty"`
+
+	Listen string `yaml:"listen,omitempty"` // bind address, default 127.0.0.1
+	// HTTPPort serves the HTTP interface (default pool base 8123).
+	HTTPPort int `yaml:"http_port,omitempty"`
+	// TCPPort serves the native protocol (default pool base 9000).
+	TCPPort int `yaml:"tcp_port,omitempty"`
+
+	AdminUser string `yaml:"admin_user,omitempty"` // default admin
+	// AdminPassword is stored in pg.yaml like other addon credentials;
+	// `pg addon password clickhouse` reads it back.
+	AdminPassword string `yaml:"admin_password,omitempty"`
+
+	// Settings are additional server configuration overrides rendered into
+	// the generated config.d XML. Keys are dotted XML paths
+	// (e.g. "max_server_memory_usage" or "logger.level") and values are XML
+	// text. Paths/ports/backup/auth keys managed by pgcli are rejected.
+	// `pg addon clickhouse config set/unset` edits this map and restarts.
+	Settings map[string]string `yaml:"settings,omitempty"`
+
+	// Autostart starts the container on host boot (pg autostart enable --clickhouse).
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// ValidClickHouseVersion reports whether version is safe to use as a Docker
+// image tag. ClickHouse is pulled directly from upstream, so any published
+// tag is accepted; pgcli pins a known LTS by default.
+func ValidClickHouseVersion(version string) bool {
+	ok, _ := regexp.MatchString(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`, version)
+	return ok
+}
+
+// ClickHouseImageTagForVersion returns the upstream image reference for a
+// ClickHouse version tag.
+func ClickHouseImageTagForVersion(version string) (string, bool) {
+	if !ValidClickHouseVersion(version) {
+		return "", false
+	}
+	return "docker.io/clickhouse/clickhouse-server:" + version, true
+}
+
+// ValidClickHouseName reports whether name is a safe ClickHouse instance key.
+func ValidClickHouseName(name string) bool {
+	ok, _ := regexp.MatchString(`^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$`, name)
+	return ok
+}
+
+// ValidClickHouseAdminUser reports whether user is a safe ClickHouse admin
+// account name.
+func ValidClickHouseAdminUser(user string) bool {
+	ok, _ := regexp.MatchString(`^[A-Za-z0-9_.-]{1,64}$`, user)
+	return ok
+}
+
+// clickHouseManagedSettings are server configuration keys pgcli renders for
+// every instance. Letting a user override them would either break the
+// generated config (duplicate XML elements) or silently fight the stored
+// paths/ports/backup disk.
+var clickHouseManagedSettings = map[string]bool{
+	"listen_host":                    true,
+	"listen_try":                     true,
+	"http_port":                      true,
+	"https_port":                     true,
+	"tcp_port":                       true,
+	"interserver_http_port":          true,
+	"interserver_http_host":          true,
+	"mysql_port":                     true,
+	"postgresql_port":                true,
+	"path":                           true,
+	"tmp_path":                       true,
+	"user_files_path":                true,
+	"format_schema_path":             true,
+	"access_control_path":            true,
+	"backups.allowed_disk":           true,
+	"backups.allowed_path":           true,
+	"user_directories":               true,
+	"profiles":                       true,
+	"users":                          true,
+	"storage_configuration.disks":    true,
+	"storage_configuration.policies": true,
+}
+
+var clickHouseSettingKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`)
+
+// ValidateClickHouseSettings checks that user-supplied server overrides are
+// dotted XML paths and do not touch pgcli-managed config.
+func ValidateClickHouseSettings(settings map[string]string) error {
+	keys := make([]string, 0, len(settings))
+	for key := range settings {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value := settings[key]
+		if !clickHouseSettingKeyRe.MatchString(key) {
+			return fmt.Errorf("settings key %q must be a dotted XML path such as logger.level", key)
+		}
+		loggerLevel := key == "logger.level"
+		if (!loggerLevel && clickHouseManagedSettings[key]) ||
+			(strings.HasPrefix(key, "logger.") && !loggerLevel) ||
+			strings.HasPrefix(key, "storage_configuration.disks.backups") ||
+			strings.HasPrefix(key, "backups.allowed_") {
+			return fmt.Errorf("settings key %q is managed by pgcli and cannot be overridden", key)
+		}
+		for managed := range clickHouseManagedSettings {
+			if strings.HasPrefix(key, managed+".") {
+				return fmt.Errorf("settings key %q is managed by pgcli and cannot be overridden", key)
+			}
+		}
+		if strings.ContainsAny(value, "\x00\r\n") {
+			return fmt.Errorf("settings value for %q must not contain control characters", key)
+		}
+		if loggerLevel {
+			switch value {
+			case "trace", "debug", "information", "warning", "error", "fatal", "none":
+			default:
+				return fmt.Errorf("settings value %q for logger.level is not a ClickHouse log level", value)
+			}
+		}
+	}
+	return nil
 }
 
 // influxDBManagedKeys are the config keys pgcli renders itself; a
@@ -2704,6 +2859,8 @@ func Default() *Config {
 		VLClusterStartPort:       9430,
 		InfluxDBStartPort:        8086,
 		Influx2TSDBStartPort:     8087,
+		ClickHouseHTTPStartPort:  8123,
+		ClickHouseTCPStartPort:   9000,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -2920,6 +3077,8 @@ type displayConfig struct {
 	VLClusterStartPort       int                       `yaml:"vlcluster_start_port,omitempty"`
 	InfluxDBStartPort        int                       `yaml:"influxdb_start_port,omitempty"`
 	Influx2TSDBStartPort     int                       `yaml:"influx2tsdb_start_port,omitempty"`
+	ClickHouseHTTPStartPort  int                       `yaml:"clickhouse_http_start_port,omitempty"`
+	ClickHouseTCPStartPort   int                       `yaml:"clickhouse_tcp_start_port,omitempty"`
 	Logging                  LoggingConfig             `yaml:"logging"`
 	Backup                   BackupConfig              `yaml:"backup"`
 	Pigsty                   PigstyConfig              `yaml:"pigsty"`
@@ -2961,6 +3120,8 @@ func (c *Config) Display() displayConfig {
 		VLClusterStartPort:       c.VLClusterStartPort,
 		InfluxDBStartPort:        c.InfluxDBStartPort,
 		Influx2TSDBStartPort:     c.Influx2TSDBStartPort,
+		ClickHouseHTTPStartPort:  c.ClickHouseHTTPStartPort,
+		ClickHouseTCPStartPort:   c.ClickHouseTCPStartPort,
 		Logging:                  c.Logging,
 		Backup:                   c.Backup,
 		Pigsty:                   c.Pigsty,
@@ -3220,6 +3381,70 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("addons.influx2tsdb.%s.pool_size must be between 1 and 1000, got %d", name, ac.PoolSize)
 		}
 	}
+	// ClickHouse instances: names are directory keys, paths are absolute, the
+	// admin account is usable for HTTP Basic auth and clickhouse-client, and
+	// HTTP/native TCP ports are unique per instance.
+	clickHousePorts := make(map[int]string, 2*len(c.Addons.ClickHouse))
+	for name, cc := range c.Addons.ClickHouse {
+		if !ValidClickHouseName(cc.Name) {
+			return fmt.Errorf("addons.clickhouse.%s.name %q must match [A-Za-z0-9][A-Za-z0-9_-]{0,47}", name, cc.Name)
+		}
+		if !ValidClickHouseVersion(cc.Version) {
+			return fmt.Errorf("addons.clickhouse.%s.version %q must be a safe Docker image tag", name, cc.Version)
+		}
+		if tag, ok := ClickHouseImageTagForVersion(cc.Version); !ok {
+			return fmt.Errorf("addons.clickhouse.%s.version %q is not supported", name, cc.Version)
+		} else if cc.ImageTag != tag {
+			return fmt.Errorf("addons.clickhouse.%s.image_tag %q does not match version %s (%s)", name, cc.ImageTag, cc.Version, tag)
+		}
+		for _, field := range []struct {
+			name  string
+			value string
+		}{
+			{"config_path", cc.ConfigPath},
+			{"data_dir", cc.DataDir},
+			{"log_dir", cc.LogDir},
+			{"backup_dir", cc.BackupDir},
+			{"secret_path", cc.SecretPath},
+		} {
+			if field.value == "" || !filepath.IsAbs(field.value) {
+				return fmt.Errorf("addons.clickhouse.%s.%s must be an absolute path, got %q", name, field.name, field.value)
+			}
+		}
+		if cc.Listen == "" || net.ParseIP(cc.Listen) == nil {
+			return fmt.Errorf("addons.clickhouse.%s.listen must be an IP address, got %q", name, cc.Listen)
+		}
+		if !ValidClickHouseAdminUser(cc.AdminUser) {
+			return fmt.Errorf("addons.clickhouse.%s.admin_user %q must match [A-Za-z0-9_.-]{1,64}", name, cc.AdminUser)
+		}
+		if cc.AdminPassword == "" {
+			return fmt.Errorf("addons.clickhouse.%s.admin_password must not be empty", name)
+		}
+		if strings.ContainsAny(cc.AdminPassword, "\r\n\x00") {
+			return fmt.Errorf("addons.clickhouse.%s.admin_password must not contain control characters", name)
+		}
+		if err := ValidateClickHouseSettings(cc.Settings); err != nil {
+			return fmt.Errorf("addons.clickhouse.%s.settings: %w", name, err)
+		}
+		if cc.HTTPPort == cc.TCPPort {
+			return fmt.Errorf("addons.clickhouse.%s.http_port and tcp_port must differ, got %d", name, cc.HTTPPort)
+		}
+		for _, field := range []struct {
+			name  string
+			value int
+		}{
+			{"http_port", cc.HTTPPort},
+			{"tcp_port", cc.TCPPort},
+		} {
+			if field.value < 1 || field.value > 65535 {
+				return fmt.Errorf("addons.clickhouse.%s.%s must be between 1 and 65535, got %d", name, field.name, field.value)
+			}
+			if prev, dup := clickHousePorts[field.value]; dup {
+				return fmt.Errorf("addons.clickhouse.%s.%s %d is already used by %s (HTTP and TCP ports must be unique)", name, field.name, field.value, prev)
+			}
+			clickHousePorts[field.value] = name + "." + field.name
+		}
+	}
 	return nil
 }
 
@@ -3362,6 +3587,12 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Influx2TSDBStartPort == 0 {
 		c.Influx2TSDBStartPort = d.Influx2TSDBStartPort
+	}
+	if c.ClickHouseHTTPStartPort == 0 {
+		c.ClickHouseHTTPStartPort = d.ClickHouseHTTPStartPort
+	}
+	if c.ClickHouseTCPStartPort == 0 {
+		c.ClickHouseTCPStartPort = d.ClickHouseTCPStartPort
 	}
 
 	// Postgres
@@ -4410,6 +4641,53 @@ func (c *Config) ApplyDefaults() {
 		c.Addons.Influx2TSDB[name] = addon
 	}
 
+	// Top-level ClickHouse instances. All state lives under
+	// <base>/addon/clickhouse/<name>/; the official image uses host
+	// networking, so the HTTP and native ports are host ports.
+	clickHouseBaseDir := platform.DefaultConfigDir()
+	if c.BaseDir != "" {
+		clickHouseBaseDir = c.BaseDir
+	}
+	for name, addon := range c.Addons.ClickHouse {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.Version == "" {
+			addon.Version = DefaultClickHouseVersion
+		}
+		if addon.ImageTag == "" {
+			if tag, ok := ClickHouseImageTagForVersion(addon.Version); ok {
+				addon.ImageTag = tag
+			}
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-clickhouse" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.Listen == "" {
+			addon.Listen = "127.0.0.1"
+		}
+		if addon.AdminUser == "" {
+			addon.AdminUser = "admin"
+		}
+		addonDir := filepath.Join(clickHouseBaseDir, "addon", "clickhouse", name)
+		if addon.ConfigPath == "" {
+			addon.ConfigPath = filepath.Join(addonDir, "config.d", "zz-pgcli.xml")
+		}
+		if addon.DataDir == "" {
+			addon.DataDir = filepath.Join(addonDir, "data")
+		}
+		if addon.LogDir == "" {
+			addon.LogDir = filepath.Join(addonDir, "logs")
+		}
+		if addon.BackupDir == "" {
+			addon.BackupDir = filepath.Join(addonDir, "backups")
+		}
+		if addon.SecretPath == "" {
+			addon.SecretPath = filepath.Join(addonDir, "secrets", "admin_password")
+		}
+		c.Addons.ClickHouse[name] = addon
+	}
+
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
 	c.autoAssignPorts()
 }
@@ -4792,6 +5070,88 @@ func (c *Config) autoAssignPorts() {
 		}
 	}
 
+	// Allocate ClickHouse HTTP and native TCP ports from separate pools
+	// (clickhouse_http_start_port, default 8123; clickhouse_tcp_start_port,
+	// default 9000). Both draws share one assigned set. Native TCP 9000 sits
+	// in the S3 API range, so every explicit InfluxDB/influx2tsdb/S3 port is
+	// pre-marked here, and the object-store block below marks ClickHouse's
+	// assigned ports in turn — neither side can steal the other's ports.
+	{
+		httpBase := c.ClickHouseHTTPStartPort
+		tcpBase := c.ClickHouseTCPStartPort
+		assigned := map[int]bool{}
+		for _, addon := range c.Addons.InfluxDB {
+			for _, p := range []int{addon.HostPort, addon.RPCPort} {
+				if p != 0 {
+					assigned[p] = true
+				}
+			}
+		}
+		for _, addon := range c.Addons.Influx2TSDB {
+			if addon.Port != 0 {
+				assigned[addon.Port] = true
+			}
+		}
+		for _, addon := range c.Addons.Minio {
+			for _, p := range []int{addon.APIPort, addon.ConsolePort} {
+				if p != 0 {
+					assigned[p] = true
+				}
+			}
+		}
+		for _, addon := range c.Addons.Silo {
+			for _, p := range []int{addon.APIPort, addon.ConsolePort} {
+				if p != 0 {
+					assigned[p] = true
+				}
+			}
+		}
+		for _, addon := range c.Addons.Rustfs {
+			for _, p := range []int{addon.APIPort, addon.ConsolePort} {
+				if p != 0 {
+					assigned[p] = true
+				}
+			}
+		}
+		for _, addon := range c.Addons.ClickHouse {
+			for _, p := range []int{addon.HTTPPort, addon.TCPPort} {
+				if p != 0 {
+					assigned[p] = true
+				}
+			}
+		}
+		nextHTTP := httpBase
+		nextTCP := tcpBase
+		nextFree := func(next *int) int {
+			for (usedPorts != nil && usedPorts[*next]) || assigned[*next] {
+				*next++
+			}
+			p := *next
+			*next++
+			assigned[p] = true
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.ClickHouse))
+		for name := range c.Addons.ClickHouse {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.ClickHouse[name]
+			if addon.HTTPPort == 0 && httpBase > 0 {
+				addon.HTTPPort = nextFree(&nextHTTP)
+			} else if addon.HTTPPort >= nextHTTP {
+				nextHTTP = addon.HTTPPort + 1
+			}
+			if addon.TCPPort == 0 && tcpBase > 0 {
+				addon.TCPPort = nextFree(&nextTCP)
+			} else if addon.TCPPort >= nextTCP {
+				nextTCP = addon.TCPPort + 1
+			}
+			c.Addons.ClickHouse[name] = addon
+		}
+	}
+
 	// Allocate ports for top-level object-storage addons (MinIO, silo, rustfs).
 	// Each instance takes two consecutive ports from ONE shared pool
 	// (minio_start_port base, default 9000): the S3 API and the web console. The
@@ -4817,6 +5177,13 @@ func (c *Config) autoAssignPorts() {
 	}
 	for _, addon := range c.Addons.Rustfs {
 		for _, p := range []int{addon.APIPort, addon.ConsolePort} {
+			if p != 0 {
+				assignedMinio[p] = true
+			}
+		}
+	}
+	for _, addon := range c.Addons.ClickHouse {
+		for _, p := range []int{addon.HTTPPort, addon.TCPPort} {
 			if p != 0 {
 				assignedMinio[p] = true
 			}
@@ -5229,6 +5596,14 @@ func (c *Config) autoAssignPorts() {
 				assignedInflux[addon.RPCPort] = true
 			}
 		}
+		for _, addon := range c.Addons.ClickHouse {
+			if addon.HTTPPort != 0 {
+				assignedInflux[addon.HTTPPort] = true
+			}
+			if addon.TCPPort != 0 {
+				assignedInflux[addon.TCPPort] = true
+			}
+		}
 		nextHTTP := httpBase
 		nextRPC := rpcBase
 		nextFree := func(next *int) int {
@@ -5279,6 +5654,14 @@ func (c *Config) autoAssignPorts() {
 		for _, addon := range c.Addons.Influx2TSDB {
 			if addon.Port != 0 {
 				assigned[addon.Port] = true
+			}
+		}
+		for _, addon := range c.Addons.ClickHouse {
+			if addon.HTTPPort != 0 {
+				assigned[addon.HTTPPort] = true
+			}
+			if addon.TCPPort != 0 {
+				assigned[addon.TCPPort] = true
 			}
 		}
 		next := base

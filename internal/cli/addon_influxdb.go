@@ -1371,6 +1371,6 @@ func init() {
 	// InfluxDB-specific install flags (--name/--data-dir/--listen/--http-port/
 	// --admin-user/--version/--force are registered globally).
 	addonInstallCmd.Flags().Int("rpc-port", 0, "influxdb: backup/restore RPC host port, loopback only (0=auto-assign from 8088)")
-	addonInstallCmd.Flags().String("admin-password", "", "influxdb: admin password (generated on first install if omitted; on --force the stored password is kept unless this is set)")
-	addonInstallCmd.Flags().StringArray("config-option", nil, "influxdb: extra influxdb.conf setting KEY=VALUE (top-level) or SECTION.KEY=VALUE (table) with a raw TOML value, e.g. 'data.index-version=\"tsi1\"' (repeatable; replaces the stored override list, persisted in pg.yaml and rendered into the config file)")
+	addonInstallCmd.Flags().String("admin-password", "", "influxdb/clickhouse: admin password (generated on first install if omitted; on --force the stored password is kept unless this is set)")
+	addonInstallCmd.Flags().StringArray("config-option", nil, "influxdb: extra influxdb.conf setting KEY=VALUE (top-level) or SECTION.KEY=VALUE (table) with a raw TOML value, e.g. 'data.index-version=\"tsi1\"' (repeatable; replaces the stored override list, persisted in pg.yaml and rendered into the config file); clickhouse: extra server setting as a dotted XML path KEY=VALUE, e.g. 'logger.level=information' or 'max_server_memory_usage=2000000000' (repeatable; replaces the stored override list, persisted in pg.yaml and merged into the rendered config.d XML)")
 }
