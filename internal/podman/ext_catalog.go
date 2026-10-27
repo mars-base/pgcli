@@ -385,7 +385,7 @@ var PigstyExtMap = map[string]PigstyExt{
 	"table_version":                  {Package: "table-version", NeedsPreload: false, Repo: "MIXED"},
 	"tdigest":                        {Package: "tdigest", NeedsPreload: false, Repo: "PGDG"},
 	"temporal_tables":                {Package: "temporal-tables", NeedsPreload: false, Repo: "PIGSTY"},
-	"timescaledb":                    {Package: "timescaledb", NeedsPreload: true, PreloadFirst: true, Repo: "PIGSTY"},
+	"timescaledb":                    {Package: "timescaledb-tsl", NeedsPreload: true, PreloadFirst: true, Repo: "PIGSTY"},
 	"timescaledb_toolkit":            {Package: "timescaledb-toolkit", NeedsPreload: false, Repo: "PIGSTY"},
 	"timeseries":                     {Package: "pg-timeseries", NeedsPreload: false, Repo: "PIGSTY"},
 	"timestamp9":                     {Package: "timestamp9", NeedsPreload: false, Repo: "MIXED"},

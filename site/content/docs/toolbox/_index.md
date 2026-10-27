@@ -21,4 +21,5 @@ Tools and guides that extend pgcli beyond core instance management.
 - [ZFS Storage](./zfs/) — Install ZFS and manage pools, datasets and snapshots
 - [PGMQ Queues](./pgmq/) — Build durable message queues inside PostgreSQL
 - [SQLite + Litestream](./sqlite/) — Manage host-local SQLite databases with continuous S3 backups
+- [TimescaleDB](./timescaledb/) — Time-series hypertables and time_bucket analytics on PostgreSQL
 {.cards}
