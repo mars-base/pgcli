@@ -18,6 +18,7 @@ pgcli 使用的容器镜像及其默认 tag。
 | `ghcr.io/mars-base/pgcli/pgcli-mc` | `20250813083541` | MinIO 客户端 (`mc`) | `DefaultMCImageTag` |
 | `docker.io/pgsty/silo` | `RELEASE.2026-09-16T00-00-00Z` | silo（Pigsty 的 MinIO 分支）S3 存储 + `mcli` 客户端 | `DefaultSiloImageTag` |
 | `ghcr.io/mars-base/pgcli/pgcli-rustfs` | `1.0.0` | rustfs（Rust 实现的 S3 存储），建立在 `docker.io/rustfs/rustfs:1.0.0` 之上的 wrapper | `DefaultRustfsImageTag` |
+| `ghcr.io/mars-base/pgcli/pgcli-influxdb` | `1.13.1` | InfluxDB 1.x 单节点时序库（官方 linux/amd64 1.13.1 二进制 + Alpine），单架构；`pg addon influxdb` 与 `pg influx` 共用 | `DefaultInfluxDBImageTag` |
 | `docker.io/edoburu/pgbouncer` | `v1.25.2-p0` | PostgreSQL 连接池 | `DefaultPgBouncerImageTag` |
 | `docker.io/postgrest/postgrest` | `v16.3` | PostgREST（REST API over PostgreSQL） | `DefaultPostgrestImageTag` |
 | `docker.io/library/haproxy` | `3.2.23-alpine` | HTTP/TCP 负载均衡 | `DefaultHAProxyImageTag` |
@@ -99,6 +100,11 @@ podman save -o "$TARGET/redis_8.10.2.tar" docker.io/library/redis:8.10.2
 podman pull ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine
 podman save -o "$TARGET/predixy_7.0.1-alpine.tar" \
   ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine
+
+# influxdb 镜像同为单架构 amd64，直接 save
+podman pull ghcr.io/mars-base/pgcli/pgcli-influxdb:1.13.1
+podman save -o "$TARGET/pgcli-influxdb_1.13.1.tar" \
+  ghcr.io/mars-base/pgcli/pgcli-influxdb:1.13.1
 
 # pgAdmin 上游镜像与 redis 一样是双架构 manifest list，先按 amd64 pull 再 save
 podman pull --platform linux/amd64 docker.io/dpage/pgadmin4:9.18
@@ -206,6 +212,12 @@ done
   已过期，free 二进制拒绝启动），因此**镜像内置 license 的有效期随构建时间滚动**
   （现镜像为 `ClientLimit 128`、2026-12-31 到期）；pgcli 本身不分发也不管理
   license，到期就重新 build + push
+- **pgcli-influxdb**：pgcli 自建镜像（`ghcr.io/mars-base/pgcli/pgcli-influxdb`），
+  把官方 InfluxDB 1.13.1 的 linux/amd64 发行包（`influxd` + `influx` +
+  `influx_inspect`）放到 Alpine 上；上游只发 amd64 二进制，所以是**单架构镜像**
+  （可直接 `podman save`）。`pg addon influxdb` 与顶层 `pg influx` 透传共用此镜像；
+  版本固定为 v1 最后一个发行版（v1 已进入维护模式），`make container-build-influxdb`
+  会下载并校验 sha256，支持 `INFLUXDB_PACKAGE=/path/to.tar.gz` 离线构建
 - **pgadmin4**：纯上游 `docker.io/dpage/pgadmin4`，无 wrapper（镜像自己的
   entrypoint 把 `/var/lib/pgadmin` chown 给 uid 5050 后降权，所以 pgcli 不需要
   rustfs 那套属主机制）；pin 到发布时的 `latest`（当前 `9.18`，双架构 manifest

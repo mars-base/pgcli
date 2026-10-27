@@ -9,7 +9,7 @@ LDFLAGS = -s -w \
 
 PLATFORMS = linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
-.PHONY: build clean test lint install build-all gencert container-build container-push container-build-minio container-push-minio container-build-mc container-push-mc container-build-patroni container-push-patroni container-build-rustfs container-push-rustfs container-build-predixy container-push-predixy container-images-export
+.PHONY: build clean test lint install build-all gencert container-build container-push container-build-minio container-push-minio container-build-mc container-push-mc container-build-patroni container-push-patroni container-build-rustfs container-push-rustfs container-build-predixy container-push-predixy container-build-influxdb container-push-influxdb container-images-export
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) .
@@ -183,6 +183,36 @@ container-build-predixy:
 container-push-predixy:
 	podman push $(PREDIXY_IMAGE) $(PREDIXY_IMAGE)
 
+# InfluxDB 1.13.1 image — single-node OSS on Alpine, packaging the official
+# linux/amd64 release tarball (influxd + influx + influx_inspect). Single-arch:
+# the addon targets Linux x86 only. INFLUXDB_PACKAGE may point at a local copy
+# of the tarball for offline builds; the sha256 is verified either way.
+INFLUXDB_VERSION ?= 1.13.1
+INFLUXDB_IMAGE    = ghcr.io/mars-base/pgcli/pgcli-influxdb:$(INFLUXDB_VERSION)
+INFLUXDB_URL      = https://dl.influxdata.com/influxdb/releases/v$(INFLUXDB_VERSION)/influxdb-$(INFLUXDB_VERSION)_linux_amd64.tar.gz
+INFLUXDB_SHA256  ?= a8a6e648f5271e3286bc965a2d321c86c6404afaa12ca4bf37c44303e0bf2f52
+INFLUXDB_PACKAGE ?=
+
+container-build-influxdb:
+	@src="$(INFLUXDB_PACKAGE)"; \
+	if [ -z "$$src" ]; then \
+	  src=/tmp/influxdb-$(INFLUXDB_VERSION)_linux_amd64.tar.gz; \
+	  curl -sfL --retry 3 -o "$$src" $(INFLUXDB_URL) || exit 1; \
+	fi; \
+	echo "$(INFLUXDB_SHA256)  $$src" | sha256sum -c - || exit 1; \
+	rm -rf /tmp/influxdb-ex && mkdir -p /tmp/influxdb-ex; \
+	tar xzf "$$src" -C /tmp/influxdb-ex || exit 1; \
+	d=$$(find /tmp/influxdb-ex -mindepth 1 -maxdepth 1 -type d -name 'influxdb-*' | head -n1); \
+	[ -n "$$d" ] || { echo "influxdb package layout not recognised" >&2; exit 1; }; \
+	cp "$$d/influxd" "$$d/influx" "$$d/influx_inspect" "$$d/influxdb.conf" embed/ || exit 1; \
+	chmod 0755 embed/influxd embed/influx embed/influx_inspect; \
+	podman build --platform linux/amd64 -t $(INFLUXDB_IMAGE) -f embed/influxdb.Containerfile embed/; \
+	rc=$$?; rm -f embed/influxd embed/influx embed/influx_inspect embed/influxdb.conf; \
+	rm -rf /tmp/influxdb-ex; exit $$rc
+
+container-push-influxdb:
+	podman push $(INFLUXDB_IMAGE) $(INFLUXDB_IMAGE)
+
 # Offline image export for the docs/images.md catalog (see that doc's
 # "镜像导出" section for the manual equivalents and the rustfs/redis
 # manifest-list caveat). Always pulls --platform linux/amd64 FIRST so a
@@ -201,6 +231,7 @@ IMAGES := \
 	ghcr.io/mars-base/pgcli/pgcli-minio:20250422221226 \
 	ghcr.io/mars-base/pgcli/pgcli-mc:20250813083541 \
 	ghcr.io/mars-base/pgcli/pgcli-rustfs:1.0.0 \
+	ghcr.io/mars-base/pgcli/pgcli-influxdb:1.13.1 \
 	ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine \
 	docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z \
 	docker.io/postgrest/postgrest:v16.3 \

@@ -20,44 +20,45 @@ import (
 
 // Config is the complete pgcli configuration.
 type Config struct {
-	BaseDir                 string                    `yaml:"base_dir,omitempty"`
-	Network                 string                    `yaml:"network,omitempty"`                    // shared podman network name, persisted at top level
-	Namespace               string                    `yaml:"namespace,omitempty"`                  // container name namespace, empty = disabled (default)
-	PGStartPort             int                       `yaml:"pg_start_port,omitempty"`              // starting PG host port, default 35432
-	PGSSHPort               int                       `yaml:"pg_ssh_port,omitempty"`                // starting SSH host port, default 42201
-	PgBouncerStartPort      int                       `yaml:"pgbouncer_start_port,omitempty"`       // starting PgBouncer host port, default 56432
-	EtcdStartPort           int                       `yaml:"etcd_start_port,omitempty"`            // starting etcd client host port, default 2379 (peer gets the next free port)
-	PgDogStartPort          int                       `yaml:"pgdog_start_port,omitempty"`           // starting PgDog host port, default 7432 (openmetrics gets the next free port)
-	PatroniStartPort        int                       `yaml:"patroni_start_port,omitempty"`         // starting Patroni member PG host port, default 35532
-	PatroniRestapiStartPort int                       `yaml:"patroni_restapi_start_port,omitempty"` // starting Patroni REST API host port, default 8008
-	PatroniSSHStartPort     int                       `yaml:"patroni_ssh_start_port,omitempty"`     // starting Patroni SSH host port, default 42301 (separate from PG instance SSH pool at 42201)
-	HaProxyStartPort        int                       `yaml:"haproxy_start_port,omitempty"`         // starting HAProxy listener host port, default 5000 (read port and stats take the next free ports)
-	MinioStartPort          int                       `yaml:"minio_start_port,omitempty"`           // starting MinIO API host port, default 9000 (console takes the next free port)
-	PostgrestStartPort      int                       `yaml:"postgrest_start_port,omitempty"`       // starting PostgREST HTTP host port, default 3500
-	RedisStartPort          int                       `yaml:"redis_start_port,omitempty"`           // starting Redis host port, default 6379
-	PredixyStartPort        int                       `yaml:"predixy_start_port,omitempty"`         // starting Predixy proxy listener host port, default 7617
-	PgAdminStartPort        int                       `yaml:"pgadmin_start_port,omitempty"`         // starting pgAdmin 4 web host port, default 5050
-	GrafanaStartPort        int                       `yaml:"grafana_start_port,omitempty"`         // starting Grafana web host port, default 3000
-	PrometheusStartPort     int                       `yaml:"prometheus_start_port,omitempty"`      // starting Prometheus web host port, default 9090
-	AlertmanagerStartPort   int                       `yaml:"alertmanager_start_port,omitempty"`    // starting Alertmanager web host port, default 9093
-	GiteaStartPort          int                       `yaml:"gitea_start_port,omitempty"`           // starting Gitea web host port, default 3080 (Gitea's own default 3000 belongs to the Grafana pool here)
-	GiteaSSHStartPort       int                       `yaml:"gitea_ssh_start_port,omitempty"`       // starting Gitea OpenSSH host port, default 2222 (allocated for every gitea instance — the image's sshd always runs, so even SSH-off needs a port to park it on, off 22)
-	NginxStartPort          int                       `yaml:"nginx_start_port,omitempty"`           // starting nginx HTTP host port, default 8080 (HTTPS takes the next free port)
-	GarageStartPort         int                       `yaml:"garage_start_port,omitempty"`          // starting Garage S3 API host port, default 3900 (RPC, web, admin take the next three free ports)
-	SeaweedfsStartPort      int                       `yaml:"seaweedfs_start_port,omitempty"`       // starting SeaweedFS master host port, default 8400 (volume, filer, s3 take the next three free ports; gRPC twins at +10000 are reserved)
-	VictoriaMetricsStartPort int                      `yaml:"victoriametrics_start_port,omitempty"` // starting VictoriaMetrics HTTP host port, default 8428
-	VMClusterStartPort       int                      `yaml:"vmcluster_start_port,omitempty"`       // starting VMCluster port, default 8480 (5 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP, internal insert TCP, internal select TCP)
-	VictoriaLogsStartPort    int                      `yaml:"victorialogs_start_port,omitempty"`    // starting VictoriaLogs HTTP host port, default 9428
-	VlagentStartPort         int                      `yaml:"vlagent_start_port,omitempty"`         // starting vlagent ingest HTTP host port, default 9429
-	VLClusterStartPort       int                      `yaml:"vlcluster_start_port,omitempty"`       // starting VLCluster port, default 9430 (3 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP)
-	Postgres                PostgresConfig            `yaml:"postgres"`
-	Podman                  PodmanConfig              `yaml:"podman"`
-	PITR                    PITRConfig                `yaml:"pitr"`
-	Logging                 LoggingConfig             `yaml:"logging"`
-	Backup                  BackupConfig              `yaml:"backup"`
-	Pigsty                  PigstyConfig              `yaml:"pigsty"`
-	Addons                  TopAddonsConfig           `yaml:"addons,omitempty"` // top-level addon configs (e.g. remote PgBouncer)
-	Instances               map[string]InstanceConfig `yaml:"instances"`
+	BaseDir                  string                    `yaml:"base_dir,omitempty"`
+	Network                  string                    `yaml:"network,omitempty"`                    // shared podman network name, persisted at top level
+	Namespace                string                    `yaml:"namespace,omitempty"`                  // container name namespace, empty = disabled (default)
+	PGStartPort              int                       `yaml:"pg_start_port,omitempty"`              // starting PG host port, default 35432
+	PGSSHPort                int                       `yaml:"pg_ssh_port,omitempty"`                // starting SSH host port, default 42201
+	PgBouncerStartPort       int                       `yaml:"pgbouncer_start_port,omitempty"`       // starting PgBouncer host port, default 56432
+	EtcdStartPort            int                       `yaml:"etcd_start_port,omitempty"`            // starting etcd client host port, default 2379 (peer gets the next free port)
+	PgDogStartPort           int                       `yaml:"pgdog_start_port,omitempty"`           // starting PgDog host port, default 7432 (openmetrics gets the next free port)
+	PatroniStartPort         int                       `yaml:"patroni_start_port,omitempty"`         // starting Patroni member PG host port, default 35532
+	PatroniRestapiStartPort  int                       `yaml:"patroni_restapi_start_port,omitempty"` // starting Patroni REST API host port, default 8008
+	PatroniSSHStartPort      int                       `yaml:"patroni_ssh_start_port,omitempty"`     // starting Patroni SSH host port, default 42301 (separate from PG instance SSH pool at 42201)
+	HaProxyStartPort         int                       `yaml:"haproxy_start_port,omitempty"`         // starting HAProxy listener host port, default 5000 (read port and stats take the next free ports)
+	MinioStartPort           int                       `yaml:"minio_start_port,omitempty"`           // starting MinIO API host port, default 9000 (console takes the next free port)
+	PostgrestStartPort       int                       `yaml:"postgrest_start_port,omitempty"`       // starting PostgREST HTTP host port, default 3500
+	RedisStartPort           int                       `yaml:"redis_start_port,omitempty"`           // starting Redis host port, default 6379
+	PredixyStartPort         int                       `yaml:"predixy_start_port,omitempty"`         // starting Predixy proxy listener host port, default 7617
+	PgAdminStartPort         int                       `yaml:"pgadmin_start_port,omitempty"`         // starting pgAdmin 4 web host port, default 5050
+	GrafanaStartPort         int                       `yaml:"grafana_start_port,omitempty"`         // starting Grafana web host port, default 3000
+	PrometheusStartPort      int                       `yaml:"prometheus_start_port,omitempty"`      // starting Prometheus web host port, default 9090
+	AlertmanagerStartPort    int                       `yaml:"alertmanager_start_port,omitempty"`    // starting Alertmanager web host port, default 9093
+	GiteaStartPort           int                       `yaml:"gitea_start_port,omitempty"`           // starting Gitea web host port, default 3080 (Gitea's own default 3000 belongs to the Grafana pool here)
+	GiteaSSHStartPort        int                       `yaml:"gitea_ssh_start_port,omitempty"`       // starting Gitea OpenSSH host port, default 2222 (allocated for every gitea instance — the image's sshd always runs, so even SSH-off needs a port to park it on, off 22)
+	NginxStartPort           int                       `yaml:"nginx_start_port,omitempty"`           // starting nginx HTTP host port, default 8080 (HTTPS takes the next free port)
+	GarageStartPort          int                       `yaml:"garage_start_port,omitempty"`          // starting Garage S3 API host port, default 3900 (RPC, web, admin take the next three free ports)
+	SeaweedfsStartPort       int                       `yaml:"seaweedfs_start_port,omitempty"`       // starting SeaweedFS master host port, default 8400 (volume, filer, s3 take the next three free ports; gRPC twins at +10000 are reserved)
+	VictoriaMetricsStartPort int                       `yaml:"victoriametrics_start_port,omitempty"` // starting VictoriaMetrics HTTP host port, default 8428
+	VMClusterStartPort       int                       `yaml:"vmcluster_start_port,omitempty"`       // starting VMCluster port, default 8480 (5 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP, internal insert TCP, internal select TCP)
+	VictoriaLogsStartPort    int                       `yaml:"victorialogs_start_port,omitempty"`    // starting VictoriaLogs HTTP host port, default 9428
+	VlagentStartPort         int                       `yaml:"vlagent_start_port,omitempty"`         // starting vlagent ingest HTTP host port, default 9429
+	VLClusterStartPort       int                       `yaml:"vlcluster_start_port,omitempty"`       // starting VLCluster port, default 9430 (3 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP)
+	InfluxDBStartPort        int                       `yaml:"influxdb_start_port,omitempty"`        // starting InfluxDB HTTP API host port, default 8086
+	Postgres                 PostgresConfig            `yaml:"postgres"`
+	Podman                   PodmanConfig              `yaml:"podman"`
+	PITR                     PITRConfig                `yaml:"pitr"`
+	Logging                  LoggingConfig             `yaml:"logging"`
+	Backup                   BackupConfig              `yaml:"backup"`
+	Pigsty                   PigstyConfig              `yaml:"pigsty"`
+	Addons                   TopAddonsConfig           `yaml:"addons,omitempty"` // top-level addon configs (e.g. remote PgBouncer)
+	Instances                map[string]InstanceConfig `yaml:"instances"`
 
 	Instance string `yaml:"-"` // current instance name (set at runtime, not persisted)
 }
@@ -117,35 +118,36 @@ type AddonsConfig struct {
 // (e.g. a PgBouncer fronting a remote database via --dsn), and for shared
 // infrastructure addons like etcd.
 type TopAddonsConfig struct {
-	PgBouncer    map[string]PgBouncerConfig      `yaml:"pgbouncer,omitempty"`
-	Postgrest    map[string]PostgrestConfig      `yaml:"postgrest,omitempty"`
-	Etcd         map[string]EtcdConfig           `yaml:"etcd,omitempty"`
-	PgDog        map[string]PgDogConfig          `yaml:"pgdog,omitempty"`
-	Patroni      map[string]PatroniClusterConfig `yaml:"patroni,omitempty"`
-	HAProxy      map[string]HAProxyConfig        `yaml:"haproxy,omitempty"`
-	Minio        map[string]MinioConfig          `yaml:"minio,omitempty"`
-	Silo         map[string]SiloConfig           `yaml:"silo,omitempty"`
-	Rustfs       map[string]RustfsConfig         `yaml:"rustfs,omitempty"`
-	Garage       map[string]GarageConfig         `yaml:"garage,omitempty"`
-	Seaweedfs    map[string]SeaweedfsConfig      `yaml:"seaweedfs,omitempty"`
-	Redis        map[string]RedisConfig          `yaml:"redis,omitempty"`
-	Predixy      map[string]PredixyConfig        `yaml:"predixy,omitempty"`
-	PgAdmin      map[string]PgAdminConfig        `yaml:"pgadmin,omitempty"`
-	Grafana      map[string]GrafanaConfig        `yaml:"grafana,omitempty"`
-	Prometheus   map[string]PrometheusConfig     `yaml:"prometheus,omitempty"`
-	Alertmanager map[string]AlertmanagerConfig   `yaml:"alertmanager,omitempty"`
-	Gitea        map[string]GiteaConfig          `yaml:"gitea,omitempty"`
-	Nginx        map[string]NginxConfig          `yaml:"nginx,omitempty"`
-	BeeGFS       map[string]BeeGFSConfig         `yaml:"beegfs,omitempty"`
-	Juicefs      map[string]JuicefsConfig        `yaml:"juicefs,omitempty"`
-	Zerofs       map[string]ZerofsConfig         `yaml:"zerofs,omitempty"`
-	Duckdb       map[string]DuckdbConfig         `yaml:"duckdb,omitempty"`
-	SQLite       map[string]SQLiteConfig         `yaml:"sqlite,omitempty"`
+	PgBouncer       map[string]PgBouncerConfig       `yaml:"pgbouncer,omitempty"`
+	Postgrest       map[string]PostgrestConfig       `yaml:"postgrest,omitempty"`
+	Etcd            map[string]EtcdConfig            `yaml:"etcd,omitempty"`
+	PgDog           map[string]PgDogConfig           `yaml:"pgdog,omitempty"`
+	Patroni         map[string]PatroniClusterConfig  `yaml:"patroni,omitempty"`
+	HAProxy         map[string]HAProxyConfig         `yaml:"haproxy,omitempty"`
+	Minio           map[string]MinioConfig           `yaml:"minio,omitempty"`
+	Silo            map[string]SiloConfig            `yaml:"silo,omitempty"`
+	Rustfs          map[string]RustfsConfig          `yaml:"rustfs,omitempty"`
+	Garage          map[string]GarageConfig          `yaml:"garage,omitempty"`
+	Seaweedfs       map[string]SeaweedfsConfig       `yaml:"seaweedfs,omitempty"`
+	Redis           map[string]RedisConfig           `yaml:"redis,omitempty"`
+	Predixy         map[string]PredixyConfig         `yaml:"predixy,omitempty"`
+	PgAdmin         map[string]PgAdminConfig         `yaml:"pgadmin,omitempty"`
+	Grafana         map[string]GrafanaConfig         `yaml:"grafana,omitempty"`
+	Prometheus      map[string]PrometheusConfig      `yaml:"prometheus,omitempty"`
+	Alertmanager    map[string]AlertmanagerConfig    `yaml:"alertmanager,omitempty"`
+	Gitea           map[string]GiteaConfig           `yaml:"gitea,omitempty"`
+	Nginx           map[string]NginxConfig           `yaml:"nginx,omitempty"`
+	BeeGFS          map[string]BeeGFSConfig          `yaml:"beegfs,omitempty"`
+	Juicefs         map[string]JuicefsConfig         `yaml:"juicefs,omitempty"`
+	Zerofs          map[string]ZerofsConfig          `yaml:"zerofs,omitempty"`
+	Duckdb          map[string]DuckdbConfig          `yaml:"duckdb,omitempty"`
+	SQLite          map[string]SQLiteConfig          `yaml:"sqlite,omitempty"`
 	VictoriaMetrics map[string]VictoriaMetricsConfig `yaml:"victoriametrics,omitempty"`
-	VMCluster      map[string]VMClusterConfig       `yaml:"vmcluster,omitempty"`
-	VLCluster      map[string]VLClusterConfig       `yaml:"vlcluster,omitempty"`
-	VictoriaLogs   map[string]VictoriaLogsConfig    `yaml:"victorialogs,omitempty"`
-	Vlagent        map[string]VlagentConfig          `yaml:"vlagent,omitempty"`
+	VMCluster       map[string]VMClusterConfig       `yaml:"vmcluster,omitempty"`
+	VLCluster       map[string]VLClusterConfig       `yaml:"vlcluster,omitempty"`
+	VictoriaLogs    map[string]VictoriaLogsConfig    `yaml:"victorialogs,omitempty"`
+	Vlagent         map[string]VlagentConfig         `yaml:"vlagent,omitempty"`
+	InfluxDB        map[string]InfluxDBConfig        `yaml:"influxdb,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -588,6 +590,13 @@ const DefaultSeaweedfsImageTag = "docker.io/chrislusf/seaweedfs:4.48_large_disk"
 // the const is the single source of truth; keep it in sync with the Makefile's
 // MC_IMAGE ($(MC_TS) is derived from MC_VERSION).
 const DefaultMCImageTag = "ghcr.io/mars-base/pgcli/pgcli-mc:20250813083541"
+
+// DefaultInfluxDBImageTag is the pgcli-built InfluxDB 1.13.1 image (the
+// official linux/amd64 release tarball on Alpine). The addon runs influxd from
+// this image, and `pg influx` runs its `influx` CLI in a throwaway container —
+// like pg mc — so no host install is needed for ad-hoc queries.
+// Keep in sync with the Makefile's INFLUXDB_IMAGE.
+const DefaultInfluxDBImageTag = "ghcr.io/mars-base/pgcli/pgcli-influxdb:1.13.1"
 
 // DefaultPgBouncerImageTag pins the PgBouncer image to a specific upstream
 // release rather than :latest, so installs are reproducible. edoburu/pgbouncer
@@ -1123,8 +1132,8 @@ type ZerofsConfig struct {
 // duckdb/duckdb GitHub releases. v1.5.x uses .zip, v2.0.x uses .tar.gz.
 const (
 	DefaultDuckdbVersion = "1.5.6"
-	duckdbSHA_1_5_6     = "6e89deac1ebbc36eed0291caf8b567b030c7b86ac35998f71854e22b3c5d5e2f" // duckdb_cli-linux-amd64.zip
-	duckdbSHA_2_0_0     = "c6507206baf7793c6013dbd82368469a45f20dc0e17a6f92f204602f652ed2bc" // duckdb-cli-linux-amd64.tar.gz
+	duckdbSHA_1_5_6      = "6e89deac1ebbc36eed0291caf8b567b030c7b86ac35998f71854e22b3c5d5e2f" // duckdb_cli-linux-amd64.zip
+	duckdbSHA_2_0_0      = "c6507206baf7793c6013dbd82368469a45f20dc0e17a6f92f204602f652ed2bc" // duckdb-cli-linux-amd64.tar.gz
 )
 
 // DuckdbSHA256 returns the pinned checksum for a specific DuckDB version
@@ -1193,6 +1202,130 @@ type SQLiteS3Config struct {
 func ValidSQLiteName(name string) bool {
 	ok, _ := regexp.MatchString(`^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$`, name)
 	return ok
+}
+
+// DefaultInfluxDBVersion pins the InfluxDB 1.x release used by the addon.
+const DefaultInfluxDBVersion = "1.13.1"
+
+// InfluxDBConfig holds a managed InfluxDB 1.x deployment. InfluxDB 1.x OSS is
+// a single-node time-series database using TSM storage and InfluxQL; pgcli
+// runs influxd from the pgcli-influxdb image. ConfigPath and DataDir are host
+// paths bind-mounted into the container (influxdb.conf read-only, data
+// read-write). RPC (backup and restore) is reachable only over the container's
+// host-network loopback because the protocol carries no authentication, while
+// the authenticated HTTP API listens on Listen:HostPort.
+type InfluxDBConfig struct {
+	ContainerName string `yaml:"container_name,omitempty"` // pgcli-influxdb[-ns]-<name>
+	Name          string `yaml:"name,omitempty"`           // addon key, defaults to the map key
+	Version       string `yaml:"version,omitempty"`        // pinned release, e.g. "1.13.1"
+	ImageTag      string `yaml:"image_tag,omitempty"`      // ghcr.io/mars-base/pgcli/pgcli-influxdb:<version>
+	ConfigPath    string `yaml:"config_path,omitempty"`    // generated influxdb.conf, mounted at /etc/influxdb/influxdb.conf
+	DataDir       string `yaml:"data_dir,omitempty"`       // meta/, data/ and wal/ live below here; mounted at /var/lib/influxdb
+	Listen        string `yaml:"listen,omitempty"`         // HTTP bind host, default 0.0.0.0
+	HostPort      int    `yaml:"host_port,omitempty"`
+	// RPCPort is the backup/restore RPC listener. Upstream has no
+	// authentication for it, so it always binds the host-network loopback and
+	// is unique per instance (two host-networked containers cannot share it).
+	RPCPort   int    `yaml:"rpc_port,omitempty"`
+	AdminUser string `yaml:"admin_user,omitempty"`
+	// AdminPassword is stored in pg.yaml like the other addon credentials;
+	// `pg addon password influxdb` reads it back.
+	AdminPassword string `yaml:"admin_password,omitempty"`
+	// ExtraConfig adds or overrides generated influxdb.conf settings, as
+	// "KEY=VALUE" (top-level) or "SECTION.KEY=VALUE" (table) entries. Values
+	// are raw TOML, so strings must carry their own quotes. Settings pgcli
+	// manages itself (paths, listen, auth) are rejected.
+	ExtraConfig []string `yaml:"extra_config,omitempty"`
+	// Autostart starts the container on host boot (pg autostart enable --influxdb).
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// InfluxDBImageTagForVersion maps a pinned InfluxDB 1.x release to its pgcli
+// image tag. Only 1.13.1 is published; any other version is rejected instead of
+// producing a pull that would fail at run time.
+func InfluxDBImageTagForVersion(version string) (string, bool) {
+	if version == DefaultInfluxDBVersion {
+		return DefaultInfluxDBImageTag, true
+	}
+	return "", false
+}
+
+// ValidInfluxDBName reports whether name is a safe InfluxDB instance key.
+func ValidInfluxDBName(name string) bool {
+	ok, _ := regexp.MatchString(`^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$`, name)
+	return ok
+}
+
+// influxDBManagedKeys are the config keys pgcli renders itself; a
+// --config-option override would either duplicate a TOML key (a parse error)
+// or silently fight the instance's stored paths/ports.
+var influxDBManagedKeys = map[string]bool{
+	"reporting-disabled": true,
+	"bind-address":       true,
+	"meta.dir":           true,
+	"data.dir":           true,
+	"data.wal-dir":       true,
+	"http.bind-address":  true,
+	"http.auth-enabled":  true,
+}
+
+var influxDBIdent = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// ParseInfluxDBConfigOption splits an extra-config entry into its table
+// (empty for top-level), key and raw TOML value.
+func ParseInfluxDBConfigOption(opt string) (section, key, value string, err error) {
+	qualified, value, ok := strings.Cut(opt, "=")
+	if !ok {
+		return "", "", "", fmt.Errorf("config option %q must be KEY=VALUE or SECTION.KEY=VALUE", opt)
+	}
+	qualified = strings.TrimSpace(qualified)
+	value = strings.TrimSpace(value)
+	if qualified == "" {
+		return "", "", "", fmt.Errorf("config option %q has an empty key", opt)
+	}
+	if value == "" {
+		return "", "", "", fmt.Errorf("config option %q has an empty value (use \"\" for an empty string)", opt)
+	}
+	parts := strings.Split(qualified, ".")
+	switch len(parts) {
+	case 1:
+		key = parts[0]
+	case 2:
+		section, key = parts[0], parts[1]
+	default:
+		return "", "", "", fmt.Errorf("config option %q has too many dots (use SECTION.KEY=VALUE)", opt)
+	}
+	if section != "" && !influxDBIdent.MatchString(section) {
+		return "", "", "", fmt.Errorf("config option %q has an invalid section %q", opt, section)
+	}
+	if !influxDBIdent.MatchString(key) {
+		return "", "", "", fmt.Errorf("config option %q has an invalid key %q", opt, key)
+	}
+	return section, key, value, nil
+}
+
+// ValidateInfluxDBExtraConfig checks syntax, rejects pgcli-managed keys and
+// duplicate overrides (duplicate TOML keys fail to parse).
+func ValidateInfluxDBExtraConfig(entries []string) error {
+	seen := make(map[string]bool, len(entries))
+	for _, opt := range entries {
+		section, key, _, err := ParseInfluxDBConfigOption(opt)
+		if err != nil {
+			return err
+		}
+		full := key
+		if section != "" {
+			full = section + "." + key
+		}
+		if influxDBManagedKeys[full] {
+			return fmt.Errorf("config option %q overrides a pgcli-managed setting", opt)
+		}
+		if seen[full] {
+			return fmt.Errorf("config option %q is set more than once", opt)
+		}
+		seen[full] = true
+	}
+	return nil
 }
 
 // RustfsConfig holds a standalone rustfs addon. Its field set is a
@@ -1883,9 +2016,9 @@ type VMClusterConfig struct {
 	StorageNodes []VMClusterStorageNode `yaml:"storage_nodes,omitempty"`
 
 	// StorageDataDir: only used when this host runs the storage role.
-	StorageDataDir string `yaml:"storage_data_dir,omitempty"`
-	Retention      string `yaml:"retention,omitempty"`
-	ReplicationFactor int `yaml:"replication_factor,omitempty"` // vminsert flag
+	StorageDataDir    string `yaml:"storage_data_dir,omitempty"`
+	Retention         string `yaml:"retention,omitempty"`
+	ReplicationFactor int    `yaml:"replication_factor,omitempty"` // vminsert flag
 
 	InsertExtraArgs  []string `yaml:"insert_extra_args,omitempty"`
 	SelectExtraArgs  []string `yaml:"select_extra_args,omitempty"`
@@ -2123,21 +2256,22 @@ type VictoriaLogsConfig struct {
 //
 // The image runs as root, so no pre-chown of the data dir is needed.
 type VlagentConfig struct {
-	ContainerName   string   `yaml:"container_name"`               // pgcli-vlagent<ns>-<name>
-	Name            string   `yaml:"name,omitempty"`               // addon key
-	ImageTag        string   `yaml:"image_tag,omitempty"`          // docker.io/victoriametrics/vlagent:v1.53.0
-	HostPort        int      `yaml:"host_port,omitempty"`          // HTTP ingest port, 9429+ auto-assigned
-	Listen          string   `yaml:"listen,omitempty"`             // -httpListenAddr bind, default 0.0.0.0
-	DataDir         string   `yaml:"data_dir,omitempty"`           // host dir mounted at /var/lib/vlagent (-tmpDataPath)
-	RemoteWriteURLs []string `yaml:"remote_write_urls,omitempty"`  // -remoteWrite.url, must end in /insert/native
-	LogPaths        []string `yaml:"log_paths,omitempty"`          // host files/dirs bind-mounted read-only at the same path
-	Includes        []string `yaml:"includes,omitempty"`           // -fileCollector.glob (container paths)
-	Excludes        []string `yaml:"excludes,omitempty"`           // -fileCollector.excludeGlob, paired positionally with Includes
-	ExtraArgs       []string `yaml:"extra_args,omitempty"`         // additional CLI flags
+	ContainerName   string   `yaml:"container_name"`              // pgcli-vlagent<ns>-<name>
+	Name            string   `yaml:"name,omitempty"`              // addon key
+	ImageTag        string   `yaml:"image_tag,omitempty"`         // docker.io/victoriametrics/vlagent:v1.53.0
+	HostPort        int      `yaml:"host_port,omitempty"`         // HTTP ingest port, 9429+ auto-assigned
+	Listen          string   `yaml:"listen,omitempty"`            // -httpListenAddr bind, default 0.0.0.0
+	DataDir         string   `yaml:"data_dir,omitempty"`          // host dir mounted at /var/lib/vlagent (-tmpDataPath)
+	RemoteWriteURLs []string `yaml:"remote_write_urls,omitempty"` // -remoteWrite.url, must end in /insert/native
+	LogPaths        []string `yaml:"log_paths,omitempty"`         // host files/dirs bind-mounted read-only at the same path
+	Includes        []string `yaml:"includes,omitempty"`          // -fileCollector.glob (container paths)
+	Excludes        []string `yaml:"excludes,omitempty"`          // -fileCollector.excludeGlob, paired positionally with Includes
+	ExtraArgs       []string `yaml:"extra_args,omitempty"`        // additional CLI flags
 	// Autostart brings this container up on host boot via the boot service.
 	// Start-only: it starts the existing container, so install first.
 	Autostart bool `yaml:"autostart,omitempty"`
 }
+
 // AlertmanagerConfig holds a standalone Alertmanager — the
 // dedup/grouping/routing frontend of the Prometheus stack
 // (https://prometheus.io/docs/alerting/latest/alertmanager/). Shape mirrors
@@ -2477,34 +2611,35 @@ type PigstyConfig struct {
 // Default returns a Config populated with default values.
 func Default() *Config {
 	return &Config{
-		BaseDir:                 "", // empty means use platform default
-		PGStartPort:             35432,
-		PGSSHPort:               42201,
-		PgBouncerStartPort:      56432,
-		EtcdStartPort:           2379,
-		PgDogStartPort:          7432,
-		PatroniStartPort:        35532,
-		PatroniRestapiStartPort: 8008,
-		PatroniSSHStartPort:     42301,
-		HaProxyStartPort:        5000,
-		MinioStartPort:          9000,
-		PostgrestStartPort:      3500,
-		RedisStartPort:          6379,
-		PredixyStartPort:        7617,
-		PgAdminStartPort:        5050,
-		GrafanaStartPort:        3000,
-		PrometheusStartPort:     9090,
-		AlertmanagerStartPort:   9093,
-		GiteaStartPort:          3080,
-		GiteaSSHStartPort:       2222,
-		NginxStartPort:          8080,
-		GarageStartPort:         3900,
-		SeaweedfsStartPort:      8400,
+		BaseDir:                  "", // empty means use platform default
+		PGStartPort:              35432,
+		PGSSHPort:                42201,
+		PgBouncerStartPort:       56432,
+		EtcdStartPort:            2379,
+		PgDogStartPort:           7432,
+		PatroniStartPort:         35532,
+		PatroniRestapiStartPort:  8008,
+		PatroniSSHStartPort:      42301,
+		HaProxyStartPort:         5000,
+		MinioStartPort:           9000,
+		PostgrestStartPort:       3500,
+		RedisStartPort:           6379,
+		PredixyStartPort:         7617,
+		PgAdminStartPort:         5050,
+		GrafanaStartPort:         3000,
+		PrometheusStartPort:      9090,
+		AlertmanagerStartPort:    9093,
+		GiteaStartPort:           3080,
+		GiteaSSHStartPort:        2222,
+		NginxStartPort:           8080,
+		GarageStartPort:          3900,
+		SeaweedfsStartPort:       8400,
 		VictoriaMetricsStartPort: 8428,
 		VMClusterStartPort:       8480,
 		VictoriaLogsStartPort:    9428,
 		VlagentStartPort:         9429,
 		VLClusterStartPort:       9430,
+		InfluxDBStartPort:        8086,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -2690,79 +2825,81 @@ func Load(path string) (*Config, error) {
 // displayConfig is the serializable subset of Config for save/display.
 // Global postgres/podman/pitr are excluded -- they are in-memory defaults only.
 type displayConfig struct {
-	BaseDir                 string                    `yaml:"base_dir,omitempty"`
-	Network                 string                    `yaml:"network,omitempty"`
-	Namespace               string                    `yaml:"namespace,omitempty"`
-	PGStartPort             int                       `yaml:"pg_start_port,omitempty"`
-	PGSSHPort               int                       `yaml:"pg_ssh_port,omitempty"`
-	PgBouncerStartPort      int                       `yaml:"pgbouncer_start_port,omitempty"`
-	EtcdStartPort           int                       `yaml:"etcd_start_port,omitempty"`
-	PgDogStartPort          int                       `yaml:"pgdog_start_port,omitempty"`
-	PatroniStartPort        int                       `yaml:"patroni_start_port,omitempty"`
-	PatroniRestapiStartPort int                       `yaml:"patroni_restapi_start_port,omitempty"`
-	HaProxyStartPort        int                       `yaml:"haproxy_start_port,omitempty"`
-	MinioStartPort          int                       `yaml:"minio_start_port,omitempty"`
-	PostgrestStartPort      int                       `yaml:"postgrest_start_port,omitempty"`
-	RedisStartPort          int                       `yaml:"redis_start_port,omitempty"`
-	PredixyStartPort        int                       `yaml:"predixy_start_port,omitempty"`
-	PgAdminStartPort        int                       `yaml:"pgadmin_start_port,omitempty"`
-	GrafanaStartPort        int                       `yaml:"grafana_start_port,omitempty"`
-	PrometheusStartPort     int                       `yaml:"prometheus_start_port,omitempty"`
-	AlertmanagerStartPort   int                       `yaml:"alertmanager_start_port,omitempty"`
-	GiteaStartPort          int                       `yaml:"gitea_start_port,omitempty"`
-	GiteaSSHStartPort       int                       `yaml:"gitea_ssh_start_port,omitempty"`
-	NginxStartPort          int                       `yaml:"nginx_start_port,omitempty"`
-	GarageStartPort         int                       `yaml:"garage_start_port,omitempty"`
-	SeaweedfsStartPort      int                       `yaml:"seaweedfs_start_port,omitempty"`
-	VictoriaMetricsStartPort int                      `yaml:"victoriametrics_start_port,omitempty"`
-	VMClusterStartPort       int                      `yaml:"vmcluster_start_port,omitempty"`
-	VictoriaLogsStartPort    int                      `yaml:"victorialogs_start_port,omitempty"`
-	VlagentStartPort         int                      `yaml:"vlagent_start_port,omitempty"`
-	VLClusterStartPort       int                      `yaml:"vlcluster_start_port,omitempty"`
-	Logging                 LoggingConfig             `yaml:"logging"`
-	Backup                  BackupConfig              `yaml:"backup"`
-	Pigsty                  PigstyConfig              `yaml:"pigsty"`
-	Addons                  TopAddonsConfig           `yaml:"addons,omitempty"`
-	Instances               map[string]InstanceConfig `yaml:"instances"`
+	BaseDir                  string                    `yaml:"base_dir,omitempty"`
+	Network                  string                    `yaml:"network,omitempty"`
+	Namespace                string                    `yaml:"namespace,omitempty"`
+	PGStartPort              int                       `yaml:"pg_start_port,omitempty"`
+	PGSSHPort                int                       `yaml:"pg_ssh_port,omitempty"`
+	PgBouncerStartPort       int                       `yaml:"pgbouncer_start_port,omitempty"`
+	EtcdStartPort            int                       `yaml:"etcd_start_port,omitempty"`
+	PgDogStartPort           int                       `yaml:"pgdog_start_port,omitempty"`
+	PatroniStartPort         int                       `yaml:"patroni_start_port,omitempty"`
+	PatroniRestapiStartPort  int                       `yaml:"patroni_restapi_start_port,omitempty"`
+	HaProxyStartPort         int                       `yaml:"haproxy_start_port,omitempty"`
+	MinioStartPort           int                       `yaml:"minio_start_port,omitempty"`
+	PostgrestStartPort       int                       `yaml:"postgrest_start_port,omitempty"`
+	RedisStartPort           int                       `yaml:"redis_start_port,omitempty"`
+	PredixyStartPort         int                       `yaml:"predixy_start_port,omitempty"`
+	PgAdminStartPort         int                       `yaml:"pgadmin_start_port,omitempty"`
+	GrafanaStartPort         int                       `yaml:"grafana_start_port,omitempty"`
+	PrometheusStartPort      int                       `yaml:"prometheus_start_port,omitempty"`
+	AlertmanagerStartPort    int                       `yaml:"alertmanager_start_port,omitempty"`
+	GiteaStartPort           int                       `yaml:"gitea_start_port,omitempty"`
+	GiteaSSHStartPort        int                       `yaml:"gitea_ssh_start_port,omitempty"`
+	NginxStartPort           int                       `yaml:"nginx_start_port,omitempty"`
+	GarageStartPort          int                       `yaml:"garage_start_port,omitempty"`
+	SeaweedfsStartPort       int                       `yaml:"seaweedfs_start_port,omitempty"`
+	VictoriaMetricsStartPort int                       `yaml:"victoriametrics_start_port,omitempty"`
+	VMClusterStartPort       int                       `yaml:"vmcluster_start_port,omitempty"`
+	VictoriaLogsStartPort    int                       `yaml:"victorialogs_start_port,omitempty"`
+	VlagentStartPort         int                       `yaml:"vlagent_start_port,omitempty"`
+	VLClusterStartPort       int                       `yaml:"vlcluster_start_port,omitempty"`
+	InfluxDBStartPort        int                       `yaml:"influxdb_start_port,omitempty"`
+	Logging                  LoggingConfig             `yaml:"logging"`
+	Backup                   BackupConfig              `yaml:"backup"`
+	Pigsty                   PigstyConfig              `yaml:"pigsty"`
+	Addons                   TopAddonsConfig           `yaml:"addons,omitempty"`
+	Instances                map[string]InstanceConfig `yaml:"instances"`
 }
 
 // Display returns a view of the config suitable for display or saving.
 func (c *Config) Display() displayConfig {
 	return displayConfig{
-		BaseDir:                 c.BaseDir,
-		Network:                 c.Podman.Network,
-		Namespace:               c.Namespace,
-		PGStartPort:             c.PGStartPort,
-		PGSSHPort:               c.PGSSHPort,
-		PgBouncerStartPort:      c.PgBouncerStartPort,
-		EtcdStartPort:           c.EtcdStartPort,
-		PgDogStartPort:          c.PgDogStartPort,
-		PatroniStartPort:        c.PatroniStartPort,
-		PatroniRestapiStartPort: c.PatroniRestapiStartPort,
-		HaProxyStartPort:        c.HaProxyStartPort,
-		MinioStartPort:          c.MinioStartPort,
-		PostgrestStartPort:      c.PostgrestStartPort,
-		RedisStartPort:          c.RedisStartPort,
-		PredixyStartPort:        c.PredixyStartPort,
-		PgAdminStartPort:        c.PgAdminStartPort,
-		GrafanaStartPort:        c.GrafanaStartPort,
-		PrometheusStartPort:     c.PrometheusStartPort,
-		AlertmanagerStartPort:   c.AlertmanagerStartPort,
-		GiteaStartPort:          c.GiteaStartPort,
-		GiteaSSHStartPort:       c.GiteaSSHStartPort,
-		NginxStartPort:          c.NginxStartPort,
-		GarageStartPort:         c.GarageStartPort,
-		SeaweedfsStartPort:      c.SeaweedfsStartPort,
+		BaseDir:                  c.BaseDir,
+		Network:                  c.Podman.Network,
+		Namespace:                c.Namespace,
+		PGStartPort:              c.PGStartPort,
+		PGSSHPort:                c.PGSSHPort,
+		PgBouncerStartPort:       c.PgBouncerStartPort,
+		EtcdStartPort:            c.EtcdStartPort,
+		PgDogStartPort:           c.PgDogStartPort,
+		PatroniStartPort:         c.PatroniStartPort,
+		PatroniRestapiStartPort:  c.PatroniRestapiStartPort,
+		HaProxyStartPort:         c.HaProxyStartPort,
+		MinioStartPort:           c.MinioStartPort,
+		PostgrestStartPort:       c.PostgrestStartPort,
+		RedisStartPort:           c.RedisStartPort,
+		PredixyStartPort:         c.PredixyStartPort,
+		PgAdminStartPort:         c.PgAdminStartPort,
+		GrafanaStartPort:         c.GrafanaStartPort,
+		PrometheusStartPort:      c.PrometheusStartPort,
+		AlertmanagerStartPort:    c.AlertmanagerStartPort,
+		GiteaStartPort:           c.GiteaStartPort,
+		GiteaSSHStartPort:        c.GiteaSSHStartPort,
+		NginxStartPort:           c.NginxStartPort,
+		GarageStartPort:          c.GarageStartPort,
+		SeaweedfsStartPort:       c.SeaweedfsStartPort,
 		VictoriaMetricsStartPort: c.VictoriaMetricsStartPort,
-		VMClusterStartPort:      c.VMClusterStartPort,
-		VictoriaLogsStartPort:   c.VictoriaLogsStartPort,
-		VlagentStartPort:        c.VlagentStartPort,
-		VLClusterStartPort:      c.VLClusterStartPort,
-		Logging:                 c.Logging,
-		Backup:                  c.Backup,
-		Pigsty:                  c.Pigsty,
-		Addons:                  c.Addons,
-		Instances:               c.Instances,
+		VMClusterStartPort:       c.VMClusterStartPort,
+		VictoriaLogsStartPort:    c.VictoriaLogsStartPort,
+		VlagentStartPort:         c.VlagentStartPort,
+		VLClusterStartPort:       c.VLClusterStartPort,
+		InfluxDBStartPort:        c.InfluxDBStartPort,
+		Logging:                  c.Logging,
+		Backup:                   c.Backup,
+		Pigsty:                   c.Pigsty,
+		Addons:                   c.Addons,
+		Instances:                c.Instances,
 	}
 }
 
@@ -2923,10 +3060,62 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	// InfluxDB instances: names are directory keys, every instance owns its
+	// own config/data paths, the image tag must be a published pgcli build,
+	// and HTTP/RPC host ports must be unique.
+	influxPorts := make(map[int]string, 2*len(c.Addons.InfluxDB))
+	for name, ic := range c.Addons.InfluxDB {
+		if !ValidInfluxDBName(ic.Name) {
+			return fmt.Errorf("addons.influxdb.%s.name %q must match [A-Za-z0-9][A-Za-z0-9_-]{0,47}", name, ic.Name)
+		}
+		if tag, ok := InfluxDBImageTagForVersion(ic.Version); !ok {
+			return fmt.Errorf("addons.influxdb.%s.version %q is not supported (available: %s)", name, ic.Version, DefaultInfluxDBVersion)
+		} else if ic.ImageTag != tag {
+			return fmt.Errorf("addons.influxdb.%s.image_tag %q does not match version %s (%s)", name, ic.ImageTag, ic.Version, tag)
+		}
+		if ic.ConfigPath == "" || !filepath.IsAbs(ic.ConfigPath) {
+			return fmt.Errorf("addons.influxdb.%s.config_path must be an absolute path, got %q", name, ic.ConfigPath)
+		}
+		if ic.DataDir == "" || !filepath.IsAbs(ic.DataDir) {
+			return fmt.Errorf("addons.influxdb.%s.data_dir must be an absolute path, got %q", name, ic.DataDir)
+		}
+		if ic.AdminUser == "" {
+			return fmt.Errorf("addons.influxdb.%s.admin_user must not be empty", name)
+		}
+		if ok, _ := regexp.MatchString(`^[A-Za-z0-9_.-]{1,64}$`, ic.AdminUser); !ok {
+			return fmt.Errorf("addons.influxdb.%s.admin_user %q must match [A-Za-z0-9_.-]{1,64}", name, ic.AdminUser)
+		}
+		if ic.AdminPassword == "" {
+			return fmt.Errorf("addons.influxdb.%s.admin_password must not be empty", name)
+		}
+		if ic.HostPort != 0 && ic.HostPort == ic.RPCPort {
+			return fmt.Errorf("addons.influxdb.%s.host_port and rpc_port must differ, got %d", name, ic.HostPort)
+		}
+		if err := ValidateInfluxDBExtraConfig(ic.ExtraConfig); err != nil {
+			return fmt.Errorf("addons.influxdb.%s.extra_config: %w", name, err)
+		}
+		for _, field := range []struct {
+			name  string
+			value int
+		}{
+			{"host_port", ic.HostPort},
+			{"rpc_port", ic.RPCPort},
+		} {
+			if field.value != 0 && (field.value < 1 || field.value > 65535) {
+				return fmt.Errorf("addons.influxdb.%s.%s must be between 1 and 65535, got %d", name, field.name, field.value)
+			}
+			if field.value == 0 {
+				continue
+			}
+			if prev, dup := influxPorts[field.value]; dup {
+				return fmt.Errorf("addons.influxdb.%s.%s %d is already used by %s (HTTP and RPC ports must be unique)", name, field.name, field.value, prev)
+			}
+			influxPorts[field.value] = name + "." + field.name
+		}
+	}
 	return nil
 }
 
-// ValidateS3Endpoint checks a bare http(s)://host[:port] external S3 endpoint
 // (no bucket path, no embedded credentials or query). Shape-only: the presence
 // requirement is enforced at install, so a half-written config still loads.
 func ValidateS3Endpoint(path, endpoint string) error {
@@ -3060,6 +3249,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.VLClusterStartPort == 0 {
 		c.VLClusterStartPort = d.VLClusterStartPort
+	}
+	if c.InfluxDBStartPort == 0 {
+		c.InfluxDBStartPort = d.InfluxDBStartPort
 	}
 
 	// Postgres
@@ -4045,6 +4237,46 @@ func (c *Config) ApplyDefaults() {
 		c.Addons.SQLite[name] = db
 	}
 
+	// Top-level InfluxDB instances. All state lives under
+	// <base>/addon/influxdb/<name>/; influxd runs from the pgcli-influxdb
+	// image, with DataDir and ConfigPath bind-mounted into the container. RPC
+	// always binds the host-network loopback (fixed at render time), because
+	// that protocol has no authentication.
+	influxBaseDir := platform.DefaultConfigDir()
+	if c.BaseDir != "" {
+		influxBaseDir = c.BaseDir
+	}
+	for name, addon := range c.Addons.InfluxDB {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.Version == "" {
+			addon.Version = DefaultInfluxDBVersion
+		}
+		if addon.ImageTag == "" {
+			if tag, ok := InfluxDBImageTagForVersion(addon.Version); ok {
+				addon.ImageTag = tag
+			}
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-influxdb" + nsSuffix(c.Namespace) + "-" + name
+		}
+		addonDir := filepath.Join(influxBaseDir, "addon", "influxdb", name)
+		if addon.Listen == "" {
+			addon.Listen = "0.0.0.0"
+		}
+		if addon.AdminUser == "" {
+			addon.AdminUser = "admin"
+		}
+		if addon.ConfigPath == "" {
+			addon.ConfigPath = filepath.Join(addonDir, "influxdb.conf")
+		}
+		if addon.DataDir == "" {
+			addon.DataDir = filepath.Join(addonDir, "data")
+		}
+		c.Addons.InfluxDB[name] = addon
+	}
+
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
 	c.autoAssignPorts()
 }
@@ -4844,6 +5076,55 @@ func (c *Config) autoAssignPorts() {
 				next = addon.HostPort + 1
 			}
 			c.Addons.Vlagent[name] = addon
+		}
+	}
+
+	// Allocate an HTTP port per InfluxDB instance from its own pool
+	// (influxdb_start_port, default 8086) and a loopback RPC port from the
+	// fixed 8088 pool. Both draws share one assigned set so an HTTP port can
+	// never land on an RPC port. The RPC port is on the host because the
+	// container uses host networking (and is never published beyond loopback).
+	{
+		httpBase := c.InfluxDBStartPort
+		rpcBase := 8088
+		assignedInflux := map[int]bool{}
+		for _, addon := range c.Addons.InfluxDB {
+			if addon.HostPort != 0 {
+				assignedInflux[addon.HostPort] = true
+			}
+			if addon.RPCPort != 0 {
+				assignedInflux[addon.RPCPort] = true
+			}
+		}
+		nextHTTP := httpBase
+		nextRPC := rpcBase
+		nextFree := func(next *int) int {
+			for (usedPorts != nil && usedPorts[*next]) || assignedInflux[*next] {
+				*next++
+			}
+			p := *next
+			*next++
+			assignedInflux[p] = true
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.InfluxDB))
+		for name := range c.Addons.InfluxDB {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.InfluxDB[name]
+			if addon.HostPort == 0 && httpBase > 0 {
+				addon.HostPort = nextFree(&nextHTTP)
+			} else if addon.HostPort >= nextHTTP {
+				nextHTTP = addon.HostPort + 1
+			}
+			if addon.RPCPort == 0 {
+				addon.RPCPort = nextFree(&nextRPC)
+			} else if addon.RPCPort >= nextRPC {
+				nextRPC = addon.RPCPort + 1
+			}
+			c.Addons.InfluxDB[name] = addon
 		}
 	}
 

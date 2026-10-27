@@ -77,8 +77,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartNginx(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --nginx)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartNginx(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --nginx)")
 		return nil
 	}
 
@@ -297,6 +297,12 @@ func startAutostart() error {
 		firstErr = err
 	}
 	if err := startAutostartZerofs(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// influxdb instances (host-binary daemon). No dependency on other addons;
+	// it runs before nginx so an nginx backend pointing at InfluxDB is up.
+	if err := startAutostartInfluxDB(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -1241,6 +1247,55 @@ func hasAutostartZerofs(c *config.Config) bool {
 		}
 	}
 	return false
+}
+
+func hasAutostartInfluxDB(c *config.Config) bool {
+	for _, ic := range c.Addons.InfluxDB {
+		if ic.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartInfluxDB starts each autostart-enabled InfluxDB container.
+// StartContainer is idempotent (a running container is reported and left
+// alone) and waits for /ping, so nginx backends that point at InfluxDB see a
+// live listener.
+func startAutostartInfluxDB(c *config.Config) error {
+	var names []string
+	for name, ic := range c.Addons.InfluxDB {
+		if ic.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	m, err := podman.NewInfluxDBManager(c)
+	if err != nil {
+		fmt.Printf("  [X] influxdb autostart: %v\n", err)
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		ic := c.Addons.InfluxDB[name]
+		already, err := m.StartContainer(&ic)
+		if err != nil {
+			fmt.Printf("  [X] influxdb autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if already {
+			fmt.Printf("  [OK] influxdb %q already running\n", name)
+			continue
+		}
+		fmt.Printf("  [OK] influxdb %q started (HTTP %s:%d)\n", name, ic.Listen, ic.HostPort)
+	}
+	return firstErr
 }
 
 // startAutostartJuicefs re-mounts each autostart-enabled JuiceFS volume. It
