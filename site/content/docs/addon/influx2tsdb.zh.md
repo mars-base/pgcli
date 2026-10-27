@@ -159,17 +159,108 @@ curl -sS -G "$URL/query" --data-urlencode "db=$DB" \
 | 数据库 | `CREATE DATABASE`、`DROP DATABASE`、`SHOW DATABASES` |
 | 保留策略 | `CREATE / ALTER / DROP / SHOW RETENTION POLICIES` |
 | 写入/删除 | line protocol 写入、`DELETE FROM`、`DROP MEASUREMENT` |
-| 元数据 | `SHOW MEASUREMENTS / TAG KEYS / TAG VALUES / FIELD KEYS` |
+| 元数据 | `SHOW MEASUREMENTS / TAG KEYS / TAG VALUES / FIELD KEYS`（后三者需带 `FROM <measurement>`） |
 | 查询 | 带 tag/time 过滤的 `SELECT`、`mean/sum/min/max/count`、`first/last`、`GROUP BY time(...)` 与 tag、子查询 |
+
+### 使用 InfluxDB 1.x 命令行客户端
+
+官方 `influx` CLI（1.13.1）可以直接操作代理。pgcli 通过一次性容器运行它，
+remote 模式指向代理即可（代理无认证，无需用户名密码）：
+
+```bash
+CLI="pg influx --host 127.0.0.1 --port 8087"
+```
+
+数据库与保留策略：
+
+```bash
+$CLI -- -execute "SHOW DATABASES"
+$CLI -- -execute "CREATE DATABASE demo"
+$CLI --database demo -- -execute \
+  "CREATE RETENTION POLICY rp1 ON demo DURATION 1d REPLICATION 1"
+$CLI --database demo -- -execute \
+  "ALTER RETENTION POLICY rp1 ON demo DURATION 2d DEFAULT"
+$CLI --database demo -- -execute "SHOW RETENTION POLICIES ON demo"
+# 默认策略不能直接删除：先把另一个策略设为 DEFAULT 再删
+$CLI --database demo -- -execute \
+  "ALTER RETENTION POLICY autogen ON demo DURATION INF REPLICATION 1 DEFAULT"
+$CLI --database demo -- -execute "DROP RETENTION POLICY rp1 ON demo"
+$CLI -- -execute "DROP DATABASE demo"
+```
+
+写入（line protocol）：
+
+```bash
+$CLI --database tsdb_db -- -execute \
+  'INSERT cpu,host=web01 value=42,ok=true 1700000000000000000'
+$CLI --database tsdb_db -- -execute \
+  'INSERT cpu,host=web02,region=us value=7.5 1700000060000000000'
+```
+
+查询与元数据：
+
+```bash
+$CLI --database tsdb_db -- -execute \
+  "SELECT * FROM cpu WHERE host = 'web01' AND time >= '2023-11-14 22:13:20'"
+$CLI --database tsdb_db -- -execute \
+  'SELECT mean(value) FROM cpu GROUP BY time(1m),host'
+$CLI --database tsdb_db -- -execute 'SHOW MEASUREMENTS'
+$CLI --database tsdb_db -- -execute 'SHOW TAG KEYS FROM cpu'
+$CLI --database tsdb_db -- -execute 'SHOW TAG VALUES FROM cpu WITH KEY = host'
+$CLI --database tsdb_db -- -execute 'SHOW FIELD KEYS FROM cpu'
+```
+
+删除与输出格式：
+
+```bash
+$CLI --database tsdb_db -- -execute "DELETE FROM cpu WHERE host = 'web01'"
+$CLI --database tsdb_db -- -execute 'DROP MEASUREMENT cpu'
+$CLI --database tsdb_db -- -format json -execute 'SELECT * FROM cpu'
+$CLI --database tsdb_db -- -format csv  -execute 'SELECT * FROM cpu'
+$CLI --database tsdb_db -- -precision ms -execute 'SELECT * FROM cpu'
+```
+
+批量导入（influx 1.x import 格式）：
+
+```bash
+cat >/tmp/influx-import.txt <<'DATA'
+# DDL
+CREATE DATABASE demo
+
+# DML
+# CONTEXT-DATABASE: demo
+# CONTEXT-RETENTION-POLICY: autogen
+weather,location=us-midwest temperature=82 1700000000000000000
+weather,location=us-midwest temperature=83 1700000060000000000
+DATA
+
+$CLI -- -import -path /tmp/influx-import.txt
+```
+
+实测可用：数据库与保留策略 DDL、`INSERT`（line protocol）、`SELECT`（含
+`GROUP BY time(...)`、tag/time 过滤和 `-format column/csv/json`）、
+`SHOW MEASUREMENTS`、带 `FROM` 的 `SHOW TAG KEYS / FIELD KEYS / TAG VALUES`、
+`DELETE`、`DROP MEASUREMENT` 以及 `-import`。
+
+与原生 InfluxDB 的差异：
+
+- 元数据命令必须带 `FROM <measurement>`：`SHOW TAG KEYS`、`SHOW FIELD KEYS`
+  和 `SHOW TAG VALUES` 不带 `FROM` 会返回 `missing FROM clause`（原生
+  InfluxDB 允许省略）；`WITH KEY =~ /regex/` 也不支持。
+- 不支持 `SHOW SERIES`（返回 `unsupported query: SHOW SERIES`）。
+- 默认保留策略不能直接 `DROP`（与原生 InfluxDB 一致），先把另一个策略设为
+  `DEFAULT`。
+- `-precision` 的 `ns/u/ms/s/m/h` 都生效；`rfc3339` 不生效，仍输出纳秒整数。
 
 ### 时间精度注意事项
 
 - **时间戳一律按纳秒解释。** 在 E2E 实测中，当前版本忽略 `/write` 的
   `precision=` 查询参数；请发送纳秒时间戳（InfluxDB 默认精度），避免数据时间
   偏移。
-- **时间字面量用 `'YYYY-MM-DD HH:MM:SS'`。** 实测中，`WHERE time ...` 使用
-  RFC3339 形式（如 `'2023-11-14T22:13:20Z'`）会静默返回空结果，空格分隔的形式
-  正常：
+- **时间字面量两种写法都可用。** 实测中，`WHERE time ...` 既接受
+  `'YYYY-MM-DD HH:MM:SS'`，也接受 RFC3339（如 `'2023-11-14T22:13:20Z'`，含
+  毫秒或 `+08:00` 时区偏移）；Grafana 经 `$timeFilter` 插值出的 epoch 毫秒
+  形式（如 `1793083539315ms`）同样可用：
 
   ```bash
   curl -sS -G "$URL/query" --data-urlencode "db=$DB" \
@@ -185,6 +276,96 @@ curl -sS -G "$URL/query" --data-urlencode "db=$DB" \
 不会被重新插入，`SHOW MEASUREMENTS` / `SHOW TAG KEYS` / `SHOW FIELD KEYS` 可能
 为空，而 `SELECT` 仍然可用。自动化中请使用每次唯一的 measurement 名，或在删除
 并重建后重启代理。仓库自带测试脚本采用前者。
+
+## Grafana 集成
+
+Grafana 内置的 **InfluxDB** 数据源可以直接接入本代理（已在 Grafana 13.2.4 上
+端到端验证）：数据源类型选 **InfluxDB**，Query Language 选 **InfluxQL**
+（不是 Flux），URL 指向代理，即可查询底层 TimescaleDB 中的 hypertable。
+
+| 字段 | 值 |
+|---|---|
+| Type | `InfluxDB` |
+| Query Language | `InfluxQL` |
+| URL | `http://<proxy-host>:8087` |
+| Database | `tsdb_db`（或你的默认库） |
+| User / Password | 留空 |
+| HTTP Method | `GET`（默认） |
+
+数据源的 “Save & test” 健康检查可用；Grafana 查询编辑器和面板生成的请求
+（`$timeFilter`、`epoch=ms`、`fill(null)`、`GROUP BY time`）已实测返回正确的
+时间序列，`SHOW MEASUREMENTS / TAG KEYS / TAG VALUES / FIELD KEYS` 也受支持，
+因此查询构建器里的 measurement/tag/field 下拉框可正常使用。
+
+注意事项：
+
+- 代理**无认证、无 TLS**；Grafana 与代理不在可信网络时用
+  [nginx 插件](./nginx/) 前置。
+- 只支持 InfluxQL 子集；不支持的表达式可能返回错误或空结果，也不支持 Flux
+  （Flux 依赖 InfluxDB v2 API，本代理不提供）。
+- 代理忽略写入的 `precision=` 参数；Grafana 用 `epoch=ms` 读取，展示不受
+  影响。
+
+### 通过 Grafana HTTP API 集成
+
+自动化场景不必点 Web UI：Grafana 的 HTTP API 可以直接创建数据源，并验证
+“代理写入 → Grafana API 读取”的完整链路（以下命令已在 Grafana 13.2.4 上
+实测）。
+
+```bash
+GRAFANA_PW=$(pg addon password grafana)   # Grafana admin 密码
+G=http://127.0.0.1:3000
+
+# 1. 创建 InfluxDB/InfluxQL 数据源
+curl -sS -u "admin:$GRAFANA_PW" \
+  -H 'Content-Type: application/json' \
+  -XPOST "$G/api/datasources" -d '{
+    "name": "influx2tsdb",
+    "type": "influxdb",
+    "access": "proxy",
+    "url": "http://127.0.0.1:8087",
+    "database": "tsdb_db",
+    "user": "",
+    "password": "",
+    "isDefault": true,
+    "jsonData": {"httpMode": "GET", "version": "InfluxQL"}
+  }'
+
+# 按名字取回 uid（也可直接读上一步响应里的 datasource.uid）
+UID=$(curl -sS -u "admin:$GRAFANA_PW" \
+  "$G/api/datasources/name/influx2tsdb" \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["uid"])')
+
+# 2. 健康检查
+curl -sS -u "admin:$GRAFANA_PW" \
+  "$G/api/datasources/uid/$UID/health"
+# {"message":"datasource is working. 0 measurements found","status":"OK"}
+
+# 3. 通过代理写入一个点（纳秒时间戳）
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  -XPOST "http://127.0.0.1:8087/write?db=tsdb_db" \
+  --data-binary "cpu,host=api value=42 $(date +%s%N)"
+
+# 4. 经 Grafana 的 datasource proxy 读取（InfluxQL）
+curl -sS -u "admin:$GRAFANA_PW" -G \
+  "$G/api/datasources/proxy/uid/$UID/query" \
+  --data-urlencode 'db=tsdb_db' \
+  --data-urlencode 'epoch=ms' \
+  --data-urlencode 'q=SELECT last("value") FROM "cpu" WHERE time >= now() - 1h'
+```
+
+写入返回 `204`；第 4 步返回该 measurement 的 `last(value)`，`time` 列为
+epoch 毫秒（与 `epoch=ms` 一致）。
+
+要点：
+
+- `access: "proxy"` 让 Grafana 服务端转发查询，浏览器不直连代理，也不涉及
+  CORS。
+- `jsonData` 中的 `version: "InfluxQL"` 和 `httpMode: "GET"` 与面板查询使用
+  的模式一致，创建时显式给出。
+- 删除数据源：
+  `curl -u "admin:$GRAFANA_PW" -X DELETE "$G/api/datasources/uid/$UID"`
+  （返回 `200`）。
 
 ## 保留策略、压缩与 TimescaleDB 任务
 
@@ -348,10 +529,11 @@ test/addon/test_influx2tsdb_retention.sh --skip-proxy-stop
 
 - **仅 Linux/amd64。**
 - **代理无认证、无 TLS**；请用 nginx 前置或做网络隔离。
-- **InfluxQL 子集。** 当前版本只实现上文列出的语句，不是完整 InfluxQL；不支持的
-  语法会返回错误或空结果。不支持 Flux。
-- **时间戳按纳秒解释**；当前版本忽略写入的 `precision=` 参数，查询中的 RFC3339
-  时间字面量在 E2E 测试中返回空。
+- **InfluxQL 子集。** 当前版本只实现上文列出的语句，不是完整 InfluxQL；例如
+  `SHOW SERIES` 不支持，`SHOW TAG KEYS / FIELD KEYS / TAG VALUES` 必须带
+  `FROM`。不支持的语法会返回错误或空结果。不支持 Flux。
+- **时间戳按纳秒解释**；当前版本忽略写入的 `precision=` 参数。查询输出精度由
+  `epoch=ms` 控制（Grafana 即使用该参数）。
 - **仅支持按数据库的保留策略。** 一个默认策略作用于 schema 内所有 hypertable。
 - **时序负载性能低于原生 InfluxDB**（见上文）。
 - 代理的元数据表（`_influx_databases`、`_influx_meta`、`_retention_policy`）位于

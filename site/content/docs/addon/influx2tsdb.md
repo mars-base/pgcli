@@ -175,17 +175,111 @@ Common statements supported by the current release:
 | Database | `CREATE DATABASE`, `DROP DATABASE`, `SHOW DATABASES` |
 | Retention policy | `CREATE / ALTER / DROP / SHOW RETENTION POLICIES` |
 | Write / delete | line protocol writes, `DELETE FROM`, `DROP MEASUREMENT` |
-| Metadata | `SHOW MEASUREMENTS / TAG KEYS / TAG VALUES / FIELD KEYS` |
+| Metadata | `SHOW MEASUREMENTS / TAG KEYS / TAG VALUES / FIELD KEYS` (the last three need `FROM <measurement>`) |
 | Query | `SELECT` with tag/time filters, `mean/sum/min/max/count`, `first/last`, `GROUP BY time(...)` and tags, subqueries |
+
+### Using the InfluxDB 1.x command-line client
+
+The official `influx` CLI (1.13.1) works directly against the proxy. pgcli runs
+it in a short-lived container; use remote mode with the proxy's host and port
+(the proxy has no auth, so no credentials are needed):
+
+```bash
+CLI="pg influx --host 127.0.0.1 --port 8087"
+```
+
+Databases and retention policies:
+
+```bash
+$CLI -- -execute "SHOW DATABASES"
+$CLI -- -execute "CREATE DATABASE demo"
+$CLI --database demo -- -execute \
+  "CREATE RETENTION POLICY rp1 ON demo DURATION 1d REPLICATION 1"
+$CLI --database demo -- -execute \
+  "ALTER RETENTION POLICY rp1 ON demo DURATION 2d DEFAULT"
+$CLI --database demo -- -execute "SHOW RETENTION POLICIES ON demo"
+# A default policy cannot be dropped directly: set another policy as DEFAULT first
+$CLI --database demo -- -execute \
+  "ALTER RETENTION POLICY autogen ON demo DURATION INF REPLICATION 1 DEFAULT"
+$CLI --database demo -- -execute "DROP RETENTION POLICY rp1 ON demo"
+$CLI -- -execute "DROP DATABASE demo"
+```
+
+Writes (line protocol):
+
+```bash
+$CLI --database tsdb_db -- -execute \
+  'INSERT cpu,host=web01 value=42,ok=true 1700000000000000000'
+$CLI --database tsdb_db -- -execute \
+  'INSERT cpu,host=web02,region=us value=7.5 1700000060000000000'
+```
+
+Queries and metadata:
+
+```bash
+$CLI --database tsdb_db -- -execute \
+  "SELECT * FROM cpu WHERE host = 'web01' AND time >= '2023-11-14 22:13:20'"
+$CLI --database tsdb_db -- -execute \
+  'SELECT mean(value) FROM cpu GROUP BY time(1m),host'
+$CLI --database tsdb_db -- -execute 'SHOW MEASUREMENTS'
+$CLI --database tsdb_db -- -execute 'SHOW TAG KEYS FROM cpu'
+$CLI --database tsdb_db -- -execute 'SHOW TAG VALUES FROM cpu WITH KEY = host'
+$CLI --database tsdb_db -- -execute 'SHOW FIELD KEYS FROM cpu'
+```
+
+Deletes and output formats:
+
+```bash
+$CLI --database tsdb_db -- -execute "DELETE FROM cpu WHERE host = 'web01'"
+$CLI --database tsdb_db -- -execute 'DROP MEASUREMENT cpu'
+$CLI --database tsdb_db -- -format json -execute 'SELECT * FROM cpu'
+$CLI --database tsdb_db -- -format csv  -execute 'SELECT * FROM cpu'
+$CLI --database tsdb_db -- -precision ms -execute 'SELECT * FROM cpu'
+```
+
+Bulk import (influx 1.x import format):
+
+```bash
+cat >/tmp/influx-import.txt <<'DATA'
+# DDL
+CREATE DATABASE demo
+
+# DML
+# CONTEXT-DATABASE: demo
+# CONTEXT-RETENTION-POLICY: autogen
+weather,location=us-midwest temperature=82 1700000000000000000
+weather,location=us-midwest temperature=83 1700000060000000000
+DATA
+
+$CLI -- -import -path /tmp/influx-import.txt
+```
+
+Verified working: database and retention-policy DDL, `INSERT` (line protocol),
+`SELECT` (including `GROUP BY time(...)`, tag/time filters and `-format
+column/csv/json`), `SHOW MEASUREMENTS`, `SHOW TAG KEYS / FIELD KEYS / TAG
+VALUES` with `FROM`, `DELETE`, `DROP MEASUREMENT`, and `-import`.
+
+Differences from native InfluxDB:
+
+- Metadata commands require `FROM <measurement>`: `SHOW TAG KEYS`, `SHOW FIELD
+  KEYS` and `SHOW TAG VALUES` without `FROM` return `missing FROM clause`
+  (native InfluxDB makes it optional); `WITH KEY =~ /regex/` is not supported
+  either.
+- `SHOW SERIES` is not supported (`unsupported query: SHOW SERIES`).
+- A default retention policy cannot be dropped directly (same as native
+  InfluxDB); set another policy as `DEFAULT` first.
+- `-precision ns/u/ms/s/m/h` all work; `rfc3339` does not and still prints
+  nanosecond integers.
 
 ### Time precision caveats
 
 - **Timestamps are always nanoseconds.** In E2E testing the current release ignored
   the `precision=` query parameter on `/write`; send nanosecond timestamps (the
   InfluxDB default) to avoid shifted data.
-- **Use `'YYYY-MM-DD HH:MM:SS'` time literals.** In E2E testing, RFC3339 literals such
-  as `'2023-11-14T22:13:20Z'` in `WHERE time ...` silently returned empty results;
-  the space-separated form worked:
+- **Both time-literal forms work.** In testing, `WHERE time ...` accepted both
+  `'YYYY-MM-DD HH:MM:SS'` and RFC3339 literals (`'2023-11-14T22:13:20Z'`, including
+  milliseconds or a `+08:00` offset), and Grafana's interpolated `$timeFilter`
+  epoch-millisecond form (for example `1793083539315ms`) worked too:
 
   ```bash
   curl -sS -G "$URL/query" --data-urlencode "db=$DB" \
@@ -202,6 +296,98 @@ does not reinsert metadata, so `SHOW MEASUREMENTS` / `SHOW TAG KEYS` /
 `SHOW FIELD KEYS` can go empty for it while `SELECT` still works. Use unique
 measurement names in automation, or restart the proxy after dropping and recreating a
 measurement. The bundled test script does the former.
+
+## Grafana integration
+
+Grafana's built-in **InfluxDB** data source works directly against this proxy
+(verified end-to-end on Grafana 13.2.4): choose **InfluxDB** as the data source
+type and **InfluxQL** as the query language (not Flux), point the URL at the
+proxy, and Grafana reads the underlying TimescaleDB hypertables.
+
+| Field | Value |
+|---|---|
+| Type | `InfluxDB` |
+| Query Language | `InfluxQL` |
+| URL | `http://<proxy-host>:8087` |
+| Database | `tsdb_db` (or your default database) |
+| User / Password | empty |
+| HTTP Method | `GET` (default) |
+
+The data source's "Save & test" health check passes; queries generated by the
+Grafana query editor and panels (`$timeFilter`, `epoch=ms`, `fill(null)`,
+`GROUP BY time`) returned correct series in testing, and `SHOW MEASUREMENTS /
+TAG KEYS / TAG VALUES / FIELD KEYS` are supported, so the measurement/tag/field
+selectors in the query builder work.
+
+Notes:
+
+- The proxy has **no auth and no TLS**; use the [nginx addon](./nginx/) in front
+  when Grafana and the proxy are not on a trusted network.
+- Only the InfluxQL subset is supported; unsupported expressions may error or
+  return empty results, and Flux is not available (it needs the InfluxDB v2 API).
+- The proxy ignores the write `precision=` parameter; Grafana reads with
+  `epoch=ms`, so display is unaffected.
+
+### Provisioning through the Grafana HTTP API
+
+You do not need the web UI for automation: Grafana's HTTP API can create the
+data source and verify the full "write through the proxy, read through the
+Grafana API" path (the commands below were verified on Grafana 13.2.4).
+
+```bash
+GRAFANA_PW=$(pg addon password grafana)   # Grafana admin password
+G=http://127.0.0.1:3000
+
+# 1. Create the InfluxDB/InfluxQL data source
+curl -sS -u "admin:$GRAFANA_PW" \
+  -H 'Content-Type: application/json' \
+  -XPOST "$G/api/datasources" -d '{
+    "name": "influx2tsdb",
+    "type": "influxdb",
+    "access": "proxy",
+    "url": "http://127.0.0.1:8087",
+    "database": "tsdb_db",
+    "user": "",
+    "password": "",
+    "isDefault": true,
+    "jsonData": {"httpMode": "GET", "version": "InfluxQL"}
+  }'
+
+# Look up the uid by name (or read datasource.uid from the POST response)
+UID=$(curl -sS -u "admin:$GRAFANA_PW" \
+  "$G/api/datasources/name/influx2tsdb" \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["uid"])')
+
+# 2. Health check
+curl -sS -u "admin:$GRAFANA_PW" \
+  "$G/api/datasources/uid/$UID/health"
+# {"message":"datasource is working. 0 measurements found","status":"OK"}
+
+# 3. Write one point through the proxy (nanosecond timestamp)
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  -XPOST "http://127.0.0.1:8087/write?db=tsdb_db" \
+  --data-binary "cpu,host=api value=42 $(date +%s%N)"
+
+# 4. Read through Grafana's data source proxy (InfluxQL)
+curl -sS -u "admin:$GRAFANA_PW" -G \
+  "$G/api/datasources/proxy/uid/$UID/query" \
+  --data-urlencode 'db=tsdb_db' \
+  --data-urlencode 'epoch=ms' \
+  --data-urlencode 'q=SELECT last("value") FROM "cpu" WHERE time >= now() - 1h'
+```
+
+The write returns `204`; step 4 returns the `last(value)` series with the time
+column in epoch milliseconds, matching `epoch=ms`.
+
+Notes:
+
+- `access: "proxy"` makes Grafana forward the query server-side; the browser
+  never talks to the proxy directly, so CORS does not apply.
+- `version: "InfluxQL"` and `httpMode: "GET"` in `jsonData` match the mode
+  panels use, so set them explicitly at creation time.
+- Delete the data source with
+  `curl -u "admin:$GRAFANA_PW" -X DELETE "$G/api/datasources/uid/$UID"`
+  (returns `200`).
 
 ## Retention policies, compression and TimescaleDB jobs
 
@@ -383,10 +569,11 @@ The script reaches PostgreSQL through `pg exec`, so it needs `--instance` or
 - **Linux/amd64 only.**
 - **No authentication and no TLS** in the proxy; front it with nginx or isolate it.
 - **InfluxQL subset.** The release implements the statements listed above, not the
-  full InfluxQL language; unsupported constructs return an error or an empty result.
-  Flux is not available.
+  full InfluxQL language; for example, `SHOW SERIES` is not supported and
+  `SHOW TAG KEYS / FIELD KEYS / TAG VALUES` require `FROM`. Unsupported constructs
+  return an error or an empty result. Flux is not available.
 - **Timestamps in nanoseconds**; the `precision=` write parameter is ignored by the
-  current release, and RFC3339 time literals in queries returned empty in E2E testing.
+  current release. Query output precision follows `epoch=ms`, which Grafana sends.
 - **Per-database retention only.** One default policy applies to every hypertable in
   the schema.
 - **Performance is below native InfluxDB** for time-series workloads (see above).
