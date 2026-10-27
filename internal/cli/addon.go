@@ -16,6 +16,7 @@ import (
 
 	"github.com/mars-base/pgcli/internal/config"
 	"github.com/mars-base/pgcli/internal/hostbin"
+	"github.com/mars-base/pgcli/internal/influx2tsdb"
 	"github.com/mars-base/pgcli/internal/platform"
 	"github.com/mars-base/pgcli/internal/podman"
 	"github.com/mars-base/pgcli/internal/tlsca"
@@ -307,6 +308,17 @@ Infra addons (shared, not tied to one instance):
           "pg influx" runs the influx CLI against this instance or any remote
           InfluxDB 1.x server (--host/--dsn). No HTTPS listener — front it
           with the nginx addon if needed.
+  pg addon install influx2tsdb --pg-name <instance> | --dsn <postgres-dsn>
+          Stored under top-level addons.influx2tsdb in config (Linux x86 only).
+          Runs the pgcli-influx2tsdb image (influx2tsdb-proxy 1.3.2), which
+          speaks the InfluxDB 1.x HTTP API (Line Protocol + InfluxQL) and
+          stores the data in a TimescaleDB-enabled PostgreSQL database. The
+          proxy is stateless — PostgreSQL holds everything — so the container
+          is recreated on every start. Either target a local instance
+          (--pg-name; DSN re-derived each start) or a remote/unmanaged server
+          (--dsn). The HTTP API has NO authentication and binds all
+          interfaces; front it with nginx or restrict the network. Each
+          InfluxDB database maps to a PostgreSQL schema.
 
 Commands:
   pg addon install <addon>    install an add-on
@@ -901,7 +913,7 @@ var addonRemoveCmd = &cobra.Command{
 For local add-ons, use -i to specify the instance.
 For remote add-ons, use --pg-name to specify the pooler name.
 
-Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/beegfs/juicefs/zerofs/duckdb/influxdb) use --name.
+Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/beegfs/juicefs/zerofs/duckdb/influxdb/influx2tsdb) use --name.
 Remove keeps the data directory; pass --clean-data for object-storage/KV/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea/BeeGFS/DuckDB
 data to go too. For beegfs the unit is the filesystem on THIS host — its role containers (all three on a converged host, the configured subset on a cross-host member) go, and --clean-data deletes their data dirs.
 For juicefs/zerofs (host-binary addons) remove unmounts and stops the processes but NEVER touches object storage or the
@@ -911,6 +923,8 @@ meta, config.toml). For zerofs the bucket survives by design: re-attach it later
 For duckdb (host-binary CLI tool) remove deletes the config entry; --clean-data additionally deletes the data directory (database files).
 For influxdb remove deletes the container and the config entry; --clean-data additionally deletes
 the instance dir (data, generated config, local backups). The image is kept.
+For influx2tsdb remove deletes the container and the config entry; the addon is
+stateless, so there is nothing to clean (--clean-data is a no-op).
 
 Examples:
   pg addon remove pgbouncer -i proj01
@@ -937,7 +951,8 @@ Examples:
   pg addon remove zerofs --name z1 --clean-data
   pg addon remove duckdb --name analytics
   pg addon remove duckdb --name analytics --clean-data
-  pg addon remove influxdb --name metrics --clean-data`,
+  pg addon remove influxdb --name metrics --clean-data
+  pg addon remove influx2tsdb --name influx2tsdb`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonRemove(args[0], cmd)
@@ -976,6 +991,7 @@ Supported add-ons:
   zerofs     pg addon start zerofs [--name z1]   (host binary: brings up the 9P server — alias of "pg addon zerofs start"; the FUSE client is "pg addon zerofs mount")
   duckdb     pg addon start duckdb [--name duckdb]   (no-op: DuckDB is a CLI tool, not a daemon — run "pg addon duckdb shell" instead)
   influxdb   pg addon start influxdb [--name influxdb]   (starts the container)
+  influx2tsdb pg addon start influx2tsdb [--name influx2tsdb]   (recreates the stateless proxy container)
   nginx      pg addon start nginx [--name proxy]
   pgbouncer  pg addon start pgbouncer -i <instance>
              pg addon start pgbouncer --pg-name <remote-name>
@@ -1001,6 +1017,7 @@ Examples:
   pg addon start juicefs --name data
   pg addon start zerofs --name z1
   pg addon start influxdb --name metrics
+  pg addon start influx2tsdb --name influx2tsdb
   pg addon start nginx --name proxy
   pg addon start pgbouncer -i proj01
   pg addon start postgrest --pg-name app-api`,
@@ -1037,6 +1054,7 @@ Supported add-ons:
   zerofs     pg addon stop zerofs [--name z1]   (host binary: unmounts the client and stops the 9P server — alias of "pg addon zerofs stop")
   duckdb     pg addon stop duckdb [--name duckdb]   (no-op: DuckDB is a CLI tool, not a daemon)
   influxdb   pg addon stop influxdb [--name influxdb]   (stops the container)
+  influx2tsdb pg addon stop influx2tsdb [--name influx2tsdb]   (stops the proxy container)
   nginx      pg addon stop nginx [--name proxy]
   pgbouncer  pg addon stop pgbouncer -i <instance>
              pg addon stop pgbouncer --pg-name <remote-name>
@@ -1062,6 +1080,7 @@ Examples:
   pg addon stop juicefs --name data
   pg addon stop zerofs --name z1
   pg addon stop influxdb --name metrics
+  pg addon stop influx2tsdb --name influx2tsdb
   pg addon stop nginx --name proxy
   pg addon stop pgbouncer -i proj01
   pg addon stop postgrest --pg-name app-api`,
@@ -1105,8 +1124,8 @@ func init() {
 	addonGiteaUserListCmd.Flags().String("name", "", "gitea instance name (default \"gitea\")")
 
 	// Basic flags
-	addonInstallCmd.Flags().String("dsn", "", "pgbouncer/postgrest: PG instance connection string for remote mode (postgres://user:pass@host:port/db) / pgadmin: a one-time server to pre-register in its UI (mutually exclusive with --pg-name there) / seaweedfs: the filer's shared metadata PostgreSQL for --cluster (REQUIRED; must be reachable from EVERY host, so use the host-published port / LAN address, not an instance's container-local 127.0.0.1:5432; the metadata database itself must already exist — pgcli only probes connectivity and never creates or drops databases here, weed's postgres2 store creates its own tables inside it) / gitea: the metadata database instead of the embedded SQLite (optional; same contract — the database must already exist, Gitea creates its own schema on first boot, and it must be reachable from the Gitea container)")
-	addonInstallCmd.Flags().String("pg-name", "", "name to identify a remote PgBouncer or PostgREST (required with --dsn) / pgadmin: resolve the DSN from this locally-managed instance instead of passing --dsn (its own addon --name is unrelated to this)")
+	addonInstallCmd.Flags().String("dsn", "", "pgbouncer/postgrest: PG instance connection string for remote mode (postgres://user:pass@host:port/db) / influx2tsdb: the TimescaleDB target for an unmanaged/remote server (mutually exclusive with --pg-name) / pgadmin: a one-time server to pre-register in its UI (mutually exclusive with --pg-name there) / seaweedfs: the filer's shared metadata PostgreSQL for --cluster (REQUIRED; must be reachable from EVERY host, so use the host-published port / LAN address, not an instance's container-local 127.0.0.1:5432; the metadata database itself must already exist — pgcli only probes connectivity and never creates or drops databases here, weed's postgres2 store creates its own tables inside it) / gitea: the metadata database instead of the embedded SQLite (optional; same contract — the database must already exist, Gitea creates its own schema on first boot, and it must be reachable from the Gitea container)")
+	addonInstallCmd.Flags().String("pg-name", "", "name to identify a remote PgBouncer or PostgREST (required with --dsn) / influx2tsdb: resolve the target DSN from this locally-managed TimescaleDB instance (its admin DSN is re-derived on every start) / pgadmin: resolve the DSN from this locally-managed instance instead of passing --dsn (its own addon --name is unrelated to this)")
 	addonInstallCmd.Flags().Int("max-client-conn", 0, "maximum number of client connections allowed (default 100)")
 	addonInstallCmd.Flags().Int("default-pool-size", 0, "number of server connections per user/database pair (default 20)")
 
@@ -1137,7 +1156,7 @@ func init() {
 	addonRemoveCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to remove")
 
 	// etcd flags (top-level shared-infrastructure addon)
-	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, vmcluster, vlcluster, alertmanager, gitea, influxdb or beegfs instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"vmc\"/\"vlc\"/\"alertmanager\"/\"gitea\"/\"beegfs\")")
+	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, vmcluster, vlcluster, alertmanager, gitea, influxdb, influx2tsdb or beegfs instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"vmc\"/\"vlc\"/\"alertmanager\"/\"gitea\"/\"influx2tsdb\"/\"beegfs\")")
 	addonInstallCmd.Flags().Int("client-port", 0, "etcd client host port (0=auto-assign from etcd_start_port)")
 	addonInstallCmd.Flags().Int("peer-port", 0, "etcd peer host port (0=auto-assign, next free port after client)")
 	addonInstallCmd.Flags().String("image", "", "override the addon image tag verbatim (etcd default quay.io/coreos/etcd:v3.5.30; redis default resolved from --version, e.g. docker.io/library/redis:8.10.2; predixy default ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine; pgadmin default docker.io/dpage/pgadmin4:9.18; grafana default docker.io/grafana/grafana:13.2.4; prometheus default docker.io/prom/prometheus:v3.15.0; vmcluster/insert-image/select-image/storage-image override the per-role vm* images; vlcluster default docker.io/victoriametrics/victoria-logs:v1.53.0 for all three roles; alertmanager default docker.io/prom/alertmanager:v0.34.1; gitea default docker.io/gitea/gitea:28.1.0)")
@@ -1154,8 +1173,8 @@ func init() {
 	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs, garage, redis, pgAdmin, Grafana, Gitea, DuckDB, VMCluster or VLCluster instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; garage default <base_dir>/addon/garage/<name>/data (its metadata dir is a sibling .../meta); seaweedfs default <base_dir>/addon/seaweedfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data; pgadmin default <base_dir>/addon/pgadmin/<name>/data; grafana default <base_dir>/addon/grafana/<name>/data; prometheus default <base_dir>/addon/prometheus/<name>/data; vmcluster default <base_dir>/addon/vmcluster/<name>/data (vmstorage only); vlcluster default <base_dir>/addon/vlcluster/<name>/data (vlstorage only); alertmanager default <base_dir>/addon/alertmanager/<name>/data; gitea default <base_dir>/addon/gitea/<name>/data; beegfs — ONE dir for the whole filesystem, its three services use <dir>/mgmtd, <dir>/meta and <dir>/storage, default root <base_dir>/addon/beegfs/<name>; duckdb default <base_dir>/addon/duckdb/<name>; influxdb default <base_dir>/addon/influxdb/<name>/data)")
 	addonInstallCmd.Flags().String("advertise-host", "", "peer-visible host: etcd member peer/client URLs, redis native-cluster --cluster-announce-ip, , garage cluster rpc_public_addr, and seaweedfs cluster weed -ip that peers dial (empty=127.0.0.1 single-host; set a LAN IP or FQDN for cross-host clusters — required on every garage or seaweedfs --cluster member)")
 	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.0.0.12:2379 (implies --initial-cluster-state existing; requires --advertise-host)")
-	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, vmcluster, vlcluster, alertmanager, gitea, influxdb or beegfs instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"vmc\"/\"vlc\"/\"alertmanager\"/\"gitea\"/\"beegfs\")")
-	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/garage/seaweedfs/redis/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea/VMCluster/VLCluster data directory (object storage / backup repository / key-value data / pgAdmin config+sessions, Grafana dashboards sqlite DB, Prometheus TSDB, Alertmanager silences+notification state, or Gitea repos + app.ini + its default SQLite DB; VMCluster vmstorage TSDB; VLCluster vlstorage logs) and pgcli-rendered files beside it, or the juicefs/zerofs host per-instance dir (cache, logs, sqlite meta), or the influxdb per-instance dir (data, generated influxdb.conf, local backups); never the S3 bucket or a PG metadata database. No-op for predixy, which is stateless. Never drops a seaweedfs filer metadata database or a Gitea --dsn PostgreSQL database")
+	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, vmcluster, vlcluster, alertmanager, gitea, influxdb, influx2tsdb or beegfs instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"vmc\"/\"vlc\"/\"alertmanager\"/\"gitea\"/\"influx2tsdb\"/\"beegfs\")")
+	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/garage/seaweedfs/redis/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea/VMCluster/VLCluster data directory (object storage / backup repository / key-value data / pgAdmin config+sessions, Grafana dashboards sqlite DB, Prometheus TSDB, Alertmanager silences+notification state, or Gitea repos + app.ini + its default SQLite DB; VMCluster vmstorage TSDB; VLCluster vlstorage logs) and pgcli-rendered files beside it, or the juicefs/zerofs host per-instance dir (cache, logs, sqlite meta), or the influxdb per-instance dir (data, generated influxdb.conf, local backups); never the S3 bucket or a PG metadata database. No-op for predixy and influx2tsdb, which are stateless. Never drops a seaweedfs filer metadata database or a Gitea --dsn PostgreSQL database")
 
 	// haproxy flags (top-level load balancer in front of a Patroni cluster)
 	addonInstallCmd.Flags().String("mode", "", "HAProxy routing mode: unified (default, all traffic to the leader) or split (separate read listener for replicas)")
@@ -1219,10 +1238,10 @@ func init() {
 	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo/rustfs/seaweedfs: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo|rustfs>/<name>/, or the addon dir for seaweedfs; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Seaweedfs serves TLS natively: the S3 port becomes HTTPS-only (cleartext listener off). Changing this needs --force to recreate. NOT for garage: it has no native TLS (rejects --tls); front it with the nginx addon")
 	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo/rustfs: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt for MinIO/silo, rustfs_cert.pem for rustfs, cert.pem for seaweedfs). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
 	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo/rustfs: private key for --tls-cert (PEM; mounted read-only as private.key for MinIO/silo, rustfs_key.pem for rustfs, key.pem for seaweedfs). Must pair with the cert; both are required to enable BYO TLS")
-	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/PostgREST/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea container (or, for BeeGFS, the whole 3-container filesystem cluster) even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, a changed pgAdmin --email/--dsn/--pg-name, Grafana --admin-user or Gitea --admin-user/--ssh-port/--dsn seed/--allow-registration, a changed VMCluster/VLCluster port/roles/storage-node/image, or to force-recreate a Prometheus instance instead of hot-reloading its config). For juicefs it rebuilds the config entry from the flags (format is still skipped when the volume already exists in the metadata engine); for zerofs it re-renders config.toml and restarts the server/client, KEEPING the stored encryption password (a fresh one could not unwrap the bucket's existing data); for duckdb it rebuilds the config entry from the flags; for influxdb it rewrites the generated influxdb.conf and recreates the container, KEEPING the stored admin password — pass --config-option again to keep your overrides")
+	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/PostgREST/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea container (or, for BeeGFS, the whole 3-container filesystem cluster) even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, a changed pgAdmin --email/--dsn/--pg-name, Grafana --admin-user or Gitea --admin-user/--ssh-port/--dsn seed/--allow-registration, a changed VMCluster/VLCluster port/roles/storage-node/image, or to force-recreate a Prometheus instance instead of hot-reloading its config). For juicefs it rebuilds the config entry from the flags (format is still skipped when the volume already exists in the metadata engine); for zerofs it re-renders config.toml and restarts the server/client, KEEPING the stored encryption password (a fresh one could not unwrap the bucket's existing data); for duckdb it rebuilds the config entry from the flags; for influxdb it rewrites the generated influxdb.conf and recreates the container, KEEPING the stored admin password — pass --config-option again to keep your overrides; for influx2tsdb it rewrites the target/port settings and recreates the stateless container")
 
 	// redis flags (top-level standalone KV store — the first version-selectable addon)
-	addonInstallCmd.Flags().String("version", "", "Redis major version to install: 7 or 8 (default \"8\"); each maps to a pinned upstream docker.io/library/redis tag. For juicefs/zerofs/duckdb it instead pins the host binary release to download (default: the version's pinned sha256); for influxdb it selects the pinned pgcli-influxdb image release (default \"1.13.1\"). Ignored for every other addon")
+	addonInstallCmd.Flags().String("version", "", "Redis major version to install: 7 or 8 (default \"8\"); each maps to a pinned upstream docker.io/library/redis tag. For juicefs/zerofs/duckdb it instead pins the host binary release to download (default: the version's pinned sha256); for influxdb it selects the pinned pgcli-influxdb image release (default \"1.13.1\"); for influx2tsdb it selects the pinned pgcli-influx2tsdb image release (default \"1.3.2\"). Ignored for every other addon")
 	addonInstallCmd.Flags().String("password", "", "Redis requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls) / Predixy proxy password (REQUIRED, never generated: it must be the proxied cluster's requirepass — read it with `pg addon password redis --name <member>`) / pgAdmin, Grafana or Gitea WEB login password (generated on first install if omitted — not a PostgreSQL password; retrieve it with `pg addon password pgadmin`/`grafana`/`gitea`. For Grafana it only takes effect while grafana.db is absent; for Gitea the stored password is the one pgcli CREATES the admin account with, so it is inert on a revived store whose admin already exists) / BeeGFS connection-auth secret (generated on first install ONLY on a host running mgmtd; REQUIRED on a cross-host join (--roles without mgmtd) and must equal the cluster's value — retrieve it with `pg addon password beegfs` or `pg addon beegfs join-hint`)")
 	addonInstallCmd.Flags().String("admin-user", "", "Grafana WEB login user (GF_SECURITY_ADMIN_USER; default \"admin\") / Gitea WEB login user (created via `gitea admin user create`; default \"gitea\" — deliberately NOT the container's OS user \"git\") / InfluxDB InfluxQL admin username (default \"admin\") — the privileged account the CLI authenticates as; unrelated to any PostgreSQL role")
 	addonInstallCmd.Flags().Bool("allow-registration", false, "Gitea: open self-service signup (GITEA__service__DISABLE_REGISTRATION=false; the web UI shows a Register entry). Closed by default — it is one of the two guards on the default 0.0.0.0 listen. Signups always create NORMAL users: Gitea offers no way for the register form to produce an admin, so this opens account spam, not takeover. The toggle needs --force to reach the live container; close it again with --allow-registration=false --force")
@@ -1237,9 +1256,9 @@ func init() {
 	addonInstallCmd.Flags().Int("replica-of-port", 0, "Redis: remote master's port, paired with --replica-of-host")
 
 	// start / stop flags
-	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, influxdb or beegfs instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"gitea\"/\"beegfs\")")
+	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, influxdb, influx2tsdb or beegfs instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"gitea\"/\"influx2tsdb\"/\"beegfs\")")
 	addonStartCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to start")
-	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, influxdb or beegfs instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"gitea\"/\"beegfs\")")
+	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, influxdb, influx2tsdb or beegfs instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"gitea\"/\"influx2tsdb\"/\"beegfs\")")
 	addonStopCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to stop")
 
 	// list / password flags
@@ -1248,7 +1267,7 @@ func init() {
 	addonPasswordCmd.Flags().String("file", "", "write the password to this file (mode 0600) instead of stdout, keeping it out of shell history and scrollback")
 
 	// pgdog flags (top-level shared Postgres proxy addon)
-	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port) / PostgREST HTTP host port (0=auto-assign from postgrest_start_port) / Redis host port (0=auto-assign from redis_start_port, default 6379) / Predixy proxy host port (0=auto-assign from predixy_start_port, default 7617) / pgAdmin web host port (0=auto-assign from pgadmin_start_port, default 5050) / Grafana web host port (0=auto-assign from grafana_start_port, default 3000) / Prometheus web host port (0=auto-assign from prometheus_start_port, default 9090) / Alertmanager web host port (0=auto-assign from alertmanager_start_port, default 9093) / Gitea web host port (0=auto-assign from gitea_start_port, default 3080)")
+	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port) / PostgREST HTTP host port (0=auto-assign from postgrest_start_port) / Redis host port (0=auto-assign from redis_start_port, default 6379) / Predixy proxy host port (0=auto-assign from predixy_start_port, default 7617) / pgAdmin web host port (0=auto-assign from pgadmin_start_port, default 5050) / Grafana web host port (0=auto-assign from grafana_start_port, default 3000) / Prometheus web host port (0=auto-assign from prometheus_start_port, default 9090) / Alertmanager web host port (0=auto-assign from alertmanager_start_port, default 9093) / Gitea web host port (0=auto-assign from gitea_start_port, default 3080) / influx2tsdb InfluxDB-protocol HTTP host port (0=auto-assign from influx2tsdb_start_port, default 8087)")
 	addonInstallCmd.Flags().Int("ssh-port", 0, "Gitea: host port for git-over-ssh (the image's OpenSSH) clone/push — any N>0 enables it. The image always runs sshd, so N=0 does not stop it, only parks it on an idle pool port (off 22). With no explicit value the port auto-assigns from gitea_ssh_start_port (default 2222); on Linux that port is bound directly (host networking), so the clone URL shows ssh://git@<listen>:<port>/...")
 	addonInstallCmd.Flags().String("host", "", "PgDog listen address (default 127.0.0.1)")
 	addonInstallCmd.Flags().String("pool-mode", "", "PgDog pooler mode: transaction (default) or session")
@@ -1324,10 +1343,12 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallDuckdb(cmd)
 	case "influxdb":
 		return runAddonInstallInfluxdb(cmd)
+	case "influx2tsdb":
+		return runAddonInstallInflux2TSDB(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -5946,6 +5967,46 @@ func runAddonList(showPassword bool) error {
 		}
 	}
 
+	// influx2tsdb (containerized InfluxDB 1.x protocol proxy in front of
+	// TimescaleDB; stateless, so there is no data dir to show)
+	section("Time-series add-ons (influx2tsdb):", len(cfg.Addons.Influx2TSDB) > 0)
+	if pm, err := podman.NewInflux2TSDBManager(cfg); err == nil {
+		for _, name := range sortedAddonNames(cfg.Addons.Influx2TSDB) {
+			ic := cfg.Addons.Influx2TSDB[name]
+			state := "stopped"
+			if running, err := pm.ContainerRunning(ic.ContainerName); err == nil && running {
+				state = "running"
+			}
+			fmt.Printf("  %s (name: %s)\n", "influx2tsdb", name)
+			fmt.Printf("    Status:      %s\n", state)
+			fmt.Printf("    Endpoint:    http://<host>:%d/ (no auth)\n", ic.Port)
+			fmt.Printf("    Target:      %s\n", influx2tsdb.TargetSummary(ic))
+			dbName := ic.Database
+			if dbName == "" {
+				if dsn, err := influx2TSDBTargetDSN(cfg, ic); err == nil {
+					dbName = influx2tsdb.DatabaseName(ic, dsn)
+				}
+			}
+			if dbName == "" {
+				dbName = "-"
+			}
+			fmt.Printf("    Database:    %s\n", dbName)
+			fmt.Printf("    Version:     %s\n", ic.Version)
+			fmt.Printf("    Image:       %s\n", ic.ImageTag)
+			fmt.Printf("    Container:   %s\n", ic.ContainerName)
+		}
+	} else if len(cfg.Addons.Influx2TSDB) > 0 {
+		for _, name := range sortedAddonNames(cfg.Addons.Influx2TSDB) {
+			ic := cfg.Addons.Influx2TSDB[name]
+			fmt.Printf("  %s (name: %s)\n", "influx2tsdb", name)
+			fmt.Printf("    Status:      n/a (%v)\n", err)
+			fmt.Printf("    Endpoint:    http://<host>:%d/\n", ic.Port)
+			fmt.Printf("    Target:      %s\n", influx2tsdb.TargetSummary(ic))
+			fmt.Printf("    Image:       %s\n", ic.ImageTag)
+			fmt.Printf("    Container:   %s\n", ic.ContainerName)
+		}
+	}
+
 	// nginx (HTTP reverse proxy, top-level addon; Linux + macOS)
 	section("Web add-ons (nginx):", len(cfg.Addons.Nginx) > 0)
 	if nm, err := podman.NewNginxManager(cfg); err == nil {
@@ -6190,10 +6251,12 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemoveDuckdb(cmd)
 	case "influxdb":
 		return runAddonRemoveInfluxdb(cmd)
+	case "influx2tsdb":
+		return runAddonRemoveInflux2TSDB(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -6528,8 +6591,10 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return nil
 	case "influxdb":
 		return runAddonStartInfluxdb(cmd)
+	case "influx2tsdb":
+		return runAddonStartInflux2TSDB(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb)", addonName)
 	}
 }
 
@@ -6592,8 +6657,10 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return nil
 	case "influxdb":
 		return runAddonStopInfluxdb(cmd)
+	case "influx2tsdb":
+		return runAddonStopInflux2TSDB(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb)", addonName)
 	}
 }
 

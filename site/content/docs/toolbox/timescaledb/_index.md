@@ -185,6 +185,31 @@ See [Compression and columnstore](#compression-and-columnstore), [Retention
 policies](#retention-policies), [Continuous aggregates](#continuous-aggregates)
 and [Managing chunks](#managing-chunks) for the full set.
 
+## InfluxDB-compatible API: the influx2tsdb addon
+
+If existing tooling speaks InfluxDB rather than SQL, the
+[influx2tsdb addon](../../addon/influx2tsdb/) runs a managed, stateless proxy that
+serves the InfluxDB 1.x HTTP API (Line Protocol writes and InfluxQL queries) on top
+of a TimescaleDB database:
+
+- each InfluxDB **database** becomes a PostgreSQL **schema**, and each
+  **measurement** becomes a **hypertable** with `time` as the partition column;
+- `CREATE / ALTER / DROP RETENTION POLICY` is translated into TimescaleDB's own
+  `add_retention_policy` / `add_compression_policy` jobs — no `pg_cron` is needed,
+  and chunk cleanup continues while the proxy is stopped;
+- the proxy holds no data, so backup, PITR, replication and HA remain ordinary
+  PostgreSQL operations.
+
+```bash
+pg addon install influx2tsdb --pg-name tsdb
+```
+
+The trade-off is throughput: every request is translated to SQL, so pure
+time-series ingest and query load is slower than native InfluxDB. The proxy has no
+authentication or TLS; front it with [nginx](../../addon/nginx/) or isolate the
+port. See the [addon page](../../addon/influx2tsdb/) for flags, the data model,
+retention semantics and the test scripts.
+
 ## Query patterns
 
 First and last value per series:
@@ -265,6 +290,11 @@ WHERE proc_name = 'policy_retention';
 
 SELECT remove_retention_policy('sensor');
 ```
+
+These jobs run in TimescaleDB's own background scheduler; `pg_cron` is not required.
+The [influx2tsdb addon](../../addon/influx2tsdb/) uses the same mechanism: its
+`CREATE / ALTER / DROP RETENTION POLICY` statements are translated into these jobs
+automatically, and cleanup continues while the proxy is stopped.
 
 ## Continuous aggregates
 

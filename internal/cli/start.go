@@ -77,8 +77,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartNginx(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --nginx)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartNginx(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --nginx)")
 		return nil
 	}
 
@@ -300,9 +300,14 @@ func startAutostart() error {
 		firstErr = err
 	}
 
-	// influxdb instances (host-binary daemon). No dependency on other addons;
-	// it runs before nginx so an nginx backend pointing at InfluxDB is up.
+	// influxdb and influx2tsdb containers. No dependency on other addons; they
+	// run before nginx so an nginx backend pointing at either is up. The
+	// influx2tsdb proxy's local target instance was already started above, and
+	// its DSN is re-derived here, so it dials the current port/password.
 	if err := startAutostartInfluxDB(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if err := startAutostartInflux2TSDB(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -1298,8 +1303,64 @@ func startAutostartInfluxDB(c *config.Config) error {
 	return firstErr
 }
 
-// startAutostartJuicefs re-mounts each autostart-enabled JuiceFS volume. It
-// never re-formats: the volume already exists in the metadata engine (created
+func hasAutostartInflux2TSDB(c *config.Config) bool {
+	for _, ic := range c.Addons.Influx2TSDB {
+		if ic.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartInflux2TSDB recreates each autostart-enabled proxy container.
+// The proxy is stateless (PostgreSQL holds the data), so StartContainer
+// replaces any stale container with a fresh one and waits for /ping. A local
+// target's DSN is re-derived now, after the instances above have started.
+func startAutostartInflux2TSDB(c *config.Config) error {
+	var names []string
+	for name, ic := range c.Addons.Influx2TSDB {
+		if ic.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	m, err := podman.NewInflux2TSDBManager(c)
+	if err != nil {
+		fmt.Printf("  [X] influx2tsdb autostart: %v\n", err)
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		ic := c.Addons.Influx2TSDB[name]
+		dsn, err := influx2TSDBTargetDSN(c, ic)
+		if err != nil {
+			fmt.Printf("  [X] influx2tsdb autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		already, err := m.StartContainer(&ic, dsn)
+		if err != nil {
+			fmt.Printf("  [X] influx2tsdb autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if already {
+			fmt.Printf("  [OK] influx2tsdb %q already running\n", name)
+			continue
+		}
+		fmt.Printf("  [OK] influx2tsdb %q started (HTTP port %d)\n", name, ic.Port)
+	}
+	return firstErr
+}
+
+// startAutostartJuicefs re-mounts each autostart-enabled JuiceFS volume. It// never re-formats: the volume already exists in the metadata engine (created
 // at install), so a boot pass is just `juicefs mount`, which is idempotent
 // against an already-mounted point. Sorted by name for deterministic boot logs.
 func startAutostartJuicefs(c *config.Config) error {

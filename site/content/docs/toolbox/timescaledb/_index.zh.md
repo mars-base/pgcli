@@ -170,6 +170,27 @@ pg export -i tsdb -o sensor.dump
 
 压缩、保留策略、连续聚合和 chunk 的完整操作见下文对应章节。
 
+## InfluxDB 兼容 API：influx2tsdb 插件
+
+如果现有工具只支持 InfluxDB 协议，可用
+[influx2tsdb 插件](../../addon/influx2tsdb/) 在 TimescaleDB 之上运行一个受管的
+无状态代理，提供 InfluxDB 1.x HTTP API（Line Protocol 写入与 InfluxQL 查询）：
+
+- 每个 InfluxDB **数据库**对应一个 PostgreSQL **schema**，每个 **measurement**
+  对应一个 **hypertable**，`time` 为分区列；
+- `CREATE / ALTER / DROP RETENTION POLICY` 会被翻译成 TimescaleDB 自带的
+  `add_retention_policy` / `add_compression_policy` 任务——不需要 `pg_cron`，
+  且代理停机期间 chunk 清理照常进行；
+- 代理本身不存数据，备份、PITR、复制与 HA 仍然完全走 PostgreSQL。
+
+```bash
+pg addon install influx2tsdb --pg-name tsdb
+```
+
+代价是吞吐：请求需要翻译成 SQL，纯时序写入/查询性能低于原生 InfluxDB。代理
+没有认证和 TLS，需要 [nginx](../../addon/nginx/) 前置或做网络隔离。参数、数据
+模型、保留语义和测试脚本见 [插件文档](../../addon/influx2tsdb/)。
+
 ## 常用查询
 
 每条序列的首末值：
@@ -249,6 +270,11 @@ WHERE proc_name = 'policy_retention';
 
 SELECT remove_retention_policy('sensor');
 ```
+
+这些任务由 TimescaleDB 自带的后台调度器执行，不需要 `pg_cron`。
+[influx2tsdb 插件](../../addon/influx2tsdb/) 使用同一机制：其
+`CREATE / ALTER / DROP RETENTION POLICY` 会被自动翻译成这些任务，代理停机期间
+清理照常进行。
 
 ## 连续聚合
 

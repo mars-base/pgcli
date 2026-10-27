@@ -51,6 +51,7 @@ type Config struct {
 	VlagentStartPort         int                       `yaml:"vlagent_start_port,omitempty"`         // starting vlagent ingest HTTP host port, default 9429
 	VLClusterStartPort       int                       `yaml:"vlcluster_start_port,omitempty"`       // starting VLCluster port, default 9430 (3 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP)
 	InfluxDBStartPort        int                       `yaml:"influxdb_start_port,omitempty"`        // starting InfluxDB HTTP API host port, default 8086
+	Influx2TSDBStartPort     int                       `yaml:"influx2tsdb_start_port,omitempty"`     // starting influx2tsdb-proxy HTTP API host port, default 8087
 	Postgres                 PostgresConfig            `yaml:"postgres"`
 	Podman                   PodmanConfig              `yaml:"podman"`
 	PITR                     PITRConfig                `yaml:"pitr"`
@@ -148,6 +149,7 @@ type TopAddonsConfig struct {
 	VictoriaLogs    map[string]VictoriaLogsConfig    `yaml:"victorialogs,omitempty"`
 	Vlagent         map[string]VlagentConfig         `yaml:"vlagent,omitempty"`
 	InfluxDB        map[string]InfluxDBConfig        `yaml:"influxdb,omitempty"`
+	Influx2TSDB     map[string]Influx2TSDBConfig     `yaml:"influx2tsdb,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -1252,6 +1254,67 @@ func InfluxDBImageTagForVersion(version string) (string, bool) {
 
 // ValidInfluxDBName reports whether name is a safe InfluxDB instance key.
 func ValidInfluxDBName(name string) bool {
+	ok, _ := regexp.MatchString(`^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$`, name)
+	return ok
+}
+
+// DefaultInflux2TSDBVersion pins the influx2tsdb-proxy release packaged in
+// the pgcli-influx2tsdb image. The proxy translates the InfluxDB 1.x HTTP API
+// (Line Protocol and InfluxQL) onto a TimescaleDB database.
+const DefaultInflux2TSDBVersion = "1.3.2"
+
+// DefaultInflux2TSDBImageTag is the pgcli-built image (the upstream
+// linux/amd64 static binary on Alpine). Keep in sync with the Makefile's
+// INFLUX2TSDB_IMAGE.
+const DefaultInflux2TSDBImageTag = "ghcr.io/mars-base/pgcli/pgcli-influx2tsdb:1.3.2"
+
+// Influx2TSDBImageTagForVersion maps a pinned proxy release to its pgcli
+// image tag. Only 1.3.2 is published; any other version is rejected instead
+// of producing a pull that would fail at run time.
+func Influx2TSDBImageTagForVersion(version string) (string, bool) {
+	if version == DefaultInflux2TSDBVersion {
+		return DefaultInflux2TSDBImageTag, true
+	}
+	return "", false
+}
+
+// Influx2TSDBConfig holds a managed influx2tsdb-proxy container. The proxy
+// speaks the InfluxDB 1.x HTTP API and stores data in a TimescaleDB database:
+// either a pgcli-managed instance (TargetInstance, whose DSN is derived at
+// start time so port/password changes are picked up) or an external server
+// (DSN). It keeps no local state — PostgreSQL is the store — so the container
+// only carries the connection settings passed on its command line. The proxy
+// uses host networking, binds all interfaces and has no authentication, so
+// restrict access at the network boundary or front it with nginx.
+type Influx2TSDBConfig struct {
+	ContainerName string `yaml:"container_name,omitempty"` // pgcli-influx2tsdb[-ns]-<name>
+	Name          string `yaml:"name,omitempty"`
+	Version       string `yaml:"version,omitempty"`
+	ImageTag      string `yaml:"image_tag,omitempty"` // ghcr.io/mars-base/pgcli/pgcli-influx2tsdb:<version>
+	Port          int    `yaml:"port,omitempty"`      // InfluxDB HTTP API, host networking
+
+	// TargetInstance names a locally managed pgcli instance. Mutually
+	// exclusive with DSN. The proxy connects as the instance admin over the
+	// host-mapped port and uses the instance's default database.
+	TargetInstance string `yaml:"target_instance,omitempty"`
+	// DSN is an explicit PostgreSQL/TimescaleDB connection string for a
+	// remote or otherwise unmanaged server. Stored in pg.yaml like other
+	// addon secrets; prefer TargetInstance for local instances.
+	DSN string `yaml:"dsn,omitempty"`
+
+	// Database is the default InfluxDB database name exposed by the proxy
+	// (-db). Empty means the PostgreSQL database name from the DSN.
+	Database string `yaml:"database,omitempty"`
+	// PoolSize is the pgx connection pool size (-pool, default 10).
+	PoolSize int `yaml:"pool_size,omitempty"`
+	// Verbose logs translated SQL and query details.
+	Verbose bool `yaml:"verbose,omitempty"`
+	// Autostart starts the container on host boot (pg autostart enable --influx2tsdb).
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// ValidInflux2TSDBName reports whether name is a safe add-on instance key.
+func ValidInflux2TSDBName(name string) bool {
 	ok, _ := regexp.MatchString(`^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$`, name)
 	return ok
 }
@@ -2640,6 +2703,7 @@ func Default() *Config {
 		VlagentStartPort:         9429,
 		VLClusterStartPort:       9430,
 		InfluxDBStartPort:        8086,
+		Influx2TSDBStartPort:     8087,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -2855,6 +2919,7 @@ type displayConfig struct {
 	VlagentStartPort         int                       `yaml:"vlagent_start_port,omitempty"`
 	VLClusterStartPort       int                       `yaml:"vlcluster_start_port,omitempty"`
 	InfluxDBStartPort        int                       `yaml:"influxdb_start_port,omitempty"`
+	Influx2TSDBStartPort     int                       `yaml:"influx2tsdb_start_port,omitempty"`
 	Logging                  LoggingConfig             `yaml:"logging"`
 	Backup                   BackupConfig              `yaml:"backup"`
 	Pigsty                   PigstyConfig              `yaml:"pigsty"`
@@ -2895,6 +2960,7 @@ func (c *Config) Display() displayConfig {
 		VlagentStartPort:         c.VlagentStartPort,
 		VLClusterStartPort:       c.VLClusterStartPort,
 		InfluxDBStartPort:        c.InfluxDBStartPort,
+		Influx2TSDBStartPort:     c.Influx2TSDBStartPort,
 		Logging:                  c.Logging,
 		Backup:                   c.Backup,
 		Pigsty:                   c.Pigsty,
@@ -3113,6 +3179,47 @@ func (c *Config) Validate() error {
 			influxPorts[field.value] = name + "." + field.name
 		}
 	}
+	// influx2tsdb-proxy instances: names are directory keys, exactly one
+	// target (a local pgcli instance or an explicit DSN), and one HTTP port
+	// per instance.
+	influx2Ports := make(map[int]string, len(c.Addons.Influx2TSDB))
+	for name, ac := range c.Addons.Influx2TSDB {
+		if !ValidInflux2TSDBName(ac.Name) {
+			return fmt.Errorf("addons.influx2tsdb.%s.name %q must match [A-Za-z0-9][A-Za-z0-9_-]{0,47}", name, ac.Name)
+		}
+		if tag, ok := Influx2TSDBImageTagForVersion(ac.Version); !ok {
+			return fmt.Errorf("addons.influx2tsdb.%s.version %q is not supported (available: %s)", name, ac.Version, DefaultInflux2TSDBVersion)
+		} else if ac.ImageTag != tag {
+			return fmt.Errorf("addons.influx2tsdb.%s.image_tag %q does not match version %s (%s)", name, ac.ImageTag, ac.Version, tag)
+		}
+		if ac.TargetInstance == "" && ac.DSN == "" {
+			return fmt.Errorf("addons.influx2tsdb.%s: set target_instance or dsn", name)
+		}
+		if ac.TargetInstance != "" && ac.DSN != "" {
+			return fmt.Errorf("addons.influx2tsdb.%s: target_instance and dsn are mutually exclusive", name)
+		}
+		if ac.TargetInstance != "" {
+			if _, ok := c.Instances[ac.TargetInstance]; !ok {
+				return fmt.Errorf("addons.influx2tsdb.%s.target_instance %q not found in instances", name, ac.TargetInstance)
+			}
+		}
+		if ac.DSN != "" {
+			u, err := url.Parse(ac.DSN)
+			if err != nil || u.Host == "" || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
+				return fmt.Errorf("addons.influx2tsdb.%s.dsn must be a postgres:// or postgresql:// URL", name)
+			}
+		}
+		if ac.Port < 1 || ac.Port > 65535 {
+			return fmt.Errorf("addons.influx2tsdb.%s.port must be between 1 and 65535, got %d", name, ac.Port)
+		}
+		if prev, dup := influx2Ports[ac.Port]; dup {
+			return fmt.Errorf("addons.influx2tsdb.%s.port %d is already used by %s", name, ac.Port, prev)
+		}
+		influx2Ports[ac.Port] = name
+		if ac.PoolSize < 1 || ac.PoolSize > 1000 {
+			return fmt.Errorf("addons.influx2tsdb.%s.pool_size must be between 1 and 1000, got %d", name, ac.PoolSize)
+		}
+	}
 	return nil
 }
 
@@ -3252,6 +3359,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.InfluxDBStartPort == 0 {
 		c.InfluxDBStartPort = d.InfluxDBStartPort
+	}
+	if c.Influx2TSDBStartPort == 0 {
+		c.Influx2TSDBStartPort = d.Influx2TSDBStartPort
 	}
 
 	// Postgres
@@ -4277,6 +4387,29 @@ func (c *Config) ApplyDefaults() {
 		c.Addons.InfluxDB[name] = addon
 	}
 
+	// Top-level influx2tsdb-proxy instances. The proxy keeps no local state:
+	// PostgreSQL is the store, and the image is pull-only.
+	for name, addon := range c.Addons.Influx2TSDB {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.Version == "" {
+			addon.Version = DefaultInflux2TSDBVersion
+		}
+		if addon.ImageTag == "" {
+			if tag, ok := Influx2TSDBImageTagForVersion(addon.Version); ok {
+				addon.ImageTag = tag
+			}
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-influx2tsdb" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.PoolSize == 0 {
+			addon.PoolSize = 10
+		}
+		c.Addons.Influx2TSDB[name] = addon
+	}
+
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
 	c.autoAssignPorts()
 }
@@ -5125,6 +5258,52 @@ func (c *Config) autoAssignPorts() {
 				nextRPC = addon.RPCPort + 1
 			}
 			c.Addons.InfluxDB[name] = addon
+		}
+	}
+
+	// Allocate one HTTP API port per influx2tsdb-proxy instance from its own
+	// pool (influx2tsdb_start_port, default 8087 — just above InfluxDB's 8086).
+	// InfluxDB's own HTTP/RPC ports are treated as assigned so the two
+	// time-series add-ons cannot land on the same port.
+	{
+		base := c.Influx2TSDBStartPort
+		assigned := map[int]bool{}
+		for _, addon := range c.Addons.InfluxDB {
+			if addon.HostPort != 0 {
+				assigned[addon.HostPort] = true
+			}
+			if addon.RPCPort != 0 {
+				assigned[addon.RPCPort] = true
+			}
+		}
+		for _, addon := range c.Addons.Influx2TSDB {
+			if addon.Port != 0 {
+				assigned[addon.Port] = true
+			}
+		}
+		next := base
+		nextFree := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assigned[next] {
+				next++
+			}
+			p := next
+			next++
+			assigned[p] = true
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.Influx2TSDB))
+		for name := range c.Addons.Influx2TSDB {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.Influx2TSDB[name]
+			if addon.Port == 0 && base > 0 {
+				addon.Port = nextFree()
+			} else if addon.Port >= next {
+				next = addon.Port + 1
+			}
+			c.Addons.Influx2TSDB[name] = addon
 		}
 	}
 

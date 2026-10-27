@@ -1875,6 +1875,12 @@ func (m *Manager) containerRunning(name string) (bool, error) {
 	return false, nil
 }
 
+// ContainerRunning reports whether the named container is running. The match
+// is exact (podman's name filter is a substring match).
+func (m *Manager) ContainerRunning(name string) (bool, error) {
+	return m.containerRunning(name)
+}
+
 // CheckContainerRunning verifies the instance container is running,
 // returning an actionable error otherwise.
 func (m *Manager) CheckContainerRunning() error {

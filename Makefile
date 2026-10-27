@@ -9,7 +9,7 @@ LDFLAGS = -s -w \
 
 PLATFORMS = linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
-.PHONY: build clean test lint install build-all gencert container-build container-push container-build-minio container-push-minio container-build-mc container-push-mc container-build-patroni container-push-patroni container-build-rustfs container-push-rustfs container-build-predixy container-push-predixy container-build-influxdb container-push-influxdb container-images-export
+.PHONY: build clean test lint install build-all gencert container-build container-push container-build-minio container-push-minio container-build-mc container-push-mc container-build-patroni container-push-patroni container-build-rustfs container-push-rustfs container-build-predixy container-push-predixy container-build-influxdb container-push-influxdb container-build-influx2tsdb container-push-influx2tsdb container-images-export
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) .
@@ -213,6 +213,30 @@ container-build-influxdb:
 container-push-influxdb:
 	podman push $(INFLUXDB_IMAGE) $(INFLUXDB_IMAGE)
 
+# influx2tsdb-proxy image — a single static Go binary from the upstream
+# linux/amd64 release asset. Single-arch: the addon targets Linux x86 only.
+# INFLUX2TSDB_BINARY may point at a local copy of the release binary for
+# offline builds; the sha256 is verified either way.
+INFLUX2TSDB_VERSION ?= 1.3.2
+INFLUX2TSDB_IMAGE    = ghcr.io/mars-base/pgcli/pgcli-influx2tsdb:$(INFLUX2TSDB_VERSION)
+INFLUX2TSDB_URL      = https://github.com/mars-base/influx2tsdb-proxy/releases/download/v$(INFLUX2TSDB_VERSION)/influx2tsdb-proxy-linux-amd64
+INFLUX2TSDB_SHA256  ?= 83d9e79c716e20a67b56265781cc2222ea37077c7793736ebb2bfb996f0e7481
+INFLUX2TSDB_BINARY  ?=
+
+container-build-influx2tsdb:
+	@src="$(INFLUX2TSDB_BINARY)"; \
+	if [ -z "$$src" ]; then \
+	  src=/tmp/influx2tsdb-proxy-linux-amd64; \
+	  curl -sfL --retry 3 -o "$$src" $(INFLUX2TSDB_URL) || exit 1; \
+	fi; \
+	echo "$(INFLUX2TSDB_SHA256)  $$src" | sha256sum -c - || exit 1; \
+	cp "$$src" embed/ && chmod 0755 embed/influx2tsdb-proxy-linux-amd64 || exit 1; \
+	podman build --platform linux/amd64 -t $(INFLUX2TSDB_IMAGE) -f embed/influx2tsdb.Containerfile embed/; \
+	rc=$$?; rm -f embed/influx2tsdb-proxy-linux-amd64; exit $$rc
+
+container-push-influx2tsdb:
+	podman push $(INFLUX2TSDB_IMAGE) $(INFLUX2TSDB_IMAGE)
+
 # Offline image export for the docs/images.md catalog (see that doc's
 # "镜像导出" section for the manual equivalents and the rustfs/redis
 # manifest-list caveat). Always pulls --platform linux/amd64 FIRST so a
@@ -232,6 +256,7 @@ IMAGES := \
 	ghcr.io/mars-base/pgcli/pgcli-mc:20250813083541 \
 	ghcr.io/mars-base/pgcli/pgcli-rustfs:1.0.0 \
 	ghcr.io/mars-base/pgcli/pgcli-influxdb:1.13.1 \
+	ghcr.io/mars-base/pgcli/pgcli-influx2tsdb:1.3.2 \
 	ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine \
 	docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z \
 	docker.io/postgrest/postgrest:v16.3 \
