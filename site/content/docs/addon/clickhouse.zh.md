@@ -313,10 +313,33 @@ pg autostart disable --clickhouse --name ch1
 - **无 TLS 监听。** HTTP 与原生端口都是明文。需要带 TLS 在网络中暴露 ClickHouse 时，用 [nginx 插件](./nginx/) 前置 HTTP 端口（或使用外部代理）；不要把原生端口直接暴露给不可信网络。
 - **默认仅回环。** `--listen` 默认 `127.0.0.1`。认证虽然始终开启，但网络绑定仍会扩大攻击面；只在可信网络中使用 `0.0.0.0`。
 - **密码存储。** admin 密码位于 `pg.yaml`（默认 `0644`）；请保护该文件，并优先用 `pg addon password clickhouse` 取用，而不是四处复制。
-- **资源占用。** pgcli 不限制容器的 CPU/内存。ClickHouse 会按宿主内存推导预算；共享宿主上请显式设置 `max_server_memory_usage`（并考虑 `max_concurrent_queries`、`background_pool_size`），用 `config set` 完成。
+- **资源占用。** pgcli 不限制容器的 CPU/内存；ClickHouse 自身的内存预算与推荐设置见下文 **内存限制**。
 - **升级。** `--force --version <新版本>` 会拉取新 tag 并在同一数据目录上重建容器。ClickHouse 只支持向前升级——绝不要让旧版本服务端启动在新版本写过的数据上。升级前先备份。
 - **数据属主。** 数据文件属主为 uid 101。请用 `--clean-data` 而不是手工删目录；pgcli 会处理权限回退。
 - **平台。** 仅 Linux（host 网络）；官方镜像为多架构（amd64/arm64）。
+
+### 内存限制
+
+pgcli 不会给 podman 传 `--memory`/`--cpus`，因此容器没有 cgroup 内存上限；内存由 ClickHouse 自己约束：
+
+- **服务端级。** `max_server_memory_usage` 是进程级上限（字节）。默认值 `0` 表示继续按 `max_server_memory_usage_to_ram_ratio`（默认宿主内存的 `0.9`）计算。这对独享宿主没问题，共享宿主则很危险。共享时应显式设置绝对值，并给 OS page cache 和其他服务留出余量；独享宿主常见起点是内存的 50%–70%。
+- **并发。** `max_concurrent_queries` 与 `background_pool_size` 也是服务端设置，可用 `config set` 修改。服务端上限覆盖所有并发查询，因此要保证 `单查询峰值内存 × 并发数` 落在预算内。
+- **查询级。** `max_memory_usage`、`max_bytes_before_external_group_by`、`max_bytes_before_external_sort`、`max_threads` 属于**用户/profile** 设置，不是服务端 XML，`config set` 不会应用它们。可在 `pg addon clickhouse shell` 启动的 `clickhouse-client` 中用 `SET` 只影响当前会话（一次性的 `query` 调用不共享会话状态），或在 SQL 创建用户时用 `CREATE USER ... SETTINGS ...` 持久定义。
+- **溢写而非 OOM。** `max_bytes_before_external_group_by` / `max_bytes_before_external_sort` 让重聚合和排序在超过阈值时溢写到磁盘，以延迟换更低的内存上限。`JOIN` 通常是内存大户——按右表大小估算，或避免大表 JOIN。
+
+查看当前生效值：
+
+```bash
+pg addon clickhouse query --name ch1 "SELECT name, value, changed FROM system.server_settings WHERE name = 'max_server_memory_usage'"
+```
+
+示例——把整个服务端限制在 8 GiB，并允许 20 个并发查询：
+
+```bash
+pg addon clickhouse config set max_server_memory_usage=8589934592 max_concurrent_queries=20 --name ch1
+```
+
+数值单位是字节；`config set` 默认会重启运行中的容器（`--no-restart` 推迟到下次启动）。参考：2 vCPU / ~2 GiB 的测试 VM 用 `max_server_memory_usage=805306368`（768 MiB）可以跑小数据量 OLAP；大数据量、JOIN 或高基数聚合密集型负载需要按比例增加内存。
 
 ## CLI 参数速查
 

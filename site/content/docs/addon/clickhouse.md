@@ -314,10 +314,33 @@ Boot start also re-renders the config and secret first, then starts the existing
 - **No TLS listener.** The HTTP and native ports are plaintext. To expose ClickHouse over the network with TLS, put the [nginx addon](./nginx/) in front of the HTTP port (or use an external proxy); do not expose the native port directly to untrusted networks.
 - **Loopback by default.** `--listen` defaults to `127.0.0.1`. Authentication is always on, but a network bind still widens the attack surface; use `0.0.0.0` only on trusted networks.
 - **Password storage.** The admin password lives in `pg.yaml` (`0644` by default); protect that file and prefer `pg addon password clickhouse` over copying it around.
-- **Resource use.** The container has no CPU/memory limit from pgcli. ClickHouse derives its memory budget from the host; on a shared host set `max_server_memory_usage` explicitly (and consider `max_concurrent_queries`, `background_pool_size`) via `config set`.
+- **Resource use.** The container has no CPU/memory limit from pgcli; ClickHouse's own memory budget and the recommended settings are covered in **Memory limits** below.
 - **Upgrades.** `--force --version <new>` pulls a new tag and recreates the container on the same data dir. ClickHouse supports forward upgrades only — never start an older server against data written by a newer version. Take a backup before upgrading.
 - **Data ownership.** Data files are owned by uid 101. Use `--clean-data` rather than deleting the directory by hand; pgcli handles the permission fallback.
 - **Platform.** Linux only (host networking); the official image is multi-arch (amd64/arm64).
+
+### Memory limits
+
+pgcli never passes `--memory`/`--cpus` to podman, so the container has no cgroup memory cap; ClickHouse enforces its own budget instead:
+
+- **Server-wide.** `max_server_memory_usage` is the process-wide limit in bytes. Its default `0` keeps ClickHouse's ratio rule, `max_server_memory_usage_to_ram_ratio` (default `0.9` of host RAM). That is fine on a dedicated host and risky on a shared one. On a shared host set the absolute value explicitly and leave headroom for the OS page cache and other services; on a dedicated host 50–70% of RAM is a common starting point.
+- **Concurrency.** `max_concurrent_queries` and `background_pool_size` are also server-level settings and work with `config set`. The server-wide limit covers all concurrent queries together, so plan for `peak per-query memory × concurrency` inside that budget.
+- **Query-level.** `max_memory_usage`, `max_bytes_before_external_group_by`, `max_bytes_before_external_sort` and `max_threads` are **user/profile** settings, not server XML, so `config set` does not apply them. Set them for one session with `SET` in a `clickhouse-client` started from `pg addon clickhouse shell` (one-shot `query` calls do not share session state), or define them on a SQL-created user with `CREATE USER ... SETTINGS ...`.
+- **Spill instead of OOM.** `max_bytes_before_external_group_by` / `max_bytes_before_external_sort` let heavy aggregations and sorts spill to disk above the threshold, trading latency for a lower memory ceiling. `JOIN` is usually the biggest consumer — size for the right-hand table or avoid large joins.
+
+Check the live value:
+
+```bash
+pg addon clickhouse query --name ch1 "SELECT name, value, changed FROM system.server_settings WHERE name = 'max_server_memory_usage'"
+```
+
+Example — cap the whole server at 8 GiB and allow 20 concurrent queries:
+
+```bash
+pg addon clickhouse config set max_server_memory_usage=8589934592 max_concurrent_queries=20 --name ch1
+```
+
+Values are bytes; `config set` restarts a running container unless `--no-restart` is passed. For reference, a 2 vCPU / ~2 GiB test VM handles small OLAP workloads with `max_server_memory_usage=805306368` (768 MiB); JOIN-heavy or high-cardinality aggregation workloads over large data need proportionally more memory.
 
 ## CLI flag reference
 
