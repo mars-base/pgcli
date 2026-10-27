@@ -79,7 +79,35 @@ The Pigsty package reports `timescale`.
 
 ## Quick start
 
-Create a normal table and convert it to a hypertable:
+### 1. Create an instance
+
+```bash
+pg create -i tsdb
+pg start -i tsdb
+```
+
+`pg create` writes the configuration and prints the admin password; `pg start`
+brings up PostgreSQL and the backup container. The default database is
+`tsdb_db`.
+
+### 2. Install the extension
+
+```bash
+pg extension install timescaledb -i tsdb --auto-restart
+```
+
+pgcli builds the extension image, preloads `timescaledb`, restarts PostgreSQL
+and runs `CREATE EXTENSION IF NOT EXISTS timescaledb` in `tsdb_db`.
+
+### 3. Create a hypertable
+
+Connect to the instance:
+
+```bash
+pg psql -i tsdb
+```
+
+Create a table and convert it to a hypertable:
 
 ```sql
 CREATE TABLE sensor (
@@ -88,10 +116,12 @@ CREATE TABLE sensor (
     value     double precision
 );
 
-SELECT create_hypertable('sensor', by_range('time'));
+SELECT create_hypertable('sensor', by_range('time', INTERVAL '1 day'));
+CREATE INDEX ON sensor (sensor_id, time DESC);
 ```
 
-Recent versions also accept the one-step form:
+Or create it in one step; the default chunk interval applies and can be changed
+afterwards:
 
 ```sql
 CREATE TABLE sensor (
@@ -99,18 +129,14 @@ CREATE TABLE sensor (
     sensor_id text NOT NULL,
     value     double precision
 ) WITH (tsdb.hypertable);
-```
 
-Choose an explicit chunk interval when the default (7 days) does not fit the
-query or retention window:
-
-```sql
-SELECT create_hypertable('sensor', by_range('time', INTERVAL '1 day'));
--- Change it later; existing chunks keep their current interval
 SELECT set_chunk_time_interval('sensor', INTERVAL '1 day');
 ```
 
-Insert sample data and aggregate it into time buckets:
+Choose the chunk interval to fit the query and retention window. Existing
+chunks keep their interval when you change it later.
+
+### 4. Write data
 
 ```sql
 INSERT INTO sensor
@@ -128,11 +154,36 @@ GROUP BY bucket, sensor_id
 ORDER BY bucket DESC, sensor_id;
 ```
 
-Indexes are declared on the hypertable and propagated to chunks:
+### 5. Daily operations
+
+Append new rows, inspect chunks and jobs, and enable automatic maintenance:
 
 ```sql
-CREATE INDEX ON sensor (sensor_id, time DESC);
+INSERT INTO sensor VALUES (now(), 'sensor_1', 42.0);
+
+SELECT show_chunks('sensor');
+SELECT * FROM timescaledb_information.jobs;
+
+ALTER TABLE sensor SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'sensor_id',
+    timescaledb.compress_orderby = 'time DESC'
+);
+CALL add_columnstore_policy('sensor', INTERVAL '7 days');
+SELECT add_retention_policy('sensor', INTERVAL '365 days');
 ```
+
+Operational commands:
+
+```bash
+pg status -i tsdb               # instance and backup status
+pg logs -i tsdb -n 100          # server log tail
+pg export -i tsdb -o sensor.dump
+```
+
+See [Compression and columnstore](#compression-and-columnstore), [Retention
+policies](#retention-policies), [Continuous aggregates](#continuous-aggregates)
+and [Managing chunks](#managing-chunks) for the full set.
 
 ## Query patterns
 
@@ -247,23 +298,74 @@ The policy refreshes only the recent window between `start_offset` and
 
 ## Managing chunks
 
-List chunks and their time ranges:
+### Chunk intervals
+
+Set the interval at creation, or change it later for new chunks:
+
+```sql
+SELECT create_hypertable('sensor', by_range('time', INTERVAL '1 day'));
+
+-- Existing chunks keep their ranges; new chunks use 6 hours
+SELECT set_chunk_time_interval('sensor', INTERVAL '6 hours');
+
+SELECT time_interval
+FROM timescaledb_information.dimensions
+WHERE hypertable_name = 'sensor';
+```
+
+For `timestamptz` columns, chunk boundaries align to UTC. Choose an interval
+large enough that a chunk fits comfortably in memory; a very small interval
+creates many chunks and adds planning overhead.
+
+### List chunks
 
 ```sql
 SELECT show_chunks('sensor');
+SELECT show_chunks('sensor', older_than => INTERVAL '30 days');
+SELECT show_chunks('sensor', newer_than => INTERVAL '1 day');
 
 SELECT chunk_name, range_start, range_end
 FROM timescaledb_information.chunks
+WHERE hypertable_name = 'sensor'
 ORDER BY range_start DESC
 LIMIT 10;
 ```
 
-Expire old data by dropping whole chunks:
+`older_than` and `newer_than` filter by the chunk's time range, not by its
+creation time.
+
+### Chunk sizes
 
 ```sql
-SELECT count(*) FROM drop_chunks('sensor', older_than => INTERVAL '90 days');
+SELECT chunk_name,
+       pg_size_pretty(pg_total_relation_size(
+           format('%I.%I', chunk_schema, chunk_name)::regclass)) AS total_size
+FROM timescaledb_information.chunks
+WHERE hypertable_name = 'sensor'
+ORDER BY range_start DESC;
 
 SELECT pg_size_pretty(hypertable_size('sensor'));
+SELECT * FROM hypertable_detailed_size('sensor');
+```
+
+### Split a chunk
+
+Split one chunk at a timestamp inside its range; take the chunk name from
+`show_chunks('sensor')`:
+
+```sql
+CALL split_chunk('_timescaledb_internal._hyper_1_2_chunk',
+                 '2026-10-26 12:00:00+00'::timestamptz);
+```
+
+`split_chunk` is a procedure; use `CALL`, not `SELECT`.
+
+### Remove chunks
+
+```sql
+-- Chunks entirely older than 90 days, or newer than tomorrow
+SELECT count(*) FROM drop_chunks('sensor', older_than => INTERVAL '90 days');
+SELECT count(*) FROM drop_chunks('sensor', newer_than => now() + INTERVAL '1 day');
 ```
 
 `drop_chunks` removes files instead of producing dead tuples. Avoid deleting
@@ -278,6 +380,24 @@ pg extension install pg_cron -i pg01 --auto-restart
 SELECT cron.schedule('drop-sensor-chunks', '0 3 * * *',
   $$SELECT drop_chunks('sensor', older_than => INTERVAL '90 days')$$);
 ```
+
+### Manual columnstore conversion
+
+With compression settings configured (see [Compression and
+columnstore](#compression-and-columnstore)), convert a single chunk without
+waiting for the policy:
+
+```sql
+CALL convert_to_columnstore('_timescaledb_internal._hyper_1_1_chunk');
+SELECT chunk_name, is_compressed
+FROM timescaledb_information.chunks
+WHERE hypertable_name = 'sensor'
+ORDER BY range_start DESC;
+
+CALL convert_to_rowstore('_timescaledb_internal._hyper_1_1_chunk');
+```
+
+Both procedures take a chunk name, not the hypertable name.
 
 ## Metadata views
 
@@ -371,11 +491,12 @@ CREATE TABLE sensor (
 | `set_chunk_time_interval('t', INTERVAL ...)` | Change the interval for new chunks | ✅ |
 | `time_bucket('1 hour', time [, timezone])` | Time-based aggregation buckets | ✅ |
 | `first(value, time)` / `last(value, time)` | First/last value in a group | ✅ |
-| `show_chunks('t')` / `drop_chunks('t', older_than => ...)` | Inspect and drop chunks | ✅ |
-| `hypertable_size('t')` | Total size of a hypertable | ✅ |
+| `show_chunks('t' [, older_than/newer_than => ...])` / `drop_chunks('t', ...)` | Inspect, filter and drop chunks | ✅ |
+| `hypertable_size('t')` / `hypertable_detailed_size('t')` | Hypertable size and breakdown | ✅ |
 | `add_dimension('t', by_hash('col', N))` | Add space partitioning | ✅ |
 | `add_retention_policy(...)` / `remove_retention_policy(...)` | Automatic chunk expiration | ✅ TSL |
 | `CALL add_columnstore_policy(...)` | Columnstore/compression policy | ✅ TSL |
+| `CALL convert_to_columnstore(chunk)` / `CALL convert_to_rowstore(chunk)` | Manual chunk storage conversion | ✅ TSL |
 | `hypertable_columnstore_stats('t')` / `chunk_columnstore_stats('t')` | Columnstore statistics | ✅ TSL |
 | `CREATE MATERIALIZED VIEW ... WITH (timescaledb.continuous)` | Continuous aggregates | ✅ TSL |
 | `add_continuous_aggregate_policy(...)` | Continuous aggregate refresh policy | ✅ TSL |

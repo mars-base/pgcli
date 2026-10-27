@@ -69,6 +69,33 @@ Pigsty 包返回 `timescale`。
 
 ## 快速开始
 
+### 1. 创建实例
+
+```bash
+pg create -i tsdb
+pg start -i tsdb
+```
+
+`pg create` 写入配置并打印管理员密码；`pg start` 启动 PostgreSQL 和备份容器。
+默认数据库为 `tsdb_db`。
+
+### 2. 安装扩展
+
+```bash
+pg extension install timescaledb -i tsdb --auto-restart
+```
+
+pgcli 构建扩展镜像，预加载 `timescaledb`，重启 PostgreSQL，并在 `tsdb_db` 中
+执行 `CREATE EXTENSION IF NOT EXISTS timescaledb`。
+
+### 3. 创建 hypertable
+
+连接实例：
+
+```bash
+pg psql -i tsdb
+```
+
 创建普通表并转换为 hypertable：
 
 ```sql
@@ -78,10 +105,11 @@ CREATE TABLE sensor (
     value     double precision
 );
 
-SELECT create_hypertable('sensor', by_range('time'));
+SELECT create_hypertable('sensor', by_range('time', INTERVAL '1 day'));
+CREATE INDEX ON sensor (sensor_id, time DESC);
 ```
 
-较新版本也支持一步创建：
+也可以一步创建；此时使用默认 chunk 间隔，之后仍可调整：
 
 ```sql
 CREATE TABLE sensor (
@@ -89,17 +117,13 @@ CREATE TABLE sensor (
     sensor_id text NOT NULL,
     value     double precision
 ) WITH (tsdb.hypertable);
-```
 
-默认 chunk 间隔为 7 天；不满足查询或保留窗口时可以显式指定：
-
-```sql
-SELECT create_hypertable('sensor', by_range('time', INTERVAL '1 day'));
--- 后续调整；已有 chunk 保持原间隔
 SELECT set_chunk_time_interval('sensor', INTERVAL '1 day');
 ```
 
-写入样例数据并按时间分桶聚合：
+chunk 间隔按查询和保留窗口选择；后续调整只影响新 chunk。
+
+### 4. 写入数据
 
 ```sql
 INSERT INTO sensor
@@ -117,11 +141,34 @@ GROUP BY bucket, sensor_id
 ORDER BY bucket DESC, sensor_id;
 ```
 
-索引建在 hypertable 上，会自动下推到各个 chunk：
+### 5. 日常运维
+
+追加数据、查看 chunk 和后台任务、启用自动维护：
 
 ```sql
-CREATE INDEX ON sensor (sensor_id, time DESC);
+INSERT INTO sensor VALUES (now(), 'sensor_1', 42.0);
+
+SELECT show_chunks('sensor');
+SELECT * FROM timescaledb_information.jobs;
+
+ALTER TABLE sensor SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'sensor_id',
+    timescaledb.compress_orderby = 'time DESC'
+);
+CALL add_columnstore_policy('sensor', INTERVAL '7 days');
+SELECT add_retention_policy('sensor', INTERVAL '365 days');
 ```
+
+常用运维命令：
+
+```bash
+pg status -i tsdb               # 实例与备份状态
+pg logs -i tsdb -n 100          # 查看日志尾部
+pg export -i tsdb -o sensor.dump
+```
+
+压缩、保留策略、连续聚合和 chunk 的完整操作见下文对应章节。
 
 ## 常用查询
 
@@ -235,23 +282,72 @@ LIMIT 10;
 
 ## 管理 chunk
 
-查看 chunk 及时间范围：
+### Chunk 间隔
+
+创建时指定间隔，或之后调整（只影响新 chunk）：
+
+```sql
+SELECT create_hypertable('sensor', by_range('time', INTERVAL '1 day'));
+
+-- 已有 chunk 保持原范围；新 chunk 使用 6 小时
+SELECT set_chunk_time_interval('sensor', INTERVAL '6 hours');
+
+SELECT time_interval
+FROM timescaledb_information.dimensions
+WHERE hypertable_name = 'sensor';
+```
+
+`timestamptz` 列的 chunk 边界按 UTC 对齐。间隔要保证单个 chunk 能较轻松地放进
+内存；间隔过小会产生大量 chunk，并增加查询规划开销。
+
+### 查看 chunk
 
 ```sql
 SELECT show_chunks('sensor');
+SELECT show_chunks('sensor', older_than => INTERVAL '30 days');
+SELECT show_chunks('sensor', newer_than => INTERVAL '1 day');
 
 SELECT chunk_name, range_start, range_end
 FROM timescaledb_information.chunks
+WHERE hypertable_name = 'sensor'
 ORDER BY range_start DESC
 LIMIT 10;
 ```
 
-按整块删除过期数据：
+`older_than` / `newer_than` 按 chunk 的时间范围过滤，而不是按创建时间。
+
+### 查看 chunk 大小
 
 ```sql
-SELECT count(*) FROM drop_chunks('sensor', older_than => INTERVAL '90 days');
+SELECT chunk_name,
+       pg_size_pretty(pg_total_relation_size(
+           format('%I.%I', chunk_schema, chunk_name)::regclass)) AS total_size
+FROM timescaledb_information.chunks
+WHERE hypertable_name = 'sensor'
+ORDER BY range_start DESC;
 
 SELECT pg_size_pretty(hypertable_size('sensor'));
+SELECT * FROM hypertable_detailed_size('sensor');
+```
+
+### 拆分 chunk
+
+在 chunk 的时间范围内选一个时间点进行拆分；chunk 名称来自
+`show_chunks('sensor')`：
+
+```sql
+CALL split_chunk('_timescaledb_internal._hyper_1_2_chunk',
+                 '2026-10-26 12:00:00+00'::timestamptz);
+```
+
+`split_chunk` 是 procedure，必须用 `CALL`，不能用 `SELECT`。
+
+### 删除 chunk
+
+```sql
+-- 完全早于 90 天、或晚于明天的 chunk
+SELECT count(*) FROM drop_chunks('sensor', older_than => INTERVAL '90 days');
+SELECT count(*) FROM drop_chunks('sensor', newer_than => now() + INTERVAL '1 day');
 ```
 
 `drop_chunks` 直接删除文件，不产生 dead tuple。不要用大范围 `DELETE` 清理
@@ -265,6 +361,22 @@ pg extension install pg_cron -i pg01 --auto-restart
 SELECT cron.schedule('drop-sensor-chunks', '0 3 * * *',
   $$SELECT drop_chunks('sensor', older_than => INTERVAL '90 days')$$);
 ```
+
+### 手动转换列存
+
+配置好压缩参数后（见上文「压缩与列存」），可以不等策略而手动转换单个 chunk：
+
+```sql
+CALL convert_to_columnstore('_timescaledb_internal._hyper_1_1_chunk');
+SELECT chunk_name, is_compressed
+FROM timescaledb_information.chunks
+WHERE hypertable_name = 'sensor'
+ORDER BY range_start DESC;
+
+CALL convert_to_rowstore('_timescaledb_internal._hyper_1_1_chunk');
+```
+
+这两个 procedure 接收 chunk 名称，而不是 hypertable 名称。
 
 ## 元数据视图
 
@@ -353,11 +465,12 @@ CREATE TABLE sensor (
 | `set_chunk_time_interval('t', INTERVAL ...)` | 调整新 chunk 的间隔 | ✅ |
 | `time_bucket('1 hour', time [, timezone])` | 时间分桶聚合 | ✅ |
 | `first(value, time)` / `last(value, time)` | 分组内首末值 | ✅ |
-| `show_chunks('t')` / `drop_chunks('t', older_than => ...)` | 查看和删除 chunk | ✅ |
-| `hypertable_size('t')` | 查看 hypertable 总大小 | ✅ |
+| `show_chunks('t' [, older_than/newer_than => ...])` / `drop_chunks('t', ...)` | 查看、过滤和删除 chunk | ✅ |
+| `hypertable_size('t')` / `hypertable_detailed_size('t')` | hypertable 总大小及明细 | ✅ |
 | `add_dimension('t', by_hash('col', N))` | 添加空间分区 | ✅ |
 | `add_retention_policy(...)` / `remove_retention_policy(...)` | 自动过期清理 | ✅ TSL |
 | `CALL add_columnstore_policy(...)` | 列存/压缩策略 | ✅ TSL |
+| `CALL convert_to_columnstore(chunk)` / `CALL convert_to_rowstore(chunk)` | 手动转换 chunk 存储格式 | ✅ TSL |
 | `hypertable_columnstore_stats('t')` / `chunk_columnstore_stats('t')` | 列存状态与空间统计 | ✅ TSL |
 | `CREATE MATERIALIZED VIEW ... WITH (timescaledb.continuous)` | 连续聚合 | ✅ TSL |
 | `add_continuous_aggregate_policy(...)` | 连续聚合的自动刷新策略 | ✅ TSL |
