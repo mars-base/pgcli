@@ -414,6 +414,16 @@ pg addon influxdb backup --name metrics --start 2026-10-01T00:00:00Z --end 2026-
 
 The default output dir is `<instance dir>/backups/<UTC timestamp>`; `--out DIR` overrides it. A backup directory contains `.manifest`, `.meta` and per-shard `.tar.gz` files.
 
+> ⚠️ **Store backups on remote S3.** The backup is written on the InfluxDB host, so losing that host would lose the backup too. Upload each backup directory with any S3 client — for example the `pg mc` add-on:
+
+```bash
+pg mc alias set store https://s3.example.com ACCESS_KEY SECRET_KEY   # once
+pg mc mb store/influxdb-backups
+pg mc cp /path/to/backup-demo store/influxdb-backups/ -- --recursive
+```
+
+A restore reads the directory through the loopback RPC, so download it back to the target host before running `pg addon influxdb restore`.
+
 Restores are **online** too (the helper talks to the running server over the loopback RPC; a stopped instance is started first). A complete backup → drop → restore cycle for one database:
 
 ```bash
@@ -435,6 +445,8 @@ pg addon influxdb restore /path/to/backup-demo --name metrics --database demo --
 
 The instance is left running after the restore.
 
+> ⚠️ **A restore is not a complete identity/metadata copy.** Users, privileges and continuous queries are not restored — recreate them manually after a restore. Retention policies and their durations are restored.
+
 ## Export and import
 
 `export` is **offline**: pgcli stops the container so `influx_inspect` reads consistent TSM files, then restarts it unless `--no-start` is given.
@@ -447,14 +459,21 @@ pg addon influxdb export --name metrics --start 2026-10-01T00:00:00Z --end 2026-
 
 The default file is `<instance dir>/exports/<database|all>-<UTC timestamp>.txt` (`.gz` with `--compress`).
 
+> ⚠️ **After an import you must recreate users, privileges and continuous queries, and recreate non-default retention policies with their real `DURATION`/`SHARD DURATION`.** The export DDL emits RPs as `DURATION 0s` and omits the shard duration, so a 30d RP would become infinite unless fixed.
+
+An export file is a **logical data copy**, not a full instance snapshot: it contains every data point (TSM plus WAL) with per-database/retention-policy context markers, plus `CREATE DATABASE` / `CREATE RETENTION POLICY` DDL. Without `--database`, all databases including `_internal` are exported. Use `backup`/`restore` for disaster recovery and `export`/`import` to move points between servers.
+
 `import` needs a running instance and takes an export-format file:
 
 ```bash
+pg addon influxdb database create demo_copy --name metrics
 pg addon influxdb import /tmp/demo.txt --name metrics --database demo_copy
 pg addon influxdb import /tmp/demo.txt --name metrics --precision ms
 ```
 
 With `--database`, pgcli copies the file under the instance directory and rewrites the `# CONTEXT-DATABASE:` lines to the target database, so the original export is not modified. Importing into a remote server is done with `pg influx --host ... -- -import -path FILE` (above).
+
+Unlike `restore`, `import` has no new-name restriction: it writes line-protocol points into the target and merges them with existing data (a point with the same series and timestamp overwrites the old one). The `demo_copy` above is only an example of importing into another database — importing into the original `demo` is fine. The target database must already exist (the file's `# DDL` can create it) unless `--database` names a database you created first.
 
 ## Lifecycle
 

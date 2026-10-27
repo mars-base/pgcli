@@ -411,6 +411,16 @@ pg addon influxdb backup --name metrics --start 2026-10-01T00:00:00Z --end 2026-
 
 默认输出目录为 `<实例目录>/backups/<UTC 时间戳>`；`--out DIR` 可覆盖。备份目录包含 `.manifest`、`.meta` 和按 shard 的 `.tar.gz` 文件。
 
+> ⚠️ **备份文件要放到远程 S3。** 备份默认写在 InfluxDB 主机本地，主机损坏时备份会一起丢失。请用任意 S3 客户端把每个备份目录上传，例如 `pg mc` 插件：
+
+```bash
+pg mc alias set store https://s3.example.com ACCESS_KEY SECRET_KEY   # 只需一次
+pg mc mb store/influxdb-backups
+pg mc cp /path/to/backup-demo store/influxdb-backups/ -- --recursive
+```
+
+恢复时 `restore` 通过回环 RPC 读取备份目录，因此需要先把备份下载回目标主机再执行 `pg addon influxdb restore`。
+
 恢复同样是**在线**的（辅助容器经回环 RPC 与运行中的服务通信；实例已停止时会先启动）。单个数据库完整的"备份 → 删除 → 恢复"流程：
 
 ```bash
@@ -432,6 +442,8 @@ pg addon influxdb restore /path/to/backup-demo --name metrics --database demo --
 
 恢复完成后实例保持运行。
 
+> ⚠️ **恢复不是完整的身份/元数据副本。** 用户、权限和连续查询不会被恢复，需要手工重建；保留策略及其 duration 可以正确恢复。
+
 ## 导出与导入
 
 `export` 是**离线**的：pgcli 先停止容器，让 `influx_inspect` 读取一致的 TSM 文件，结束后自动重启（`--no-start` 可保持停止）。
@@ -444,14 +456,21 @@ pg addon influxdb export --name metrics --start 2026-10-01T00:00:00Z --end 2026-
 
 默认文件为 `<实例目录>/exports/<database|all>-<UTC 时间戳>.txt`（`--compress` 时加 `.gz`）。
 
+> ⚠️ **导入后必须手工重建：用户、权限、连续查询，以及非默认保留策略的真实 `DURATION`/`SHARD DURATION`。** 导出 DDL 会把 RP 写成 `DURATION 0s` 且不带 shard duration，不修正的话 30d 保留期会变成永久。
+
+导出文件是**逻辑数据副本**，不是完整实例快照：它包含全部数据点（TSM + WAL），按库/保留策略写入 context 标记，并附带 `CREATE DATABASE` / `CREATE RETENTION POLICY` DDL。不加 `--database` 时会导出所有库（含 `_internal`）。灾备请用 `backup`/`restore`，`export`/`import` 适合跨实例搬运数据点。
+
 `import` 需要实例运行中，并接受 export 格式文件：
 
 ```bash
+pg addon influxdb database create demo_copy --name metrics
 pg addon influxdb import /tmp/demo.txt --name metrics --database demo_copy
 pg addon influxdb import /tmp/demo.txt --name metrics --precision ms
 ```
 
 带 `--database` 时，pgcli 会把文件复制到实例目录下并改写 `# CONTEXT-DATABASE:` 行到目标数据库，原导出文件不受影响。导入远程服务器用 `pg influx --host ... -- -import -path FILE`（见上文）。
+
+与 `restore` 不同，`import` 没有"必须换新库名"的限制：它把 line protocol 数据点写入目标库并与已有数据合并（相同 series + 时间戳的点会覆盖旧值）。上面的 `demo_copy` 只是导入到另一个库的示例——导入回原来的 `demo` 完全可以。目标库必须已存在（文件里的 `# DDL` 可以建库），除非 `--database` 指定的库是你事先建好的。
 
 ## 生命周期
 
