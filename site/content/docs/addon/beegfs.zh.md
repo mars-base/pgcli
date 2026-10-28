@@ -99,18 +99,18 @@ SQLite 注册表）。
 
 ```bash
 # vm01 —— 本宿主跑管理 + 元数据；conn-auth 密钥在这台生成：
-pg addon install beegfs --name fs1 --roles mgmtd,meta --listen 10.241.20.147
+pg addon install beegfs --name fs1 --roles mgmtd,meta --listen 192.0.2.10
 
 # 在 vm01 上渲染逐字 join 命令（含密钥）：
 pg addon beegfs join-hint --name fs1
 
 # vm02 —— 两块数据盘，一块盘一个 storage target：
-pg addon install beegfs --name fs1 --roles storage --mgmtd-host 10.241.20.147 \
+pg addon install beegfs --name fs1 --roles storage --mgmtd-host 192.0.2.10 \
     --node-id 2 --password <conn-auth> \
     --storage-target /mnt/d1 --storage-target /mnt/d2
 
 # vm03 —— 再来一个 storage 节点（或 --roles meta 把元数据挪离 vm01）：
-pg addon install beegfs --name fs1 --roles storage --mgmtd-host 10.241.20.147 \
+pg addon install beegfs --name fs1 --roles storage --mgmtd-host 192.0.2.10 \
     --node-id 3 --password <conn-auth> --storage-target /mnt/d3
 ```
 

@@ -120,18 +120,18 @@ Three hosts, one filesystem:
 
 ```bash
 # vm01 — management + metadata on this host; conn-auth generated here:
-pg addon install beegfs --name fs1 --roles mgmtd,meta --listen 10.241.20.147
+pg addon install beegfs --name fs1 --roles mgmtd,meta --listen 192.0.2.10
 
 # render the verbatim join commands (secret included) from vm01:
 pg addon beegfs join-hint --name fs1
 
 # vm02 — two data disks, one storage target each:
-pg addon install beegfs --name fs1 --roles storage --mgmtd-host 10.241.20.147 \
+pg addon install beegfs --name fs1 --roles storage --mgmtd-host 192.0.2.10 \
     --node-id 2 --password <conn-auth> \
     --storage-target /mnt/d1 --storage-target /mnt/d2
 
 # vm03 — another storage node (or --roles meta to move metadata off vm01):
-pg addon install beegfs --name fs1 --roles storage --mgmtd-host 10.241.20.147 \
+pg addon install beegfs --name fs1 --roles storage --mgmtd-host 192.0.2.10 \
     --node-id 3 --password <conn-auth> --storage-target /mnt/d3
 ```
 
