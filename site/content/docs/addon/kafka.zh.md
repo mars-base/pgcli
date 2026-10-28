@@ -1,6 +1,6 @@
 ---
 title: "Kafka"
-description: "以托管插件方式运行单机 Apache Kafka 4.x（KRaft 模式，无需 ZooKeeper），支持 topic 管理、渲染 server.properties 与 host 网络"
+description: "以托管插件方式运行 Apache Kafka 4.x（KRaft 模式，无需 ZooKeeper）——支持单机或跨主机静态 controller quorum，含 topic 管理、渲染 server.properties 与 host 网络"
 weight: 65
 ---
 
@@ -11,8 +11,9 @@ ZooKeeper**。
 
 和 ClickHouse 一样，Kafka 是**顶层插件**，不代理某个 PostgreSQL 实例。pgcli 负责渲染
 `server.properties`、固定 KRaft cluster id、绑定挂载数据目录，并以 host 网络启动容器。
-当前版本只支持**单机 combined 节点**；多机集群参数已预留，但会被明确拒绝（见
-[生产注意事项](#生产注意事项)）。
+单条命令安装一个**单机 combined 节点**；加上 `--cluster`、`--node-id` 和 `--peer`
+则安装**跨主机静态 controller quorum** 中的一个节点，每台主机各自执行一次
+`pg addon install kafka`（pgcli 不会通过 SSH 远程操作）。见[多机集群](#多机集群)。
 
 > **没有认证。** Kafka 默认只使用 PLAINTEXT，`--listen` 默认 `127.0.0.1`。TLS 是可选功能
 > （`--tls`），只加密传输，**不认证客户端**（`ssl.client.auth=none`），且 PLAINTEXT 监听
@@ -26,19 +27,21 @@ ZooKeeper**。
 | `--name` | `kafka` | 实例名（map key，也是子命令默认名字） |
 | `--version` | `4.4.0` | 上游镜像 tag，直接从 `docker.io/apache/kafka` 拉取 |
 | `--data-dir` | `<base_dir>/addon/kafka/<name>/data` | 数据目录，挂载到 `/var/lib/kafka/data`；必须是绝对路径 |
-| `--listen` | `127.0.0.1` | PLAINTEXT、SSL（启用 `--tls` 时）与 CONTROLLER 监听地址。`0.0.0.0` 会暴露所有已启用的监听端口 |
-| `--advertise-host` | `127.0.0.1` | 告知客户端使用的地址，必须是具体 IP（不能是 `0.0.0.0`）；单机模式下同时作为 controller voter 地址 |
+| `--listen` | `127.0.0.1` | PLAINTEXT、SSL（启用 `--tls` 时）与 CONTROLLER 监听地址。`0.0.0.0` 会暴露所有已启用的监听端口；集群模式下必须是 `0.0.0.0` 或本节点 advertise 地址 |
+| `--advertise-host` | `127.0.0.1` | 告知客户端使用的地址，必须是具体 IP（不能是 `0.0.0.0`）；单机模式下同时作为 controller voter 地址，集群模式下是本节点的 voter 地址，因此必须是具体非 loopback IP，且全新集群安装必须显式传入 |
 | `--broker-port` | 自动（基准 `9092`） | broker 宿主机端口；`0` = 从 `kafka_broker_start_port` 自动分配 |
-| `--controller-port` | 自动（基准 `19093`） | KRaft controller 宿主机端口；`0` = 从 `kafka_controller_start_port` 自动分配 |
+| `--controller-port` | 自动（基准 `19093`） | KRaft controller 宿主机端口；`0` = 从 `kafka_controller_start_port` 自动分配。集群安装必须显式传入：所有 peer 都会把它写进 voter 列表 |
+| `--cluster NAME` | — | 加入名为该值的多机集群；所有主机必须相同，KRaft cluster id 由它确定性推导 |
+| `--node-id N` | 单机 `1` | 本节点 1-based KRaft node id；全新集群安装必填，集群内唯一；单机模式下会被拒绝 |
+| `--peer ID@HOST:PORT` | — | 另一个 controller voter。每个**其他**节点各写一次（本节点自动折叠进去）；每台主机都要传完整 peer 列表。host 必须是 IP，port 必须与该节点的 `--controller-port` 一致 |
 | `--tls` | false | 在明文 broker 之外增加 SSL 监听，使用 pgcli 自签 CA 签发的证书；PLAINTEXT 监听保留 |
-| `--tls-pem` | — | 用这个合并后的 PEM（证书链 + 私钥）提供 TLS，替代自动生成的证书。隐含 `--tls`；文件会先校验再复制为 `config/tls/server.pem`。支持 PKCS#8、PKCS#1 与 SEC1 私钥 |
+| `--tls-pem` | — | 用这个合并后的 PEM（证书链 + 私钥）提供 TLS，替代自动生成的证书。隐含 `--tls`；文件会先校验再复制为 `config/tls/server.pem`。支持 PKCS#8、PKCS#1 与 SEC1 私钥。集群模式下证书必须覆盖本节点的 `--advertise-host` |
 | `--tls-port` | 自动（基准 `9093`） | SSL 监听宿主机端口；`0` = 从 `kafka_tls_start_port` 自动分配；需要 `--tls` |
-| `--cluster-id` | 自动生成 | 采用显式 22 字符 KRaft cluster id（否则生成，或从 `meta.properties` 采纳）；`remove` 后保留数据重装时也用它 |
+| `--cluster-id` | 集群推导 / 单机生成 | 集群模式下 id 由 `--cluster` 推导，显式值必须与之相等；单机模式可显式采用 22 字符 KRaft cluster id，否则采纳 `meta.properties` 或生成 |
 | `--config-option K=V` | — | 额外的 `server.properties` 配置（`num.partitions=3`、`log.retention.hours=168`）；可重复；**替换**已存储的覆盖表 |
-| `--force` | false | 重新渲染 `server.properties` 并重建容器；保留数据、已存储的 cluster id 与 node id；增删 TLS 必须带 `--force` |
+| `--force` | false | 重新渲染 `server.properties` 并重建容器；保留数据、已存储的 cluster id 与 node id；增删 TLS 必须带 `--force`。集群身份字段（cluster、node id、cluster id、peers、advertise host、controller port）即使带 `--force` 也不可修改 |
 
-Kafka 不使用 `--image`，用 `--version`。`--cluster`、`--peer`、`--node-id` 尚未实现，
-传入会直接报"not implemented yet"错误。
+Kafka 不使用 `--image`，用 `--version`。
 
 controller 默认端口是 **19093** 而不是 9093——9093 属于 Alertmanager 的默认端口池（TLS 池
 虽然从 9093 开始，但会跳过其他插件已占用的端口）。拓扑相关键由 pgcli 自己渲染，
@@ -79,6 +82,65 @@ pg addon install kafka --name k2 --data-dir /srv/kafka-data --listen 0.0.0.0 --a
 镜像直接从 Docker Hub 拉取，不涉及 pgcli 自建镜像。`--version` 接受任意合法的上游 tag，
 但 tag 必须真实存在，否则 pull 失败。
 
+## 多机集群
+
+集群是**静态 KRaft quorum**：每个节点都携带完整的 `controller.quorum.voters` 列表，
+成员关系不能在线变更。每台主机用一个节点安装，使用相同的 `--cluster` 名字、集群内唯一的
+`--node-id`、本机的 `--advertise-host`、显式的 `--controller-port`，并为每个**其他**
+节点传一条 `--peer`。命令由你在每台主机上分别执行；pgcli 不会通过 SSH 批量操作。
+
+以三台主机 `192.0.2.11`、`192.0.2.12`、`192.0.2.13` 为例：
+
+```bash
+# 节点 1，在 192.0.2.11 上
+pg addon install kafka --name prod --cluster prod --node-id 1 \
+  --listen 0.0.0.0 --advertise-host 192.0.2.11 \
+  --broker-port 9092 --controller-port 19093 \
+  --peer 2@192.0.2.12:19093 --peer 3@192.0.2.13:19093
+
+# 节点 2，在 192.0.2.12 上
+pg addon install kafka --name prod --cluster prod --node-id 2 \
+  --listen 0.0.0.0 --advertise-host 192.0.2.12 \
+  --broker-port 9092 --controller-port 19093 \
+  --peer 1@192.0.2.11:19093 --peer 3@192.0.2.13:19093
+
+# 节点 3，在 192.0.2.13 上
+pg addon install kafka --name prod --cluster prod --node-id 3 \
+  --listen 0.0.0.0 --advertise-host 192.0.2.13 \
+  --broker-port 9092 --controller-port 19093 \
+  --peer 1@192.0.2.11:19093 --peer 2@192.0.2.12:19093
+```
+
+身份信息是这样拼出来的：
+
+- **Cluster ID。** 由 `--cluster` 确定性哈希推导，所有主机无需传 `--cluster-id` 也能得到
+  相同值。若显式传入 `--cluster-id`，必须等于推导值。
+- **Voters。** `ID@HOST:PORT` 按 node id 排序；本节点的条目来自 `--node-id`、
+  `--advertise-host` 和 `--controller-port`，其余由 peer 提供。两个 voter 不允许共享
+  同一个 controller endpoint。
+- **Controller 端口。** 它出现在所有 peer 的 voter 列表里，所以全新集群安装必须显式
+  传 `--controller-port`（默认且推荐值：`19093`）。自动分配可能在其他主机选到不同端口。
+- **端口与地址。** 不同主机可以使用相同的 broker/controller 端口。`--listen` 必须是
+  `0.0.0.0`（或本节点的 advertise 地址）；loopback 会被拒绝。
+
+前两台安装会打印 controller quorum 尚未就绪的警告——在最后一个 voter 装好之前这是正常的。
+集群模式下就绪等待是 15 秒而不是 90 秒。所有节点起来后：
+
+```bash
+pg addon kafka cluster status --name prod    # leader + 3 个 voter
+pg addon kafka status --name prod            # cluster、node x of N、voter、voters、RF/minISR
+pg addon list                                # 显示 "cluster prod" 和 voter 列表
+```
+
+Topic 默认副本数跟随 quorum 大小：`--replication-factor 0` 表示 `min(3, voters)`
+（三节点即 3），`min.insync.replicas = min(2, RF)`。**允许两 voter 集群，但零容错**——
+失去任一节点就失去元数据 quorum——因此 pgcli 会打印警告。HA 请用 3 或另一个奇数。
+
+安装后集群身份不可变，即使带 `--force`：`--cluster`、`--node-id`、`--cluster-id`、
+`--peer` 集合、`--advertise-host` 和 `--controller-port` 变化都会被拒绝。端口、TLS、
+版本、`--data-dir` 与 `--config-option` 仍可通过 `--force` 修改。要改变拓扑，只能在本机
+remove 后重装；本插件不提供在线增删 controller。
+
 ## 端口
 
 | 端点 | 默认值 | 协议 | 端口池 |
@@ -97,6 +159,12 @@ Alertmanager 已占端口（Alertmanager 池也反向预占 Kafka 端口），�
 controller 端点同理。单机模式的静态 voter 是 `AdvertiseHost:ControllerPort`，所以如果
 把 `--advertise-host` 设成内网地址，必须同时把 `--listen` 设为 `0.0.0.0`（或同一个
 内网地址），否则 controller 连不上自己。
+
+集群模式下 controller 端口不只是本地监听——它会被其他所有主机写进自己的
+`controller.quorum.voters`。所有节点请使用相同的 `--controller-port`（除非你刻意让每个节点
+用不同端口，此时每条 `--peer` 必须携带对应节点的正确端口），并确保该端口在所有主机上
+都空闲。端口不一致意味着 voter 列表不同，quorum 永远无法形成。broker 端口是按节点广播的，
+可以不同，但全部使用 `9092` 能让客户端 bootstrap 列表更简单。
 
 ## TLS
 
@@ -122,6 +190,26 @@ PLAINTEXT 监听保持开启，已有客户端不受影响。TLS 只在创建或
 证书由 pgcli 自签 CA（与 MinIO/silo/rustfs 相同的 helper）签发，SAN 覆盖 `localhost`、
 宿主机所有网卡地址和 `--advertise-host`。客户端需要信任 `config/tls/ca.crt`。
 
+### 集群 TLS
+
+每个节点各自签发**独立的** CA 和叶子证书，因此可能连接任意 broker 的客户端需要把它们
+放进同一个信任文件：
+
+```bash
+# 在各主机上取出该节点的 CA，然后在客户端上拼接。
+for v in vm01 vm02 vm03; do
+  ssh $v 'cat ~/.pgcli/addon/kafka/prod/config/tls/ca.crt'
+done > kafka-ca-bundle.pem
+```
+
+SSL 监听是按节点开启的：需要统一的 SSL bootstrap 列表时请给**所有**节点启用 `--tls`。
+如果只有部分节点启用了 TLS，这些节点会广播 `SSL://...` 端点，其余节点只广播
+`PLAINTEXT://...`；使用 `security.protocol=SSL` 的客户端仍能连到启用了 TLS 的节点，
+但纯明文节点保持明文。请逐台执行 `--tls --force`，保证三 voter 的 quorum 始终保留两个。
+
+`--tls` 只增加面向客户端的 SSL 监听。**CONTROLLER** quorum 与 broker 间流量始终是
+`PLAINTEXT`，所以增删 TLS 不会破坏 quorum。
+
 ### 使用自带证书（`pg cert`）
 
 Kafka 的 PEM keystore 只读**一个**文件：先是证书链，随后是私钥。`pg cert` 会把证书和私钥
@@ -130,7 +218,7 @@ Kafka 的 PEM keystore 只读**一个**文件：先是证书链，随后是私�
 ```bash
 # 1. 签发服务端证书。--host 要包含客户端实际拨号的所有地址，
 #    尤其是 --advertise-host。
-pg cert --host 127.0.0.1,10.241.20.147 \
+pg cert --host 127.0.0.1,192.0.2.11 \
   --cert-file kafka.crt --key-file kafka.key
 
 # 2. 合并证书（链）与私钥为一个 PEM。
@@ -143,10 +231,10 @@ pg addon install kafka --name k1 --tls-pem ./kafka-server.pem
 有中间证书时把叶子证书放在最前：`cat leaf.crt intermediate.crt key.key > kafka-server.pem`。
 
 安装时 pgcli 会校验：文件包含证书且只有一个未加密私钥、两者匹配、证书当前有效、允许
-服务端认证用途、且不是 CA 证书。若 `--advertise-host` 不在 SAN 中会打印警告——broker
-仍会启动，但做主机名校验的客户端会连接失败。支持 PKCS#8（`BEGIN PRIVATE KEY`，即
-`pg cert` 的输出）、PKCS#1（`BEGIN RSA PRIVATE KEY`）与 SEC1（`BEGIN EC PRIVATE KEY`）；
-加密私钥会被拒绝。
+服务端认证用途、且不是 CA 证书。还会检查 SAN 是否覆盖 `--advertise-host`：集群模式下
+证书不覆盖本节点 advertise IP 是**硬错误**（其他 voter 和客户端会用该地址访问本节点）；
+单机模式只打印警告。支持 PKCS#8（`BEGIN PRIVATE KEY`，即 `pg cert` 的输出）、
+PKCS#1（`BEGIN RSA PRIVATE KEY`）与 SEC1（`BEGIN EC PRIVATE KEY`）；加密私钥会被拒绝。
 
 pgcli 会把合并后的文件复制为 `config/tls/server.pem`（0600，属主 uid 1000），**不会**
 生成 `ca.crt` 或 `public.crt`/`private.key`，源文件保持不变。自动续期不适用：更换源 PEM 后
@@ -155,6 +243,20 @@ pgcli 会把合并后的文件复制为 `config/tls/server.pem`（0600，属主 
 自签的 `pg cert` 证书需要客户端直接信任证书文件——把下文示例中的 `ca.crt` 换成
 `kafka.crt`。如果证书由公共或私有 CA 签发，则让客户端信任该 CA 链，并把中间证书一并
 放进 `kafka-server.pem`。
+
+集群中请为**每个节点单独**签发覆盖其 advertise IP 的证书，并且只传给该节点的 install：
+
+```bash
+# 节点 1，其 --advertise-host 为 192.0.2.11：
+pg cert --host 192.0.2.11 --cert-file kafka-node1.crt --key-file kafka-node1.key
+cat kafka-node1.crt kafka-node1.key > kafka-node1.pem
+pg addon install kafka --name prod --cluster prod --node-id 1 --force ... --tls-pem ./kafka-node1.pem
+
+# 客户端需要信任所有节点：把各节点证书（或 CA）拼起来。
+cat kafka-node1.crt kafka-node2.crt kafka-node3.crt > kafka-ca-bundle.pem
+```
+
+如果某节点的证书没有覆盖它的 `--advertise-host`，集群安装会在重建容器之前被拒绝。
 
 要从自带证书切回 pgcli 生成的证书，用 `--tls --tls-pem '' --force` 重新安装；
 `--tls-pem` 传空值会清除已存储的路径。
@@ -236,6 +338,28 @@ ssl.keystore.location=/mnt/shared/config/tls/server.pem
 ssl.client.auth=none
 ```
 
+三节点集群示例（展示 `node 2 of prod`；`--listen 0.0.0.0`）：
+
+```properties
+process.roles=broker,controller
+node.id=2
+listeners=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:19093
+advertised.listeners=PLAINTEXT://192.0.2.12:9092
+inter.broker.listener.name=PLAINTEXT
+controller.listener.names=CONTROLLER
+listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+controller.quorum.voters=1@192.0.2.11:19093,2@192.0.2.12:19093,3@192.0.2.13:19093
+log.dirs=/var/lib/kafka/data
+offsets.topic.replication.factor=3
+transaction.state.log.replication.factor=3
+transaction.state.log.min.isr=2
+default.replication.factor=3
+min.insync.replicas=2
+```
+
+voter 列表在三台主机上完全相同并按 node id 排序；只有本节点的 `node.id` 一行不同。
+副本数为 `min(3, voters)`，ISR 为 `min(2, RF)`。
+
 再加上内部 topic 与自动创建 topic 的副本配置：单 voter 时
 `offsets.topic.replication.factor=1`、`transaction.state.log.replication.factor=1`、
 `transaction.state.log.min.isr=1`、share coordinator 的同名项、
@@ -266,7 +390,8 @@ pg addon kafka topic delete demo --name k1 --yes
 ```
 
 - `--partitions` 默认使用 broker 的 `num.partitions`（上游默认 `1`）。
-  `--replication-factor 0`（默认值）表示"本实例的 RF"——单机为 `1`。
+  `--replication-factor 0`（默认值）表示"本实例的 RF"——单机为 `1`，集群为
+  `min(3, voters)`（三节点即 `3`）。
 - `--config KEY=VALUE` 可重复，直接透传给 `kafka-topics.sh`。
 - `delete` 默认要求确认，`--yes` 跳过；删除 topic 会删除其全部消息。
 - 所有 topic 命令都要求实例正在运行。
@@ -284,6 +409,89 @@ pg addon kafka shell --name k1 -- bash -lc \
 外部客户端使用打印出的 broker 端点作为 `--bootstrap-server`。对默认 loopback 监听，
 宿主机客户端直接用 `127.0.0.1:9092` 即可。
 
+集群中每个 broker 广播自己的地址，客户端可以从任意节点 bootstrap，随后被重定向到分区
+leader。生产者和消费者可以运行在不同主机上：
+
+```bash
+pg addon kafka topic create e2e --partitions 3 --replication-factor 3 --name prod
+
+# 在节点 1 上通过本地 broker 写入：
+pg addon kafka shell --name prod -- bash -lc \
+  'printf "alpha\nbeta\n" | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server 192.0.2.11:9092 --topic e2e'
+
+# 在节点 3 上从节点 2 的 broker 读取：
+pg addon kafka shell --name prod -- bash -lc \
+  '/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server 192.0.2.12:9092 --topic e2e --from-beginning --max-messages 2'
+```
+
+### 用 kcat 在宿主机测试
+
+[kcat](https://github.com/edenhill/kcat) 是轻量的原生生产/消费工具，适合在容器外做
+冒烟测试（Debian/Ubuntu `apt install kcat`，macOS `brew install kcat`）。从任意节点
+bootstrap 即可，客户端会自动跟随 advertised leader。示例使用上文创建的 `e2e`
+topic（3 分区、RF=3）：
+
+```bash
+# PLAINTEXT
+printf 'alpha\nbeta\n' | kcat -P -b 192.0.2.11:9092 -t e2e
+kcat -C -q -b 192.0.2.12:9092 -t e2e -o beginning -e -c 2   # 前两条
+kcat -C -q -b 192.0.2.13:9092 -t e2e -o -1 -e -c 1         # 最后一条
+```
+
+TLS 场景下把 kcat 指向[集群 TLS](#集群-tls) 一节拼出的 CA bundle，并选择 SSL
+（TLS 监听端口为 `9093`）：
+
+```bash
+printf 'gamma\n' | kcat -P -b 192.0.2.11:9093 -t e2e \
+  -X security.protocol=SSL -X ssl.ca.location=kafka-ca-bundle.pem
+kcat -C -q -b 192.0.2.12:9093 -t e2e -o -1 -e -c 1 \
+  -X security.protocol=SSL -X ssl.ca.location=kafka-ca-bundle.pem
+```
+
+- `-o beginning` / `-o -1` 分别从第一条 / 最后一条开始；`-e` 读到 EOF 退出，
+  `-c N` 消费 N 条后退出；`-q` 只输出消息体。
+- `-b` 使用 advertised 地址即可，客户端会被重定向到分区 leader，无需逐分区配置。
+- 这些示例**不加入消费组**：kcat 直接读分区，不提交 offset，因此
+  `pg addon kafka group list` 里不会出现任何 group。要以消费组方式读取，加
+  `-G NAME`（topic 改为位置参数），见[消费组](#消费组)。
+
+## 消费组
+
+`kafka-consumer-groups.sh` 的日常查询封装成了两个子命令：
+
+```bash
+pg addon kafka group list --name k1
+pg addon kafka group describe demo-group --name k1
+```
+
+- `list` 列出在本集群提交过 offset 的 group id。
+- `describe` 输出 group 状态、成员，以及每个分区的 `CURRENT-OFFSET` /
+  `LOG-END-OFFSET` / `LAG` 和消费者 id、host。LAG 持续增长说明消费速度跟不上。
+- group 在第一次提交 offset 后才会出现；`group.id` 由客户端设置，pgcli 不创建
+  消费组。冒烟测试可以先带 `--group` 消费一次：
+
+```bash
+pg addon kafka shell --name prod -- bash -lc \
+  '/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server 192.0.2.11:9092 --topic e2e --group demo-group --from-beginning --max-messages 2'
+pg addon kafka group list --name prod
+pg addon kafka group describe demo-group --name prod
+```
+
+在宿主机上用 kcat 做同样的事则用 `-G`；组模式下 topic 是位置参数，不能用 `-t`：
+
+```bash
+kcat -C -q -G demo-group -b 192.0.2.11:9092 \
+  -X auto.offset.reset=earliest -c 2 e2e
+pg addon kafka group list --name prod
+pg addon kafka group describe demo-group --name prod
+```
+
+上文各节的 `console-consumer` 和 kcat 示例刻意不带 group（读完即退出的冒烟
+测试），因此不会创建消费组。
+
+- 两个命令都要求实例正在运行。消费者停止且未提交 offset 时 group 会留在 `Empty`
+  状态，offset 和 lag 仍可见，直到 offset 过期。
+
 ## 状态与 quorum
 
 ```bash
@@ -293,10 +501,22 @@ pg logs addon kafka --name k1 -f         # broker 日志（stdout/stderr）
 ```
 
 `cluster status` 执行 `kafka-metadata-quorum.sh --bootstrap-controller <本地 controller>
-describe --status`；健康的单机会打印 cluster id、leader 和一个 voter。
+describe --status`；健康的单机会打印 cluster id、leader 和一个 voter。集群中它会报告
+leader 以及所有 voter 的日志延迟和是否已追上——在任意节点执行均可：
+
+```
+ClusterId:              <推导出的 id>
+LeaderId:               1
+CurrentVoters:          [{"id": 1, ...}, {"id": 2, ...}, {"id": 3, ...}]
+```
+
+`N` 个 voter 容忍 `(N-1)/2` 台节点停机——三节点容忍一台，两节点一台都不能停。停掉多数派
+会失去元数据 quorum：broker 的现有分区只能按 `min.insync.replicas` 允许的范围继续读写，
+在 quorum 恢复前无法进行 leader 选举或元数据变更。
 
 `install` 和 `start` 最多等待 90 秒，直到 `kafka-broker-api-versions.sh` 在本地 broker
-端点返回结果。一直不就绪会让命令失败并打印最后几行日志；数据会保留。
+端点返回结果（集群模式为 15 秒，因为完整 quorum 要等最后一个 voter 装好才形成）。
+一直不就绪会让命令失败并打印最后几行日志；数据会保留。
 
 ## 配置
 
@@ -333,12 +553,18 @@ pg addon remove kafka --name k1 --clean-data   # 同时删除实例目录和自�
 `podman unshare` 删除），但不会删除已拉取的镜像。如果把实例指向属于其他 cluster id
 或 node id 的数据目录，会在创建容器前被拒绝。
 
-开机自启：
+集群中 `remove` 只影响**本机**——pgcli 不会联系其他节点，它们的静态 voter 列表仍然引用
+本节点。`pg addon remove` 会先打印 quorum 影响。三个 voter 时，移除（或停止）一个节点
+集群仍可用；移除第二个会失去 quorum。之后重新加入必须使用**相同**的 `--cluster`、
+`--node-id` 和 `--peer` 列表；`--clean-data` 后数据目录为空，broker 会用相同的推导
+cluster id 重新格式化。
+
+开机自启同样是按主机的——请在每个节点上启用：
 
 ```bash
-pg autostart enable --kafka --name k1
+pg autostart enable --kafka --name prod   # 在每台主机执行
 pg autostart status
-pg autostart disable --kafka --name k1
+pg autostart disable --kafka --name prod
 ```
 
 开机启动会先重新渲染 `server.properties`，并且是幂等的（`pg start` 也会启动
@@ -346,18 +572,22 @@ autostart 启用的 Kafka 实例）。
 
 ## 生产注意事项
 
-- **本版本仅支持单机。** 没有副本，也没有 HA：broker 停止后无法读写。
-  `--cluster`/`--peer`/`--node-id` 预留给未来的多机拓扑，目前会明确报错。
+- **静态 quorum，不能在线扩缩。** `--cluster` 安装的是固定 KRaft quorum 中的一个节点，
+  没有在线增删 controller 的能力：扩容或缩容需要用新的 voter 列表重装节点。HA 请使用
+  3（或其他 ≥3 的奇数）个 voter；允许两 voter，但零容错。
+- **默认仍是单机。** 不带 `--cluster` 时没有副本也没有 HA：broker 停止后该实例无法读写。
 - **KRaft combined 模式。** broker 和 controller 共用一个进程，适合开发和小规模部署；
   上游建议大型关键集群使用独立的 controller/broker 角色，本插件暂不提供。
 - **无认证；TLS 只负责传输加密。** PLAINTEXT 监听始终开启；`--tls` 增加的加密监听因
   `ssl.client.auth=none` 而不认证客户端。能连到任一端口的人都可以读写所有 topic。
-  保持默认 loopback，或只在可信内网暴露。如需要真正的认证（SASL/mTLS），请自行在
+  集群模式下 CONTROLLER quorum 与 broker 间流量同样是 PLAINTEXT——`--tls` 只覆盖客户端
+  连接。保持默认 loopback，或只在可信内网暴露。如需要真正的认证（SASL/mTLS），请自行在
   Kafka 前放置代理/网关。
 - **没有 ZooKeeper。** Kafka 4.x 是 KRaft-only，不存在 ZooKeeper 容器；
   `zookeeper.connect` 作为托管 key 会被拒绝。
-- **副本不是备份。** topic 副本（单机没有）保障的是可用性，不能防误删或逻辑损坏。
-  离线备份请停止实例后复制数据目录；本版本没有 backup/restore 命令。
+- **副本不是备份。** topic 副本保障的是可用性，不能防误删或逻辑损坏。
+  离线备份请停止实例后复制数据目录；本版本没有 backup/restore 命令，且单个集群节点的
+  离线拷贝并不是完整的集群备份。
 - **升级。** `--force --version <新版本>` 会拉取新 tag 并在同一数据目录上重建容器。
   Kafka 不保证新版本写入的数据能回退到旧版本——升级前请做离线拷贝。
   `--version` 必须是真实存在的上游 tag。
@@ -377,16 +607,19 @@ autostart 启用的 Kafka 实例）。
 | `--name NAME` | `kafka` | 实例名；`[A-Za-z0-9][A-Za-z0-9_-]*`，最多 48 字符 |
 | `--version TAG` | `4.4.0` | 上游 `docker.io/apache/kafka` tag |
 | `--data-dir DIR` | `<base_dir>/addon/kafka/<name>/data` | 绝对路径宿主机数据目录，挂载到 `/var/lib/kafka/data` |
-| `--listen ADDR` | `127.0.0.1` | broker、SSL（启用时）与 controller 的监听地址 |
-| `--advertise-host IP` | `127.0.0.1` | 对外广播的 broker 地址（单机也是 controller voter 地址）；不能是通配地址 |
+| `--listen ADDR` | `127.0.0.1` | broker、SSL（启用时）与 controller 的监听地址；集群模式要求 `0.0.0.0` 或 advertise 地址 |
+| `--advertise-host IP` | `127.0.0.1` | 对外广播的 broker 地址（也是本节点的 controller voter 地址）；不能是通配地址；全新集群安装必须显式传入 |
 | `--broker-port N` | 自动（基准 `9092`） | broker 宿主机端口；`0` = 自动分配 |
-| `--controller-port N` | 自动（基准 `19093`） | controller 宿主机端口；`0` = 自动分配；必须与 broker 端口不同 |
+| `--controller-port N` | 自动（基准 `19093`） | controller 宿主机端口；`0` = 自动分配；全新集群安装必须显式传入，因为每个 peer 都会内嵌它 |
+| `--cluster NAME` | — | 多机集群名；所有主机相同；KRaft cluster id 由它推导 |
+| `--node-id N` | 单机 `1` | 1-based node id，集群内唯一；全新集群安装必填；单机模式会被拒绝 |
+| `--peer ID@HOST:PORT` | — | 另一个节点的 controller voter；每个其他节点各一条；所有主机传相同 peer 列表 |
 | `--tls` | false | 增加 SSL 监听；PLAINTEXT 监听保留 |
-| `--tls-pem FILE` | — | SSL 监听使用的合并 PEM（证书链 + 私钥）；隐含 `--tls`；路径可为相对或绝对 |
+| `--tls-pem FILE` | — | SSL 监听使用的合并 PEM（证书链 + 私钥）；隐含 `--tls`；路径可为相对或绝对；集群模式下必须覆盖 `--advertise-host` |
 | `--tls-port N` | 自动（基准 `9093`） | SSL 监听宿主机端口；`0` = 自动分配；需要 `--tls` |
-| `--cluster-id ID` | 生成 / 采纳 | 显式 22 字符 base64url KRaft cluster id |
+| `--cluster-id ID` | 集群推导 / 单机生成 | KRaft cluster id；集群模式下必须等于由 `--cluster` 推导出的值 |
 | `--config-option K=V` | — | 额外 `server.properties` 配置；可重复；替换已存储的覆盖表 |
-| `--force` | false | 重新渲染配置并重建容器，保留数据和 id；增删 TLS 必须使用 |
+| `--force` | false | 重新渲染配置并重建容器，保留数据和 id；增删 TLS 必须使用；不能修改集群身份字段 |
 
 ### `pg addon kafka status` / `shell`
 
@@ -401,10 +634,17 @@ autostart 启用的 Kafka 实例）。
 |---|---|---|
 | `NAME` | — | topic 名（`create`/`describe`/`delete` 的位置参数） |
 | `--partitions N` | broker 默认（`1`） | 仅 `create`：分区数 |
-| `--replication-factor N` | `0` = 实例 RF（`1`） | 仅 `create`：副本数 |
+| `--replication-factor N` | `0` = 实例 RF（单机 `1`，集群 `min(3, voters)`） | 仅 `create`：副本数 |
 | `--config K=V` | — | 仅 `create`：topic 配置；可重复 |
 | `--exclude-internal` | false | 仅 `list`：隐藏 Kafka 内部 topic |
 | `--yes` | false | 仅 `delete`：跳过确认 |
+
+### `pg addon kafka group list|describe`
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `GROUP` | — | 消费组 id（仅 `describe` 的位置参数） |
+| `--name NAME` | `kafka` | 查询哪个实例的本地 broker |
 
 ### `pg addon kafka cluster status`
 

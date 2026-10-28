@@ -374,6 +374,59 @@ func TestKafkaValidate(t *testing.T) {
 			wantSub: "at least one --peer",
 		},
 		{
+			name: "valid two-voter cluster",
+			mutate: func(c *Config) {
+				kc := c.Addons.Kafka["kafka"]
+				kc.Cluster = "pair"
+				kc.ClusterID = DeriveKafkaClusterID("pair")
+				kc.Listen = "0.0.0.0"
+				kc.AdvertiseHost = "10.0.0.1"
+				kc.NodeID = 1
+				kc.Peers = []string{"2@10.0.0.2:19093"}
+				c.Addons.Kafka["kafka"] = kc
+			},
+		},
+		{
+			name: "cluster node id zero",
+			mutate: func(c *Config) {
+				kc := c.Addons.Kafka["kafka"]
+				kc.Cluster = "prod"
+				kc.ClusterID = DeriveKafkaClusterID("prod")
+				kc.Listen = "0.0.0.0"
+				kc.AdvertiseHost = "10.0.0.1"
+				kc.NodeID = 0
+				kc.Peers = []string{"2@10.0.0.2:19093"}
+				c.Addons.Kafka["kafka"] = kc
+			},
+			wantSub: "must be >= 1 in cluster mode",
+		},
+		{
+			name: "cluster id does not match derived id",
+			mutate: func(c *Config) {
+				kc := c.Addons.Kafka["kafka"]
+				kc.Cluster = "prod"
+				kc.ClusterID = DeriveKafkaClusterID("other")
+				kc.Listen = "0.0.0.0"
+				kc.AdvertiseHost = "10.0.0.1"
+				kc.Peers = []string{"2@10.0.0.2:19093"}
+				c.Addons.Kafka["kafka"] = kc
+			},
+			wantSub: "does not match the id derived",
+		},
+		{
+			name: "cluster concrete listen differs from advertise",
+			mutate: func(c *Config) {
+				kc := c.Addons.Kafka["kafka"]
+				kc.Cluster = "prod"
+				kc.ClusterID = DeriveKafkaClusterID("prod")
+				kc.Listen = "10.0.0.9"
+				kc.AdvertiseHost = "10.0.0.1"
+				kc.Peers = []string{"2@10.0.0.2:19093"}
+				c.Addons.Kafka["kafka"] = kc
+			},
+			wantSub: "is not the advertised address",
+		},
+		{
 			name: "same broker and controller port",
 			mutate: func(c *Config) {
 				kc := c.Addons.Kafka["kafka"]
@@ -547,6 +600,9 @@ func TestKafkaVoters(t *testing.T) {
 		{"duplicate ids", KafkaConfig{Cluster: "p", NodeID: 1, AdvertiseHost: "10.0.0.1", ControllerPort: 19093, Peers: []string{"2@10.0.0.2:19093", "2@10.0.0.3:19093"}}, "used by both"},
 		{"hostname peer", KafkaConfig{Cluster: "p", NodeID: 1, AdvertiseHost: "10.0.0.1", ControllerPort: 19093, Peers: []string{"2@broker2:19093"}}, "must be an IP address"},
 		{"wildcard peer", KafkaConfig{Cluster: "p", NodeID: 1, AdvertiseHost: "10.0.0.1", ControllerPort: 19093, Peers: []string{"2@0.0.0.0:19093"}}, "wildcard address"},
+		{"peer id zero", KafkaConfig{Cluster: "p", NodeID: 1, AdvertiseHost: "10.0.0.1", ControllerPort: 19093, Peers: []string{"0@10.0.0.2:19093"}}, "1-based"},
+		{"duplicate endpoint", KafkaConfig{Cluster: "p", NodeID: 1, AdvertiseHost: "10.0.0.1", ControllerPort: 19093, Peers: []string{"2@10.0.0.2:19093", "3@10.0.0.2:19093"}}, "share the controller endpoint"},
+		{"peer repeats local endpoint", KafkaConfig{Cluster: "p", NodeID: 1, AdvertiseHost: "10.0.0.1", ControllerPort: 19093, Peers: []string{"2@10.0.0.1:19093"}}, "share the controller endpoint"},
 		{"bad port", KafkaConfig{Cluster: "p", NodeID: 1, AdvertiseHost: "10.0.0.1", ControllerPort: 19093, Peers: []string{"2@10.0.0.2:70000"}}, "invalid port"},
 	}
 	for _, tt := range bad {

@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"maps"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -53,7 +55,7 @@ func TestParseKafkaConfigOptions(t *testing.T) {
 }
 
 func TestKafkaCommandTree(t *testing.T) {
-	for _, name := range []string{"status", "shell", "topic", "cluster"} {
+	for _, name := range []string{"status", "shell", "topic", "group", "cluster"} {
 		if _, _, err := addonKafkaCmd.Find([]string{name}); err != nil {
 			t.Errorf("addon kafka %s: %v", name, err)
 		}
@@ -61,6 +63,16 @@ func TestKafkaCommandTree(t *testing.T) {
 	for _, name := range []string{"create", "list", "describe", "delete"} {
 		if _, _, err := addonKafkaCmd.Find([]string{"topic", name}); err != nil {
 			t.Errorf("addon kafka topic %s: %v", name, err)
+		}
+	}
+	for _, name := range []string{"list", "describe"} {
+		cmd, _, err := addonKafkaCmd.Find([]string{"group", name})
+		if err != nil {
+			t.Errorf("addon kafka group %s: %v", name, err)
+			continue
+		}
+		if cmd.Flags().Lookup("name") == nil {
+			t.Errorf("addon kafka group %s: --name flag not registered", name)
 		}
 	}
 	if _, _, err := addonKafkaCmd.Find([]string{"cluster", "status"}); err != nil {
@@ -90,6 +102,9 @@ func TestKafkaInstallFlagsRegistered(t *testing.T) {
 		"tls-port":        "int",
 		"tls-pem":         "string",
 		"cluster-id":      "string",
+		"cluster":         "string",
+		"peer":            "stringArray",
+		"node-id":         "int",
 		"advertise-host":  "string",
 		"listen":          "string",
 		"version":         "string",
@@ -143,40 +158,238 @@ func kafkaInstallCmd() *cobra.Command {
 	return cmd
 }
 
-// Phase 1 ships a single combined KRaft node. Cluster flags must be refused
-// before any image pull or container work, even though the fields exist.
-func TestKafkaInstallRejectsPhaseTwoFlags(t *testing.T) {
+// writeKafkaTestConfig saves cfg as the active pg.yaml for the duration of t.
+func writeKafkaTestConfig(t *testing.T, cfg *config.Config) string {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "pg.yaml")
-	cfg := config.Default()
-	cfg.BaseDir = t.TempDir()
 	if err := cfg.Save(path); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	oldPath := cfgPath
 	cfgPath = path
 	t.Cleanup(func() { cfgPath = oldPath })
+	return path
+}
 
-	cases := []struct {
+// runKafkaInstallFlags runs the install with the given scalar flags and peers.
+func runKafkaInstallFlags(t *testing.T, flags map[string]string, peers []string) error {
+	t.Helper()
+	cmd := kafkaInstallCmd()
+	for key, value := range flags {
+		if err := cmd.Flags().Set(key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, peer := range peers {
+		if err := cmd.Flags().Set("peer", peer); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return runAddonInstallKafka(cmd)
+}
+
+// clusterTestKafka is a valid installed node 2 of cluster "prod".
+func clusterTestKafka(name string) config.KafkaConfig {
+	return config.KafkaConfig{
+		Name:           name,
+		Cluster:        "prod",
+		NodeID:         2,
+		Listen:         "0.0.0.0",
+		AdvertiseHost:  "10.0.0.2",
+		ControllerPort: 19093,
+		Peers:          []string{"1@10.0.0.1:19093", "3@10.0.0.3:19093"},
+		ClusterID:      config.DeriveKafkaClusterID("prod"),
+	}
+}
+
+func TestKafkaInstallClusterFlagValidation(t *testing.T) {
+	base := map[string]string{
+		"cluster":         "prod",
+		"node-id":         "1",
+		"listen":          "0.0.0.0",
+		"advertise-host":  "10.0.0.1",
+		"controller-port": "19093",
+	}
+	with := func(changes map[string]string) map[string]string {
+		out := make(map[string]string, len(base)+len(changes))
+		maps.Copy(out, base)
+		for k, v := range changes {
+			if v == "" {
+				delete(out, k)
+				continue
+			}
+			out[k] = v
+		}
+		return out
+	}
+	peer := []string{"2@10.0.0.2:19093"}
+	tests := []struct {
 		name  string
 		flags map[string]string
+		peers []string
+		want  string
 	}{
-		{"cluster", map[string]string{"cluster": "prod"}},
-		{"peer", map[string]string{"peer": "2@10.0.0.2:19093"}},
-		{"node-id", map[string]string{"node-id": "2"}},
+		{"missing peer", base, nil, "--cluster requires at least one --peer"},
+		{"missing node id", with(map[string]string{"node-id": ""}), peer, "cannot determine this node's Kafka cluster node id"},
+		{"missing advertise host", with(map[string]string{"advertise-host": ""}), peer, "--cluster requires an explicit --advertise-host"},
+		{"missing controller port", with(map[string]string{"controller-port": ""}), peer, "--cluster requires an explicit --controller-port"},
+		{"loopback advertise host", with(map[string]string{"advertise-host": "127.0.0.1"}), peer, "--cluster requires an explicit --advertise-host"},
+		{"loopback listen", with(map[string]string{"listen": "127.0.0.1"}), peer, "--cluster requires --listen 0.0.0.0"},
+		{"mismatched cluster id", with(map[string]string{"cluster-id": config.DeriveKafkaClusterID("other")}), peer, "does not match the id derived"},
+		{"invalid peer id", base, []string{"0@10.0.0.2:19093"}, "1-based"},
+		{"self peer", base, []string{"1@10.0.0.9:19093"}, "repeats this node"},
+		{"duplicate peer endpoint", base, []string{"2@10.0.0.2:19093", "3@10.0.0.2:19093"}, "share the controller endpoint"},
 	}
-	for _, tt := range cases {
+	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cmd := kafkaInstallCmd()
-			for key, value := range tt.flags {
-				if err := cmd.Flags().Set(key, value); err != nil {
-					t.Fatal(err)
-				}
-			}
-			err := runAddonInstallKafka(cmd)
-			if err == nil || !strings.Contains(err.Error(), "not implemented yet") {
-				t.Fatalf("want multi-node rejection, got %v", err)
+			cfg := config.Default()
+			cfg.BaseDir = t.TempDir()
+			writeKafkaTestConfig(t, cfg)
+			err := runKafkaInstallFlags(t, tt.flags, tt.peers)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("install error = %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestKafkaInstallSingleNodeRejectsClusterFlags(t *testing.T) {
+	tests := []struct {
+		name  string
+		flags map[string]string
+		peers []string
+		want  string
+	}{
+		{"peer without cluster", nil, []string{"2@10.0.0.2:19093"}, "--peer requires --cluster"},
+		{"node id without cluster", map[string]string{"node-id": "2"}, nil, "--node-id requires --cluster"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.BaseDir = t.TempDir()
+			writeKafkaTestConfig(t, cfg)
+			err := runKafkaInstallFlags(t, tt.flags, tt.peers)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("install error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestKafkaInstallRejectsClusterIdentityChanges(t *testing.T) {
+	tests := []struct {
+		name  string
+		flags map[string]string
+		peers []string
+		want  string
+	}{
+		{"cluster", map[string]string{"force": "true", "cluster": "other"}, nil, "changing --cluster is not supported"},
+		{"node id", map[string]string{"force": "true", "node-id": "4"}, nil, "changing --node-id is not supported"},
+		{"cluster id", map[string]string{"force": "true", "cluster-id": config.DeriveKafkaClusterID("other")}, nil, "changing --cluster-id is not supported"},
+		{"peers", map[string]string{"force": "true"}, []string{"1@10.0.0.1:19093"}, "changing --peer is not supported"},
+		{"advertise host", map[string]string{"force": "true", "advertise-host": "10.0.0.99"}, nil, "changing --advertise-host"},
+		{"controller port", map[string]string{"force": "true", "controller-port": "19193"}, nil, "changing --controller-port"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.BaseDir = t.TempDir()
+			cfg.Addons.Kafka = map[string]config.KafkaConfig{"prod": clusterTestKafka("prod")}
+			cfg.ApplyDefaults()
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("seed Validate: %v", err)
+			}
+			writeKafkaTestConfig(t, cfg)
+			flags := map[string]string{"name": "prod"}
+			maps.Copy(flags, tt.flags)
+			err := runKafkaInstallFlags(t, flags, tt.peers)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("install error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// Re-installing without --force must reject conflicting identity flags instead
+// of silently ignoring them.
+func TestKafkaInstallNoOpRejectsIdentityChanges(t *testing.T) {
+	tests := []struct {
+		name  string
+		flags map[string]string
+		peers []string
+		want  string
+	}{
+		{"cluster", map[string]string{"cluster": "other"}, nil, "changing --cluster is not supported"},
+		{"node id", map[string]string{"node-id": "4"}, nil, "changing --node-id is not supported"},
+		{"peers", nil, []string{"1@10.0.0.1:19093"}, "changing --peer is not supported"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.BaseDir = t.TempDir()
+			cfg.Addons.Kafka = map[string]config.KafkaConfig{"prod": clusterTestKafka("prod")}
+			cfg.ApplyDefaults()
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("seed Validate: %v", err)
+			}
+			writeKafkaTestConfig(t, cfg)
+			flags := map[string]string{"name": "prod"}
+			maps.Copy(flags, tt.flags)
+			err := runKafkaInstallFlags(t, flags, tt.peers)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("install error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveKafkaIdentityFreshCluster(t *testing.T) {
+	cfg := config.Default()
+	cfg.BaseDir = t.TempDir()
+	kc := clusterTestKafka("prod")
+	cfg.Addons.Kafka = map[string]config.KafkaConfig{"prod": kc}
+	cfg.ApplyDefaults()
+	kc = cfg.Addons.Kafka["prod"]
+
+	opts := kafkaInstallOptions{clusterSet: true, nodeIDSet: true}
+	if err := resolveKafkaIdentity(&kc, opts, false); err != nil {
+		t.Fatalf("resolveKafkaIdentity: %v", err)
+	}
+	if want := config.DeriveKafkaClusterID("prod"); kc.ClusterID != want {
+		t.Errorf("cluster id = %q, want the derived id %q", kc.ClusterID, want)
+	}
+	if kc.NodeID != 2 {
+		t.Errorf("node id = %d, want 2", kc.NodeID)
+	}
+}
+
+func TestResolveKafkaIdentityAdoptsMeta(t *testing.T) {
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	clusterID := config.DeriveKafkaClusterID("prod")
+	meta := "cluster.id=" + clusterID + "\nnode.id=3\n"
+	if err := os.WriteFile(filepath.Join(dataDir, "meta.properties"), []byte(meta), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	kc := clusterTestKafka("prod")
+	kc.NodeID = 0
+	kc.DataDir = dataDir
+	opts := kafkaInstallOptions{}
+	if err := resolveKafkaIdentity(&kc, opts, true); err != nil {
+		t.Fatalf("resolveKafkaIdentity: %v", err)
+	}
+	if kc.ClusterID != clusterID || kc.NodeID != 3 {
+		t.Errorf("adopted ids = (%s, %d), want (%s, 3)", kc.ClusterID, kc.NodeID, clusterID)
+	}
+
+	// A node id > 1 must not silently become a single-node install.
+	single := config.KafkaConfig{Name: "prod", DataDir: dataDir}
+	if err := resolveKafkaIdentity(&single, opts, false); err == nil || !strings.Contains(err.Error(), "original --cluster and --node-id") {
+		t.Fatalf("single-node adoption error = %v", err)
 	}
 }
 
@@ -222,6 +435,43 @@ func TestKafkaInstallIdempotentKeepsConfig(t *testing.T) {
 	}
 	if kc.ContainerName != seed.ContainerName || kc.BrokerPort != seed.BrokerPort || kc.ControllerPort != seed.ControllerPort {
 		t.Errorf("idempotent install rewrote the instance: got %+v, want %+v", kc, seed)
+	}
+
+	// A clustered node keeps its identity too, and matching flags (in any peer
+	// order) are accepted on a no-op re-install.
+	clusterCfg := config.Default()
+	clusterCfg.BaseDir = t.TempDir()
+	clusterCfg.Addons.Kafka = map[string]config.KafkaConfig{"prod": clusterTestKafka("prod")}
+	clusterCfg.ApplyDefaults()
+	if err := clusterCfg.Validate(); err != nil {
+		t.Fatalf("seed Validate: %v", err)
+	}
+	clusterPath := writeKafkaTestConfig(t, clusterCfg)
+	clusterSeed := clusterCfg.Addons.Kafka["prod"]
+
+	err = runKafkaInstallFlags(t,
+		map[string]string{
+			"name":            "prod",
+			"cluster":         "prod",
+			"node-id":         "2",
+			"advertise-host":  "10.0.0.2",
+			"controller-port": "19093",
+		},
+		[]string{"3@10.0.0.3:19093", "1@10.0.0.1:19093"},
+	)
+	if err != nil {
+		t.Fatalf("idempotent cluster install: %v", err)
+	}
+	gotCluster, err := config.Load(clusterPath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	clusterGot := gotCluster.Addons.Kafka["prod"]
+	if clusterGot.ClusterID != clusterSeed.ClusterID || clusterGot.Cluster != clusterSeed.Cluster || clusterGot.NodeID != clusterSeed.NodeID {
+		t.Errorf("idempotent cluster install rewrote identity: got %+v, want %+v", clusterGot, clusterSeed)
+	}
+	if !kafkaPeerSetsEqual(clusterGot.Peers, clusterSeed.Peers) {
+		t.Errorf("idempotent cluster install rewrote peers: got %v, want %v", clusterGot.Peers, clusterSeed.Peers)
 	}
 }
 

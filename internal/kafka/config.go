@@ -71,6 +71,11 @@ func RenderProperties(k config.KafkaConfig) (string, error) {
 	if !config.ValidKafkaClusterID(k.ClusterID) {
 		return "", fmt.Errorf("invalid Kafka cluster id %q", k.ClusterID)
 	}
+	if k.Clustered() {
+		if want := config.DeriveKafkaClusterID(k.Cluster); k.ClusterID != want {
+			return "", fmt.Errorf("kafka cluster id %q does not match cluster %q (expected %q)", k.ClusterID, k.Cluster, want)
+		}
+	}
 
 	rf := config.KafkaReplicationFactor(len(voters))
 	minISR := config.KafkaMinISR(rf)

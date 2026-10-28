@@ -63,6 +63,33 @@ func findPodman() (string, error) {
 	return p, nil
 }
 
+// containerProcessAlive verifies that a container podman reports as running
+// still has a live main process. An abrupt host shutdown can kill conmon
+// before it records the exit, leaving a stale "running" entry that neither
+// `podman ps --sync` nor `podman start` repairs; start paths must treat a dead
+// PID as not running so they can recreate the container. On non-Linux hosts
+// the recorded PID belongs to the podman VM, so podman's answer is trusted.
+func containerProcessAlive(podmanPath, name string) bool {
+	if runtime.GOOS != "linux" {
+		return true
+	}
+	out, err := podmanCommand(podmanPath, "inspect", "--format", "{{.State.Pid}}", name).Output()
+	if err != nil {
+		// Keep podman's answer when liveness cannot be verified.
+		return true
+	}
+	pid := strings.TrimSpace(string(out))
+	return pidAlive(pid)
+}
+
+func pidAlive(pid string) bool {
+	if pid == "" || pid == "0" {
+		return false
+	}
+	_, statErr := os.Stat(filepath.Join("/proc", pid))
+	return statErr == nil
+}
+
 // podmanCommand creates an *exec.Cmd for the podman binary with the given
 // arguments. On Linux it sets XDG_RUNTIME_DIR in the environment so rootless
 // podman can reach the user API socket. Use this instead of exec.Command
@@ -1744,7 +1771,6 @@ func (m *Manager) RunRestoreContainerToWriter(w io.Writer, stanza, target string
 	}
 	return out, nil
 }
-
 
 func (m *Manager) run(args ...string) (string, error) {
 	slog.Debug("podman", "args", args)

@@ -60,3 +60,19 @@ func TestKafkaCreateArgsUsesStoredPaths(t *testing.T) {
 	}
 	t.Errorf("kafkaCreateArgs does not mount the configured data dir %q: %q", outside, got)
 }
+
+func TestKafkaExecArgsTTY(t *testing.T) {
+	got := kafkaExecArgs("c", true, true, "bash")
+	if want := []string{"exec", "-it", "c", "bash"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("tty argv = %q, want %q", got, want)
+	}
+	// Without a terminal, -t makes podman hang before starting the command.
+	got = kafkaExecArgs("c", true, false, "bash", "-lc", "true")
+	if want := []string{"exec", "-i", "c", "bash", "-lc", "true"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("non-tty argv = %q, want %q", got, want)
+	}
+	got = kafkaExecArgs("c", false, true, "true")
+	if want := []string{"exec", "c", "true"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("non-interactive argv = %q, want %q", got, want)
+	}
+}

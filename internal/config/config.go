@@ -1561,8 +1561,8 @@ func ParseKafkaPeer(raw string) (KafkaPeer, error) {
 		return KafkaPeer{}, fmt.Errorf("peer %q must be ID@HOST:PORT", raw)
 	}
 	id, err := strconv.Atoi(idPart)
-	if err != nil || id < 0 {
-		return KafkaPeer{}, fmt.Errorf("peer %q has an invalid node id", raw)
+	if err != nil || id < 1 {
+		return KafkaPeer{}, fmt.Errorf("peer %q has an invalid node id (ids are 1-based; 0 means unset)", raw)
 	}
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -1598,8 +1598,17 @@ func KafkaVoters(k KafkaConfig) ([]KafkaPeer, error) {
 	if len(k.Peers) == 0 {
 		return nil, fmt.Errorf("cluster mode requires at least one --peer")
 	}
+	endpointKey := func(host string, port int) string {
+		if ip := net.ParseIP(host); ip != nil {
+			host = ip.String()
+		}
+		return net.JoinHostPort(host, strconv.Itoa(port))
+	}
 	byID := map[int]KafkaPeer{
 		k.NodeID: {ID: k.NodeID, Host: k.AdvertiseHost, Port: k.ControllerPort},
+	}
+	byEndpoint := map[string]int{
+		endpointKey(k.AdvertiseHost, k.ControllerPort): k.NodeID,
 	}
 	for _, raw := range k.Peers {
 		peer, err := ParseKafkaPeer(raw)
@@ -1612,7 +1621,12 @@ func KafkaVoters(k KafkaConfig) ([]KafkaPeer, error) {
 		if prev, dup := byID[peer.ID]; dup {
 			return nil, fmt.Errorf("node id %d is used by both %s and %s", peer.ID, prev, peer)
 		}
+		endpoint := endpointKey(peer.Host, peer.Port)
+		if prevID, dup := byEndpoint[endpoint]; dup {
+			return nil, fmt.Errorf("Kafka voters %d and %d share the controller endpoint %s; each voter needs a distinct controller host:port", prevID, peer.ID, endpoint)
+		}
 		byID[peer.ID] = peer
+		byEndpoint[endpoint] = peer.ID
 	}
 	voters := make([]KafkaPeer, 0, len(byID))
 	for _, peer := range byID {
@@ -3773,6 +3787,15 @@ func (c *Config) Validate() error {
 		if kc.Clustered() {
 			if !ValidKafkaName(kc.Cluster) {
 				return fmt.Errorf("addons.kafka.%s.cluster %q must match [A-Za-z0-9][A-Za-z0-9_-]{0,47}", name, kc.Cluster)
+			}
+			if kc.NodeID < 1 {
+				return fmt.Errorf("addons.kafka.%s.node_id must be >= 1 in cluster mode (0 means unset)", name)
+			}
+			if want := DeriveKafkaClusterID(kc.Cluster); kc.ClusterID != want {
+				return fmt.Errorf("addons.kafka.%s.cluster_id %q does not match the id derived from cluster %q (expected %q)", name, kc.ClusterID, kc.Cluster, want)
+			}
+			if !listenIP.IsUnspecified() && !listenIP.Equal(advertiseIP) {
+				return fmt.Errorf("addons.kafka.%s.listen %s is not the advertised address %s; bind 0.0.0.0 (or ::), or bind the advertised address", name, kc.Listen, kc.AdvertiseHost)
 			}
 			if advertiseIP.IsLoopback() {
 				return fmt.Errorf("addons.kafka.%s.advertise_host must not be loopback in cluster mode", name)

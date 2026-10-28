@@ -105,11 +105,19 @@ func (m *KafkaManager) StartContainer(k *config.KafkaConfig) (bool, error) {
 	}
 	if exists {
 		if _, err := m.run("start", k.ContainerName); err == nil {
-			fmt.Printf("  [OK] Kafka container %s started\n", k.ContainerName)
-			if err := m.waitReady(k); err != nil {
-				return false, err
+			running, checkErr := m.containerRunning(k.ContainerName)
+			if checkErr != nil {
+				return false, fmt.Errorf("verifying Kafka container %s after start: %w", k.ContainerName, checkErr)
 			}
-			return false, nil
+			// `podman start` exits 0 on podman's stale "running" record even
+			// though nothing was started, so re-check the process liveness.
+			if running {
+				fmt.Printf("  [OK] Kafka container %s started\n", k.ContainerName)
+				if err := m.waitReady(k); err != nil {
+					return false, err
+				}
+				return false, nil
+			}
 		}
 		fmt.Printf("  [!] Kafka container %s in improper state, recreating...\n", k.ContainerName)
 		if _, err := m.run("rm", "-f", k.ContainerName); err != nil {
@@ -238,7 +246,7 @@ func (m *KafkaManager) waitReady(k *config.KafkaConfig) error {
 		lastErr = err
 		if time.Now().After(deadline) {
 			if k.Clustered() {
-				fmt.Printf("  [!] Kafka node %d is running but the controller quorum is not ready yet (%v) — install the remaining peers, then check `pg addon kafka cluster status`\n", k.NodeID, lastErr)
+				fmt.Printf("  [!] Kafka node %d is running, but the controller quorum is not ready yet (%v) — install the remaining voters with the same --cluster %q and matching --peer controller ports, then run `pg addon kafka cluster status --name %s`\n", k.NodeID, lastErr, k.Cluster, k.Name)
 				return nil
 			}
 			detail := strings.TrimSpace(out)
@@ -309,19 +317,29 @@ func (m *KafkaManager) ContainerExists(name string) (bool, error) {
 	return m.containerExists(name)
 }
 
+// kafkaExecArgs builds the podman exec argv. -t requires a real terminal:
+// over SSH or when stdin is a pipe it hangs without starting the command, so
+// use -i alone to keep piped stdin working.
+func kafkaExecArgs(container string, interactive, tty bool, args ...string) []string {
+	execArgs := []string{"exec"}
+	if interactive {
+		if tty {
+			execArgs = append(execArgs, "-it")
+		} else {
+			execArgs = append(execArgs, "-i")
+		}
+	}
+	execArgs = append(execArgs, container)
+	return append(execArgs, args...)
+}
+
 // Exec runs a command inside the container, sharing the host's terminal when
 // interactive. With no args it opens bash.
 func (m *KafkaManager) Exec(k *config.KafkaConfig, interactive bool, args ...string) error {
 	if len(args) == 0 {
 		args = []string{"/bin/bash"}
 	}
-	execArgs := []string{"exec"}
-	if interactive {
-		execArgs = append(execArgs, "-it")
-	}
-	execArgs = append(execArgs, k.ContainerName)
-	execArgs = append(execArgs, args...)
-	return m.runInteractive(execArgs...)
+	return m.runInteractive(kafkaExecArgs(k.ContainerName, interactive, isTerminal(os.Stdin), args...)...)
 }
 
 // ExecOutput runs a command inside the container and captures its output.
@@ -336,6 +354,18 @@ func (m *KafkaManager) Topic(k *config.KafkaConfig, args ...string) (string, err
 	execArgs := []string{
 		"exec", k.ContainerName,
 		kafkaBinDir + "/kafka-topics.sh",
+		"--bootstrap-server", kafka.LocalBrokerEndpoint(*k),
+	}
+	execArgs = append(execArgs, args...)
+	return execIdleKilled(m.podman, 30*time.Second, defaultIdleKill, execArgs...)
+}
+
+// ConsumerGroups runs kafka-consumer-groups.sh against this node's local
+// broker endpoint.
+func (m *KafkaManager) ConsumerGroups(k *config.KafkaConfig, args ...string) (string, error) {
+	execArgs := []string{
+		"exec", k.ContainerName,
+		kafkaBinDir + "/kafka-consumer-groups.sh",
 		"--bootstrap-server", kafka.LocalBrokerEndpoint(*k),
 	}
 	execArgs = append(execArgs, args...)
@@ -411,7 +441,7 @@ func (m *KafkaManager) containerRunning(name string) (bool, error) {
 	}
 	for line := range strings.SplitSeq(out, "\n") {
 		if strings.TrimSpace(line) == name {
-			return true, nil
+			return containerProcessAlive(m.podman, name), nil
 		}
 	}
 	return false, nil

@@ -21,7 +21,7 @@ pgcli 使用的容器镜像及其默认 tag。
 | `ghcr.io/mars-base/pgcli/pgcli-influxdb` | `1.13.1` | InfluxDB 1.x 单节点时序库（官方 linux/amd64 1.13.1 二进制 + Alpine），单架构；`pg addon influxdb` 与 `pg influx` 共用 | `DefaultInfluxDBImageTag` |
 | `ghcr.io/mars-base/pgcli/pgcli-influx2tsdb` | `1.3.2` | influx2tsdb-proxy：在 PostgreSQL + TimescaleDB 上提供 InfluxDB 1.x HTTP API（Line Protocol + InfluxQL），单架构 amd64、无状态；目标库可为本地实例或远程 `--dsn` | `DefaultInflux2TSDBImageTag` |
 | `docker.io/clickhouse/clickhouse-server` | `26.8.36.3` | ClickHouse 单机列式 OLAP（26.8 LTS），纯上游官方镜像无 wrapper，多架构 manifest list；host 网络 | `DefaultClickHouseImageTag`（`ClickHouseImageTagForVersion`） |
-| `docker.io/apache/kafka` | `4.4.0` | Apache Kafka 4.x（KRaft-only，无需 ZooKeeper）单机 broker+controller combined 节点，纯上游官方镜像无 wrapper，多架构 manifest list；host 网络，以 uid/gid 1000 运行 | `DefaultKafkaImageTag`（`KafkaImageTagForVersion`） |
+| `docker.io/apache/kafka` | `4.4.0` | Apache Kafka 4.x（KRaft-only，无需 ZooKeeper）broker+controller combined 节点，支持单机或跨主机静态 controller quorum，纯上游官方镜像无 wrapper，多架构 manifest list；host 网络，以 uid/gid 1000 运行 | `DefaultKafkaImageTag`（`KafkaImageTagForVersion`） |
 | `docker.io/edoburu/pgbouncer` | `v1.25.2-p0` | PostgreSQL 连接池 | `DefaultPgBouncerImageTag` |
 | `docker.io/postgrest/postgrest` | `v16.3` | PostgREST（REST API over PostgreSQL） | `DefaultPostgrestImageTag` |
 | `docker.io/library/haproxy` | `3.2.23-alpine` | HTTP/TCP 负载均衡 | `DefaultHAProxyImageTag` |
@@ -253,7 +253,10 @@ done
   就跳过递归 chown。broker 默认 `9092`、controller 默认 `19093`（避开 Alertmanager
   的 `9093`）；默认 PLAINTEXT，可选 `--tls` 增加 SSL 监听（TLS 池从 `9093` 起，
   PEM keystore 读取合并后的 `config/tls/server.pem`，仅加密、不认证客户端），
-  `Listen` 默认 `127.0.0.1`；单节点无复制/HA；以 **host 网络**运行
+  `Listen` 默认 `127.0.0.1`；单机无复制/HA，也可用 `--cluster`/`--node-id`/`--peer`
+  组成跨主机静态 controller quorum（每台主机各自安装，RF=`min(3, voters)`；
+  CONTROLLER 与 broker 间流量保持 PLAINTEXT，集群客户端需拼接各节点 CA bundle）；
+  以 **host 网络**运行
 - **pgadmin4**：纯上游 `docker.io/dpage/pgadmin4`，无 wrapper（镜像自己的
   entrypoint 把 `/var/lib/pgadmin` chown 给 uid 5050 后降权，所以 pgcli 不需要
   rustfs 那套属主机制）；pin 到发布时的 `latest`（当前 `9.18`，双架构 manifest

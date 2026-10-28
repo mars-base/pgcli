@@ -159,6 +159,7 @@ min.insync.replicas=1
 func TestRenderPropertiesCluster(t *testing.T) {
 	kc := testKafkaConfig(t)
 	kc.Cluster = "prod"
+	kc.ClusterID = config.DeriveKafkaClusterID(kc.Cluster)
 	kc.NodeID = 2
 	kc.Listen = "0.0.0.0"
 	kc.AdvertiseHost = "10.241.20.148"
@@ -183,6 +184,80 @@ func TestRenderPropertiesCluster(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("RenderProperties missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestRenderPropertiesTwoVoterCluster(t *testing.T) {
+	kc := testKafkaConfig(t)
+	kc.Cluster = "pair"
+	kc.ClusterID = config.DeriveKafkaClusterID(kc.Cluster)
+	kc.Listen = "0.0.0.0"
+	kc.AdvertiseHost = "10.0.0.1"
+	kc.Peers = []string{"2@10.0.0.2:19093"}
+
+	got, err := RenderProperties(kc)
+	if err != nil {
+		t.Fatalf("RenderProperties: %v", err)
+	}
+	for _, want := range []string{
+		"controller.quorum.voters=1@10.0.0.1:19093,2@10.0.0.2:19093\n",
+		"offsets.topic.replication.factor=2\n",
+		"transaction.state.log.min.isr=2\n",
+		"default.replication.factor=2\n",
+		"min.insync.replicas=2\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("RenderProperties missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRenderPropertiesClusterTLS(t *testing.T) {
+	kc := testKafkaConfig(t)
+	kc.Cluster = "prod"
+	kc.ClusterID = config.DeriveKafkaClusterID(kc.Cluster)
+	kc.Listen = "0.0.0.0"
+	kc.AdvertiseHost = "10.241.20.147"
+	kc.Peers = []string{"2@10.241.20.148:19093", "3@10.241.20.153:19093"}
+	kc.TLS = true
+	kc.TLSPort = 9093
+
+	got, err := RenderProperties(kc)
+	if err != nil {
+		t.Fatalf("RenderProperties: %v", err)
+	}
+	for _, want := range []string{
+		"listeners=PLAINTEXT://0.0.0.0:9092,SSL://0.0.0.0:9093,CONTROLLER://0.0.0.0:19093\n",
+		"advertised.listeners=PLAINTEXT://10.241.20.147:9092,SSL://10.241.20.147:9093\n",
+		"listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SSL:SSL\n",
+		"ssl.keystore.location=/mnt/shared/config/tls/server.pem\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("RenderProperties missing %q:\n%s", want, got)
+		}
+	}
+
+	// Internal traffic is not TLS even when the client listener is.
+	for _, want := range []string{
+		"inter.broker.listener.name=PLAINTEXT\n",
+		"controller.listener.names=CONTROLLER\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("RenderProperties missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRenderPropertiesRejectsMismatchedClusterID(t *testing.T) {
+	kc := testKafkaConfig(t)
+	kc.Cluster = "prod"
+	kc.ClusterID = config.DeriveKafkaClusterID("other")
+	kc.Listen = "0.0.0.0"
+	kc.AdvertiseHost = "10.0.0.1"
+	kc.Peers = []string{"2@10.0.0.2:19093"}
+
+	if _, err := RenderProperties(kc); err == nil || !strings.Contains(err.Error(), "does not match cluster") {
+		t.Fatalf("mismatched cluster id error = %v", err)
 	}
 }
 
@@ -499,6 +574,41 @@ func TestEnsureTLSCerts(t *testing.T) {
 	if _, err := EnsureTLSCerts(kc); err != nil {
 		t.Errorf("EnsureTLSCerts is not idempotent: %v", err)
 	}
+}
+
+func TestEnsureTLSCertsClusterSAN(t *testing.T) {
+	kc := testKafkaConfig(t)
+	kc.Cluster = "prod"
+	kc.ClusterID = config.DeriveKafkaClusterID(kc.Cluster)
+	kc.NodeID = 2
+	kc.Listen = "0.0.0.0"
+	kc.AdvertiseHost = "10.241.20.148"
+	kc.Peers = []string{"1@10.241.20.147:19093", "3@10.241.20.153:19093"}
+	kc.TLS = true
+	kc.TLSPort = 9093
+
+	if _, err := EnsureTLSCerts(kc); err != nil {
+		t.Fatalf("EnsureTLSCerts: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(TLSDir(kc), ServerPEMFile))
+	if err != nil {
+		t.Fatalf("read server.pem: %v", err)
+	}
+	block, _ := pem.Decode(body)
+	if block == nil {
+		t.Fatal("server.pem has no PEM block")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse server certificate: %v", err)
+	}
+	want := net.ParseIP(kc.AdvertiseHost)
+	for _, ip := range cert.IPAddresses {
+		if ip.Equal(want) {
+			return
+		}
+	}
+	t.Errorf("cluster certificate SANs %v do not include the advertise host %s", cert.IPAddresses, kc.AdvertiseHost)
 }
 
 func TestEnsureTLSCertsDisabled(t *testing.T) {
