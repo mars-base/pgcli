@@ -2,6 +2,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"net/url"
@@ -10,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,39 +24,41 @@ import (
 // Config is the complete pgcli configuration.
 type Config struct {
 	BaseDir                  string                    `yaml:"base_dir,omitempty"`
-	Network                  string                    `yaml:"network,omitempty"`                    // shared podman network name, persisted at top level
-	Namespace                string                    `yaml:"namespace,omitempty"`                  // container name namespace, empty = disabled (default)
-	PGStartPort              int                       `yaml:"pg_start_port,omitempty"`              // starting PG host port, default 35432
-	PGSSHPort                int                       `yaml:"pg_ssh_port,omitempty"`                // starting SSH host port, default 42201
-	PgBouncerStartPort       int                       `yaml:"pgbouncer_start_port,omitempty"`       // starting PgBouncer host port, default 56432
-	EtcdStartPort            int                       `yaml:"etcd_start_port,omitempty"`            // starting etcd client host port, default 2379 (peer gets the next free port)
-	PgDogStartPort           int                       `yaml:"pgdog_start_port,omitempty"`           // starting PgDog host port, default 7432 (openmetrics gets the next free port)
-	PatroniStartPort         int                       `yaml:"patroni_start_port,omitempty"`         // starting Patroni member PG host port, default 35532
-	PatroniRestapiStartPort  int                       `yaml:"patroni_restapi_start_port,omitempty"` // starting Patroni REST API host port, default 8008
-	PatroniSSHStartPort      int                       `yaml:"patroni_ssh_start_port,omitempty"`     // starting Patroni SSH host port, default 42301 (separate from PG instance SSH pool at 42201)
-	HaProxyStartPort         int                       `yaml:"haproxy_start_port,omitempty"`         // starting HAProxy listener host port, default 5000 (read port and stats take the next free ports)
-	MinioStartPort           int                       `yaml:"minio_start_port,omitempty"`           // starting MinIO API host port, default 9000 (console takes the next free port)
-	PostgrestStartPort       int                       `yaml:"postgrest_start_port,omitempty"`       // starting PostgREST HTTP host port, default 3500
-	RedisStartPort           int                       `yaml:"redis_start_port,omitempty"`           // starting Redis host port, default 6379
-	PredixyStartPort         int                       `yaml:"predixy_start_port,omitempty"`         // starting Predixy proxy listener host port, default 7617
-	PgAdminStartPort         int                       `yaml:"pgadmin_start_port,omitempty"`         // starting pgAdmin 4 web host port, default 5050
-	GrafanaStartPort         int                       `yaml:"grafana_start_port,omitempty"`         // starting Grafana web host port, default 3000
-	PrometheusStartPort      int                       `yaml:"prometheus_start_port,omitempty"`      // starting Prometheus web host port, default 9090
-	AlertmanagerStartPort    int                       `yaml:"alertmanager_start_port,omitempty"`    // starting Alertmanager web host port, default 9093
-	GiteaStartPort           int                       `yaml:"gitea_start_port,omitempty"`           // starting Gitea web host port, default 3080 (Gitea's own default 3000 belongs to the Grafana pool here)
-	GiteaSSHStartPort        int                       `yaml:"gitea_ssh_start_port,omitempty"`       // starting Gitea OpenSSH host port, default 2222 (allocated for every gitea instance — the image's sshd always runs, so even SSH-off needs a port to park it on, off 22)
-	NginxStartPort           int                       `yaml:"nginx_start_port,omitempty"`           // starting nginx HTTP host port, default 8080 (HTTPS takes the next free port)
-	GarageStartPort          int                       `yaml:"garage_start_port,omitempty"`          // starting Garage S3 API host port, default 3900 (RPC, web, admin take the next three free ports)
-	SeaweedfsStartPort       int                       `yaml:"seaweedfs_start_port,omitempty"`       // starting SeaweedFS master host port, default 8400 (volume, filer, s3 take the next three free ports; gRPC twins at +10000 are reserved)
-	VictoriaMetricsStartPort int                       `yaml:"victoriametrics_start_port,omitempty"` // starting VictoriaMetrics HTTP host port, default 8428
-	VMClusterStartPort       int                       `yaml:"vmcluster_start_port,omitempty"`       // starting VMCluster port, default 8480 (5 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP, internal insert TCP, internal select TCP)
-	VictoriaLogsStartPort    int                       `yaml:"victorialogs_start_port,omitempty"`    // starting VictoriaLogs HTTP host port, default 9428
-	VlagentStartPort         int                       `yaml:"vlagent_start_port,omitempty"`         // starting vlagent ingest HTTP host port, default 9429
-	VLClusterStartPort       int                       `yaml:"vlcluster_start_port,omitempty"`       // starting VLCluster port, default 9430 (3 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP)
-	InfluxDBStartPort        int                       `yaml:"influxdb_start_port,omitempty"`        // starting InfluxDB HTTP API host port, default 8086
-	Influx2TSDBStartPort     int                       `yaml:"influx2tsdb_start_port,omitempty"`     // starting influx2tsdb-proxy HTTP API host port, default 8087
-	ClickHouseHTTPStartPort  int                       `yaml:"clickhouse_http_start_port,omitempty"` // starting ClickHouse HTTP host port, default 8123
-	ClickHouseTCPStartPort   int                       `yaml:"clickhouse_tcp_start_port,omitempty"`  // starting ClickHouse native TCP host port, default 9000 (shared with the S3 API pool)
+	Network                  string                    `yaml:"network,omitempty"`                     // shared podman network name, persisted at top level
+	Namespace                string                    `yaml:"namespace,omitempty"`                   // container name namespace, empty = disabled (default)
+	PGStartPort              int                       `yaml:"pg_start_port,omitempty"`               // starting PG host port, default 35432
+	PGSSHPort                int                       `yaml:"pg_ssh_port,omitempty"`                 // starting SSH host port, default 42201
+	PgBouncerStartPort       int                       `yaml:"pgbouncer_start_port,omitempty"`        // starting PgBouncer host port, default 56432
+	EtcdStartPort            int                       `yaml:"etcd_start_port,omitempty"`             // starting etcd client host port, default 2379 (peer gets the next free port)
+	PgDogStartPort           int                       `yaml:"pgdog_start_port,omitempty"`            // starting PgDog host port, default 7432 (openmetrics gets the next free port)
+	PatroniStartPort         int                       `yaml:"patroni_start_port,omitempty"`          // starting Patroni member PG host port, default 35532
+	PatroniRestapiStartPort  int                       `yaml:"patroni_restapi_start_port,omitempty"`  // starting Patroni REST API host port, default 8008
+	PatroniSSHStartPort      int                       `yaml:"patroni_ssh_start_port,omitempty"`      // starting Patroni SSH host port, default 42301 (separate from PG instance SSH pool at 42201)
+	HaProxyStartPort         int                       `yaml:"haproxy_start_port,omitempty"`          // starting HAProxy listener host port, default 5000 (read port and stats take the next free ports)
+	MinioStartPort           int                       `yaml:"minio_start_port,omitempty"`            // starting MinIO API host port, default 9000 (console takes the next free port)
+	PostgrestStartPort       int                       `yaml:"postgrest_start_port,omitempty"`        // starting PostgREST HTTP host port, default 3500
+	RedisStartPort           int                       `yaml:"redis_start_port,omitempty"`            // starting Redis host port, default 6379
+	PredixyStartPort         int                       `yaml:"predixy_start_port,omitempty"`          // starting Predixy proxy listener host port, default 7617
+	PgAdminStartPort         int                       `yaml:"pgadmin_start_port,omitempty"`          // starting pgAdmin 4 web host port, default 5050
+	GrafanaStartPort         int                       `yaml:"grafana_start_port,omitempty"`          // starting Grafana web host port, default 3000
+	PrometheusStartPort      int                       `yaml:"prometheus_start_port,omitempty"`       // starting Prometheus web host port, default 9090
+	AlertmanagerStartPort    int                       `yaml:"alertmanager_start_port,omitempty"`     // starting Alertmanager web host port, default 9093
+	GiteaStartPort           int                       `yaml:"gitea_start_port,omitempty"`            // starting Gitea web host port, default 3080 (Gitea's own default 3000 belongs to the Grafana pool here)
+	GiteaSSHStartPort        int                       `yaml:"gitea_ssh_start_port,omitempty"`        // starting Gitea OpenSSH host port, default 2222 (allocated for every gitea instance — the image's sshd always runs, so even SSH-off needs a port to park it on, off 22)
+	NginxStartPort           int                       `yaml:"nginx_start_port,omitempty"`            // starting nginx HTTP host port, default 8080 (HTTPS takes the next free port)
+	GarageStartPort          int                       `yaml:"garage_start_port,omitempty"`           // starting Garage S3 API host port, default 3900 (RPC, web, admin take the next three free ports)
+	SeaweedfsStartPort       int                       `yaml:"seaweedfs_start_port,omitempty"`        // starting SeaweedFS master host port, default 8400 (volume, filer, s3 take the next three free ports; gRPC twins at +10000 are reserved)
+	VictoriaMetricsStartPort int                       `yaml:"victoriametrics_start_port,omitempty"`  // starting VictoriaMetrics HTTP host port, default 8428
+	VMClusterStartPort       int                       `yaml:"vmcluster_start_port,omitempty"`        // starting VMCluster port, default 8480 (5 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP, internal insert TCP, internal select TCP)
+	VictoriaLogsStartPort    int                       `yaml:"victorialogs_start_port,omitempty"`     // starting VictoriaLogs HTTP host port, default 9428
+	VlagentStartPort         int                       `yaml:"vlagent_start_port,omitempty"`          // starting vlagent ingest HTTP host port, default 9429
+	VLClusterStartPort       int                       `yaml:"vlcluster_start_port,omitempty"`        // starting VLCluster port, default 9430 (3 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP)
+	InfluxDBStartPort        int                       `yaml:"influxdb_start_port,omitempty"`         // starting InfluxDB HTTP API host port, default 8086
+	Influx2TSDBStartPort     int                       `yaml:"influx2tsdb_start_port,omitempty"`      // starting influx2tsdb-proxy HTTP API host port, default 8087
+	ClickHouseHTTPStartPort  int                       `yaml:"clickhouse_http_start_port,omitempty"`  // starting ClickHouse HTTP host port, default 8123
+	ClickHouseTCPStartPort   int                       `yaml:"clickhouse_tcp_start_port,omitempty"`   // starting ClickHouse native TCP host port, default 9000 (shared with the S3 API pool)
+	KafkaBrokerStartPort     int                       `yaml:"kafka_broker_start_port,omitempty"`     // starting Kafka broker host port, default 9092
+	KafkaControllerStartPort int                       `yaml:"kafka_controller_start_port,omitempty"` // starting Kafka controller host port, default 19093 (9093 belongs to the Alertmanager pool)
 	Postgres                 PostgresConfig            `yaml:"postgres"`
 	Podman                   PodmanConfig              `yaml:"podman"`
 	PITR                     PITRConfig                `yaml:"pitr"`
@@ -153,6 +158,7 @@ type TopAddonsConfig struct {
 	InfluxDB        map[string]InfluxDBConfig        `yaml:"influxdb,omitempty"`
 	Influx2TSDB     map[string]Influx2TSDBConfig     `yaml:"influx2tsdb,omitempty"`
 	ClickHouse      map[string]ClickHouseConfig      `yaml:"clickhouse,omitempty"`
+	Kafka           map[string]KafkaConfig           `yaml:"kafka,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -1469,6 +1475,245 @@ func ValidateClickHouseSettings(settings map[string]string) error {
 			default:
 				return fmt.Errorf("settings value %q for logger.level is not a ClickHouse log level", value)
 			}
+		}
+	}
+	return nil
+}
+
+// DefaultKafkaVersion pins the Kafka 4.x release pulled from the official
+// multi-arch image. Kafka 4.x is KRaft-only; ZooKeeper is not involved.
+const DefaultKafkaVersion = "4.4.0"
+
+// DefaultKafkaImageTag is the official upstream image. pgcli pulls it
+// directly; Kafka is not wrapped in a pgcli-built image.
+const DefaultKafkaImageTag = "docker.io/apache/kafka:4.4.0"
+
+// KafkaConfig holds a managed Kafka container. Single-node mode runs one
+// combined broker/controller KRaft process. Setting Cluster switches on the
+// multi-host topology: every host installs its own combined node with the
+// same cluster ID and a full static controller voter list.
+type KafkaConfig struct {
+	ContainerName string `yaml:"container_name,omitempty"` // pgcli-kafka<ns>-<name>
+	Name          string `yaml:"name,omitempty"`           // addon key, defaults to the map key
+	Version       string `yaml:"version,omitempty"`        // upstream image tag, e.g. "4.4.0"
+	ImageTag      string `yaml:"image_tag,omitempty"`      // docker.io/apache/kafka:<version>
+
+	// ConfigPath is the generated server.properties file; its parent dir is
+	// mounted read-only at /mnt/shared/config.
+	ConfigPath string `yaml:"config_path,omitempty"`
+	DataDir    string `yaml:"data_dir,omitempty"` // mounted at /var/lib/kafka/data
+
+	Listen         string `yaml:"listen,omitempty"`          // bind address, default 127.0.0.1
+	AdvertiseHost  string `yaml:"advertise_host,omitempty"`  // advertised broker host, never a wildcard
+	BrokerPort     int    `yaml:"broker_port,omitempty"`     // default pool base 9092
+	ControllerPort int    `yaml:"controller_port,omitempty"` // default pool base 19093
+
+	NodeID    int    `yaml:"node_id,omitempty"`    // KRaft node.id, default 1
+	ClusterID string `yaml:"cluster_id,omitempty"` // KRaft cluster.id; persisted
+
+	// Cluster is the multi-host group name. Non-empty switches to cluster
+	// mode. Peers lists the OTHER controllers as id@host:port; this node is
+	// folded in from NodeID/AdvertiseHost/ControllerPort.
+	Cluster string   `yaml:"cluster,omitempty"`
+	Peers   []string `yaml:"peers,omitempty"`
+
+	// Settings are additional server.properties overrides. pgcli-managed
+	// keys (roles, listeners, quorum voters, log.dirs, replication factors)
+	// are rejected.
+	Settings map[string]string `yaml:"settings,omitempty"`
+
+	// Autostart starts the container on host boot (pg autostart enable --kafka).
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// Clustered reports whether this Kafka entry runs in multi-host cluster mode.
+func (k KafkaConfig) Clustered() bool { return k.Cluster != "" }
+
+// KafkaPeer is one static KRaft controller voter.
+type KafkaPeer struct {
+	ID   int
+	Host string
+	Port int
+}
+
+func (p KafkaPeer) String() string {
+	host := p.Host
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return fmt.Sprintf("%d@%s:%d", p.ID, host, p.Port)
+}
+
+// ParseKafkaPeer parses an id@host:port controller voter.
+func ParseKafkaPeer(raw string) (KafkaPeer, error) {
+	idPart, addr, ok := strings.Cut(strings.TrimSpace(raw), "@")
+	if !ok {
+		return KafkaPeer{}, fmt.Errorf("peer %q must be ID@HOST:PORT", raw)
+	}
+	id, err := strconv.Atoi(idPart)
+	if err != nil || id < 0 {
+		return KafkaPeer{}, fmt.Errorf("peer %q has an invalid node id", raw)
+	}
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return KafkaPeer{}, fmt.Errorf("peer %q must be ID@HOST:PORT: %w", raw, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return KafkaPeer{}, fmt.Errorf("peer %q host must be an IP address", raw)
+	}
+	if ip.IsUnspecified() {
+		return KafkaPeer{}, fmt.Errorf("peer %q host must not be a wildcard address", raw)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return KafkaPeer{}, fmt.Errorf("peer %q has an invalid port", raw)
+	}
+	return KafkaPeer{ID: id, Host: host, Port: port}, nil
+}
+
+// KafkaVoters returns the complete, sorted static quorum list (including this
+// node). It rejects duplicate node IDs, a peer that repeats this node, and
+// peers supplied in single-node mode.
+func KafkaVoters(k KafkaConfig) ([]KafkaPeer, error) {
+	if !k.Clustered() {
+		if len(k.Peers) > 0 {
+			return nil, fmt.Errorf("peers require cluster mode")
+		}
+		return []KafkaPeer{{ID: k.NodeID, Host: k.AdvertiseHost, Port: k.ControllerPort}}, nil
+	}
+	if k.AdvertiseHost == "" || k.AdvertiseHost == "0.0.0.0" || k.AdvertiseHost == "::" {
+		return nil, fmt.Errorf("advertise_host must be a concrete address in cluster mode")
+	}
+	if len(k.Peers) == 0 {
+		return nil, fmt.Errorf("cluster mode requires at least one --peer")
+	}
+	byID := map[int]KafkaPeer{
+		k.NodeID: {ID: k.NodeID, Host: k.AdvertiseHost, Port: k.ControllerPort},
+	}
+	for _, raw := range k.Peers {
+		peer, err := ParseKafkaPeer(raw)
+		if err != nil {
+			return nil, err
+		}
+		if peer.ID == k.NodeID {
+			return nil, fmt.Errorf("peer %q repeats this node's id %d", raw, k.NodeID)
+		}
+		if prev, dup := byID[peer.ID]; dup {
+			return nil, fmt.Errorf("node id %d is used by both %s and %s", peer.ID, prev, peer)
+		}
+		byID[peer.ID] = peer
+	}
+	voters := make([]KafkaPeer, 0, len(byID))
+	for _, peer := range byID {
+		voters = append(voters, peer)
+	}
+	sort.Slice(voters, func(i, j int) bool { return voters[i].ID < voters[j].ID })
+	return voters, nil
+}
+
+// KafkaReplicationFactor is the default RF for internal and auto-created
+// topics: 1 on a single node, up to 3 in a cluster.
+func KafkaReplicationFactor(voters int) int {
+	if voters < 1 {
+		return 1
+	}
+	if voters > 3 {
+		return 3
+	}
+	return voters
+}
+
+// KafkaMinISR returns the matching min.insync.replicas for an RF.
+func KafkaMinISR(rf int) int {
+	if rf > 1 {
+		return 2
+	}
+	return 1
+}
+
+// ValidKafkaClusterID reports whether id is a Kafka base64url UUID (22 chars,
+// no padding).
+func ValidKafkaClusterID(id string) bool {
+	if len(id) != 22 || strings.ContainsAny(id, "=+/") {
+		return false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(id)
+	return err == nil && len(raw) == 16
+}
+
+// DeriveKafkaClusterID returns a stable cluster id for a cluster name. Every
+// host that runs the same --cluster computes the same id, so operators do not
+// have to carry a generated value between hosts.
+func DeriveKafkaClusterID(cluster string) string {
+	sum := sha256.Sum256([]byte("pgcli-kafka/" + cluster))
+	return base64.RawURLEncoding.EncodeToString(sum[:16])
+}
+
+// ValidKafkaVersion reports whether version is safe to use as a Docker image tag.
+func ValidKafkaVersion(version string) bool {
+	ok, _ := regexp.MatchString(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`, version)
+	return ok
+}
+
+// KafkaImageTagForVersion returns the upstream image reference for a Kafka tag.
+func KafkaImageTagForVersion(version string) (string, bool) {
+	if !ValidKafkaVersion(version) {
+		return "", false
+	}
+	return "docker.io/apache/kafka:" + version, true
+}
+
+// ValidKafkaName reports whether name is a safe Kafka instance key.
+func ValidKafkaName(name string) bool {
+	ok, _ := regexp.MatchString(`^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$`, name)
+	return ok
+}
+
+var kafkaSettingKeyRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// kafkaManagedSettings are properties pgcli renders itself. Letting a user
+// override them would either break KRaft (roles/listeners/quorum) or fight the
+// stored paths and replication policy.
+var kafkaManagedSettings = map[string]bool{
+	"process.roles":                                    true,
+	"node.id":                                          true,
+	"broker.id":                                        true,
+	"listeners":                                        true,
+	"advertised.listeners":                             true,
+	"listener.security.protocol.map":                   true,
+	"controller.listener.names":                        true,
+	"controller.quorum.voters":                         true,
+	"controller.quorum.bootstrap.servers":              true,
+	"inter.broker.listener.name":                       true,
+	"log.dirs":                                         true,
+	"metadata.log.dir":                                 true,
+	"zookeeper.connect":                                true,
+	"offsets.topic.replication.factor":                 true,
+	"transaction.state.log.replication.factor":         true,
+	"transaction.state.log.min.isr":                    true,
+	"share.coordinator.state.topic.replication.factor": true,
+	"share.coordinator.state.topic.min.isr":            true,
+	"default.replication.factor":                       true,
+	"min.insync.replicas":                              true,
+}
+
+// ValidateKafkaSettings checks user-supplied server.properties overrides.
+func ValidateKafkaSettings(settings map[string]string) error {
+	keys := make([]string, 0, len(settings))
+	for key := range settings {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if !kafkaSettingKeyRe.MatchString(key) {
+			return fmt.Errorf("settings key %q must contain only letters, digits, '.', '_' and '-'", key)
+		}
+		if kafkaManagedSettings[key] {
+			return fmt.Errorf("settings key %q is managed by pgcli and cannot be overridden", key)
+		}
+		if strings.ContainsAny(settings[key], "\x00\r\n") {
+			return fmt.Errorf("settings value for %q must not contain control characters", key)
 		}
 	}
 	return nil
@@ -2861,6 +3106,8 @@ func Default() *Config {
 		Influx2TSDBStartPort:     8087,
 		ClickHouseHTTPStartPort:  8123,
 		ClickHouseTCPStartPort:   9000,
+		KafkaBrokerStartPort:     9092,
+		KafkaControllerStartPort: 19093,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -3079,6 +3326,8 @@ type displayConfig struct {
 	Influx2TSDBStartPort     int                       `yaml:"influx2tsdb_start_port,omitempty"`
 	ClickHouseHTTPStartPort  int                       `yaml:"clickhouse_http_start_port,omitempty"`
 	ClickHouseTCPStartPort   int                       `yaml:"clickhouse_tcp_start_port,omitempty"`
+	KafkaBrokerStartPort     int                       `yaml:"kafka_broker_start_port,omitempty"`
+	KafkaControllerStartPort int                       `yaml:"kafka_controller_start_port,omitempty"`
 	Logging                  LoggingConfig             `yaml:"logging"`
 	Backup                   BackupConfig              `yaml:"backup"`
 	Pigsty                   PigstyConfig              `yaml:"pigsty"`
@@ -3122,6 +3371,8 @@ func (c *Config) Display() displayConfig {
 		Influx2TSDBStartPort:     c.Influx2TSDBStartPort,
 		ClickHouseHTTPStartPort:  c.ClickHouseHTTPStartPort,
 		ClickHouseTCPStartPort:   c.ClickHouseTCPStartPort,
+		KafkaBrokerStartPort:     c.KafkaBrokerStartPort,
+		KafkaControllerStartPort: c.KafkaControllerStartPort,
 		Logging:                  c.Logging,
 		Backup:                   c.Backup,
 		Pigsty:                   c.Pigsty,
@@ -3445,6 +3696,91 @@ func (c *Config) Validate() error {
 			clickHousePorts[field.value] = name + "." + field.name
 		}
 	}
+	// Kafka instances: names are directory keys, paths absolute, the KRaft
+	// cluster id is valid, and broker/controller ports are unique per host.
+	kafkaPorts := make(map[int]string, 2*len(c.Addons.Kafka))
+	for name, kc := range c.Addons.Kafka {
+		if !ValidKafkaName(kc.Name) {
+			return fmt.Errorf("addons.kafka.%s.name %q must match [A-Za-z0-9][A-Za-z0-9_-]{0,47}", name, kc.Name)
+		}
+		if !ValidKafkaVersion(kc.Version) {
+			return fmt.Errorf("addons.kafka.%s.version %q must be a safe Docker image tag", name, kc.Version)
+		}
+		if tag, ok := KafkaImageTagForVersion(kc.Version); !ok {
+			return fmt.Errorf("addons.kafka.%s.version %q is not supported", name, kc.Version)
+		} else if kc.ImageTag != tag {
+			return fmt.Errorf("addons.kafka.%s.image_tag %q does not match version %s (%s)", name, kc.ImageTag, kc.Version, tag)
+		}
+		for _, field := range []struct {
+			name  string
+			value string
+		}{
+			{"config_path", kc.ConfigPath},
+			{"data_dir", kc.DataDir},
+		} {
+			if field.value == "" || !filepath.IsAbs(field.value) {
+				return fmt.Errorf("addons.kafka.%s.%s must be an absolute path, got %q", name, field.name, field.value)
+			}
+		}
+		listenIP := net.ParseIP(kc.Listen)
+		if listenIP == nil {
+			return fmt.Errorf("addons.kafka.%s.listen must be an IP address, got %q", name, kc.Listen)
+		}
+		advertiseIP := net.ParseIP(kc.AdvertiseHost)
+		if advertiseIP == nil || advertiseIP.IsUnspecified() {
+			return fmt.Errorf("addons.kafka.%s.advertise_host must be a concrete IP address, got %q", name, kc.AdvertiseHost)
+		}
+		if kc.NodeID < 0 {
+			return fmt.Errorf("addons.kafka.%s.node_id must be >= 0, got %d", name, kc.NodeID)
+		}
+		if !ValidKafkaClusterID(kc.ClusterID) {
+			return fmt.Errorf("addons.kafka.%s.cluster_id must be a 22-character base64url Kafka cluster ID", name)
+		}
+		if err := ValidateKafkaSettings(kc.Settings); err != nil {
+			return fmt.Errorf("addons.kafka.%s.settings: %w", name, err)
+		}
+		if len(kc.Peers) > 0 && !kc.Clustered() {
+			return fmt.Errorf("addons.kafka.%s.peers require cluster mode", name)
+		}
+		if kc.Clustered() {
+			if !ValidKafkaName(kc.Cluster) {
+				return fmt.Errorf("addons.kafka.%s.cluster %q must match [A-Za-z0-9][A-Za-z0-9_-]{0,47}", name, kc.Cluster)
+			}
+			if advertiseIP.IsLoopback() {
+				return fmt.Errorf("addons.kafka.%s.advertise_host must not be loopback in cluster mode", name)
+			}
+			if listenIP.IsLoopback() {
+				return fmt.Errorf("addons.kafka.%s.listen must be 0.0.0.0 or a non-loopback address in cluster mode", name)
+			}
+			voters, err := KafkaVoters(kc)
+			if err != nil {
+				return fmt.Errorf("addons.kafka.%s: %w", name, err)
+			}
+			for _, voter := range voters {
+				if ip := net.ParseIP(voter.Host); ip != nil && ip.IsLoopback() {
+					return fmt.Errorf("addons.kafka.%s voter %s must not use a loopback address", name, voter)
+				}
+			}
+		}
+		if kc.BrokerPort == kc.ControllerPort {
+			return fmt.Errorf("addons.kafka.%s.broker_port and controller_port must differ, got %d", name, kc.BrokerPort)
+		}
+		for _, field := range []struct {
+			name  string
+			value int
+		}{
+			{"broker_port", kc.BrokerPort},
+			{"controller_port", kc.ControllerPort},
+		} {
+			if field.value < 1 || field.value > 65535 {
+				return fmt.Errorf("addons.kafka.%s.%s must be between 1 and 65535, got %d", name, field.name, field.value)
+			}
+			if prev, dup := kafkaPorts[field.value]; dup {
+				return fmt.Errorf("addons.kafka.%s.%s %d is already used by %s (Kafka ports must be unique)", name, field.name, field.value, prev)
+			}
+			kafkaPorts[field.value] = name + "." + field.name
+		}
+	}
 	return nil
 }
 
@@ -3593,6 +3929,12 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.ClickHouseTCPStartPort == 0 {
 		c.ClickHouseTCPStartPort = d.ClickHouseTCPStartPort
+	}
+	if c.KafkaBrokerStartPort == 0 {
+		c.KafkaBrokerStartPort = d.KafkaBrokerStartPort
+	}
+	if c.KafkaControllerStartPort == 0 {
+		c.KafkaControllerStartPort = d.KafkaControllerStartPort
 	}
 
 	// Postgres
@@ -4688,6 +5030,50 @@ func (c *Config) ApplyDefaults() {
 		c.Addons.ClickHouse[name] = addon
 	}
 
+	// Top-level Kafka instances. The official image runs as uid 1000; all
+	// state lives under <base>/addon/kafka/<name>/ and the container uses host
+	// networking. Cluster mode is the same add-on with --cluster set.
+	kafkaBaseDir := platform.DefaultConfigDir()
+	if c.BaseDir != "" {
+		kafkaBaseDir = c.BaseDir
+	}
+	for name, addon := range c.Addons.Kafka {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.Version == "" {
+			addon.Version = DefaultKafkaVersion
+		}
+		if addon.ImageTag == "" {
+			if tag, ok := KafkaImageTagForVersion(addon.Version); ok {
+				addon.ImageTag = tag
+			}
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-kafka" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.Listen == "" {
+			addon.Listen = "127.0.0.1"
+		}
+		if addon.AdvertiseHost == "" {
+			addon.AdvertiseHost = "127.0.0.1"
+		}
+		if addon.NodeID == 0 && addon.Cluster == "" {
+			addon.NodeID = 1
+		}
+		if addon.Cluster != "" && addon.ClusterID == "" {
+			addon.ClusterID = DeriveKafkaClusterID(addon.Cluster)
+		}
+		addonDir := filepath.Join(kafkaBaseDir, "addon", "kafka", name)
+		if addon.ConfigPath == "" {
+			addon.ConfigPath = filepath.Join(addonDir, "config", "server.properties")
+		}
+		if addon.DataDir == "" {
+			addon.DataDir = filepath.Join(addonDir, "data")
+		}
+		c.Addons.Kafka[name] = addon
+	}
+
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
 	c.autoAssignPorts()
 }
@@ -5120,6 +5506,13 @@ func (c *Config) autoAssignPorts() {
 				}
 			}
 		}
+		for _, addon := range c.Addons.Kafka {
+			for _, p := range []int{addon.BrokerPort, addon.ControllerPort} {
+				if p != 0 {
+					assigned[p] = true
+				}
+			}
+		}
 		nextHTTP := httpBase
 		nextTCP := tcpBase
 		nextFree := func(next *int) int {
@@ -5149,6 +5542,99 @@ func (c *Config) autoAssignPorts() {
 				nextTCP = addon.TCPPort + 1
 			}
 			c.Addons.ClickHouse[name] = addon
+		}
+	}
+
+	// Allocate Kafka broker and controller ports from separate pools
+	// (kafka_broker_start_port, default 9092; kafka_controller_start_port,
+	// default 19093). Both draws share one assigned set. Explicit ports from
+	// the streams that share these ranges (Prometheus 9090+, ClickHouse, the
+	// object stores) are pre-marked so neither side can steal the other's port.
+	{
+		brokerBase := c.KafkaBrokerStartPort
+		controllerBase := c.KafkaControllerStartPort
+		assigned := map[int]bool{}
+		for _, addon := range c.Addons.Kafka {
+			for _, p := range []int{addon.BrokerPort, addon.ControllerPort} {
+				if p != 0 {
+					assigned[p] = true
+				}
+			}
+		}
+		for _, addon := range c.Addons.ClickHouse {
+			for _, p := range []int{addon.HTTPPort, addon.TCPPort} {
+				if p != 0 {
+					assigned[p] = true
+				}
+			}
+		}
+		for _, addon := range c.Addons.InfluxDB {
+			for _, p := range []int{addon.HostPort, addon.RPCPort} {
+				if p != 0 {
+					assigned[p] = true
+				}
+			}
+		}
+		for _, addon := range c.Addons.Influx2TSDB {
+			if addon.Port != 0 {
+				assigned[addon.Port] = true
+			}
+		}
+		for _, addon := range c.Addons.Minio {
+			for _, p := range []int{addon.APIPort, addon.ConsolePort} {
+				if p != 0 {
+					assigned[p] = true
+				}
+			}
+		}
+		for _, addon := range c.Addons.Silo {
+			for _, p := range []int{addon.APIPort, addon.ConsolePort} {
+				if p != 0 {
+					assigned[p] = true
+				}
+			}
+		}
+		for _, addon := range c.Addons.Rustfs {
+			for _, p := range []int{addon.APIPort, addon.ConsolePort} {
+				if p != 0 {
+					assigned[p] = true
+				}
+			}
+		}
+		for _, addon := range c.Addons.Prometheus {
+			if addon.HostPort != 0 {
+				assigned[addon.HostPort] = true
+			}
+		}
+		nextBroker := brokerBase
+		nextController := controllerBase
+		nextFree := func(next *int) int {
+			for (usedPorts != nil && usedPorts[*next]) || assigned[*next] {
+				*next++
+			}
+			p := *next
+			*next++
+			assigned[p] = true
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.Kafka))
+		for name := range c.Addons.Kafka {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.Kafka[name]
+			if addon.BrokerPort == 0 && brokerBase > 0 {
+				addon.BrokerPort = nextFree(&nextBroker)
+			} else if addon.BrokerPort >= nextBroker {
+				nextBroker = addon.BrokerPort + 1
+			}
+			if addon.ControllerPort == 0 && controllerBase > 0 {
+				addon.ControllerPort = nextFree(&nextController)
+			} else if addon.ControllerPort >= nextController {
+				nextController = addon.ControllerPort + 1
+			}
+			c.Addons.Kafka[name] = addon
 		}
 	}
 
@@ -5184,6 +5670,13 @@ func (c *Config) autoAssignPorts() {
 	}
 	for _, addon := range c.Addons.ClickHouse {
 		for _, p := range []int{addon.HTTPPort, addon.TCPPort} {
+			if p != 0 {
+				assignedMinio[p] = true
+			}
+		}
+	}
+	for _, addon := range c.Addons.Kafka {
+		for _, p := range []int{addon.BrokerPort, addon.ControllerPort} {
 			if p != 0 {
 				assignedMinio[p] = true
 			}
@@ -5421,6 +5914,13 @@ func (c *Config) autoAssignPorts() {
 		for _, addon := range c.Addons.Prometheus {
 			if addon.HostPort != 0 {
 				assignedPrometheus[addon.HostPort] = true
+			}
+		}
+		for _, addon := range c.Addons.Kafka {
+			for _, p := range []int{addon.BrokerPort, addon.ControllerPort} {
+				if p != 0 {
+					assignedPrometheus[p] = true
+				}
 			}
 		}
 		next := prometheusBase
@@ -5703,6 +6203,13 @@ func (c *Config) autoAssignPorts() {
 		for _, addon := range c.Addons.Alertmanager {
 			if addon.HostPort != 0 {
 				assignedAlertmanager[addon.HostPort] = true
+			}
+		}
+		for _, addon := range c.Addons.Kafka {
+			for _, p := range []int{addon.BrokerPort, addon.ControllerPort} {
+				if p != 0 {
+					assignedAlertmanager[p] = true
+				}
 			}
 		}
 		next := alertmanagerBase

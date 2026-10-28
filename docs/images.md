@@ -21,6 +21,7 @@ pgcli 使用的容器镜像及其默认 tag。
 | `ghcr.io/mars-base/pgcli/pgcli-influxdb` | `1.13.1` | InfluxDB 1.x 单节点时序库（官方 linux/amd64 1.13.1 二进制 + Alpine），单架构；`pg addon influxdb` 与 `pg influx` 共用 | `DefaultInfluxDBImageTag` |
 | `ghcr.io/mars-base/pgcli/pgcli-influx2tsdb` | `1.3.2` | influx2tsdb-proxy：在 PostgreSQL + TimescaleDB 上提供 InfluxDB 1.x HTTP API（Line Protocol + InfluxQL），单架构 amd64、无状态；目标库可为本地实例或远程 `--dsn` | `DefaultInflux2TSDBImageTag` |
 | `docker.io/clickhouse/clickhouse-server` | `26.8.36.3` | ClickHouse 单机列式 OLAP（26.8 LTS），纯上游官方镜像无 wrapper，多架构 manifest list；host 网络 | `DefaultClickHouseImageTag`（`ClickHouseImageTagForVersion`） |
+| `docker.io/apache/kafka` | `4.4.0` | Apache Kafka 4.x（KRaft-only，无需 ZooKeeper）单机 broker+controller combined 节点，纯上游官方镜像无 wrapper，多架构 manifest list；host 网络，以 uid/gid 1000 运行 | `DefaultKafkaImageTag`（`KafkaImageTagForVersion`） |
 | `docker.io/edoburu/pgbouncer` | `v1.25.2-p0` | PostgreSQL 连接池 | `DefaultPgBouncerImageTag` |
 | `docker.io/postgrest/postgrest` | `v16.3` | PostgREST（REST API over PostgreSQL） | `DefaultPostgrestImageTag` |
 | `docker.io/library/haproxy` | `3.2.23-alpine` | HTTP/TCP 负载均衡 | `DefaultHAProxyImageTag` |
@@ -242,6 +243,16 @@ done
   覆盖镜像自带的 wildcard 监听），数据/日志/备份/密码 secret 也都是 bind mount。
   认证始终开启（`CLICKHOUSE_USER` + `CLICKHOUSE_PASSWORD_FILE`）；**无 TLS 监听**
   （用 nginx 前置）、单节点无复制/HA；以 **host 网络**运行
+- **kafka**：纯上游官方 `docker.io/apache/kafka`，无 wrapper，pin 到 `4.4.0`
+  （多架构 manifest list，amd64 + arm64）。Kafka 4.x **KRaft-only**，无 ZooKeeper；
+  pgcli 渲染 `server.properties`（combined broker+controller、静态 voters、
+  `log.dirs=/var/lib/kafka/data`），把配置目录只读挂载到 `/mnt/shared/config`，
+  并显式传入 `-e CLUSTER_ID=<id>` 固定 KRaft cluster id（否则镜像会注入自己的
+  固定默认值）。镜像以 **uid/gid 1000（appuser）** 运行，首次启动前 pgcli 用
+  `podman unshare chown` 一次性把数据目录交给该 id；一旦 `meta.properties` 存在
+  就跳过递归 chown。broker 默认 `9092`、controller 默认 `19093`（避开 Alertmanager
+  的 `9093`）；**仅 PLAINTEXT，无认证、无 TLS**，`Listen` 默认 `127.0.0.1`；
+  单节点无复制/HA；以 **host 网络**运行
 - **pgadmin4**：纯上游 `docker.io/dpage/pgadmin4`，无 wrapper（镜像自己的
   entrypoint 把 `/var/lib/pgadmin` chown 给 uid 5050 后降权，所以 pgcli 不需要
   rustfs 那套属主机制）；pin 到发布时的 `latest`（当前 `9.18`，双架构 manifest
@@ -350,7 +361,7 @@ done
 
 ---
 
-**最后更新**：2026-10-27（新增 clickhouse 与 influx2tsdb 镜像；2026-10-23 新增 vlagent 镜像；同日新增 victorialogs 镜像；此前新增 vmcluster 三镜像于 2026-10-22；
+**最后更新**：2026-10-28（新增 Kafka 4.4.0 镜像；2026-10-27 新增 clickhouse 与 influx2tsdb 镜像；2026-10-23 新增 vlagent 镜像；同日新增 victorialogs 镜像；此前新增 vmcluster 三镜像于 2026-10-22；
 此前新增 victoriametrics 镜像；
 此前新增 beegfs 三镜像于 2026-10-19，gitea 于 2026-10-16
 合入时补录，alertmanager 于 2026-10-15

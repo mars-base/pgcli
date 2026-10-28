@@ -74,6 +74,18 @@ pg autostart enable --etcd
 quorum 尚未形成前会短暂报 `etcdserver: no leader`，属正常现象，足够多成员
 起来后即恢复。
 
+### Kafka 节点
+
+为通过 `pg addon install kafka` 安装的 Kafka 实例启用开机自启：
+```bash
+pg autostart enable --kafka --name <实例名>
+```
+
+省略 `--name` 时默认为 `kafka`。开机时 pgcli 会先按 `pg.yaml` 重新渲染
+`server.properties`，再启动已有容器并等待 broker API 响应。已经格式化过的
+数据目录不会被重新格式化——cluster id 与 node id 从 `meta.properties` 读取，
+原有日志直接复用。
+
 ### SQLite 数据库
 
 为受管的 SQLite 数据库启用开机自启（仅 Linux）：

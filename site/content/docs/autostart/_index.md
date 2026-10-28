@@ -77,6 +77,18 @@ reachable first. Starting members before quorum forms briefly reports
 `etcdserver: no leader`; that is normal and resolves once enough members are
 up.
 
+### For a Kafka Node
+
+Enable auto-start for a Kafka instance installed via `pg addon install kafka`:
+```bash
+pg autostart enable --kafka --name <instance>
+```
+
+The name defaults to `kafka`. At boot pgcli re-renders `server.properties` from
+`pg.yaml`, starts the existing container and waits for the broker API to
+answer. It never re-formats an already-formatted data dir — the cluster id and
+node id are read from `meta.properties`, so the existing log is reused as-is.
+
 ### For a SQLite Database
 
 Enable auto-start for a managed SQLite database (Linux only):

@@ -10,6 +10,7 @@ import (
 
 	"github.com/mars-base/pgcli/internal/config"
 	"github.com/mars-base/pgcli/internal/hostbin"
+	"github.com/mars-base/pgcli/internal/kafka"
 	"github.com/mars-base/pgcli/internal/pitr"
 	"github.com/mars-base/pgcli/internal/platform"
 	"github.com/mars-base/pgcli/internal/podman"
@@ -77,8 +78,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouse(c) && !hasAutostartNginx(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --nginx)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartNginx(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --kafka / --nginx)")
 		return nil
 	}
 
@@ -314,6 +315,12 @@ func startAutostart() error {
 	// clickhouse containers. No dependency on other addons; run before nginx so
 	// an nginx backend pointing at ClickHouse's HTTP port is up.
 	if err := startAutostartClickHouse(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// kafka nodes. No dependency on other addons; a cluster node may need its
+	// peers to reach a controller quorum, which StartContainer tolerates.
+	if err := startAutostartKafka(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -1411,6 +1418,54 @@ func startAutostartClickHouse(c *config.Config) error {
 			continue
 		}
 		fmt.Printf("  [OK] clickhouse %q started (HTTP %s:%d)\n", name, cc.Listen, cc.HTTPPort)
+	}
+	return firstErr
+}
+
+func hasAutostartKafka(c *config.Config) bool {
+	for _, kc := range c.Addons.Kafka {
+		if kc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartKafka starts each autostart-enabled Kafka node. StartContainer
+// re-renders server.properties, is idempotent and tolerates a cluster node
+// waiting for its peers to form the controller quorum.
+func startAutostartKafka(c *config.Config) error {
+	var names []string
+	for name, kc := range c.Addons.Kafka {
+		if kc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	m, err := podman.NewKafkaManager(c)
+	if err != nil {
+		fmt.Printf("  [X] kafka autostart: %v\n", err)
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		kc := c.Addons.Kafka[name]
+		already, err := m.StartContainer(&kc)
+		if err != nil {
+			fmt.Printf("  [X] kafka autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if already {
+			fmt.Printf("  [OK] kafka %q already running\n", name)
+			continue
+		}
+		fmt.Printf("  [OK] kafka %q started (broker %s)\n", name, kafka.AdvertisedBrokerEndpoint(kc))
 	}
 	return firstErr
 }

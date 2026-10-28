@@ -283,7 +283,8 @@ IMAGES := \
 	docker.io/victoriametrics/vmstorage:v1.154.1-cluster \
 	docker.io/victoriametrics/victoria-logs:v1.53.0 \
 	docker.io/victoriametrics/vlagent:v1.53.0 \
-	docker.io/clickhouse/clickhouse-server:26.8.36.3
+	docker.io/clickhouse/clickhouse-server:26.8.36.3 \
+	docker.io/apache/kafka:4.4.0
 
 container-images-export:
 	@mkdir -p images
