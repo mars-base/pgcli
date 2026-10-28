@@ -1138,7 +1138,7 @@ func init() {
 
 	addonInstallCmd.Flags().Int("broker-port", 0, "Kafka broker host port (0=auto-assign from kafka_broker_start_port, default 9092)")
 	addonInstallCmd.Flags().Int("controller-port", 0, "Kafka KRaft controller host port (0=auto-assign from kafka_controller_start_port, default 19093; required explicitly in --cluster mode because peers embed it)")
-	addonInstallCmd.Flags().Int("tls-port", 0, "Kafka SSL (TLS) listener host port (0=auto-assign from kafka_tls_start_port, default 9093; requires --tls)")
+	addonInstallCmd.Flags().Int("tls-port", 0, "TLS listener host port: Kafka SSL broker port (0=auto-assign from kafka_tls_start_port, default 9093; requires --tls) / RabbitMQ AMQPS port (0=auto-assign from rabbitmq_tls_start_port, default 5671; requires --tls; management HTTPS is auto-assigned separately)")
 	addonInstallCmd.Flags().String("tls-pem", "", "combined PEM (certificate chain + private key) for the Kafka TLS listener; implies --tls and replaces the generated certificate (pass an empty value with --tls to fall back to the generated certificate)")
 	addonInstallCmd.Flags().String("heap", "", "Kafka JVM heap size (e.g. 512m, 2g, 4g), applied as KAFKA_HEAP_OPTS=-Xms<size> -Xmx<size>; empty keeps the image default (-Xms1G -Xmx1G); changing it needs --force")
 	addonInstallCmd.Flags().String("cluster-id", "", "Kafka KRaft cluster id (in --cluster mode it must equal the id derived from the cluster name; otherwise: adopt meta.properties, else generate a random 22-char id)")

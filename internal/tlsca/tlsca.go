@@ -86,6 +86,13 @@ func Generate(dir string, hosts []string, renewBefore time.Duration) (string, er
 	return caCertPath, nil
 }
 
+// NeedsRenewal reports whether Generate would rewrite the leaf sitting in dir
+// for the given hosts. Callers that hand the private key to a container user
+// use it to unlink an unmovable key before regeneration.
+func NeedsRenewal(dir string, hosts []string, renewBefore time.Duration) (bool, error) {
+	return leafNeedsRenewal(filepath.Join(dir, ServerCert), hosts, renewBefore)
+}
+
 // leafNeedsRenewal reports whether the leaf at leafPath must be rewritten.
 func leafNeedsRenewal(leafPath string, hosts []string, renewBefore time.Duration) (bool, error) {
 	data, err := os.ReadFile(leafPath)

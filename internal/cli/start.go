@@ -14,6 +14,7 @@ import (
 	"github.com/mars-base/pgcli/internal/pitr"
 	"github.com/mars-base/pgcli/internal/platform"
 	"github.com/mars-base/pgcli/internal/podman"
+	"github.com/mars-base/pgcli/internal/rabbitmq"
 	"github.com/mars-base/pgcli/internal/sqlite"
 )
 
@@ -78,8 +79,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartNginx(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --kafka / --nginx)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartRabbitMQ(c) && !hasAutostartNginx(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --kafka / --rabbitmq / --nginx)")
 		return nil
 	}
 
@@ -321,6 +322,12 @@ func startAutostart() error {
 	// kafka nodes. No dependency on other addons; a cluster node may need its
 	// peers to reach a controller quorum, which StartContainer tolerates.
 	if err := startAutostartKafka(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// rabbitmq nodes. No dependency on other addons; StartContainer includes
+	// readiness and the admin-credential reconciliation.
+	if err := startAutostartRabbitMQ(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -1466,6 +1473,54 @@ func startAutostartKafka(c *config.Config) error {
 			continue
 		}
 		fmt.Printf("  [OK] kafka %q started (broker %s)\n", name, kafka.AdvertisedBrokerEndpoint(kc))
+	}
+	return firstErr
+}
+
+func hasAutostartRabbitMQ(c *config.Config) bool {
+	for _, rc := range c.Addons.RabbitMQ {
+		if rc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartRabbitMQ starts each autostart-enabled RabbitMQ instance.
+// StartContainer is idempotent, waits for readiness and reconciles the admin
+// credentials.
+func startAutostartRabbitMQ(c *config.Config) error {
+	var names []string
+	for name, rc := range c.Addons.RabbitMQ {
+		if rc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	m, err := podman.NewRabbitMQManager(c)
+	if err != nil {
+		fmt.Printf("  [X] rabbitmq autostart: %v\n", err)
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		rc := c.Addons.RabbitMQ[name]
+		already, err := m.StartContainer(&rc)
+		if err != nil {
+			fmt.Printf("  [X] rabbitmq autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if already {
+			fmt.Printf("  [OK] rabbitmq %q already running\n", name)
+			continue
+		}
+		fmt.Printf("  [OK] rabbitmq %q started (AMQP %s)\n", name, rabbitmq.AMQPAddr(rc))
 	}
 	return firstErr
 }

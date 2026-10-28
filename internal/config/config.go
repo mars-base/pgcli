@@ -24,42 +24,48 @@ import (
 // Config is the complete pgcli configuration.
 type Config struct {
 	BaseDir                  string                    `yaml:"base_dir,omitempty"`
-	Network                  string                    `yaml:"network,omitempty"`                     // shared podman network name, persisted at top level
-	Namespace                string                    `yaml:"namespace,omitempty"`                   // container name namespace, empty = disabled (default)
-	PGStartPort              int                       `yaml:"pg_start_port,omitempty"`               // starting PG host port, default 35432
-	PGSSHPort                int                       `yaml:"pg_ssh_port,omitempty"`                 // starting SSH host port, default 42201
-	PgBouncerStartPort       int                       `yaml:"pgbouncer_start_port,omitempty"`        // starting PgBouncer host port, default 56432
-	EtcdStartPort            int                       `yaml:"etcd_start_port,omitempty"`             // starting etcd client host port, default 2379 (peer gets the next free port)
-	PgDogStartPort           int                       `yaml:"pgdog_start_port,omitempty"`            // starting PgDog host port, default 7432 (openmetrics gets the next free port)
-	PatroniStartPort         int                       `yaml:"patroni_start_port,omitempty"`          // starting Patroni member PG host port, default 35532
-	PatroniRestapiStartPort  int                       `yaml:"patroni_restapi_start_port,omitempty"`  // starting Patroni REST API host port, default 8008
-	PatroniSSHStartPort      int                       `yaml:"patroni_ssh_start_port,omitempty"`      // starting Patroni SSH host port, default 42301 (separate from PG instance SSH pool at 42201)
-	HaProxyStartPort         int                       `yaml:"haproxy_start_port,omitempty"`          // starting HAProxy listener host port, default 5000 (read port and stats take the next free ports)
-	MinioStartPort           int                       `yaml:"minio_start_port,omitempty"`            // starting MinIO API host port, default 9000 (console takes the next free port)
-	PostgrestStartPort       int                       `yaml:"postgrest_start_port,omitempty"`        // starting PostgREST HTTP host port, default 3500
-	RedisStartPort           int                       `yaml:"redis_start_port,omitempty"`            // starting Redis host port, default 6379
-	PredixyStartPort         int                       `yaml:"predixy_start_port,omitempty"`          // starting Predixy proxy listener host port, default 7617
-	PgAdminStartPort         int                       `yaml:"pgadmin_start_port,omitempty"`          // starting pgAdmin 4 web host port, default 5050
-	GrafanaStartPort         int                       `yaml:"grafana_start_port,omitempty"`          // starting Grafana web host port, default 3000
-	PrometheusStartPort      int                       `yaml:"prometheus_start_port,omitempty"`       // starting Prometheus web host port, default 9090
-	AlertmanagerStartPort    int                       `yaml:"alertmanager_start_port,omitempty"`     // starting Alertmanager web host port, default 9093
-	GiteaStartPort           int                       `yaml:"gitea_start_port,omitempty"`            // starting Gitea web host port, default 3080 (Gitea's own default 3000 belongs to the Grafana pool here)
-	GiteaSSHStartPort        int                       `yaml:"gitea_ssh_start_port,omitempty"`        // starting Gitea OpenSSH host port, default 2222 (allocated for every gitea instance — the image's sshd always runs, so even SSH-off needs a port to park it on, off 22)
-	NginxStartPort           int                       `yaml:"nginx_start_port,omitempty"`            // starting nginx HTTP host port, default 8080 (HTTPS takes the next free port)
-	GarageStartPort          int                       `yaml:"garage_start_port,omitempty"`           // starting Garage S3 API host port, default 3900 (RPC, web, admin take the next three free ports)
-	SeaweedfsStartPort       int                       `yaml:"seaweedfs_start_port,omitempty"`        // starting SeaweedFS master host port, default 8400 (volume, filer, s3 take the next three free ports; gRPC twins at +10000 are reserved)
-	VictoriaMetricsStartPort int                       `yaml:"victoriametrics_start_port,omitempty"`  // starting VictoriaMetrics HTTP host port, default 8428
-	VMClusterStartPort       int                       `yaml:"vmcluster_start_port,omitempty"`        // starting VMCluster port, default 8480 (5 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP, internal insert TCP, internal select TCP)
-	VictoriaLogsStartPort    int                       `yaml:"victorialogs_start_port,omitempty"`     // starting VictoriaLogs HTTP host port, default 9428
-	VlagentStartPort         int                       `yaml:"vlagent_start_port,omitempty"`          // starting vlagent ingest HTTP host port, default 9429
-	VLClusterStartPort       int                       `yaml:"vlcluster_start_port,omitempty"`        // starting VLCluster port, default 9430 (3 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP)
-	InfluxDBStartPort        int                       `yaml:"influxdb_start_port,omitempty"`         // starting InfluxDB HTTP API host port, default 8086
-	Influx2TSDBStartPort     int                       `yaml:"influx2tsdb_start_port,omitempty"`      // starting influx2tsdb-proxy HTTP API host port, default 8087
-	ClickHouseHTTPStartPort  int                       `yaml:"clickhouse_http_start_port,omitempty"`  // starting ClickHouse HTTP host port, default 8123
-	ClickHouseTCPStartPort   int                       `yaml:"clickhouse_tcp_start_port,omitempty"`   // starting ClickHouse native TCP host port, default 9000 (shared with the S3 API pool)
-	KafkaBrokerStartPort     int                       `yaml:"kafka_broker_start_port,omitempty"`     // starting Kafka broker host port, default 9092
-	KafkaControllerStartPort int                       `yaml:"kafka_controller_start_port,omitempty"` // starting Kafka controller host port, default 19093 (9093 belongs to the Alertmanager pool)
-	KafkaTLSStartPort        int                       `yaml:"kafka_tls_start_port,omitempty"`        // starting Kafka SSL listener host port, default 9093
+	Network                  string                    `yaml:"network,omitempty"`                            // shared podman network name, persisted at top level
+	Namespace                string                    `yaml:"namespace,omitempty"`                          // container name namespace, empty = disabled (default)
+	PGStartPort              int                       `yaml:"pg_start_port,omitempty"`                      // starting PG host port, default 35432
+	PGSSHPort                int                       `yaml:"pg_ssh_port,omitempty"`                        // starting SSH host port, default 42201
+	PgBouncerStartPort       int                       `yaml:"pgbouncer_start_port,omitempty"`               // starting PgBouncer host port, default 56432
+	EtcdStartPort            int                       `yaml:"etcd_start_port,omitempty"`                    // starting etcd client host port, default 2379 (peer gets the next free port)
+	PgDogStartPort           int                       `yaml:"pgdog_start_port,omitempty"`                   // starting PgDog host port, default 7432 (openmetrics gets the next free port)
+	PatroniStartPort         int                       `yaml:"patroni_start_port,omitempty"`                 // starting Patroni member PG host port, default 35532
+	PatroniRestapiStartPort  int                       `yaml:"patroni_restapi_start_port,omitempty"`         // starting Patroni REST API host port, default 8008
+	PatroniSSHStartPort      int                       `yaml:"patroni_ssh_start_port,omitempty"`             // starting Patroni SSH host port, default 42301 (separate from PG instance SSH pool at 42201)
+	HaProxyStartPort         int                       `yaml:"haproxy_start_port,omitempty"`                 // starting HAProxy listener host port, default 5000 (read port and stats take the next free ports)
+	MinioStartPort           int                       `yaml:"minio_start_port,omitempty"`                   // starting MinIO API host port, default 9000 (console takes the next free port)
+	PostgrestStartPort       int                       `yaml:"postgrest_start_port,omitempty"`               // starting PostgREST HTTP host port, default 3500
+	RedisStartPort           int                       `yaml:"redis_start_port,omitempty"`                   // starting Redis host port, default 6379
+	PredixyStartPort         int                       `yaml:"predixy_start_port,omitempty"`                 // starting Predixy proxy listener host port, default 7617
+	PgAdminStartPort         int                       `yaml:"pgadmin_start_port,omitempty"`                 // starting pgAdmin 4 web host port, default 5050
+	GrafanaStartPort         int                       `yaml:"grafana_start_port,omitempty"`                 // starting Grafana web host port, default 3000
+	PrometheusStartPort      int                       `yaml:"prometheus_start_port,omitempty"`              // starting Prometheus web host port, default 9090
+	AlertmanagerStartPort    int                       `yaml:"alertmanager_start_port,omitempty"`            // starting Alertmanager web host port, default 9093
+	GiteaStartPort           int                       `yaml:"gitea_start_port,omitempty"`                   // starting Gitea web host port, default 3080 (Gitea's own default 3000 belongs to the Grafana pool here)
+	GiteaSSHStartPort        int                       `yaml:"gitea_ssh_start_port,omitempty"`               // starting Gitea OpenSSH host port, default 2222 (allocated for every gitea instance — the image's sshd always runs, so even SSH-off needs a port to park it on, off 22)
+	NginxStartPort           int                       `yaml:"nginx_start_port,omitempty"`                   // starting nginx HTTP host port, default 8080 (HTTPS takes the next free port)
+	GarageStartPort          int                       `yaml:"garage_start_port,omitempty"`                  // starting Garage S3 API host port, default 3900 (RPC, web, admin take the next three free ports)
+	SeaweedfsStartPort       int                       `yaml:"seaweedfs_start_port,omitempty"`               // starting SeaweedFS master host port, default 8400 (volume, filer, s3 take the next three free ports; gRPC twins at +10000 are reserved)
+	VictoriaMetricsStartPort int                       `yaml:"victoriametrics_start_port,omitempty"`         // starting VictoriaMetrics HTTP host port, default 8428
+	VMClusterStartPort       int                       `yaml:"vmcluster_start_port,omitempty"`               // starting VMCluster port, default 8480 (5 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP, internal insert TCP, internal select TCP)
+	VictoriaLogsStartPort    int                       `yaml:"victorialogs_start_port,omitempty"`            // starting VictoriaLogs HTTP host port, default 9428
+	VlagentStartPort         int                       `yaml:"vlagent_start_port,omitempty"`                 // starting vlagent ingest HTTP host port, default 9429
+	VLClusterStartPort       int                       `yaml:"vlcluster_start_port,omitempty"`               // starting VLCluster port, default 9430 (3 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP)
+	InfluxDBStartPort        int                       `yaml:"influxdb_start_port,omitempty"`                // starting InfluxDB HTTP API host port, default 8086
+	Influx2TSDBStartPort     int                       `yaml:"influx2tsdb_start_port,omitempty"`             // starting influx2tsdb-proxy HTTP API host port, default 8087
+	ClickHouseHTTPStartPort  int                       `yaml:"clickhouse_http_start_port,omitempty"`         // starting ClickHouse HTTP host port, default 8123
+	ClickHouseTCPStartPort   int                       `yaml:"clickhouse_tcp_start_port,omitempty"`          // starting ClickHouse native TCP host port, default 9000 (shared with the S3 API pool)
+	KafkaBrokerStartPort     int                       `yaml:"kafka_broker_start_port,omitempty"`            // starting Kafka broker host port, default 9092
+	KafkaControllerStartPort int                       `yaml:"kafka_controller_start_port,omitempty"`        // starting Kafka controller host port, default 19093 (9093 belongs to the Alertmanager pool)
+	KafkaTLSStartPort        int                       `yaml:"kafka_tls_start_port,omitempty"`               // starting Kafka SSL listener host port, default 9093
+	RabbitMQStartPort        int                       `yaml:"rabbitmq_start_port,omitempty"`                // starting RabbitMQ AMQP host port, default 5672
+	RabbitMQTLSStartPort     int                       `yaml:"rabbitmq_tls_start_port,omitempty"`            // starting RabbitMQ AMQPS host port, default 5671
+	RabbitMQMgmtStartPort    int                       `yaml:"rabbitmq_management_start_port,omitempty"`     // starting RabbitMQ management HTTP host port, default 15672
+	RabbitMQMgmtTLSStartPort int                       `yaml:"rabbitmq_management_tls_start_port,omitempty"` // starting RabbitMQ management HTTPS host port, default 15671
+	RabbitMQEPMDStartPort    int                       `yaml:"rabbitmq_epmd_start_port,omitempty"`           // starting RabbitMQ epmd host port, default 4369
+	RabbitMQDistStartPort    int                       `yaml:"rabbitmq_dist_start_port,omitempty"`           // starting RabbitMQ Erlang distribution host port, default 25672
 	Postgres                 PostgresConfig            `yaml:"postgres"`
 	Podman                   PodmanConfig              `yaml:"podman"`
 	PITR                     PITRConfig                `yaml:"pitr"`
@@ -160,6 +166,7 @@ type TopAddonsConfig struct {
 	Influx2TSDB     map[string]Influx2TSDBConfig     `yaml:"influx2tsdb,omitempty"`
 	ClickHouse      map[string]ClickHouseConfig      `yaml:"clickhouse,omitempty"`
 	Kafka           map[string]KafkaConfig           `yaml:"kafka,omitempty"`
+	RabbitMQ        map[string]RabbitMQConfig        `yaml:"rabbitmq,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -1774,6 +1781,124 @@ func ValidateKafkaSettings(settings map[string]string) error {
 	return nil
 }
 
+// DefaultRabbitMQVersion pins the RabbitMQ 4.x release pulled from the
+// official multi-arch image. The -management image bundles the web UI/API.
+const DefaultRabbitMQVersion = "4.4.0"
+
+// DefaultRabbitMQImageTag is the official upstream management image.
+const DefaultRabbitMQImageTag = "docker.io/library/rabbitmq:4.4.0-management"
+
+// RabbitMQConfig holds a managed single-node RabbitMQ container. State lives
+// in a bind-mounted data dir; every listener shares the config's Listen
+// address under host networking. TLS adds AMQPS and management HTTPS next to
+// the plaintext listeners.
+type RabbitMQConfig struct {
+	ContainerName string `yaml:"container_name,omitempty"` // pgcli-rabbitmq<ns>-<name>
+	Name          string `yaml:"name,omitempty"`           // addon key, defaults to the map key
+	Version       string `yaml:"version,omitempty"`        // e.g. "4.4.0"
+	ImageTag      string `yaml:"image_tag,omitempty"`      // docker.io/library/rabbitmq:<version>-management
+
+	// ConfigPath is the generated rabbitmq.conf; its parent dir also holds
+	// enabled_plugins and the tls/ directory.
+	ConfigPath string `yaml:"config_path,omitempty"`
+	DataDir    string `yaml:"data_dir,omitempty"`    // mounted at /var/lib/rabbitmq
+	SecretPath string `yaml:"secret_path,omitempty"` // 0600 admin password file
+
+	Listen            string `yaml:"listen,omitempty"`              // bind address, default 127.0.0.1
+	AMQPPort          int    `yaml:"amqp_port,omitempty"`           // default pool base 5672
+	ManagementPort    int    `yaml:"management_port,omitempty"`     // default pool base 15672
+	TLS               bool   `yaml:"tls,omitempty"`                 // add AMQPS + management HTTPS
+	AMQPTLSPort       int    `yaml:"amqp_tls_port,omitempty"`       // default pool base 5671
+	ManagementTLSPort int    `yaml:"management_tls_port,omitempty"` // default pool base 15671
+	EPMDPort          int    `yaml:"epmd_port,omitempty"`           // default pool base 4369
+	DistPort          int    `yaml:"dist_port,omitempty"`           // default pool base 25672
+
+	AdminUser     string `yaml:"admin_user,omitempty"`     // default admin
+	AdminPassword string `yaml:"admin_password,omitempty"` // generated at install
+
+	// CertFile/KeyFile are bring-your-own TLS inputs; the manager copies them
+	// into the instance config dir and never reads them again.
+	CertFile string `yaml:"cert_file,omitempty"`
+	KeyFile  string `yaml:"key_file,omitempty"`
+
+	// Settings are additional rabbitmq.conf overrides. pgcli-managed keys
+	// (listeners, TLS, management, default user/tags/permissions,
+	// distribution) are rejected.
+	Settings map[string]string `yaml:"settings,omitempty"`
+
+	// Autostart starts the container on host boot (pg autostart enable --rabbitmq).
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// ValidRabbitMQVersion reports whether version is safe to use as a Docker
+// image tag.
+func ValidRabbitMQVersion(version string) bool {
+	ok, _ := regexp.MatchString(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`, version)
+	return ok
+}
+
+// RabbitMQImageTagForVersion returns the upstream image reference for a
+// RabbitMQ version.
+func RabbitMQImageTagForVersion(version string) (string, bool) {
+	if !ValidRabbitMQVersion(version) {
+		return "", false
+	}
+	return "docker.io/library/rabbitmq:" + version + "-management", true
+}
+
+// ValidRabbitMQName reports whether name is a safe RabbitMQ instance key.
+func ValidRabbitMQName(name string) bool {
+	ok, _ := regexp.MatchString(`^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$`, name)
+	return ok
+}
+
+// ValidRabbitMQAdminUser reports whether user is a safe RabbitMQ user name.
+func ValidRabbitMQAdminUser(user string) bool {
+	ok, _ := regexp.MatchString(`^[A-Za-z0-9_.-]{1,64}$`, user)
+	return ok
+}
+
+var rabbitMQSettingKeyRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// rabbitMQManagedSettingPrefixes are rendered by pgcli itself; overriding them
+// would break listeners, TLS paths, the management endpoint, the bootstrap
+// user/tags, or the per-instance Erlang distribution isolation.
+var rabbitMQManagedSettingPrefixes = []string{
+	"listeners.",
+	"ssl_options.",
+	"management.",
+	"prometheus.",
+	"default_user",
+	"default_pass",
+	"default_user_tags.",
+	"default_permissions.",
+	"loopback_users.",
+	"distribution.listener.",
+}
+
+// ValidateRabbitMQSettings checks user-supplied rabbitmq.conf overrides.
+func ValidateRabbitMQSettings(settings map[string]string) error {
+	keys := make([]string, 0, len(settings))
+	for key := range settings {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if !rabbitMQSettingKeyRe.MatchString(key) {
+			return fmt.Errorf("settings key %q must contain only letters, digits, '.', '_' and '-'", key)
+		}
+		for _, prefix := range rabbitMQManagedSettingPrefixes {
+			if key == prefix || strings.HasPrefix(key, prefix) {
+				return fmt.Errorf("settings key %q is managed by pgcli and cannot be overridden", key)
+			}
+		}
+		if strings.ContainsAny(settings[key], "\x00\r\n") {
+			return fmt.Errorf("settings value for %q must not contain control characters", key)
+		}
+	}
+	return nil
+}
+
 // influxDBManagedKeys are the config keys pgcli renders itself; a
 // --config-option override would either duplicate a TOML key (a parse error)
 // or silently fight the instance's stored paths/ports.
@@ -3164,6 +3289,12 @@ func Default() *Config {
 		KafkaBrokerStartPort:     9092,
 		KafkaControllerStartPort: 19093,
 		KafkaTLSStartPort:        9093,
+		RabbitMQStartPort:        5672,
+		RabbitMQTLSStartPort:     5671,
+		RabbitMQMgmtStartPort:    15672,
+		RabbitMQMgmtTLSStartPort: 15671,
+		RabbitMQEPMDStartPort:    4369,
+		RabbitMQDistStartPort:    25672,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -3385,6 +3516,12 @@ type displayConfig struct {
 	KafkaBrokerStartPort     int                       `yaml:"kafka_broker_start_port,omitempty"`
 	KafkaControllerStartPort int                       `yaml:"kafka_controller_start_port,omitempty"`
 	KafkaTLSStartPort        int                       `yaml:"kafka_tls_start_port,omitempty"`
+	RabbitMQStartPort        int                       `yaml:"rabbitmq_start_port,omitempty"`
+	RabbitMQTLSStartPort     int                       `yaml:"rabbitmq_tls_start_port,omitempty"`
+	RabbitMQMgmtStartPort    int                       `yaml:"rabbitmq_management_start_port,omitempty"`
+	RabbitMQMgmtTLSStartPort int                       `yaml:"rabbitmq_management_tls_start_port,omitempty"`
+	RabbitMQEPMDStartPort    int                       `yaml:"rabbitmq_epmd_start_port,omitempty"`
+	RabbitMQDistStartPort    int                       `yaml:"rabbitmq_dist_start_port,omitempty"`
 	Logging                  LoggingConfig             `yaml:"logging"`
 	Backup                   BackupConfig              `yaml:"backup"`
 	Pigsty                   PigstyConfig              `yaml:"pigsty"`
@@ -3431,6 +3568,12 @@ func (c *Config) Display() displayConfig {
 		KafkaBrokerStartPort:     c.KafkaBrokerStartPort,
 		KafkaControllerStartPort: c.KafkaControllerStartPort,
 		KafkaTLSStartPort:        c.KafkaTLSStartPort,
+		RabbitMQStartPort:        c.RabbitMQStartPort,
+		RabbitMQTLSStartPort:     c.RabbitMQTLSStartPort,
+		RabbitMQMgmtStartPort:    c.RabbitMQMgmtStartPort,
+		RabbitMQMgmtTLSStartPort: c.RabbitMQMgmtTLSStartPort,
+		RabbitMQEPMDStartPort:    c.RabbitMQEPMDStartPort,
+		RabbitMQDistStartPort:    c.RabbitMQDistStartPort,
 		Logging:                  c.Logging,
 		Backup:                   c.Backup,
 		Pigsty:                   c.Pigsty,
@@ -3867,6 +4010,97 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("addons.kafka.%s.%s %d is already used by %s (Kafka ports must be unique)", name, field.name, field.value, prev)
 			}
 			kafkaPorts[field.value] = name + "." + field.name
+		}
+	}
+	// RabbitMQ instances: names are directory keys, paths absolute, the listen
+	// address is an IP, and all listeners are unique per host.
+	rabbitMQPorts := make(map[int]string, 6*len(c.Addons.RabbitMQ))
+	for name, rc := range c.Addons.RabbitMQ {
+		if !ValidRabbitMQName(rc.Name) {
+			return fmt.Errorf("addons.rabbitmq.%s.name %q must match [A-Za-z0-9][A-Za-z0-9_-]{0,47}", name, rc.Name)
+		}
+		if !ValidRabbitMQVersion(rc.Version) {
+			return fmt.Errorf("addons.rabbitmq.%s.version %q must be a safe Docker image tag", name, rc.Version)
+		}
+		if tag, ok := RabbitMQImageTagForVersion(rc.Version); !ok {
+			return fmt.Errorf("addons.rabbitmq.%s.version %q is not supported", name, rc.Version)
+		} else if rc.ImageTag != tag {
+			return fmt.Errorf("addons.rabbitmq.%s.image_tag %q does not match version %s (%s)", name, rc.ImageTag, rc.Version, tag)
+		}
+		if !ValidRabbitMQAdminUser(rc.AdminUser) {
+			return fmt.Errorf("addons.rabbitmq.%s.admin_user %q must match [A-Za-z0-9_.-]{1,64}", name, rc.AdminUser)
+		}
+		if rc.AdminPassword == "" {
+			return fmt.Errorf("addons.rabbitmq.%s.admin_password must not be empty", name)
+		}
+		if strings.ContainsAny(rc.AdminPassword, "\x00\r\n") {
+			return fmt.Errorf("addons.rabbitmq.%s.admin_password must not contain control characters", name)
+		}
+		for _, field := range []struct {
+			name  string
+			value string
+		}{
+			{"config_path", rc.ConfigPath},
+			{"data_dir", rc.DataDir},
+			{"secret_path", rc.SecretPath},
+		} {
+			if field.value == "" || !filepath.IsAbs(field.value) {
+				return fmt.Errorf("addons.rabbitmq.%s.%s must be an absolute path, got %q", name, field.name, field.value)
+			}
+		}
+		if net.ParseIP(rc.Listen) == nil {
+			return fmt.Errorf("addons.rabbitmq.%s.listen must be an IP address, got %q", name, rc.Listen)
+		}
+		if (rc.CertFile == "") != (rc.KeyFile == "") {
+			return fmt.Errorf("addons.rabbitmq.%s.cert_file and key_file must be set together", name)
+		}
+		if rc.CertFile != "" {
+			if !rc.TLS {
+				return fmt.Errorf("addons.rabbitmq.%s.cert_file requires tls: true", name)
+			}
+			for _, field := range []struct {
+				name  string
+				value string
+			}{{"cert_file", rc.CertFile}, {"key_file", rc.KeyFile}} {
+				if !filepath.IsAbs(field.value) {
+					return fmt.Errorf("addons.rabbitmq.%s.%s must be an absolute path, got %q", name, field.name, field.value)
+				}
+			}
+		}
+		if err := ValidateRabbitMQSettings(rc.Settings); err != nil {
+			return fmt.Errorf("addons.rabbitmq.%s.settings: %w", name, err)
+		}
+		portFields := []struct {
+			name  string
+			value int
+		}{
+			{"amqp_port", rc.AMQPPort},
+			{"management_port", rc.ManagementPort},
+			{"epmd_port", rc.EPMDPort},
+			{"dist_port", rc.DistPort},
+		}
+		if rc.TLS {
+			portFields = append(portFields,
+				struct {
+					name  string
+					value int
+				}{"amqp_tls_port", rc.AMQPTLSPort},
+				struct {
+					name  string
+					value int
+				}{"management_tls_port", rc.ManagementTLSPort},
+			)
+		} else if rc.AMQPTLSPort != 0 || rc.ManagementTLSPort != 0 {
+			return fmt.Errorf("addons.rabbitmq.%s TLS ports require tls: true", name)
+		}
+		for _, field := range portFields {
+			if field.value < 1 || field.value > 65535 {
+				return fmt.Errorf("addons.rabbitmq.%s.%s must be between 1 and 65535, got %d", name, field.name, field.value)
+			}
+			if prev, dup := rabbitMQPorts[field.value]; dup {
+				return fmt.Errorf("addons.rabbitmq.%s.%s %d is already used by %s (RabbitMQ ports must be unique)", name, field.name, field.value, prev)
+			}
+			rabbitMQPorts[field.value] = name + "." + field.name
 		}
 	}
 	return nil
@@ -5168,6 +5402,51 @@ func (c *Config) ApplyDefaults() {
 		c.Addons.Kafka[name] = addon
 	}
 
+	// Top-level RabbitMQ instances. The official image runs as uid 999 (the
+	// entrypoint chowns its data dir); config, plugins, TLS and mnesia state
+	// live under <base>/addon/rabbitmq/<name>/.
+	rabbitMQBaseDir := platform.DefaultConfigDir()
+	if c.BaseDir != "" {
+		rabbitMQBaseDir = c.BaseDir
+	}
+	for name, addon := range c.Addons.RabbitMQ {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.Version == "" {
+			addon.Version = DefaultRabbitMQVersion
+		}
+		if addon.ImageTag == "" {
+			if tag, ok := RabbitMQImageTagForVersion(addon.Version); ok {
+				addon.ImageTag = tag
+			}
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-rabbitmq" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.Listen == "" {
+			addon.Listen = "127.0.0.1"
+		}
+		if addon.AdminUser == "" {
+			addon.AdminUser = "admin"
+		}
+		if !addon.TLS {
+			addon.AMQPTLSPort = 0
+			addon.ManagementTLSPort = 0
+		}
+		addonDir := filepath.Join(rabbitMQBaseDir, "addon", "rabbitmq", name)
+		if addon.ConfigPath == "" {
+			addon.ConfigPath = filepath.Join(addonDir, "config", "rabbitmq.conf")
+		}
+		if addon.DataDir == "" {
+			addon.DataDir = filepath.Join(addonDir, "data")
+		}
+		if addon.SecretPath == "" {
+			addon.SecretPath = filepath.Join(addonDir, "secrets", "admin_password")
+		}
+		c.Addons.RabbitMQ[name] = addon
+	}
+
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
 	c.autoAssignPorts()
 }
@@ -5743,6 +6022,87 @@ func (c *Config) autoAssignPorts() {
 				nextTLS = addon.TLSPort + 1
 			}
 			c.Addons.Kafka[name] = addon
+		}
+	}
+
+	// Allocate RabbitMQ listener ports from six independent pools: AMQP
+	// (rabbitmq_start_port, 5672), AMQPS (5671), management HTTP (15672),
+	// management HTTPS (15671), epmd (4369) and Erlang distribution (25672).
+	// Every draw shares one assigned set; explicit ports are pre-marked so a
+	// TLS pool cannot steal a plaintext port and vice versa.
+	{
+		amqpBase := c.RabbitMQStartPort
+		amqpsBase := c.RabbitMQTLSStartPort
+		mgmtBase := c.RabbitMQMgmtStartPort
+		mgmtTLSBase := c.RabbitMQMgmtTLSStartPort
+		epmdBase := c.RabbitMQEPMDStartPort
+		distBase := c.RabbitMQDistStartPort
+		assigned := map[int]bool{}
+		for _, addon := range c.Addons.RabbitMQ {
+			for _, p := range []int{
+				addon.AMQPPort, addon.AMQPTLSPort, addon.ManagementPort,
+				addon.ManagementTLSPort, addon.EPMDPort, addon.DistPort,
+			} {
+				if p != 0 {
+					assigned[p] = true
+				}
+			}
+		}
+		nextAMQP := amqpBase
+		nextAMQPS := amqpsBase
+		nextMgmt := mgmtBase
+		nextMgmtTLS := mgmtTLSBase
+		nextEPMD := epmdBase
+		nextDist := distBase
+		nextFree := func(next *int) int {
+			for (usedPorts != nil && usedPorts[*next]) || assigned[*next] {
+				*next++
+			}
+			p := *next
+			*next++
+			assigned[p] = true
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.RabbitMQ))
+		for name := range c.Addons.RabbitMQ {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.RabbitMQ[name]
+			if addon.AMQPPort == 0 && amqpBase > 0 {
+				addon.AMQPPort = nextFree(&nextAMQP)
+			} else if addon.AMQPPort >= nextAMQP {
+				nextAMQP = addon.AMQPPort + 1
+			}
+			if addon.ManagementPort == 0 && mgmtBase > 0 {
+				addon.ManagementPort = nextFree(&nextMgmt)
+			} else if addon.ManagementPort >= nextMgmt {
+				nextMgmt = addon.ManagementPort + 1
+			}
+			if addon.EPMDPort == 0 && epmdBase > 0 {
+				addon.EPMDPort = nextFree(&nextEPMD)
+			} else if addon.EPMDPort >= nextEPMD {
+				nextEPMD = addon.EPMDPort + 1
+			}
+			if addon.DistPort == 0 && distBase > 0 {
+				addon.DistPort = nextFree(&nextDist)
+			} else if addon.DistPort >= nextDist {
+				nextDist = addon.DistPort + 1
+			}
+			if addon.TLS {
+				if addon.AMQPTLSPort == 0 && amqpsBase > 0 {
+					addon.AMQPTLSPort = nextFree(&nextAMQPS)
+				} else if addon.AMQPTLSPort >= nextAMQPS {
+					nextAMQPS = addon.AMQPTLSPort + 1
+				}
+				if addon.ManagementTLSPort == 0 && mgmtTLSBase > 0 {
+					addon.ManagementTLSPort = nextFree(&nextMgmtTLS)
+				} else if addon.ManagementTLSPort >= nextMgmtTLS {
+					nextMgmtTLS = addon.ManagementTLSPort + 1
+				}
+			}
+			c.Addons.RabbitMQ[name] = addon
 		}
 	}
 

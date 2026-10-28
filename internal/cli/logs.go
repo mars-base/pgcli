@@ -181,7 +181,7 @@ Examples:
 			if err != nil {
 				return err
 			}
-		case "etcd", "pgdog", "haproxy", "minio", "silo", "rustfs", "garage", "seaweedfs", "redis", "predixy", "pgadmin", "grafana", "prometheus", "alertmanager", "gitea", "beegfs", "nginx", "influxdb", "influx2tsdb", "clickhouse", "kafka", "vmcluster", "vlcluster":
+		case "etcd", "pgdog", "haproxy", "minio", "silo", "rustfs", "garage", "seaweedfs", "redis", "predixy", "pgadmin", "grafana", "prometheus", "alertmanager", "gitea", "beegfs", "nginx", "influxdb", "influx2tsdb", "clickhouse", "kafka", "rabbitmq", "vmcluster", "vlcluster":
 			// (patroni is handled above; it shares --name but requires --scope.)
 			if pgName != "" {
 				return fmt.Errorf("--pg-name selects a remote PgBouncer or PostgREST; use --name for an %s", addonType)
@@ -389,6 +389,15 @@ Examples:
 					return fmt.Errorf("kafka instance %q not found (use 'pg addon list' to see available)", name)
 				}
 				containerName = kc.ContainerName
+			case "rabbitmq":
+				if cfg.Addons.RabbitMQ == nil {
+					return fmt.Errorf("no rabbitmq addons configured")
+				}
+				rc, ok := cfg.Addons.RabbitMQ[name]
+				if !ok {
+					return fmt.Errorf("rabbitmq instance %q not found (use 'pg addon list' to see available)", name)
+				}
+				containerName = rc.ContainerName
 			case "nginx":
 				if cfg.Addons.Nginx == nil {
 					return fmt.Errorf("no nginx addons configured")
@@ -507,7 +516,7 @@ Examples:
 			}
 			return tailHostLog(m, tail, follow)
 		default:
-			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, kafka, nginx, patroni)", addonType)
+			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, nginx, patroni)", addonType)
 		}
 
 		return runPodmanLogs(containerName, tail, follow)
