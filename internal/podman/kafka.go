@@ -212,7 +212,7 @@ func (m *KafkaManager) createContainer(k *config.KafkaConfig) error {
 // kafkaCreateArgs builds the `podman run` argv. Pure so tests can pin the
 // mounts, cluster id and host networking without podman.
 func kafkaCreateArgs(k config.KafkaConfig) []string {
-	return []string{
+	args := []string{
 		"run", "-d",
 		"--name", k.ContainerName,
 		"--network", "host",
@@ -222,8 +222,11 @@ func kafkaCreateArgs(k config.KafkaConfig) []string {
 		"-v", fmt.Sprintf("%s:%s:z", hostMountPath(k.DataDir), kafka.ContainerDataDir),
 		"-v", fmt.Sprintf("%s:%s:ro,z", hostMountPath(filepath.Dir(k.ConfigPath)), kafka.ContainerConfigDir),
 		"-e", "CLUSTER_ID=" + k.ClusterID,
-		k.ImageTag,
 	}
+	if k.Heap != "" {
+		args = append(args, "-e", "KAFKA_HEAP_OPTS=-Xms"+k.Heap+" -Xmx"+k.Heap)
+	}
+	return append(args, k.ImageTag)
 }
 
 // waitReady runs the broker API check until it succeeds. A single node must

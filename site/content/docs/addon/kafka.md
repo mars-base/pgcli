@@ -123,6 +123,22 @@ When `--listen` is a wildcard, pgcli's own topic/health commands dial `127.0.0.1
 
 In cluster mode the controller port is not just a local bind — it is the address every other host writes into its `controller.quorum.voters`. Use the same `--controller-port` on every node (unless you deliberately give each node a different one, in which case every `--peer` entry must carry the correct port for that node) and make sure the port is free on all hosts before you start. A mismatch means the voter lists differ and the quorum never forms. The broker port is advertised per node, so it may differ between hosts, but the same `9092` everywhere keeps client bootstrap lists simple.
 
+## Replication defaults
+
+Replication follows the number of static voters, so neither mode needs manual
+`server.properties` edits:
+
+| Voters | Topic default RF | `min.insync.replicas` | Tolerates (with `acks=all`) |
+|---|---|---|---|
+| 1 | 1 | 1 | no broker failure |
+| 2 | 2 | 2 | no broker failure (both replicas must stay in sync) |
+| 3+ | 3 | 2 | one broker down |
+
+- The same values set `default.replication.factor`, `min.insync.replicas` and the internal topics (`offsets`, `transaction.state.log`, share coordinator), so a new cluster can commit offsets and transactions before any user topic exists.
+- `pg addon kafka topic create NAME` uses the topic default; override it per topic with `--replication-factor N`. The RF cannot exceed the number of brokers holding the data.
+- RF stays capped at 3 in larger clusters: extra replicas add write cost and latency without improving the failure budget that `min.insync.replicas=2` allows.
+- With `min.insync.replicas=2`, a partition whose ISR drops below 2 rejects `acks=all` writes (the producer default since Kafka 3.0). `pg addon kafka topic describe NAME` shows the ISR.
+
 ## TLS
 
 Enable the SSL listener with `--tls`:
@@ -489,6 +505,7 @@ Boot start re-renders `server.properties` first and is idempotent (`pg start` al
 - **No ZooKeeper.** Kafka 4.x is KRaft-only; there is no ZooKeeper container to manage, and `zookeeper.connect` is rejected as a managed key.
 - **Copies are not backups.** Topic replication protects availability, not against accidental deletion or corruption. Stop the instance and copy the data dir for an offline backup of one node; there is no backup/restore command in this release, and an offline copy of a single cluster node is not a complete cluster backup.
 - **Upgrades.** `--force --version <new>` pulls a new tag and recreates the container on the same data dir. Kafka does not guarantee downgrading data written by a newer version — take an offline copy before upgrading. `--version` must be a real upstream tag.
+- **JVM heap.** The image default is `-Xms1G -Xmx1G`. Raise it with `--heap` when a node handles many partitions/connections, but leave most RAM to the OS page cache — Kafka reads mostly from page cache, and heaps above roughly 6–8 GB usually hurt more than they help. In a cluster each node takes its own `--heap`; changing it recreates that node's container (`--force`), one node at a time.
 - **Data ownership.** Data files are owned by uid/gid 1000. Use `--clean-data` instead of deleting the directory by hand; pgcli handles the permission fallback.
 - **Ports.** Broker defaults to `9092`; the controller defaults to `19093` to avoid the Alertmanager default `9093`. Both are ordinary host ports under host networking.
 - **Platform.** Linux (host networking); the official image is multi-arch (amd64/arm64).
@@ -513,6 +530,7 @@ Boot start re-renders `server.properties` first and is idempotent (`pg start` al
 | `--tls-pem FILE` | — | Combined PEM (chain + key) for the SSL listener; implies `--tls`; relative paths are resolved to absolute; must cover `--advertise-host` in cluster mode |
 | `--tls-port N` | auto (base `9093`) | SSL listener host port; `0` = auto-assign; requires `--tls` |
 | `--cluster-id ID` | derived (cluster) / generated | KRaft cluster id; in cluster mode it must equal the id derived from `--cluster` |
+| `--heap SIZE` | image default (`1G`) | JVM heap, passed as `KAFKA_HEAP_OPTS=-XmsSIZE -XmxSIZE` (`512m`, `2g`, `4g`); per node in a cluster; changing it needs `--force` |
 | `--config-option K=V` | — | Extra `server.properties` setting; repeatable; replaces the stored override map |
 | `--force` | false | Re-render config and recreate the container, keeping data and ids; required to add or remove `--tls`; cannot change cluster identity fields |
 

@@ -1527,6 +1527,10 @@ type KafkaConfig struct {
 	Cluster string   `yaml:"cluster,omitempty"`
 	Peers   []string `yaml:"peers,omitempty"`
 
+	// Heap is the JVM heap size passed as KAFKA_HEAP_OPTS (e.g. "4g" ->
+	// -Xms4g -Xmx4g). Empty keeps the image default (-Xms1G -Xmx1G).
+	Heap string `yaml:"heap,omitempty"`
+
 	// Settings are additional server.properties overrides. pgcli-managed
 	// keys (roles, listeners, quorum voters, log.dirs, replication factors)
 	// are rejected.
@@ -1727,6 +1731,26 @@ var kafkaManagedSettings = map[string]bool{
 	"ssl.keystore.certificate.chain":                   true,
 	"ssl.key.password":                                 true,
 	"ssl.client.auth":                                  true,
+}
+
+var kafkaHeapRe = regexp.MustCompile(`^([0-9]+)([gm])$`)
+
+// ParseKafkaHeap validates a JVM heap size such as "512m" or "4g" and returns
+// it lowercased. Empty means the image default applies.
+func ParseKafkaHeap(value string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(value))
+	if v == "" {
+		return "", nil
+	}
+	m := kafkaHeapRe.FindStringSubmatch(v)
+	if m == nil {
+		return "", fmt.Errorf("invalid heap size %q: use a unit, e.g. 512m or 4g", value)
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil || n < 1 {
+		return "", fmt.Errorf("invalid heap size %q: must be at least 1m or 1g", value)
+	}
+	return v, nil
 }
 
 // ValidateKafkaSettings checks user-supplied server.properties overrides.
@@ -3777,6 +3801,9 @@ func (c *Config) Validate() error {
 			if !filepath.IsAbs(kc.TLSPEM) {
 				return fmt.Errorf("addons.kafka.%s.tls_pem must be an absolute path, got %q", name, kc.TLSPEM)
 			}
+		}
+		if _, err := ParseKafkaHeap(kc.Heap); err != nil {
+			return fmt.Errorf("addons.kafka.%s.heap: %w", name, err)
 		}
 		if err := ValidateKafkaSettings(kc.Settings); err != nil {
 			return fmt.Errorf("addons.kafka.%s.settings: %w", name, err)

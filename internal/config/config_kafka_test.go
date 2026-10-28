@@ -693,3 +693,18 @@ func TestKafkaTLSPortAvoidsAlertmanager(t *testing.T) {
 		t.Error("Kafka TLS port 9093 collides with an explicit Alertmanager port")
 	}
 }
+
+func TestParseKafkaHeap(t *testing.T) {
+	valid := map[string]string{"512m": "512m", "4g": "4g", " 2G ": "2g", "": ""}
+	for in, want := range valid {
+		got, err := ParseKafkaHeap(in)
+		if err != nil || got != want {
+			t.Errorf("ParseKafkaHeap(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"4", "4gb", "0g", "-1g", "1.5g"} {
+		if _, err := ParseKafkaHeap(in); err == nil {
+			t.Errorf("ParseKafkaHeap(%q) should fail", in)
+		}
+	}
+}

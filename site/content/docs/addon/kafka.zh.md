@@ -38,6 +38,7 @@ ZooKeeper**。
 | `--tls-pem` | — | 用这个合并后的 PEM（证书链 + 私钥）提供 TLS，替代自动生成的证书。隐含 `--tls`；文件会先校验再复制为 `config/tls/server.pem`。支持 PKCS#8、PKCS#1 与 SEC1 私钥。集群模式下证书必须覆盖本节点的 `--advertise-host` |
 | `--tls-port` | 自动（基准 `9093`） | SSL 监听宿主机端口；`0` = 从 `kafka_tls_start_port` 自动分配；需要 `--tls` |
 | `--cluster-id` | 集群推导 / 单机生成 | 集群模式下 id 由 `--cluster` 推导，显式值必须与之相等；单机模式可显式采用 22 字符 KRaft cluster id，否则采纳 `meta.properties` 或生成 |
+| `--heap SIZE` | 镜像默认（`1G`） | JVM 堆大小，以 `KAFKA_HEAP_OPTS=-XmsSIZE -XmxSIZE` 传入（`512m`、`2g`、`4g`）；集群中每节点各自设置；修改需要 `--force` |
 | `--config-option K=V` | — | 额外的 `server.properties` 配置（`num.partitions=3`、`log.retention.hours=168`）；可重复；**替换**已存储的覆盖表 |
 | `--force` | false | 重新渲染 `server.properties` 并重建容器；保留数据、已存储的 cluster id 与 node id；增删 TLS 必须带 `--force`。集群身份字段（cluster、node id、cluster id、peers、advertise host、controller port）即使带 `--force` 也不可修改 |
 
@@ -165,6 +166,26 @@ controller 端点同理。单机模式的静态 voter 是 `AdvertiseHost:Control
 用不同端口，此时每条 `--peer` 必须携带对应节点的正确端口），并确保该端口在所有主机上
 都空闲。端口不一致意味着 voter 列表不同，quorum 永远无法形成。broker 端口是按节点广播的，
 可以不同，但全部使用 `9092` 能让客户端 bootstrap 列表更简单。
+
+## 副本默认值
+
+副本数跟随静态 voter 数量，单机和集群都不需要手工修改 `server.properties`：
+
+| Voters | Topic 默认 RF | `min.insync.replicas` | 可容忍故障（`acks=all`） |
+|---|---|---|---|
+| 1 | 1 | 1 | 不支持任何 broker 故障 |
+| 2 | 2 | 2 | 不支持任何故障（两个副本必须都在同步中） |
+| 3+ | 3 | 2 | 停 1 台 |
+
+- 同样的值会写入 `default.replication.factor`、`min.insync.replicas` 以及内部
+  topic（`offsets`、`transaction.state.log`、share coordinator），因此新集群在创建
+  任何业务 topic 之前就能提交 offset 和事务。
+- `pg addon kafka topic create NAME` 使用该默认值；可用 `--replication-factor N`
+  按 topic 覆盖。RF 不能超过实际承载该分区数据的 broker 数。
+- 集群再大 RF 也封顶为 3：更多副本只会增加写入成本和延迟，在
+  `min.insync.replicas=2` 下并不能多容忍一台机器。
+- `min.insync.replicas=2` 时，ISR 少于 2 的分区会拒绝 `acks=all` 写入（Kafka 3.0
+  起生产者的默认值）。用 `pg addon kafka topic describe NAME` 查看 ISR。
 
 ## TLS
 
@@ -598,6 +619,10 @@ autostart 启用的 Kafka 实例）。
 - **升级。** `--force --version <新版本>` 会拉取新 tag 并在同一数据目录上重建容器。
   Kafka 不保证新版本写入的数据能回退到旧版本——升级前请做离线拷贝。
   `--version` 必须是真实存在的上游 tag。
+- **JVM 堆。** 镜像默认 `-Xms1G -Xmx1G`。节点承载大量分区/连接时用 `--heap`
+  调大，但要给 OS page cache 留足内存——Kafka 主要读 page cache，堆超过约
+  6–8 GB 通常弊大于利。集群中每节点独立设置；修改会用 `--force` 重建该节点容器，
+  逐台执行。
 - **数据属主。** 数据文件属主为 uid/gid 1000。清理请用 `--clean-data`，不要手工删除；
   pgcli 会处理权限回退。
 - **端口。** broker 默认 `9092`；controller 默认 `19093`，避开 Alertmanager 默认的
@@ -625,6 +650,7 @@ autostart 启用的 Kafka 实例）。
 | `--tls-pem FILE` | — | SSL 监听使用的合并 PEM（证书链 + 私钥）；隐含 `--tls`；路径可为相对或绝对；集群模式下必须覆盖 `--advertise-host` |
 | `--tls-port N` | 自动（基准 `9093`） | SSL 监听宿主机端口；`0` = 自动分配；需要 `--tls` |
 | `--cluster-id ID` | 集群推导 / 单机生成 | KRaft cluster id；集群模式下必须等于由 `--cluster` 推导出的值 |
+| `--heap SIZE` | 镜像默认（`1G`） | JVM 堆，以 `KAFKA_HEAP_OPTS=-XmsSIZE -XmxSIZE` 传入（`512m`、`2g`、`4g`）；集群中每节点各自设置；修改需要 `--force` |
 | `--config-option K=V` | — | 额外 `server.properties` 配置；可重复；替换已存储的覆盖表 |
 | `--force` | false | 重新渲染配置并重建容器，保留数据和 id；增删 TLS 必须使用；不能修改集群身份字段 |
 

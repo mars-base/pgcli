@@ -163,6 +163,14 @@ func applyKafkaInstallFlags(kc *config.KafkaConfig, fs *pflag.FlagSet, opts kafk
 	if fs.Changed("cluster-id") {
 		kc.ClusterID, _ = fs.GetString("cluster-id")
 	}
+	if fs.Changed("heap") {
+		value, _ := fs.GetString("heap")
+		heap, err := config.ParseKafkaHeap(value)
+		if err != nil {
+			return err
+		}
+		kc.Heap = heap
+	}
 	if fs.Changed("config-option") {
 		options, _ := fs.GetStringArray("config-option")
 		settings, err := parseKafkaConfigOptions(options)
@@ -522,6 +530,9 @@ func runAddonInstallKafka(cmd *cobra.Command) error {
 	fmt.Printf("  Controller:  %s\n", kafka.LocalControllerEndpoint(kc))
 	fmt.Printf("  Node ID:     %d\n", kc.NodeID)
 	fmt.Printf("  Cluster ID:  %s\n", kc.ClusterID)
+	if kc.Heap != "" {
+		fmt.Printf("  JVM heap:    %s (KAFKA_HEAP_OPTS=-Xms%s -Xmx%s)\n", kc.Heap, kc.Heap, kc.Heap)
+	}
 	if kc.Clustered() {
 		rf := config.KafkaReplicationFactor(len(voters))
 		fmt.Printf("  Cluster:     %s\n", kc.Cluster)
@@ -677,6 +688,9 @@ func runAddonKafkaStatus(cmd *cobra.Command) error {
 	fmt.Printf("  Listen:      %s\n", kc.Listen)
 	fmt.Printf("  Node ID:     %d\n", kc.NodeID)
 	fmt.Printf("  Cluster ID:  %s\n", kc.ClusterID)
+	if kc.Heap != "" {
+		fmt.Printf("  JVM heap:    %s\n", kc.Heap)
+	}
 	if kc.Clustered() {
 		if voters, err := config.KafkaVoters(kc); err == nil {
 			rf := config.KafkaReplicationFactor(len(voters))
@@ -1126,5 +1140,6 @@ func init() {
 	addonInstallCmd.Flags().Int("controller-port", 0, "Kafka KRaft controller host port (0=auto-assign from kafka_controller_start_port, default 19093; required explicitly in --cluster mode because peers embed it)")
 	addonInstallCmd.Flags().Int("tls-port", 0, "Kafka SSL (TLS) listener host port (0=auto-assign from kafka_tls_start_port, default 9093; requires --tls)")
 	addonInstallCmd.Flags().String("tls-pem", "", "combined PEM (certificate chain + private key) for the Kafka TLS listener; implies --tls and replaces the generated certificate (pass an empty value with --tls to fall back to the generated certificate)")
+	addonInstallCmd.Flags().String("heap", "", "Kafka JVM heap size (e.g. 512m, 2g, 4g), applied as KAFKA_HEAP_OPTS=-Xms<size> -Xmx<size>; empty keeps the image default (-Xms1G -Xmx1G); changing it needs --force")
 	addonInstallCmd.Flags().String("cluster-id", "", "Kafka KRaft cluster id (in --cluster mode it must equal the id derived from the cluster name; otherwise: adopt meta.properties, else generate a random 22-char id)")
 }

@@ -61,6 +61,24 @@ func TestKafkaCreateArgsUsesStoredPaths(t *testing.T) {
 	t.Errorf("kafkaCreateArgs does not mount the configured data dir %q: %q", outside, got)
 }
 
+func TestKafkaCreateArgsHeap(t *testing.T) {
+	kc := testKafkaNode(t)
+	kc.Heap = "4g"
+	got := kafkaCreateArgs(kc)
+	found := false
+	for i := 0; i+1 < len(got); i++ {
+		if got[i] == "-e" && got[i+1] == "KAFKA_HEAP_OPTS=-Xms4g -Xmx4g" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("kafkaCreateArgs does not set KAFKA_HEAP_OPTS: %q", got)
+	}
+	if got[len(got)-1] != kc.ImageTag {
+		t.Fatalf("image tag must stay last: %q", got)
+	}
+}
+
 func TestKafkaExecArgsTTY(t *testing.T) {
 	got := kafkaExecArgs("c", true, true, "bash")
 	if want := []string{"exec", "-it", "c", "bash"}; !reflect.DeepEqual(got, want) {

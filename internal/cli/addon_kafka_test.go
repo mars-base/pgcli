@@ -127,6 +127,7 @@ func TestKafkaInstallFlagsRegistered(t *testing.T) {
 		"tls":             "bool",
 		"tls-port":        "int",
 		"tls-pem":         "string",
+		"heap":            "string",
 		"cluster-id":      "string",
 		"cluster":         "string",
 		"peer":            "stringArray",
