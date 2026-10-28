@@ -387,6 +387,8 @@ pg addon kafka topic list --name k1
 pg addon kafka topic list --exclude-internal --name k1
 pg addon kafka topic describe demo --name k1
 pg addon kafka topic delete demo --name k1 --yes
+pg addon kafka topic retention demo 7d --name k1   # 设置 retention.ms
+pg addon kafka topic retention demo --name k1      # 查看当前覆盖项
 ```
 
 - `--partitions` 默认使用 broker 的 `num.partitions`（上游默认 `1`）。
@@ -394,6 +396,11 @@ pg addon kafka topic delete demo --name k1 --yes
   `min(3, voters)`（三节点即 `3`）。
 - `--config KEY=VALUE` 可重复，直接透传给 `kafka-topics.sh`。
 - `delete` 默认要求确认，`--yes` 跳过；删除 topic 会删除其全部消息。
+- `retention NAME [DURATION]` 查看或设置 `retention.ms`。时长支持
+  `ms`/`s`/`m`/`h`/`d`/`w` 后缀（`30m`、`12h`、`7d`、`4w`）、纯数字毫秒，
+  或 `-1` / `infinite` / `forever` 表示永久保留。不带时长时打印 topic 的
+  动态覆盖项；结果为空表示使用 broker 默认值。保留时间按时间清理旧 segment，
+  即使消息从未被消费也会被删除。
 - 所有 topic 命令都要求实例正在运行。
 
 用容器内的 Kafka 脚本写入和读取（脚本位于 `/opt/kafka/bin`，不在 `PATH` 中）：
@@ -628,11 +635,12 @@ autostart 启用的 Kafka 实例）。
 | `--name NAME` | `kafka` | 目标实例 |
 | `-- COMMAND...` | `/bin/bash` | 仅 `shell`：执行命令而不是打开交互式 shell |
 
-### `pg addon kafka topic create|list|describe|delete`
+### `pg addon kafka topic create|list|describe|delete|retention`
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `NAME` | — | topic 名（`create`/`describe`/`delete` 的位置参数） |
+| `NAME` | — | topic 名（`create`/`describe`/`delete`/`retention` 的位置参数） |
+| `DURATION` | — | 仅 `retention`：新的 `retention.ms`（`30m`、`12h`、`7d`、`4w`、纯毫秒，或 `-1`/`infinite`）；省略则查看当前覆盖项 |
 | `--partitions N` | broker 默认（`1`） | 仅 `create`：分区数 |
 | `--replication-factor N` | `0` = 实例 RF（单机 `1`，集群 `min(3, voters)`） | 仅 `create`：副本数 |
 | `--config K=V` | — | 仅 `create`：topic 配置；可重复 |

@@ -372,6 +372,18 @@ func (m *KafkaManager) ConsumerGroups(k *config.KafkaConfig, args ...string) (st
 	return execIdleKilled(m.podman, 30*time.Second, defaultIdleKill, execArgs...)
 }
 
+// TopicConfigs runs kafka-configs.sh against this node's local broker
+// endpoint.
+func (m *KafkaManager) TopicConfigs(k *config.KafkaConfig, args ...string) (string, error) {
+	execArgs := []string{
+		"exec", k.ContainerName,
+		kafkaBinDir + "/kafka-configs.sh",
+		"--bootstrap-server", kafka.LocalBrokerEndpoint(*k),
+	}
+	execArgs = append(execArgs, args...)
+	return execIdleKilled(m.podman, 30*time.Second, defaultIdleKill, execArgs...)
+}
+
 // ClusterStatus describes the local metadata quorum.
 func (m *KafkaManager) ClusterStatus(k *config.KafkaConfig) (string, error) {
 	return execIdleKilled(m.podman, 30*time.Second, defaultIdleKill,

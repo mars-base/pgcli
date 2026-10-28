@@ -310,11 +310,14 @@ pg addon kafka topic list --name k1
 pg addon kafka topic list --exclude-internal --name k1
 pg addon kafka topic describe demo --name k1
 pg addon kafka topic delete demo --name k1 --yes
+pg addon kafka topic retention demo 7d --name k1   # set retention.ms
+pg addon kafka topic retention demo --name k1      # show current overrides
 ```
 
 - `--partitions` defaults to the broker's `num.partitions` (upstream default `1`). `--replication-factor 0` (the default) means "the instance's RF" — `1` on a single node, `min(3, voters)` in a cluster (so `3` on a three-node cluster).
 - `--config KEY=VALUE` is repeatable and passes topic-level settings through to `kafka-topics.sh`.
 - `delete` asks for confirmation unless `--yes` is given; deleting a topic deletes all of its messages.
+- `retention NAME [DURATION]` shows or sets `retention.ms`. Durations accept `ms`/`s`/`m`/`h`/`d`/`w` suffixes (`30m`, `12h`, `7d`, `4w`), plain milliseconds, or `-1` / `infinite` / `forever` to keep messages indefinitely. Without a duration it prints the topic's dynamic overrides; an empty result means the broker default applies. Retention is time-based and deletes old segments even if they were never consumed.
 - The instance must be running for every topic command.
 
 Produce and consume with the Kafka scripts inside the container (the image keeps
@@ -520,11 +523,12 @@ Boot start re-renders `server.properties` first and is idempotent (`pg start` al
 | `--name NAME` | `kafka` | Instance to operate on |
 | `-- COMMAND...` | `/bin/bash` | `shell` only: run a command instead of an interactive shell |
 
-### `pg addon kafka topic create|list|describe|delete`
+### `pg addon kafka topic create|list|describe|delete|retention`
 
 | Argument/flag | Default | Description |
 |---|---|---|
-| `NAME` | — | Topic name (`create`/`describe`/`delete`, positional) |
+| `NAME` | — | Topic name (`create`/`describe`/`delete`/`retention`, positional) |
+| `DURATION` | — | `retention` only: new `retention.ms` (`30m`, `12h`, `7d`, `4w`, plain milliseconds, or `-1`/`infinite`); omit it to show the current overrides |
 | `--partitions N` | broker default (`1`) | `create` only: partition count |
 | `--replication-factor N` | `0` = instance RF (`1` single-node, `min(3, voters)` in a cluster) | `create` only: replication factor |
 | `--config K=V` | — | `create` only: topic config; repeatable |

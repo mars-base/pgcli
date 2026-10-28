@@ -60,7 +60,7 @@ func TestKafkaCommandTree(t *testing.T) {
 			t.Errorf("addon kafka %s: %v", name, err)
 		}
 	}
-	for _, name := range []string{"create", "list", "describe", "delete"} {
+	for _, name := range []string{"create", "list", "describe", "delete", "retention"} {
 		if _, _, err := addonKafkaCmd.Find([]string{"topic", name}); err != nil {
 			t.Errorf("addon kafka topic %s: %v", name, err)
 		}
@@ -90,6 +90,32 @@ func TestKafkaTopicName(t *testing.T) {
 	for _, name := range []string{"", "..", ".", "has space", "slash/topic", strings.Repeat("a", 250)} {
 		if validKafkaTopicName(name) {
 			t.Errorf("topic %q should be invalid", name)
+		}
+	}
+}
+
+func TestParseKafkaRetention(t *testing.T) {
+	valid := map[string]int64{
+		"604800000": 604800000,
+		"250ms":     250,
+		"30s":       30000,
+		"15m":       900000,
+		"12h":       43200000,
+		"7d":        604800000,
+		"4w":        2419200000,
+		"-1":        -1,
+		"forever":   -1,
+		"INFINITE":  -1,
+	}
+	for value, want := range valid {
+		got, err := parseKafkaRetention(value)
+		if err != nil || got != want {
+			t.Errorf("parseKafkaRetention(%q) = %d, %v; want %d", value, got, err, want)
+		}
+	}
+	for _, value := range []string{"", "-2", "1.5h", "7 days", "d", "9999999999999999999w"} {
+		if _, err := parseKafkaRetention(value); err == nil {
+			t.Errorf("parseKafkaRetention(%q) should fail", value)
 		}
 	}
 }

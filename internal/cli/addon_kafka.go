@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -729,6 +730,42 @@ func requireKafkaRunning(cmd *cobra.Command) (*podman.KafkaManager, config.Kafka
 
 var kafkaTopicNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,249}$`)
 
+var kafkaRetentionRe = regexp.MustCompile(`^([0-9]+)(ms|s|m|h|d|w)?$`)
+
+// parseKafkaRetention converts a human duration to milliseconds for
+// retention.ms. Plain numbers are milliseconds, matching Kafka; -1,
+// "infinite" and "forever" keep messages indefinitely.
+func parseKafkaRetention(value string) (int64, error) {
+	trimmed := strings.TrimSpace(value)
+	switch strings.ToLower(trimmed) {
+	case "-1", "infinite", "forever":
+		return -1, nil
+	}
+	m := kafkaRetentionRe.FindStringSubmatch(trimmed)
+	if m == nil {
+		return 0, fmt.Errorf("invalid retention %q: use ms/s/m/h/d/w (e.g. 30m, 12h, 7d, 4w), plain milliseconds, or -1 for infinite", value)
+	}
+	multiplier := int64(1)
+	switch m[2] {
+	case "", "ms":
+	case "s":
+		multiplier = 1000
+	case "m":
+		multiplier = 60 * 1000
+	case "h":
+		multiplier = 60 * 60 * 1000
+	case "d":
+		multiplier = 24 * 60 * 60 * 1000
+	case "w":
+		multiplier = 7 * 24 * 60 * 60 * 1000
+	}
+	n, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil || n > math.MaxInt64/multiplier {
+		return 0, fmt.Errorf("retention %q is too large (max %d ms)", value, int64(math.MaxInt64))
+	}
+	return n * multiplier, nil
+}
+
 func validKafkaTopicName(topic string) bool {
 	return kafkaTopicNameRe.MatchString(topic) && topic != "." && topic != ".."
 }
@@ -826,6 +863,41 @@ func runAddonKafkaTopicDelete(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runAddonKafkaTopicRetention(cmd *cobra.Command, args []string) error {
+	topic := args[0]
+	if !validKafkaTopicName(topic) {
+		return fmt.Errorf("invalid topic name %q: use letters, digits, '.', '_' and '-' (max 249 chars)", topic)
+	}
+	m, kc, err := requireKafkaRunning(cmd)
+	if err != nil {
+		return err
+	}
+	if len(args) == 1 {
+		out, err := m.TopicConfigs(&kc, "--describe", "--entity-type", "topics", "--entity-name", topic)
+		if err != nil {
+			return fmt.Errorf("reading retention for topic %q: %w (%s)", topic, err, strings.TrimSpace(out))
+		}
+		fmt.Print(out)
+		return nil
+	}
+	retention, err := parseKafkaRetention(args[1])
+	if err != nil {
+		return err
+	}
+	out, err := m.TopicConfigs(&kc,
+		"--alter", "--entity-type", "topics", "--entity-name", topic,
+		"--add-config", "retention.ms="+strconv.FormatInt(retention, 10))
+	if err != nil {
+		return fmt.Errorf("setting retention for topic %q: %w (%s)", topic, err, strings.TrimSpace(out))
+	}
+	if retention == -1 {
+		fmt.Printf("✓ topic %q retention set to infinite (retention.ms=-1)\n", topic)
+		return nil
+	}
+	fmt.Printf("✓ topic %q retention set to %s (retention.ms=%d)\n", topic, args[1], retention)
+	return nil
+}
+
 func runAddonKafkaGroupList(cmd *cobra.Command, _ []string) error {
 	m, kc, err := requireKafkaRunning(cmd)
 	if err != nil {
@@ -905,7 +977,7 @@ still exposes it; internal management commands keep using loopback PLAINTEXT.
 Subcommands:
   status    Show container state, endpoints, node/cluster ids and paths
   shell     Open bash in the container
-  topic     Create, list, describe or delete topics
+  topic     Create, list, describe or delete topics; show or set retention
   group     List consumer groups and show their offsets and lag
   cluster   Show the KRaft metadata quorum status
 
@@ -928,6 +1000,7 @@ Examples:
   pg addon kafka topic list --exclude-internal --name k1
   pg addon kafka topic describe demo --name k1
   pg addon kafka topic delete demo --name k1 --yes
+  pg addon kafka topic retention demo 7d --name k1
   pg addon kafka group list --name k1
   pg addon kafka group describe demo-group --name k1
   pg addon kafka cluster status --name k1
@@ -981,6 +1054,22 @@ var addonKafkaTopicDeleteCmd = &cobra.Command{
 	RunE:  runAddonKafkaTopicDelete,
 }
 
+var addonKafkaTopicRetentionCmd = &cobra.Command{
+	Use:   "retention NAME [DURATION]",
+	Short: "Show or set a topic's message retention time",
+	Long: `Show or set retention.ms for a topic.
+
+With DURATION, the value accepts ms/s/m/h/d/w suffixes (30m, 12h, 7d, 4w),
+plain milliseconds, or -1 / "infinite" / "forever" to keep messages
+indefinitely. Without DURATION, the topic's dynamic config overrides are
+printed; an empty result means the broker default applies.
+
+Retention is time-based: segments older than retention.ms are deleted even
+if they were never consumed.`,
+	Args: cobra.RangeArgs(1, 2),
+	RunE: runAddonKafkaTopicRetention,
+}
+
 var addonKafkaGroupCmd = &cobra.Command{
 	Use:   "group",
 	Short: "List and describe consumer groups",
@@ -1013,13 +1102,14 @@ var addonKafkaClusterStatusCmd = &cobra.Command{
 func init() {
 	addonCmd.AddCommand(addonKafkaCmd)
 	addonKafkaCmd.AddCommand(addonKafkaStatusCmd, addonKafkaShellCmd, addonKafkaTopicCmd, addonKafkaGroupCmd, addonKafkaClusterCmd)
-	addonKafkaTopicCmd.AddCommand(addonKafkaTopicCreateCmd, addonKafkaTopicListCmd, addonKafkaTopicDescribeCmd, addonKafkaTopicDeleteCmd)
+	addonKafkaTopicCmd.AddCommand(addonKafkaTopicCreateCmd, addonKafkaTopicListCmd, addonKafkaTopicDescribeCmd, addonKafkaTopicDeleteCmd, addonKafkaTopicRetentionCmd)
 	addonKafkaGroupCmd.AddCommand(addonKafkaGroupListCmd, addonKafkaGroupDescribeCmd)
 	addonKafkaClusterCmd.AddCommand(addonKafkaClusterStatusCmd)
 
 	for _, sub := range []*cobra.Command{
 		addonKafkaStatusCmd, addonKafkaShellCmd,
 		addonKafkaTopicCreateCmd, addonKafkaTopicListCmd, addonKafkaTopicDescribeCmd, addonKafkaTopicDeleteCmd,
+		addonKafkaTopicRetentionCmd,
 		addonKafkaGroupListCmd, addonKafkaGroupDescribeCmd,
 		addonKafkaClusterStatusCmd,
 	} {
