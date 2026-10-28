@@ -4,8 +4,14 @@
 package kafka
 
 import (
+	"bytes"
+	"crypto/ecdsa"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"fmt"
 	"net"
 	"os"
@@ -13,8 +19,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mars-base/pgcli/internal/config"
+	"github.com/mars-base/pgcli/internal/tlsca"
 )
 
 // Container paths are fixed by the official apache/kafka image. The image's
@@ -28,6 +36,12 @@ const (
 	// dir must be writable by that id.
 	ContainerUID = 1000
 	ContainerGID = 1000
+
+	// TLSDirName sits under the mounted config dir; ServerPEMFile is the
+	// combined key+cert file Kafka's PEM keystore expects.
+	TLSDirName      = "tls"
+	ServerPEMFile   = "server.pem"
+	ContainerTLSDir = ContainerConfigDir + "/" + TLSDirName
 )
 
 // GenerateClusterID returns a random 22-character Kafka KRaft cluster id (16
@@ -69,16 +83,29 @@ func RenderProperties(k config.KafkaConfig) (string, error) {
 	var b strings.Builder
 	writeProperty(&b, "process.roles", "broker,controller")
 	writeProperty(&b, "node.id", strconv.Itoa(k.NodeID))
-	writeProperty(&b, "listeners",
-		"PLAINTEXT://"+net.JoinHostPort(k.Listen, strconv.Itoa(k.BrokerPort))+","+
-			"CONTROLLER://"+net.JoinHostPort(k.Listen, strconv.Itoa(k.ControllerPort)))
-	writeProperty(&b, "advertised.listeners",
-		"PLAINTEXT://"+net.JoinHostPort(k.AdvertiseHost, strconv.Itoa(k.BrokerPort)))
+	plainListener := "PLAINTEXT://" + net.JoinHostPort(k.Listen, strconv.Itoa(k.BrokerPort))
+	plainAdvertised := "PLAINTEXT://" + net.JoinHostPort(k.AdvertiseHost, strconv.Itoa(k.BrokerPort))
+	listeners := plainListener
+	advertised := plainAdvertised
+	protocolMap := "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+	if k.TLS {
+		listeners += ",SSL://" + net.JoinHostPort(k.Listen, strconv.Itoa(k.TLSPort))
+		advertised += ",SSL://" + net.JoinHostPort(k.AdvertiseHost, strconv.Itoa(k.TLSPort))
+		protocolMap += ",SSL:SSL"
+	}
+	listeners += ",CONTROLLER://" + net.JoinHostPort(k.Listen, strconv.Itoa(k.ControllerPort))
+	writeProperty(&b, "listeners", listeners)
+	writeProperty(&b, "advertised.listeners", advertised)
 	writeProperty(&b, "inter.broker.listener.name", "PLAINTEXT")
 	writeProperty(&b, "controller.listener.names", "CONTROLLER")
-	writeProperty(&b, "listener.security.protocol.map", "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT")
+	writeProperty(&b, "listener.security.protocol.map", protocolMap)
 	writeProperty(&b, "controller.quorum.voters", strings.Join(voterStrings, ","))
 	writeProperty(&b, "log.dirs", ContainerDataDir)
+	if k.TLS {
+		writeProperty(&b, "ssl.keystore.type", "PEM")
+		writeProperty(&b, "ssl.keystore.location", ContainerTLSDir+"/"+ServerPEMFile)
+		writeProperty(&b, "ssl.client.auth", "none")
+	}
 	b.WriteString("\n")
 	writeProperty(&b, "offsets.topic.replication.factor", strconv.Itoa(rf))
 	writeProperty(&b, "transaction.state.log.replication.factor", strconv.Itoa(rf))
@@ -138,6 +165,317 @@ func WriteProperties(k config.KafkaConfig) error {
 	}
 	if err := os.Rename(name, k.ConfigPath); err != nil {
 		return fmt.Errorf("installing %s: %w", k.ConfigPath, err)
+	}
+	return nil
+}
+
+// TLSDir returns the host directory holding this instance's TLS material.
+func TLSDir(k config.KafkaConfig) string {
+	return filepath.Join(filepath.Dir(k.ConfigPath), TLSDirName)
+}
+
+// TLSCAPath is the CA certificate clients use to verify the broker.
+func TLSCAPath(k config.KafkaConfig) string {
+	return filepath.Join(TLSDir(k), tlsca.CACertFile)
+}
+
+// CertInfo summarizes the leaf certificate in a bring-your-own TLS PEM.
+type CertInfo struct {
+	Subject    string
+	Issuer     string
+	DNSNames   []string
+	IPs        []string
+	NotBefore  time.Time
+	NotAfter   time.Time
+	SelfSigned bool
+}
+
+// CoversHost reports whether host (an IP or DNS name) is present in the
+// certificate's SANs. Kafka's AdvertiseHost is validated as an IP.
+func (ci *CertInfo) CoversHost(host string) bool {
+	if ip := net.ParseIP(host); ip != nil {
+		for _, s := range ci.IPs {
+			if s == ip.String() {
+				return true
+			}
+		}
+		return false
+	}
+	for _, name := range ci.DNSNames {
+		if strings.EqualFold(name, host) {
+			return true
+		}
+	}
+	return ci.Subject != "" && strings.EqualFold(ci.Subject, host)
+}
+
+// ValidateTLSPEM parses a combined certificate-chain + private-key PEM and
+// checks that it can actually serve Kafka's SSL listener. It is called at
+// install time so a bad file fails before the container is recreated.
+func ValidateTLSPEM(path string) (*CertInfo, error) {
+	_, _, info, err := readTLSPEM(path)
+	return info, err
+}
+
+// EnsureTLSCerts creates or renews the broker certificate and writes the
+// combined key+cert PEM file Kafka's PEM keystore reads. With TLSPEM set the
+// user-supplied file is validated and installed instead; otherwise the CA is
+// pgcli's private root (reused across renewals) and is what clients trust.
+func EnsureTLSCerts(k config.KafkaConfig) (string, error) {
+	if !k.TLS {
+		return "", nil
+	}
+	dir := TLSDir(k)
+	// The config dir is mounted read-only into the container. Kafka runs as
+	// uid 1000, so both it and the TLS dir must be traversable and ca.crt
+	// readable; the private key file itself stays host-only. tlsca.Generate
+	// creates a missing parent with 0700, so widen it explicitly. The combined
+	// server.pem is chowned to the container user by the podman manager.
+	configDir := filepath.Dir(dir)
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		return "", fmt.Errorf("creating config dir %s: %w", configDir, err)
+	}
+	if err := os.Chmod(configDir, 0o755); err != nil {
+		return "", fmt.Errorf("setting config dir mode: %w", err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("creating TLS dir %s: %w", dir, err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		return "", fmt.Errorf("setting TLS dir mode: %w", err)
+	}
+	if k.TLSPEM != "" {
+		if err := installBroughtOwnPEM(dir, k.TLSPEM); err != nil {
+			return "", fmt.Errorf("installing Kafka TLS PEM %s: %w", k.TLSPEM, err)
+		}
+		return "", nil
+	}
+
+	hosts := []string{k.AdvertiseHost}
+	if ip := net.ParseIP(k.Listen); ip != nil && !ip.IsUnspecified() {
+		hosts = append(hosts, k.Listen)
+	}
+	caPath, err := tlsca.Generate(dir, tlsca.LocalHosts(hosts...), 30*24*time.Hour)
+	if err != nil {
+		return "", fmt.Errorf("generating Kafka TLS certificates: %w", err)
+	}
+	if err := os.Chmod(caPath, 0o644); err != nil {
+		return "", fmt.Errorf("setting CA cert mode: %w", err)
+	}
+	if err := writeServerPEM(dir); err != nil {
+		return "", err
+	}
+	return caPath, nil
+}
+
+// installBroughtOwnPEM validates a combined PEM and writes a normalized copy
+// as the Kafka keystore: all certificate blocks in their original order
+// followed by the private key converted to PKCS#8.
+func installBroughtOwnPEM(dir, path string) error {
+	chain, key, _, err := readTLSPEM(path)
+	if err != nil {
+		return err
+	}
+	var b bytes.Buffer
+	b.Write(chain)
+	b.Write(key)
+	return writeFileAtomic(filepath.Join(dir, ServerPEMFile), b.Bytes(), 0o600)
+}
+
+// readTLSPEM splits a combined PEM into a certificate chain and a PKCS#8
+// private key, then proves the pair works for server authentication.
+func readTLSPEM(path string) (chainPEM, keyPEM []byte, info *CertInfo, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	var certs []*pem.Block
+	var keyBlock *pem.Block
+	for rest := data; ; {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		switch {
+		case block.Type == "CERTIFICATE":
+			certs = append(certs, block)
+		case strings.HasSuffix(block.Type, "PRIVATE KEY"):
+			if keyBlock != nil {
+				return nil, nil, nil, fmt.Errorf("%s contains more than one private key", path)
+			}
+			keyBlock = block
+		}
+	}
+	if len(certs) == 0 {
+		return nil, nil, nil, fmt.Errorf("%s has no CERTIFICATE block", path)
+	}
+	if keyBlock == nil {
+		return nil, nil, nil, fmt.Errorf("%s has no private key block", path)
+	}
+	var chain bytes.Buffer
+	for _, cert := range certs {
+		if err := pem.Encode(&chain, cert); err != nil {
+			return nil, nil, nil, fmt.Errorf("encoding certificate chain: %w", err)
+		}
+	}
+	keyPEM, err = normalizeKeyPEM(keyBlock)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	pair, err := tls.X509KeyPair(chain.Bytes(), keyPEM)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("certificate chain and private key do not pair: %w", err)
+	}
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("parsing leaf certificate: %w", err)
+	}
+	if leaf.IsCA {
+		return nil, nil, nil, fmt.Errorf("%s is a CA certificate; use the server leaf whose private key you provided", path)
+	}
+	now := time.Now()
+	if now.Before(leaf.NotBefore) {
+		return nil, nil, nil, fmt.Errorf("certificate is not valid yet (starts %s)", leaf.NotBefore.Format(time.RFC3339))
+	}
+	if now.After(leaf.NotAfter) {
+		return nil, nil, nil, fmt.Errorf("certificate expired %s", leaf.NotAfter.Format(time.RFC3339))
+	}
+	if len(leaf.ExtKeyUsage) > 0 {
+		ok := false
+		for _, usage := range leaf.ExtKeyUsage {
+			if usage == x509.ExtKeyUsageServerAuth || usage == x509.ExtKeyUsageAny {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return nil, nil, nil, fmt.Errorf("certificate is not valid for server authentication (ExtKeyUsage %v)", leaf.ExtKeyUsage)
+		}
+	}
+	ips := make([]string, 0, len(leaf.IPAddresses))
+	for _, ip := range leaf.IPAddresses {
+		ips = append(ips, ip.String())
+	}
+	info = &CertInfo{
+		Subject:    leaf.Subject.CommonName,
+		Issuer:     leaf.Issuer.CommonName,
+		DNSNames:   leaf.DNSNames,
+		IPs:        ips,
+		NotBefore:  leaf.NotBefore,
+		NotAfter:   leaf.NotAfter,
+		SelfSigned: string(leaf.RawSubject) == string(leaf.RawIssuer),
+	}
+	return chain.Bytes(), keyPEM, info, nil
+}
+
+// writeServerPEM concatenates the leaf+CA chain and the private key into the
+// single PEM file the Kafka PEM keystore expects. Kafka only accepts PKCS#8
+// private keys, while tlsca writes PKCS#1 ("RSA PRIVATE KEY"), so the key is
+// re-encoded here.
+func writeServerPEM(dir string) error {
+	cert, err := os.ReadFile(filepath.Join(dir, tlsca.ServerCert))
+	if err != nil {
+		return fmt.Errorf("reading Kafka server certificate: %w", err)
+	}
+	key, err := os.ReadFile(filepath.Join(dir, tlsca.ServerKey))
+	if err != nil {
+		return fmt.Errorf("reading Kafka server key: %w", err)
+	}
+	keyPEM, err := pkcs8PEM(key)
+	if err != nil {
+		return err
+	}
+	var b bytes.Buffer
+	b.Write(cert)
+	if !bytes.HasSuffix(cert, []byte("\n")) {
+		b.WriteByte('\n')
+	}
+	b.Write(keyPEM)
+	return writeFileAtomic(filepath.Join(dir, ServerPEMFile), b.Bytes(), 0o600)
+}
+
+// pkcs8PEM converts a private key PEM to PKCS#8.
+func pkcs8PEM(keyPEM []byte) ([]byte, error) {
+	block, _ := pem.Decode(keyPEM)
+	if block == nil {
+		return nil, fmt.Errorf("decoding Kafka server key: no PEM block found")
+	}
+	return normalizeKeyPEM(block)
+}
+
+// normalizeKeyPEM converts PKCS#1/EC private keys to PKCS#8 and rejects key
+// types or encodings Kafka's PEM keystore cannot load.
+func normalizeKeyPEM(block *pem.Block) ([]byte, error) {
+	switch block.Type {
+	case "ENCRYPTED PRIVATE KEY":
+		return nil, fmt.Errorf("encrypted private keys are not supported; decrypt the key first")
+	case "PRIVATE KEY":
+		key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parsing PKCS#8 private key: %w", err)
+		}
+		if err := checkKafkaKeyType(key); err != nil {
+			return nil, err
+		}
+		return pem.EncodeToMemory(block), nil
+	case "RSA PRIVATE KEY":
+		key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parsing RSA private key: %w", err)
+		}
+		return marshalPKCS8(key)
+	case "EC PRIVATE KEY":
+		key, err := x509.ParseECPrivateKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parsing EC private key: %w", err)
+		}
+		return marshalPKCS8(key)
+	default:
+		return nil, fmt.Errorf("unsupported private key PEM type %q", block.Type)
+	}
+}
+
+func checkKafkaKeyType(key any) error {
+	switch key.(type) {
+	case *rsa.PrivateKey, *ecdsa.PrivateKey:
+		return nil
+	default:
+		return fmt.Errorf("Kafka's PEM keystore supports RSA and EC private keys, got %T", key)
+	}
+}
+
+func marshalPKCS8(key any) ([]byte, error) {
+	if err := checkKafkaKeyType(key); err != nil {
+		return nil, err
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("encoding private key as PKCS#8: %w", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), nil
+}
+
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return fmt.Errorf("creating temp file: %w", err)
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		return fmt.Errorf("setting mode on %s: %w", path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing %s: %w", path, err)
+	}
+	if err := os.Rename(name, path); err != nil {
+		return fmt.Errorf("installing %s: %w", path, err)
 	}
 	return nil
 }
@@ -257,6 +595,15 @@ func LocalControllerEndpoint(k config.KafkaConfig) string {
 // advertised.listeners.
 func AdvertisedBrokerEndpoint(k config.KafkaConfig) string {
 	return net.JoinHostPort(k.AdvertiseHost, strconv.Itoa(k.BrokerPort))
+}
+
+// AdvertisedTLSEndpoint is the SSL endpoint clients should use, as rendered in
+// advertised.listeners.
+func AdvertisedTLSEndpoint(k config.KafkaConfig) string {
+	if k.TLSPort == 0 {
+		return ""
+	}
+	return net.JoinHostPort(k.AdvertiseHost, strconv.Itoa(k.TLSPort))
 }
 
 func localHost(listen string) string {

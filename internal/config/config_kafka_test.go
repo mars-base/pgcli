@@ -222,6 +222,45 @@ func TestKafkaValidate(t *testing.T) {
 			},
 		},
 		{
+			name: "valid TLS",
+			mutate: func(c *Config) {
+				kc := c.Addons.Kafka["kafka"]
+				kc.TLS = true
+				kc.TLSPort = 39093
+				c.Addons.Kafka["kafka"] = kc
+			},
+		},
+		{
+			name: "valid BYO TLS PEM",
+			mutate: func(c *Config) {
+				kc := c.Addons.Kafka["kafka"]
+				kc.TLS = true
+				kc.TLSPort = 39093
+				kc.TLSPEM = "/etc/pgcli/kafka/kafka-server.pem"
+				c.Addons.Kafka["kafka"] = kc
+			},
+		},
+		{
+			name: "tls_pem without tls",
+			mutate: func(c *Config) {
+				kc := c.Addons.Kafka["kafka"]
+				kc.TLSPEM = "/etc/pgcli/kafka/kafka-server.pem"
+				c.Addons.Kafka["kafka"] = kc
+			},
+			wantSub: "requires tls: true",
+		},
+		{
+			name: "tls_pem relative path",
+			mutate: func(c *Config) {
+				kc := c.Addons.Kafka["kafka"]
+				kc.TLS = true
+				kc.TLSPort = 39093
+				kc.TLSPEM = "kafka-server.pem"
+				c.Addons.Kafka["kafka"] = kc
+			},
+			wantSub: "must be an absolute path",
+		},
+		{
 			name: "invalid name",
 			mutate: func(c *Config) {
 				kc := c.Addons.Kafka["kafka"]
@@ -356,6 +395,32 @@ func TestKafkaValidate(t *testing.T) {
 			wantSub: "already used",
 		},
 		{
+			name: "tls port equals broker port",
+			mutate: func(c *Config) {
+				kc := c.Addons.Kafka["kafka"]
+				kc.TLS = true
+				kc.TLSPort = kc.BrokerPort
+				c.Addons.Kafka["kafka"] = kc
+			},
+			wantSub: "must differ from broker_port",
+		},
+		{
+			name: "duplicate tls port across instances",
+			mutate: func(c *Config) {
+				first := c.Addons.Kafka["kafka"]
+				first.TLS = true
+				if first.TLSPort == 0 {
+					first.TLSPort = first.BrokerPort + 100
+				}
+				c.Addons.Kafka["kafka"] = first
+				second := first
+				second.Name = "second"
+				second.ContainerName = "pgcli-kafka-second"
+				c.Addons.Kafka["second"] = second
+			},
+			wantSub: "already used",
+		},
+		{
 			name: "port out of range",
 			mutate: func(c *Config) {
 				kc := c.Addons.Kafka["kafka"]
@@ -405,6 +470,8 @@ func TestValidateKafkaSettings(t *testing.T) {
 	}{
 		{map[string]string{"not a key": "1"}, "must contain only"},
 		{map[string]string{"listeners": "PLAINTEXT://0.0.0.0:9092"}, "managed by pgcli"},
+		{map[string]string{"ssl.keystore.location": "/tmp/server.pem"}, "managed by pgcli"},
+		{map[string]string{"ssl.client.auth": "required"}, "managed by pgcli"},
 		{map[string]string{"log.dirs": "/tmp"}, "managed by pgcli"},
 		{map[string]string{"zookeeper.connect": "localhost:2181"}, "managed by pgcli"},
 		{map[string]string{"default.replication.factor": "1"}, "managed by pgcli"},
@@ -501,5 +568,72 @@ func TestKafkaReplicationFactorAndMinISR(t *testing.T) {
 		if got := KafkaMinISR(rf); got != want {
 			t.Errorf("KafkaMinISR(%d) = %d, want %d", rf, got, want)
 		}
+	}
+}
+
+func TestKafkaTLSPorts(t *testing.T) {
+	cfg := Default()
+	cfg.KafkaBrokerStartPort = 29092
+	cfg.KafkaControllerStartPort = 29093
+	cfg.KafkaTLSStartPort = 29094
+	cfg.Addons.Kafka = map[string]KafkaConfig{
+		"a": {TLS: true},
+		"b": {TLS: true},
+		"c": {},
+	}
+	cfg.ApplyDefaults()
+
+	a := cfg.Addons.Kafka["a"]
+	b := cfg.Addons.Kafka["b"]
+	c := cfg.Addons.Kafka["c"]
+	if a.TLSPort < cfg.KafkaTLSStartPort || b.TLSPort < cfg.KafkaTLSStartPort {
+		t.Errorf("TLS ports = %d/%d, want >= %d", a.TLSPort, b.TLSPort, cfg.KafkaTLSStartPort)
+	}
+	if c.TLSPort != 0 {
+		t.Errorf("TLS-disabled instance has TLSPort %d, want 0", c.TLSPort)
+	}
+	seen := map[int]string{}
+	for name, kc := range cfg.Addons.Kafka {
+		for field, port := range map[string]int{"broker": kc.BrokerPort, "controller": kc.ControllerPort, "tls": kc.TLSPort} {
+			if port == 0 {
+				continue
+			}
+			if prev, dup := seen[port]; dup {
+				t.Errorf("port %d assigned to both %s and %s.%s", port, prev, name, field)
+			}
+			seen[port] = name + "." + field
+		}
+		kc.ClusterID = DeriveKafkaClusterID("tls-" + name)
+		cfg.Addons.Kafka[name] = kc
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+}
+
+func TestKafkaTLSPortClearedWhenDisabled(t *testing.T) {
+	cfg := Default()
+	cfg.Addons.Kafka = map[string]KafkaConfig{
+		"k1": {TLSPort: 39093},
+	}
+	cfg.ApplyDefaults()
+	if got := cfg.Addons.Kafka["k1"].TLSPort; got != 0 {
+		t.Errorf("TLSPort = %d without TLS, want 0", got)
+	}
+}
+
+func TestKafkaTLSPortAvoidsAlertmanager(t *testing.T) {
+	cfg := Default()
+	cfg.KafkaBrokerStartPort = 29092
+	cfg.KafkaControllerStartPort = 29093
+	cfg.Addons.Alertmanager = map[string]AlertmanagerConfig{
+		"am": {HostPort: 9093},
+	}
+	cfg.Addons.Kafka = map[string]KafkaConfig{
+		"k1": {TLS: true},
+	}
+	cfg.ApplyDefaults()
+	if got := cfg.Addons.Kafka["k1"].TLSPort; got == 9093 {
+		t.Error("Kafka TLS port 9093 collides with an explicit Alertmanager port")
 	}
 }

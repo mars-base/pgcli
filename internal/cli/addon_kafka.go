@@ -38,6 +38,14 @@ func kafkaFlagName(cmd *cobra.Command) string {
 	return name
 }
 
+// kafkaTLSSource describes where the SSL listener's key material came from.
+func kafkaTLSSource(kc config.KafkaConfig) string {
+	if kc.TLSPEM != "" {
+		return "cert " + kc.TLSPEM
+	}
+	return "CA " + kafka.TLSCAPath(kc)
+}
+
 // parseKafkaConfigOptions parses repeatable KEY=VALUE overrides for
 // server.properties.
 func parseKafkaConfigOptions(options []string) (map[string]string, error) {
@@ -83,8 +91,12 @@ func runAddonInstallKafka(cmd *cobra.Command) error {
 				state = "running"
 			}
 		}
-		fmt.Printf("✓ kafka %q already installed (%s, broker %s, controller %s, node %d) — re-install with --force to rewrite the config and recreate the container\n",
-			name, state, kafka.AdvertisedBrokerEndpoint(kc), kafka.LocalControllerEndpoint(kc), kc.NodeID)
+		tlsInfo := ""
+		if kc.TLS {
+			tlsInfo = fmt.Sprintf(", tls %s", kafka.AdvertisedTLSEndpoint(kc))
+		}
+		fmt.Printf("✓ kafka %q already installed (%s, broker %s%s, controller %s, node %d) — re-install with --force to rewrite the config and recreate the container\n",
+			name, state, kafka.AdvertisedBrokerEndpoint(kc), tlsInfo, kafka.LocalControllerEndpoint(kc), kc.NodeID)
 		return nil
 	}
 
@@ -122,6 +134,34 @@ func runAddonInstallKafka(cmd *cobra.Command) error {
 	}
 	if fs.Changed("controller-port") {
 		kc.ControllerPort, _ = fs.GetInt("controller-port")
+	}
+	if fs.Changed("tls") {
+		kc.TLS, _ = fs.GetBool("tls")
+	}
+	if fs.Changed("tls-pem") {
+		pemPath, _ := fs.GetString("tls-pem")
+		if pemPath == "" {
+			kc.TLSPEM = ""
+		} else {
+			if fs.Changed("tls") && !kc.TLS {
+				return fmt.Errorf("--tls-pem cannot be combined with --tls=false")
+			}
+			abs, err := filepath.Abs(pemPath)
+			if err != nil {
+				return fmt.Errorf("resolving --tls-pem: %w", err)
+			}
+			kc.TLSPEM = abs
+			kc.TLS = true
+		}
+	}
+	if !kc.TLS {
+		kc.TLSPEM = ""
+	}
+	if fs.Changed("tls-port") {
+		kc.TLSPort, _ = fs.GetInt("tls-port")
+	}
+	if fs.Changed("tls-port") && !kc.TLS {
+		return fmt.Errorf("--tls-port requires --tls")
 	}
 	if v, _ := fs.GetString("data-dir"); v != "" {
 		kc.DataDir = v
@@ -166,6 +206,15 @@ func runAddonInstallKafka(cmd *cobra.Command) error {
 	c.Addons.Kafka[name] = kc
 	c.ApplyDefaults()
 	kc = c.Addons.Kafka[name]
+	if kc.TLS && kc.TLSPEM != "" {
+		info, err := kafka.ValidateTLSPEM(kc.TLSPEM)
+		if err != nil {
+			return fmt.Errorf("--tls-pem: %w", err)
+		}
+		if !info.CoversHost(kc.AdvertiseHost) {
+			fmt.Printf("  [!] TLS certificate does not cover advertise host %q; clients verifying the hostname will fail\n", kc.AdvertiseHost)
+		}
+	}
 	if err := c.Validate(); err != nil {
 		c.Addons.Kafka[name] = kc
 		return err
@@ -196,6 +245,9 @@ func runAddonInstallKafka(cmd *cobra.Command) error {
 	fmt.Printf("  Image:       %s\n", kc.ImageTag)
 	fmt.Printf("  Container:   %s\n", kc.ContainerName)
 	fmt.Printf("  Broker:      %s\n", kafka.AdvertisedBrokerEndpoint(kc))
+	if kc.TLS {
+		fmt.Printf("  TLS:         %s (%s)\n", kafka.AdvertisedTLSEndpoint(kc), kafkaTLSSource(kc))
+	}
 	fmt.Printf("  Controller:  %s\n", kafka.LocalControllerEndpoint(kc))
 	fmt.Printf("  Node ID:     %d\n", kc.NodeID)
 	fmt.Printf("  Cluster ID:  %s\n", kc.ClusterID)
@@ -270,6 +322,9 @@ func runAddonStartKafka(cmd *cobra.Command) error {
 		return nil
 	}
 	fmt.Printf("✓ kafka %q started (broker %s)\n", name, kafka.AdvertisedBrokerEndpoint(kc))
+	if kc.TLS {
+		fmt.Printf("  TLS: %s (%s)\n", kafka.AdvertisedTLSEndpoint(kc), kafkaTLSSource(kc))
+	}
 	return nil
 }
 
@@ -320,6 +375,14 @@ func runAddonKafkaStatus(cmd *cobra.Command) error {
 	fmt.Printf("  Image:       %s\n", kc.ImageTag)
 	fmt.Printf("  Container:   %s\n", kc.ContainerName)
 	fmt.Printf("  Broker:      %s\n", kafka.AdvertisedBrokerEndpoint(kc))
+	if kc.TLS {
+		fmt.Printf("  TLS:         %s\n", kafka.AdvertisedTLSEndpoint(kc))
+		if kc.TLSPEM != "" {
+			fmt.Printf("  TLS cert:    %s (bring your own)\n", kc.TLSPEM)
+		} else {
+			fmt.Printf("  TLS CA:      %s\n", kafka.TLSCAPath(kc))
+		}
+	}
 	fmt.Printf("  Controller:  %s\n", kafka.LocalControllerEndpoint(kc))
 	fmt.Printf("  Listen:      %s\n", kc.Listen)
 	fmt.Printf("  Node ID:     %d\n", kc.NodeID)
@@ -488,6 +551,19 @@ server.properties, bind-mounts the data dir and starts the container on the
 host network. Single-node installs listen on 127.0.0.1 by default and have no
 authentication — keep them on a trusted network or behind a firewall.
 
+TLS is opt-in: --tls adds an SSL listener (default port 9093) next to the
+plaintext broker and generates a certificate from pgcli's self-signed CA.
+--tls-pem PATH installs your own combined PEM instead: all certificate blocks
+(leaf first) followed by the matching private key in PKCS#8, PKCS#1 or SEC1
+form. It implies --tls. For example, using a certificate from pg cert:
+  pg cert --host 127.0.0.1,10.0.0.5 --cert-file kafka.crt --key-file kafka.key
+  cat kafka.crt kafka.key > kafka-server.pem
+  pg addon install kafka --tls-pem kafka-server.pem
+A self-signed certificate is only trusted by clients that are configured with
+the same certificate as their CA; include the advertise host in --host.
+The plaintext listener stays enabled for compatibility, so a wildcard --listen
+still exposes it; internal management commands keep using loopback PLAINTEXT.
+
 Subcommands:
   status    Show container state, endpoints, node/cluster ids and paths
   shell     Open bash in the container
@@ -497,6 +573,8 @@ Subcommands:
 Examples:
   pg addon install kafka
   pg addon install kafka --name k1 --broker-port 9092 --controller-port 19093
+  pg addon install kafka --name k1 --tls --tls-port 9093
+  pg addon install kafka --name k1 --tls-pem kafka-server.pem
   pg addon kafka topic create demo --partitions 3 --name k1
   pg addon kafka topic list --exclude-internal --name k1
   pg addon kafka topic describe demo --name k1
@@ -585,5 +663,7 @@ func init() {
 
 	addonInstallCmd.Flags().Int("broker-port", 0, "Kafka broker host port (0=auto-assign from kafka_broker_start_port, default 9092)")
 	addonInstallCmd.Flags().Int("controller-port", 0, "Kafka KRaft controller host port (0=auto-assign from kafka_controller_start_port, default 19093)")
+	addonInstallCmd.Flags().Int("tls-port", 0, "Kafka SSL (TLS) listener host port (0=auto-assign from kafka_tls_start_port, default 9093; requires --tls)")
+	addonInstallCmd.Flags().String("tls-pem", "", "combined PEM (certificate chain + private key) for the Kafka TLS listener; implies --tls and replaces the generated certificate (pass an empty value with --tls to fall back to the generated certificate)")
 	addonInstallCmd.Flags().String("cluster-id", "", "Kafka KRaft cluster id to adopt (default: adopt meta.properties, else generate a random 22-char id)")
 }

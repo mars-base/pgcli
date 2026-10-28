@@ -86,6 +86,9 @@ func TestKafkaInstallFlagsRegistered(t *testing.T) {
 	want := map[string]string{
 		"broker-port":     "int",
 		"controller-port": "int",
+		"tls":             "bool",
+		"tls-port":        "int",
+		"tls-pem":         "string",
 		"cluster-id":      "string",
 		"advertise-host":  "string",
 		"listen":          "string",
@@ -101,6 +104,9 @@ func TestKafkaInstallFlagsRegistered(t *testing.T) {
 		if f.Value.Type() != typ {
 			t.Errorf("--%s is %s, want %s", name, f.Value.Type(), typ)
 		}
+	}
+	if f := addonInstallCmd.Flags().Lookup("tls"); !strings.Contains(f.Usage, "kafka") {
+		t.Errorf("--tls help does not mention kafka: %q", f.Usage)
 	}
 }
 
@@ -125,6 +131,9 @@ func kafkaInstallCmd() *cobra.Command {
 	cmd.Flags().String("advertise-host", "", "")
 	cmd.Flags().Int("broker-port", 0, "")
 	cmd.Flags().Int("controller-port", 0, "")
+	cmd.Flags().Bool("tls", false, "")
+	cmd.Flags().Int("tls-port", 0, "")
+	cmd.Flags().String("tls-pem", "", "")
 	cmd.Flags().String("cluster-id", "", "")
 	cmd.Flags().StringArray("config-option", nil, "")
 	cmd.Flags().String("cluster", "", "")
@@ -213,5 +222,62 @@ func TestKafkaInstallIdempotentKeepsConfig(t *testing.T) {
 	}
 	if kc.ContainerName != seed.ContainerName || kc.BrokerPort != seed.BrokerPort || kc.ControllerPort != seed.ControllerPort {
 		t.Errorf("idempotent install rewrote the instance: got %+v, want %+v", kc, seed)
+	}
+}
+
+func TestKafkaTLSPortRequiresTLS(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pg.yaml")
+	cfg := config.Default()
+	cfg.BaseDir = t.TempDir()
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	oldPath := cfgPath
+	cfgPath = path
+	t.Cleanup(func() { cfgPath = oldPath })
+
+	cmd := kafkaInstallCmd()
+	if err := cmd.Flags().Set("tls-port", "9093"); err != nil {
+		t.Fatal(err)
+	}
+	err := runAddonInstallKafka(cmd)
+	if err == nil || !strings.Contains(err.Error(), "--tls-port requires --tls") {
+		t.Fatalf("want --tls-port/--tls error, got %v", err)
+	}
+}
+
+func TestKafkaTLSPEMFlag(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pg.yaml")
+	cfg := config.Default()
+	cfg.BaseDir = t.TempDir()
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	oldPath := cfgPath
+	cfgPath = path
+	t.Cleanup(func() { cfgPath = oldPath })
+
+	// A non-empty PEM cannot be combined with an explicit --tls=false.
+	cmd := kafkaInstallCmd()
+	if err := cmd.Flags().Set("tls", "false"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("tls-pem", "/tmp/kafka-server.pem"); err != nil {
+		t.Fatal(err)
+	}
+	err := runAddonInstallKafka(cmd)
+	if err == nil || !strings.Contains(err.Error(), "cannot be combined with --tls=false") {
+		t.Fatalf("conflict error = %v", err)
+	}
+
+	// A missing PEM is reported by validation, proving --tls-pem implies TLS
+	// without the caller also passing --tls.
+	cmd = kafkaInstallCmd()
+	if err := cmd.Flags().Set("tls-pem", filepath.Join(t.TempDir(), "missing.pem")); err != nil {
+		t.Fatal(err)
+	}
+	err = runAddonInstallKafka(cmd)
+	if err == nil || !strings.Contains(err.Error(), "--tls-pem: reading") {
+		t.Fatalf("missing PEM error = %v", err)
 	}
 }

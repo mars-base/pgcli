@@ -59,6 +59,7 @@ type Config struct {
 	ClickHouseTCPStartPort   int                       `yaml:"clickhouse_tcp_start_port,omitempty"`   // starting ClickHouse native TCP host port, default 9000 (shared with the S3 API pool)
 	KafkaBrokerStartPort     int                       `yaml:"kafka_broker_start_port,omitempty"`     // starting Kafka broker host port, default 9092
 	KafkaControllerStartPort int                       `yaml:"kafka_controller_start_port,omitempty"` // starting Kafka controller host port, default 19093 (9093 belongs to the Alertmanager pool)
+	KafkaTLSStartPort        int                       `yaml:"kafka_tls_start_port,omitempty"`        // starting Kafka SSL listener host port, default 9093
 	Postgres                 PostgresConfig            `yaml:"postgres"`
 	Podman                   PodmanConfig              `yaml:"podman"`
 	PITR                     PITRConfig                `yaml:"pitr"`
@@ -1508,6 +1509,15 @@ type KafkaConfig struct {
 	BrokerPort     int    `yaml:"broker_port,omitempty"`     // default pool base 9092
 	ControllerPort int    `yaml:"controller_port,omitempty"` // default pool base 19093
 
+	// TLS adds an SSL:// listener on TLSPort next to the plaintext broker.
+	// The plaintext listener stays enabled for compatibility; internal admin
+	// commands keep using it over loopback.
+	TLS     bool `yaml:"tls,omitempty"`
+	TLSPort int  `yaml:"tls_port,omitempty"` // default pool base 9093
+	// TLSPEM is a bring-your-own combined PEM (certificate chain + private
+	// key, e.g. from `pg cert`) used instead of pgcli's generated CA/leaf.
+	TLSPEM string `yaml:"tls_pem,omitempty"`
+
 	NodeID    int    `yaml:"node_id,omitempty"`    // KRaft node.id, default 1
 	ClusterID string `yaml:"cluster_id,omitempty"` // KRaft cluster.id; persisted
 
@@ -1696,6 +1706,13 @@ var kafkaManagedSettings = map[string]bool{
 	"share.coordinator.state.topic.min.isr":            true,
 	"default.replication.factor":                       true,
 	"min.insync.replicas":                              true,
+	"ssl.keystore.type":                                true,
+	"ssl.keystore.location":                            true,
+	"ssl.keystore.password":                            true,
+	"ssl.keystore.key":                                 true,
+	"ssl.keystore.certificate.chain":                   true,
+	"ssl.key.password":                                 true,
+	"ssl.client.auth":                                  true,
 }
 
 // ValidateKafkaSettings checks user-supplied server.properties overrides.
@@ -3108,6 +3125,7 @@ func Default() *Config {
 		ClickHouseTCPStartPort:   9000,
 		KafkaBrokerStartPort:     9092,
 		KafkaControllerStartPort: 19093,
+		KafkaTLSStartPort:        9093,
 		Postgres: PostgresConfig{
 			Host:     "127.0.0.1",
 			Port:     5432,
@@ -3328,6 +3346,7 @@ type displayConfig struct {
 	ClickHouseTCPStartPort   int                       `yaml:"clickhouse_tcp_start_port,omitempty"`
 	KafkaBrokerStartPort     int                       `yaml:"kafka_broker_start_port,omitempty"`
 	KafkaControllerStartPort int                       `yaml:"kafka_controller_start_port,omitempty"`
+	KafkaTLSStartPort        int                       `yaml:"kafka_tls_start_port,omitempty"`
 	Logging                  LoggingConfig             `yaml:"logging"`
 	Backup                   BackupConfig              `yaml:"backup"`
 	Pigsty                   PigstyConfig              `yaml:"pigsty"`
@@ -3373,6 +3392,7 @@ func (c *Config) Display() displayConfig {
 		ClickHouseTCPStartPort:   c.ClickHouseTCPStartPort,
 		KafkaBrokerStartPort:     c.KafkaBrokerStartPort,
 		KafkaControllerStartPort: c.KafkaControllerStartPort,
+		KafkaTLSStartPort:        c.KafkaTLSStartPort,
 		Logging:                  c.Logging,
 		Backup:                   c.Backup,
 		Pigsty:                   c.Pigsty,
@@ -3698,7 +3718,7 @@ func (c *Config) Validate() error {
 	}
 	// Kafka instances: names are directory keys, paths absolute, the KRaft
 	// cluster id is valid, and broker/controller ports are unique per host.
-	kafkaPorts := make(map[int]string, 2*len(c.Addons.Kafka))
+	kafkaPorts := make(map[int]string, 3*len(c.Addons.Kafka))
 	for name, kc := range c.Addons.Kafka {
 		if !ValidKafkaName(kc.Name) {
 			return fmt.Errorf("addons.kafka.%s.name %q must match [A-Za-z0-9][A-Za-z0-9_-]{0,47}", name, kc.Name)
@@ -3736,6 +3756,14 @@ func (c *Config) Validate() error {
 		if !ValidKafkaClusterID(kc.ClusterID) {
 			return fmt.Errorf("addons.kafka.%s.cluster_id must be a 22-character base64url Kafka cluster ID", name)
 		}
+		if kc.TLSPEM != "" {
+			if !kc.TLS {
+				return fmt.Errorf("addons.kafka.%s.tls_pem requires tls: true", name)
+			}
+			if !filepath.IsAbs(kc.TLSPEM) {
+				return fmt.Errorf("addons.kafka.%s.tls_pem must be an absolute path, got %q", name, kc.TLSPEM)
+			}
+		}
 		if err := ValidateKafkaSettings(kc.Settings); err != nil {
 			return fmt.Errorf("addons.kafka.%s.settings: %w", name, err)
 		}
@@ -3765,13 +3793,23 @@ func (c *Config) Validate() error {
 		if kc.BrokerPort == kc.ControllerPort {
 			return fmt.Errorf("addons.kafka.%s.broker_port and controller_port must differ, got %d", name, kc.BrokerPort)
 		}
-		for _, field := range []struct {
+		portFields := []struct {
 			name  string
 			value int
 		}{
 			{"broker_port", kc.BrokerPort},
 			{"controller_port", kc.ControllerPort},
-		} {
+		}
+		if kc.TLS {
+			portFields = append(portFields, struct {
+				name  string
+				value int
+			}{"tls_port", kc.TLSPort})
+			if kc.TLSPort == kc.BrokerPort || kc.TLSPort == kc.ControllerPort {
+				return fmt.Errorf("addons.kafka.%s.tls_port must differ from broker_port and controller_port, got %d", name, kc.TLSPort)
+			}
+		}
+		for _, field := range portFields {
 			if field.value < 1 || field.value > 65535 {
 				return fmt.Errorf("addons.kafka.%s.%s must be between 1 and 65535, got %d", name, field.name, field.value)
 			}
@@ -3935,6 +3973,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.KafkaControllerStartPort == 0 {
 		c.KafkaControllerStartPort = d.KafkaControllerStartPort
+	}
+	if c.KafkaTLSStartPort == 0 {
+		c.KafkaTLSStartPort = d.KafkaTLSStartPort
 	}
 
 	// Postgres
@@ -5061,6 +5102,9 @@ func (c *Config) ApplyDefaults() {
 		if addon.NodeID == 0 && addon.Cluster == "" {
 			addon.NodeID = 1
 		}
+		if !addon.TLS {
+			addon.TLSPort = 0
+		}
 		if addon.Cluster != "" && addon.ClusterID == "" {
 			addon.ClusterID = DeriveKafkaClusterID(addon.Cluster)
 		}
@@ -5507,7 +5551,7 @@ func (c *Config) autoAssignPorts() {
 			}
 		}
 		for _, addon := range c.Addons.Kafka {
-			for _, p := range []int{addon.BrokerPort, addon.ControllerPort} {
+			for _, p := range []int{addon.BrokerPort, addon.ControllerPort, addon.TLSPort} {
 				if p != 0 {
 					assigned[p] = true
 				}
@@ -5553,9 +5597,10 @@ func (c *Config) autoAssignPorts() {
 	{
 		brokerBase := c.KafkaBrokerStartPort
 		controllerBase := c.KafkaControllerStartPort
+		tlsBase := c.KafkaTLSStartPort
 		assigned := map[int]bool{}
 		for _, addon := range c.Addons.Kafka {
-			for _, p := range []int{addon.BrokerPort, addon.ControllerPort} {
+			for _, p := range []int{addon.BrokerPort, addon.ControllerPort, addon.TLSPort} {
 				if p != 0 {
 					assigned[p] = true
 				}
@@ -5606,8 +5651,16 @@ func (c *Config) autoAssignPorts() {
 				assigned[addon.HostPort] = true
 			}
 		}
+		// Alertmanager's default pool base is 9093, the same base as the Kafka
+		// TLS pool; respect explicitly pinned Alertmanager ports.
+		for _, addon := range c.Addons.Alertmanager {
+			if addon.HostPort != 0 {
+				assigned[addon.HostPort] = true
+			}
+		}
 		nextBroker := brokerBase
 		nextController := controllerBase
+		nextTLS := tlsBase
 		nextFree := func(next *int) int {
 			for (usedPorts != nil && usedPorts[*next]) || assigned[*next] {
 				*next++
@@ -5633,6 +5686,11 @@ func (c *Config) autoAssignPorts() {
 				addon.ControllerPort = nextFree(&nextController)
 			} else if addon.ControllerPort >= nextController {
 				nextController = addon.ControllerPort + 1
+			}
+			if addon.TLS && addon.TLSPort == 0 && tlsBase > 0 {
+				addon.TLSPort = nextFree(&nextTLS)
+			} else if addon.TLSPort >= nextTLS {
+				nextTLS = addon.TLSPort + 1
 			}
 			c.Addons.Kafka[name] = addon
 		}
@@ -5676,7 +5734,7 @@ func (c *Config) autoAssignPorts() {
 		}
 	}
 	for _, addon := range c.Addons.Kafka {
-		for _, p := range []int{addon.BrokerPort, addon.ControllerPort} {
+		for _, p := range []int{addon.BrokerPort, addon.ControllerPort, addon.TLSPort} {
 			if p != 0 {
 				assignedMinio[p] = true
 			}
@@ -5917,7 +5975,7 @@ func (c *Config) autoAssignPorts() {
 			}
 		}
 		for _, addon := range c.Addons.Kafka {
-			for _, p := range []int{addon.BrokerPort, addon.ControllerPort} {
+			for _, p := range []int{addon.BrokerPort, addon.ControllerPort, addon.TLSPort} {
 				if p != 0 {
 					assignedPrometheus[p] = true
 				}
@@ -6206,7 +6264,7 @@ func (c *Config) autoAssignPorts() {
 			}
 		}
 		for _, addon := range c.Addons.Kafka {
-			for _, p := range []int{addon.BrokerPort, addon.ControllerPort} {
+			for _, p := range []int{addon.BrokerPort, addon.ControllerPort, addon.TLSPort} {
 				if p != 0 {
 					assignedAlertmanager[p] = true
 				}

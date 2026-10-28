@@ -1,13 +1,92 @@
 package kafka
 
 import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mars-base/pgcli/internal/config"
 )
+
+// testPEM returns a combined certificate+key PEM. With pkcs1 the key is
+// written as "RSA PRIVATE KEY" (the format tlsca uses), otherwise as an EC
+// PKCS#8 "PRIVATE KEY" (the format pg cert uses).
+func testPEM(t *testing.T, notBefore, notAfter time.Time, isCA, pkcs1 bool) []byte {
+	t.Helper()
+	var priv any
+	var pub any
+	if pkcs1 {
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatal(err)
+		}
+		priv, pub = key, &key.PublicKey
+	} else {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		priv, pub = key, &key.PublicKey
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "kafka.test"},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		DNSNames:              []string{"kafka.test"},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  isCA,
+	}
+	if isCA {
+		tmpl.KeyUsage |= x509.KeyUsageCertSign
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b bytes.Buffer
+	if err := pem.Encode(&b, &pem.Block{Type: "CERTIFICATE", Bytes: der}); err != nil {
+		t.Fatal(err)
+	}
+	if pkcs1 {
+		if err := pem.Encode(&b, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv.(*rsa.PrivateKey))}); err != nil {
+			t.Fatal(err)
+		}
+		return b.Bytes()
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pem.Encode(&b, &pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}); err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
+}
+
+func writePEM(t *testing.T, dir, name string, body []byte) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
 
 func testKafkaConfig(t *testing.T) config.KafkaConfig {
 	t.Helper()
@@ -314,5 +393,254 @@ func TestEndpoints(t *testing.T) {
 	kc.AdvertiseHost = "fd00::5"
 	if got := AdvertisedBrokerEndpoint(kc); got != "[fd00::5]:9092" {
 		t.Errorf("IPv6 AdvertisedBrokerEndpoint = %q", got)
+	}
+}
+
+func TestRenderPropertiesTLS(t *testing.T) {
+	kc := testKafkaConfig(t)
+	kc.TLS = true
+	kc.TLSPort = 9093
+
+	got, err := RenderProperties(kc)
+	if err != nil {
+		t.Fatalf("RenderProperties: %v", err)
+	}
+	for _, want := range []string{
+		"listeners=PLAINTEXT://127.0.0.1:9092,SSL://127.0.0.1:9093,CONTROLLER://127.0.0.1:19093\n",
+		"advertised.listeners=PLAINTEXT://127.0.0.1:9092,SSL://127.0.0.1:9093\n",
+		"listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SSL:SSL\n",
+		"ssl.keystore.type=PEM\n",
+		"ssl.keystore.location=/mnt/shared/config/tls/server.pem\n",
+		"ssl.client.auth=none\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("RenderProperties missing %q:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"ssl.keystore.password", "ssl.key.password", "SASL"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("TLS properties unexpectedly contain %q:\n%s", unwanted, got)
+		}
+	}
+}
+
+func TestEnsureTLSCerts(t *testing.T) {
+	kc := testKafkaConfig(t)
+	kc.TLS = true
+	kc.TLSPort = 9093
+
+	caPath, err := EnsureTLSCerts(kc)
+	if err != nil {
+		t.Fatalf("EnsureTLSCerts: %v", err)
+	}
+	if caPath != TLSCAPath(kc) {
+		t.Errorf("CA path = %q, want %q", caPath, TLSCAPath(kc))
+	}
+	dir := TLSDir(kc)
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat TLS dir: %v", err)
+	}
+	if perm := dirInfo.Mode().Perm(); perm != 0o755 {
+		t.Errorf("TLS dir mode = %o, want 755", perm)
+	}
+	configInfo, err := os.Stat(filepath.Dir(dir))
+	if err != nil {
+		t.Fatalf("stat config dir: %v", err)
+	}
+	if perm := configInfo.Mode().Perm(); perm != 0o755 {
+		t.Errorf("config dir mode = %o, want 755", perm)
+	}
+	caInfo, err := os.Stat(caPath)
+	if err != nil {
+		t.Fatalf("stat CA: %v", err)
+	}
+	if perm := caInfo.Mode().Perm(); perm != 0o644 {
+		t.Errorf("CA mode = %o, want 644", perm)
+	}
+	serverPEM := filepath.Join(dir, ServerPEMFile)
+	pemInfo, err := os.Stat(serverPEM)
+	if err != nil {
+		t.Fatalf("stat server.pem: %v", err)
+	}
+	if perm := pemInfo.Mode().Perm(); perm != 0o600 {
+		t.Errorf("server.pem mode = %o, want 600", perm)
+	}
+	body, err := os.ReadFile(serverPEM)
+	if err != nil {
+		t.Fatalf("read server.pem: %v", err)
+	}
+	if !strings.Contains(string(body), "-----BEGIN CERTIFICATE-----") {
+		t.Errorf("server.pem is missing the certificate:\n%s", body)
+	}
+	if strings.Contains(string(body), "BEGIN RSA PRIVATE KEY") {
+		t.Errorf("server.pem must carry a PKCS#8 key, got PKCS#1:\n%s", body)
+	}
+	// Kafka's PEM keystore rejects PKCS#1 with "algid parse error, not a
+	// sequence"; make sure the embedded key parses as PKCS#8.
+	var keyBlock *pem.Block
+	for rest := body; ; {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if strings.Contains(block.Type, "PRIVATE KEY") {
+			keyBlock = block
+		}
+	}
+	if keyBlock == nil || keyBlock.Type != "PRIVATE KEY" {
+		t.Fatalf("server.pem has no PKCS#8 private key block:\n%s", body)
+	}
+	if _, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes); err != nil {
+		t.Errorf("embedded key is not valid PKCS#8: %v", err)
+	}
+
+	if _, err := EnsureTLSCerts(kc); err != nil {
+		t.Errorf("EnsureTLSCerts is not idempotent: %v", err)
+	}
+}
+
+func TestEnsureTLSCertsDisabled(t *testing.T) {
+	kc := testKafkaConfig(t)
+	caPath, err := EnsureTLSCerts(kc)
+	if err != nil || caPath != "" {
+		t.Errorf("EnsureTLSCerts without TLS = (%q, %v), want (\"\", nil)", caPath, err)
+	}
+	if _, err := os.Stat(TLSDir(kc)); !os.IsNotExist(err) {
+		t.Errorf("TLS dir should not exist when TLS is off: %v", err)
+	}
+}
+
+func TestAdvertisedTLSEndpoint(t *testing.T) {
+	kc := testKafkaConfig(t)
+	if got := AdvertisedTLSEndpoint(kc); got != "" {
+		t.Errorf("AdvertisedTLSEndpoint without TLS = %q, want empty", got)
+	}
+	kc.TLS = true
+	kc.TLSPort = 9093
+	if got := AdvertisedTLSEndpoint(kc); got != "127.0.0.1:9093" {
+		t.Errorf("AdvertisedTLSEndpoint = %q", got)
+	}
+	kc.AdvertiseHost = "fd00::5"
+	if got := AdvertisedTLSEndpoint(kc); got != "[fd00::5]:9093" {
+		t.Errorf("IPv6 AdvertisedTLSEndpoint = %q", got)
+	}
+}
+
+func TestEnsureTLSCertsBroughtOwnPEM(t *testing.T) {
+	kc := testKafkaConfig(t)
+	kc.TLS = true
+	kc.TLSPort = 9093
+	now := time.Now()
+	body := testPEM(t, now.Add(-time.Hour), now.Add(24*time.Hour), false, false)
+	kc.TLSPEM = writePEM(t, t.TempDir(), "kafka-server.pem", body)
+
+	caPath, err := EnsureTLSCerts(kc)
+	if err != nil {
+		t.Fatalf("EnsureTLSCerts: %v", err)
+	}
+	if caPath != "" {
+		t.Errorf("BYO TLS returned CA path %q, want empty", caPath)
+	}
+	serverPEM := filepath.Join(TLSDir(kc), ServerPEMFile)
+	got, err := os.ReadFile(serverPEM)
+	if err != nil {
+		t.Fatalf("read server.pem: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("server.pem differs from the supplied PEM:\n%s", got)
+	}
+	info, err := os.Stat(serverPEM)
+	if err != nil {
+		t.Fatalf("stat server.pem: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("server.pem mode = %o, want 600", perm)
+	}
+	if _, err := os.Stat(TLSCAPath(kc)); !os.IsNotExist(err) {
+		t.Errorf("BYO TLS should not generate ca.crt: %v", err)
+	}
+
+	ci, err := ValidateTLSPEM(kc.TLSPEM)
+	if err != nil {
+		t.Fatalf("ValidateTLSPEM: %v", err)
+	}
+	for _, host := range []string{"127.0.0.1", "::1", "kafka.test"} {
+		if !ci.CoversHost(host) {
+			t.Errorf("CoversHost(%q) = false", host)
+		}
+	}
+	if ci.CoversHost("10.0.0.9") {
+		t.Error("CoversHost accepted an address missing from the SANs")
+	}
+	if !ci.SelfSigned {
+		t.Error("self-signed test certificate reported as issued by another CA")
+	}
+}
+
+func TestEnsureTLSCertsBroughtOwnPKCS1(t *testing.T) {
+	kc := testKafkaConfig(t)
+	kc.TLS = true
+	kc.TLSPort = 9093
+	now := time.Now()
+	kc.TLSPEM = writePEM(t, t.TempDir(), "kafka-server.pem",
+		testPEM(t, now.Add(-time.Hour), now.Add(24*time.Hour), false, true))
+
+	if _, err := EnsureTLSCerts(kc); err != nil {
+		t.Fatalf("EnsureTLSCerts with PKCS#1 key: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(TLSDir(kc), ServerPEMFile))
+	if err != nil {
+		t.Fatalf("read server.pem: %v", err)
+	}
+	if strings.Contains(string(got), "BEGIN RSA PRIVATE KEY") {
+		t.Errorf("server.pem kept the PKCS#1 key:\n%s", got)
+	}
+	block, _ := pem.Decode(got)
+	if block == nil {
+		t.Fatal("server.pem has no PEM block")
+	}
+	// Find the key block (after the certificate) and prove it is PKCS#8.
+	_, rest := pem.Decode(got)
+	keyBlock, _ := pem.Decode(rest)
+	if keyBlock == nil || keyBlock.Type != "PRIVATE KEY" {
+		t.Fatalf("expected a PKCS#8 PRIVATE KEY block, got %+v", keyBlock)
+	}
+	if _, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes); err != nil {
+		t.Errorf("normalized key is not PKCS#8: %v", err)
+	}
+}
+
+func TestValidateTLSPEMErrors(t *testing.T) {
+	now := time.Now()
+	good := testPEM(t, now.Add(-time.Hour), now.Add(24*time.Hour), false, false)
+	other := testPEM(t, now.Add(-time.Hour), now.Add(24*time.Hour), false, false)
+
+	certBlock, rest := pem.Decode(good)
+	otherCert, _ := pem.Decode(other)
+	onlyCert := pem.EncodeToMemory(certBlock)
+	mismatched := append(pem.EncodeToMemory(otherCert), rest...)
+
+	cases := []struct {
+		name string
+		body []byte
+		want string
+	}{
+		{"no key", onlyCert, "no private key"},
+		{"no cert", rest, "no CERTIFICATE"},
+		{"mismatched key", mismatched, "do not pair"},
+		{"expired", testPEM(t, now.Add(-48*time.Hour), now.Add(-24*time.Hour), false, false), "expired"},
+		{"not yet valid", testPEM(t, now.Add(24*time.Hour), now.Add(48*time.Hour), false, false), "not valid yet"},
+		{"CA certificate", testPEM(t, now.Add(-time.Hour), now.Add(24*time.Hour), true, false), "CA certificate"},
+		{"encrypted key", append(append([]byte{}, onlyCert...), pem.EncodeToMemory(&pem.Block{Type: "ENCRYPTED PRIVATE KEY", Bytes: []byte("x")})...), "encrypted private keys"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writePEM(t, t.TempDir(), "bad.pem", tc.body)
+			if _, err := ValidateTLSPEM(path); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("ValidateTLSPEM error = %v, want substring %q", err, tc.want)
+			}
+		})
 	}
 }

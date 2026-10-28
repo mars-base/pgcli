@@ -251,8 +251,9 @@ done
   固定默认值）。镜像以 **uid/gid 1000（appuser）** 运行，首次启动前 pgcli 用
   `podman unshare chown` 一次性把数据目录交给该 id；一旦 `meta.properties` 存在
   就跳过递归 chown。broker 默认 `9092`、controller 默认 `19093`（避开 Alertmanager
-  的 `9093`）；**仅 PLAINTEXT，无认证、无 TLS**，`Listen` 默认 `127.0.0.1`；
-  单节点无复制/HA；以 **host 网络**运行
+  的 `9093`）；默认 PLAINTEXT，可选 `--tls` 增加 SSL 监听（TLS 池从 `9093` 起，
+  PEM keystore 读取合并后的 `config/tls/server.pem`，仅加密、不认证客户端），
+  `Listen` 默认 `127.0.0.1`；单节点无复制/HA；以 **host 网络**运行
 - **pgadmin4**：纯上游 `docker.io/dpage/pgadmin4`，无 wrapper（镜像自己的
   entrypoint 把 `/var/lib/pgadmin` chown 给 uid 5050 后降权，所以 pgcli 不需要
   rustfs 那套属主机制）；pin 到发布时的 `latest`（当前 `9.18`，双架构 manifest

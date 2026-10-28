@@ -138,7 +138,33 @@ func (m *KafkaManager) ensureFiles(k *config.KafkaConfig) error {
 	if err := m.ensureDataDirOwner(k); err != nil {
 		return err
 	}
+	if k.TLS {
+		if _, err := kafka.EnsureTLSCerts(*k); err != nil {
+			return err
+		}
+		if err := m.ensureTLSFileOwner(*k); err != nil {
+			return err
+		}
+	}
 	return kafka.WriteProperties(*k)
+}
+
+// ensureTLSFileOwner hands the combined key+cert PEM to the image's appuser.
+// Only that file is chowned: it is the one the container reads, while the raw
+// private key and CA stay host-owned. The TLS dir remains traversable so the
+// read-only mount works for uid 1000.
+func (m *KafkaManager) ensureTLSFileOwner(k config.KafkaConfig) error {
+	path := filepath.Join(kafka.TLSDir(k), kafka.ServerPEMFile)
+	if err := podmanUnshareChown(m.podman, kafka.ContainerUID, kafka.ContainerGID, path); err == nil {
+		return nil
+	}
+	if os.Geteuid() == 0 {
+		if err := os.Chown(path, kafka.ContainerUID, kafka.ContainerGID); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("chowning Kafka TLS key %s to %d:%d (the image's appuser): rootless podman does this through `podman unshare`; on a rootful host run pgcli as root, or pre-chown the file manually",
+		path, kafka.ContainerUID, kafka.ContainerGID)
 }
 
 // ensureDataDirOwner hands a fresh data dir to the image's appuser. The
