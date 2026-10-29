@@ -146,6 +146,9 @@ func RenderBrokerConfig(c config.RocketMQConfig) (string, error) {
 		writeProperty(&b, "storePathRootDir", ContainerDataDir)
 		writeProperty(&b, "storePathCommitLog", ContainerDataDir+"/commitlog")
 	}
+	writeProperty(&b, "fileReservedTime", strconv.Itoa(c.FileReservedTime))
+	writeProperty(&b, "deleteWhen", c.DeleteWhen)
+	writeProperty(&b, "diskMaxUsedSpaceRatio", strconv.Itoa(c.DiskMaxUsedSpaceRatio))
 	writeProperty(&b, "autoCreateTopicEnable", "true")
 	if len(c.Settings) > 0 {
 		b.WriteString("\n")

@@ -26,6 +26,10 @@ func standalone() config.RocketMQConfig {
 		Heap:          "512m",
 		NamesrvHeap:   "256m",
 		ProxyHeap:     "256m",
+
+		FileReservedTime:      config.DefaultRocketMQFileReservedTime,
+		DeleteWhen:            config.DefaultRocketMQDeleteWhen,
+		DiskMaxUsedSpaceRatio: config.DefaultRocketMQDiskMaxUsedSpaceRatio,
 	}
 }
 
@@ -105,6 +109,9 @@ func TestRenderBrokerConfigStandalone(t *testing.T) {
 		"haListenPort=10912\n" +
 		"storePathRootDir=/home/rocketmq/store\n" +
 		"storePathCommitLog=/home/rocketmq/store/commitlog\n" +
+		"fileReservedTime=72\n" +
+		"deleteWhen=04\n" +
+		"diskMaxUsedSpaceRatio=75\n" +
 		"autoCreateTopicEnable=true\n"
 	if got != want {
 		t.Errorf("broker config =\n%s\nwant:\n%s", got, want)
@@ -131,6 +138,9 @@ func TestRenderBrokerConfigCluster(t *testing.T) {
 		"storePathCommitLog=/home/rocketmq/store/commitlog\n" +
 		"allAckInSyncStateSet=true\n" +
 		"minInSyncReplicas=2\n" +
+		"fileReservedTime=72\n" +
+		"deleteWhen=04\n" +
+		"diskMaxUsedSpaceRatio=75\n" +
 		"autoCreateTopicEnable=true\n"
 	if got != want {
 		t.Errorf("broker config =\n%s\nwant:\n%s", got, want)

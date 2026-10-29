@@ -261,6 +261,32 @@ pg addon rocketmq consume surge --begin 1793264528000 --end 1793264535000 \
 pg addon rocketmq topic delete surge --name rmq --yes
 ```
 
+## 消息保留
+
+消费不会删除消息。broker 以 commitlog 段（同一 broker 上所有 topic 共用的存储单位）为
+单位删除：段年龄超过 `fileReservedTime` 小时，并且时钟到达 `deleteWhen` 指定的整点时
+删除；磁盘占用超过 `diskMaxUsedSpaceRatio` 百分比时提前删除。保留策略是 broker 级别的，
+不能按 topic 单独设置。
+
+查看运行中 broker 的实际值并修改：
+
+```bash
+pg addon rocketmq retention show --name rmq
+
+pg addon rocketmq retention set --hours 24 --delete-when "04;16" \
+  --disk-ratio 80 --name rmq
+```
+
+默认值为 72 小时、04 点、75%。`set` 至少要给一个参数：`--hours`（1–8760）、
+`--delete-when`（一个或多个 0–23 的整点，用 `;` 分隔）、`--disk-ratio`（1–100）。
+它通过 `updateBrokerConfig` 立即修改运行中的 broker，并把相同的值写入 `pg.yaml` 和
+重新渲染的 `broker.conf`，因此 `pg addon stop`/`start` 后仍然生效，无需重建容器。
+过期段不保证在整点立刻删除，而是在 broker 下一次调度清理时移除。把比例调高到当前磁盘
+占用以上可以停止磁盘压力触发的提前删除。
+
+保留策略按 broker 保存。集群中要在每台成员主机上分别执行；每个 broker 只清理自己的
+commitlog。
+
 ## 投递与持久性
 
 **单机。** broker 是唯一节点（`brokerId=0`、`brokerRole=ASYNC_MASTER`），没有副本。消息写入

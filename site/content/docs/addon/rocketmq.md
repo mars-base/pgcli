@@ -226,6 +226,23 @@ Deleting a topic removes all of its messages and asks for confirmation unless `-
 pg addon rocketmq topic delete surge --name rmq --yes
 ```
 
+## Message retention
+
+Consumption never deletes messages. The broker removes whole commitlog segments (the storage unit shared by all topics on that broker) when a segment is older than `fileReservedTime` hours and the clock reaches one of the `deleteWhen` hours, or earlier when disk usage exceeds `diskMaxUsedSpaceRatio` percent. Retention is broker-wide, not per topic.
+
+Show the running broker's effective values and change them:
+
+```bash
+pg addon rocketmq retention show --name rmq
+
+pg addon rocketmq retention set --hours 24 --delete-when "04;16" \
+  --disk-ratio 80 --name rmq
+```
+
+Defaults are 72 hours, 04 o'clock and 75 percent. `set` requires at least one of `--hours` (1–8760), `--delete-when` (one or more hours 0–23 separated by `;`) and `--disk-ratio` (1–100). It applies the change to the running broker with `updateBrokerConfig` and writes the same values to `pg.yaml` and the rendered `broker.conf`, so the setting survives `pg addon stop`/`start` without a recreate. An expired segment is not deleted at the exact hour; the broker removes it during the next scheduled cleanup. Raising the ratio above the current disk usage stops disk-pressure deletions.
+
+Retention is stored per broker. In a cluster, run the command on every member host; each broker cleans only its own commitlog.
+
 ## Delivery and durability
 
 **Standalone.** The broker is the only node (`brokerId=0`, `brokerRole=ASYNC_MASTER`) with no replicas. Messages are written to the broker store under `data/broker`, so a graceful stop/start keeps them. The rendered disk flush policy is RocketMQ's default **ASYNC_FLUSH**; a host power loss can therefore lose the most recent writes. For stronger durability, render `SYNC_FLUSH` (at the cost of throughput):

@@ -51,6 +51,18 @@ func TestRocketMQApplyDefaults(t *testing.T) {
 	if rc.Heap != DefaultRocketMQHeap || rc.NamesrvHeap != DefaultRocketMQNamesrvHeap || rc.ProxyHeap != DefaultRocketMQProxyHeap {
 		t.Errorf("heaps = %q/%q/%q", rc.Heap, rc.NamesrvHeap, rc.ProxyHeap)
 	}
+	if rc.FileReservedTime != DefaultRocketMQFileReservedTime {
+		t.Errorf("FileReservedTime = %d, want %d", rc.FileReservedTime, DefaultRocketMQFileReservedTime)
+	}
+	if rc.DeleteWhen != DefaultRocketMQDeleteWhen {
+		t.Errorf("DeleteWhen = %q, want %q", rc.DeleteWhen, DefaultRocketMQDeleteWhen)
+	}
+	if rc.DiskMaxUsedSpaceRatio != DefaultRocketMQDiskMaxUsedSpaceRatio {
+		t.Errorf("DiskMaxUsedSpaceRatio = %d, want %d", rc.DiskMaxUsedSpaceRatio, DefaultRocketMQDiskMaxUsedSpaceRatio)
+	}
+	if got := RocketMQBrokerAddr(rc); got != "127.0.0.1:10911" {
+		t.Errorf("RocketMQBrokerAddr = %q", got)
+	}
 	dir := filepath.Join("/srv/pg", "addon", "rocketmq", "rmq")
 	if rc.ConfigDir != filepath.Join(dir, "config") {
 		t.Errorf("ConfigDir = %q", rc.ConfigDir)
@@ -185,6 +197,12 @@ func TestRocketMQValidate(t *testing.T) {
 		{"port duplicate", func(rc *RocketMQConfig) { rc.ProxyPort = rc.GRPCPort }, "must be unique"},
 		{"vip collision", func(rc *RocketMQConfig) { rc.ProxyPort = RocketMQVIPPort(*rc) }, "must be unique"},
 		{"ha collision", func(rc *RocketMQConfig) { rc.GRPCPort = RocketMQHAPort(*rc) }, "must be unique"},
+		{"retention hours low", func(rc *RocketMQConfig) { rc.FileReservedTime = 0 }, "file_reserved_time"},
+		{"retention hours high", func(rc *RocketMQConfig) { rc.FileReservedTime = 8761 }, "file_reserved_time"},
+		{"delete when", func(rc *RocketMQConfig) { rc.DeleteWhen = "24" }, "delete_when"},
+		{"delete when empty", func(rc *RocketMQConfig) { rc.DeleteWhen = "" }, "delete_when"},
+		{"disk ratio low", func(rc *RocketMQConfig) { rc.DiskMaxUsedSpaceRatio = 0 }, "disk_max_used_space_ratio"},
+		{"disk ratio high", func(rc *RocketMQConfig) { rc.DiskMaxUsedSpaceRatio = 101 }, "disk_max_used_space_ratio"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -327,6 +345,19 @@ func TestRocketMQVersionAndImage(t *testing.T) {
 	for _, version := range []string{"4.9.0", "5", "5.5.0-rc1", "latest", "6.0.0"} {
 		if ValidRocketMQVersion(version) {
 			t.Errorf("ValidRocketMQVersion(%q) = true", version)
+		}
+	}
+}
+
+func TestValidRocketMQDeleteWhen(t *testing.T) {
+	for _, value := range []string{"0", "04", "4", "23", "04;16", "0;12;23"} {
+		if !ValidRocketMQDeleteWhen(value) {
+			t.Errorf("ValidRocketMQDeleteWhen(%q) = false", value)
+		}
+	}
+	for _, value := range []string{"", "24", "-1", "04;", ";04", "04; 16", "4,16", "04:16"} {
+		if ValidRocketMQDeleteWhen(value) {
+			t.Errorf("ValidRocketMQDeleteWhen(%q) = true", value)
 		}
 	}
 }

@@ -17,6 +17,7 @@ import (
 
 	"github.com/mars-base/pgcli/internal/config"
 	"github.com/mars-base/pgcli/internal/podman"
+	"github.com/mars-base/pgcli/internal/rocketmq"
 )
 
 // resolveRocketMQInstance loads the config, applies defaults and returns the
@@ -1009,6 +1010,171 @@ func runAddonRocketMQClusterStatus(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// --- message retention -----------------------------------------------------
+
+var rocketMQRetentionKeys = []struct {
+	key         string
+	unit        string
+	description string
+}{
+	{"fileReservedTime", "hours", "delete commitlog segments older than this"},
+	{"deleteWhen", "", "hour of day (0-23, ';'-separated) when expired segments are deleted"},
+	{"diskMaxUsedSpaceRatio", "percent", "delete segments early once disk usage exceeds this"},
+}
+
+func requireRocketMQBrokerRunning(cmd *cobra.Command) (*podman.RocketMQManager, string, *config.Config, config.RocketMQConfig, error) {
+	name := rocketMQFlagName(cmd)
+	c, path, rc, err := resolveRocketMQInstance(name)
+	if err != nil {
+		return nil, "", nil, rc, err
+	}
+	m, err := podman.NewRocketMQManager(c)
+	if err != nil {
+		return nil, "", nil, rc, err
+	}
+	if running, _, _ := m.ContainerStatus(&rc, podman.RocketMQRoleBroker); !running {
+		return nil, "", nil, rc, fmt.Errorf("rocketmq %q broker is not running — 'pg addon start rocketmq --name %s' first", name, name)
+	}
+	return m, path, c, rc, nil
+}
+
+// parseRocketMQBrokerConfig turns mqadmin getBrokerConfig output into a map.
+// The output has "============<addr>============" section headers and
+// "key<padding> = value" lines; non key/value lines are ignored.
+func parseRocketMQBrokerConfig(output string) map[string]string {
+	values := make(map[string]string)
+	for line := range strings.SplitSeq(output, "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		key = strings.TrimSpace(key)
+		if !ok || key == "" {
+			continue
+		}
+		values[key] = strings.TrimSpace(value)
+	}
+	return values
+}
+
+func formatRocketMQRetentionValue(unit, value string) string {
+	switch unit {
+	case "hours":
+		return value + " hours"
+	case "percent":
+		return value + "%"
+	}
+	return value
+}
+
+func printRocketMQRetention(rc config.RocketMQConfig, values map[string]string) {
+	fmt.Printf("rocketmq %q — message retention (broker %s):\n", rc.Name, config.RocketMQBrokerAddr(rc))
+	for _, item := range rocketMQRetentionKeys {
+		value, ok := values[item.key]
+		if !ok || value == "" {
+			value = "(unset)"
+		} else {
+			value = formatRocketMQRetentionValue(item.unit, value)
+		}
+		fmt.Printf("  %-22s %-12s %s\n", item.key, value, item.description)
+	}
+	if rc.Clustered() {
+		fmt.Printf("Retention is stored per broker: run this command on every cluster member.\n")
+	}
+}
+
+func rocketMQRetentionSettings(fs *pflag.FlagSet) (map[string]string, error) {
+	settings := make(map[string]string, len(rocketMQRetentionKeys))
+	if fs.Changed("hours") {
+		hours, _ := fs.GetInt("hours")
+		if hours < 1 || hours > 8760 {
+			return nil, fmt.Errorf("--hours must be between 1 and 8760")
+		}
+		settings["fileReservedTime"] = strconv.Itoa(hours)
+	}
+	if fs.Changed("delete-when") {
+		deleteWhen, _ := fs.GetString("delete-when")
+		if !config.ValidRocketMQDeleteWhen(deleteWhen) {
+			return nil, fmt.Errorf("invalid --delete-when %q: use hours 0-23 separated by ';', e.g. 04 or 04;16", deleteWhen)
+		}
+		settings["deleteWhen"] = deleteWhen
+	}
+	if fs.Changed("disk-ratio") {
+		ratio, _ := fs.GetInt("disk-ratio")
+		if ratio < 1 || ratio > 100 {
+			return nil, fmt.Errorf("--disk-ratio must be between 1 and 100 (percent)")
+		}
+		settings["diskMaxUsedSpaceRatio"] = strconv.Itoa(ratio)
+	}
+	if len(settings) == 0 {
+		return nil, fmt.Errorf("no settings given: use --hours, --delete-when and/or --disk-ratio")
+	}
+	return settings, nil
+}
+
+func runAddonRocketMQRetentionShow(cmd *cobra.Command, _ []string) error {
+	m, _, _, rc, err := requireRocketMQBrokerRunning(cmd)
+	if err != nil {
+		return err
+	}
+	addr := config.RocketMQBrokerAddr(rc)
+	out, err := m.MQAdmin(&rc, "getBrokerConfig", "-b", addr)
+	if err != nil {
+		return fmt.Errorf("reading broker config from %s: %w (%s)", addr, err, strings.TrimSpace(out))
+	}
+	printRocketMQRetention(rc, parseRocketMQBrokerConfig(out))
+	return nil
+}
+
+func runAddonRocketMQRetentionSet(cmd *cobra.Command, _ []string) error {
+	settings, err := rocketMQRetentionSettings(cmd.Flags())
+	if err != nil {
+		return err
+	}
+	m, path, c, rc, err := requireRocketMQBrokerRunning(cmd)
+	if err != nil {
+		return err
+	}
+	addr := config.RocketMQBrokerAddr(rc)
+	for _, item := range rocketMQRetentionKeys {
+		value, ok := settings[item.key]
+		if !ok {
+			continue
+		}
+		out, err := m.MQAdmin(&rc, "updateBrokerConfig", "-b", addr, "-k", item.key, "-v", value)
+		if err != nil {
+			return fmt.Errorf("updating %s on broker %s: %w (%s)", item.key, addr, err, strings.TrimSpace(out))
+		}
+		switch item.key {
+		case "fileReservedTime":
+			rc.FileReservedTime, _ = strconv.Atoi(value)
+		case "deleteWhen":
+			rc.DeleteWhen = value
+		case "diskMaxUsedSpaceRatio":
+			rc.DiskMaxUsedSpaceRatio, _ = strconv.Atoi(value)
+		}
+	}
+	c.Addons.RocketMQ[rc.Name] = rc
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if err := c.Save(path); err != nil {
+		return fmt.Errorf("saving config: %w", err)
+	}
+	if err := rocketmq.WriteConfigs(rc); err != nil {
+		return fmt.Errorf("rendering broker config: %w", err)
+	}
+
+	fmt.Printf("✓ message retention updated on rocketmq %q (broker %s)\n", rc.Name, addr)
+	for _, item := range rocketMQRetentionKeys {
+		if value, ok := settings[item.key]; ok {
+			fmt.Printf("  %-22s %s\n", item.key, formatRocketMQRetentionValue(item.unit, value))
+		}
+	}
+	fmt.Printf("  Saved to %s and %s — live now, kept across restarts.\n", path, rocketmq.BrokerConfigPath(rc))
+	if rc.Clustered() {
+		fmt.Printf("  Cluster %q: this changed only this host's broker; run the same command on every member.\n", rc.Cluster)
+	}
+	return nil
+}
+
 // --- command tree ----------------------------------------------------------
 
 var addonRocketMQCmd = &cobra.Command{
@@ -1046,6 +1212,7 @@ Subcommands:
   topic     Create, list, describe or delete topics
   send      Send one message to a topic
   consume   Pull and print messages from a topic (debug consumer)
+  retention Show or change message retention on the local broker
   cluster   Show the clusterList table (registered brokers and roles)
 
 Examples:
@@ -1064,6 +1231,8 @@ Examples:
   pg addon rocketmq topic describe demo --name rmq
   pg addon rocketmq send demo "hello" --key k1 --tags demo --name rmq
   pg addon rocketmq consume demo --count 5 --timeout 30s --name rmq
+  pg addon rocketmq retention show --name rmq
+  pg addon rocketmq retention set --hours 24 --delete-when 04 --disk-ratio 80 --name rmq
   pg addon rocketmq cluster status --name rmq
   pg addon rocketmq shell --service namesrv --name rmq
   pg logs addon rocketmq --name rmq --service broker -f
@@ -1145,6 +1314,40 @@ unless --broker overrides it.`,
 	RunE: runAddonRocketMQConsume,
 }
 
+var addonRocketMQRetentionCmd = &cobra.Command{
+	Use:   "retention",
+	Short: "Show or change message retention on the local broker",
+	Long: `Consumption never deletes messages. The broker removes commitlog segments
+when they are older than fileReservedTime hours at the deleteWhen o'clock
+(one or more ';'-separated hours), or earlier when disk usage exceeds
+diskMaxUsedSpaceRatio percent.
+
+"show" reads the running broker's effective values with getBrokerConfig.
+"set" applies them live with updateBrokerConfig and persists the same values
+to pg.yaml and the generated broker.conf, so a restart keeps them.
+
+Retention is per broker. In a cluster, run the command on every member host.`,
+}
+
+var addonRocketMQRetentionShowCmd = &cobra.Command{
+	Use:   "show",
+	Short: "Show the broker's effective retention settings",
+	Args:  cobra.NoArgs,
+	RunE:  runAddonRocketMQRetentionShow,
+}
+
+var addonRocketMQRetentionSetCmd = &cobra.Command{
+	Use:   "set [--hours N] [--delete-when HH[;HH...]] [--disk-ratio PCT]",
+	Short: "Change retention now and persist it to pg.yaml + broker.conf",
+	Long: `Change one or more retention settings. At least one flag is required.
+
+  --hours        fileReservedTime, 1-8760 hours (default 72)
+  --delete-when  hour(s) of day 0-23, ';'-separated (default 04)
+  --disk-ratio   diskMaxUsedSpaceRatio percentage, 1-100 (default 75)`,
+	Args: cobra.NoArgs,
+	RunE: runAddonRocketMQRetentionSet,
+}
+
 var addonRocketMQClusterCmd = &cobra.Command{
 	Use:   "cluster",
 	Short: "Inspect registered brokers and controller-assigned roles",
@@ -1158,14 +1361,16 @@ var addonRocketMQClusterStatusCmd = &cobra.Command{
 
 func init() {
 	addonCmd.AddCommand(addonRocketMQCmd)
-	addonRocketMQCmd.AddCommand(addonRocketMQStatusCmd, addonRocketMQShellCmd, addonRocketMQTopicCmd, addonRocketMQSendCmd, addonRocketMQConsumeCmd, addonRocketMQClusterCmd)
+	addonRocketMQCmd.AddCommand(addonRocketMQStatusCmd, addonRocketMQShellCmd, addonRocketMQTopicCmd, addonRocketMQSendCmd, addonRocketMQConsumeCmd, addonRocketMQRetentionCmd, addonRocketMQClusterCmd)
 	addonRocketMQTopicCmd.AddCommand(addonRocketMQTopicCreateCmd, addonRocketMQTopicListCmd, addonRocketMQTopicDescribeCmd, addonRocketMQTopicDeleteCmd)
+	addonRocketMQRetentionCmd.AddCommand(addonRocketMQRetentionShowCmd, addonRocketMQRetentionSetCmd)
 	addonRocketMQClusterCmd.AddCommand(addonRocketMQClusterStatusCmd)
 
 	for _, sub := range []*cobra.Command{
 		addonRocketMQStatusCmd, addonRocketMQShellCmd,
 		addonRocketMQTopicCreateCmd, addonRocketMQTopicListCmd, addonRocketMQTopicDescribeCmd, addonRocketMQTopicDeleteCmd,
-		addonRocketMQSendCmd, addonRocketMQConsumeCmd, addonRocketMQClusterStatusCmd,
+		addonRocketMQSendCmd, addonRocketMQConsumeCmd, addonRocketMQRetentionShowCmd, addonRocketMQRetentionSetCmd,
+		addonRocketMQClusterStatusCmd,
 	} {
 		sub.Flags().String("name", "", "rocketmq instance name (default \"rocketmq\")")
 	}
@@ -1183,6 +1388,9 @@ func init() {
 	addonRocketMQConsumeCmd.Flags().Int64("offset", -1, "start offset (requires --queue)")
 	addonRocketMQConsumeCmd.Flags().String("begin", "", "only messages after this timestamp (yyyy-MM-dd#HH:mm:ss:SSS or epoch millis)")
 	addonRocketMQConsumeCmd.Flags().String("end", "", "only messages before this timestamp (yyyy-MM-dd#HH:mm:ss:SSS or epoch millis)")
+	addonRocketMQRetentionSetCmd.Flags().Int("hours", -1, "delete commitlog segments older than this many hours (1-8760)")
+	addonRocketMQRetentionSetCmd.Flags().String("delete-when", "", "hour(s) of day 0-23 when expired segments are deleted, ';'-separated (e.g. 04 or 04;16)")
+	addonRocketMQRetentionSetCmd.Flags().Int("disk-ratio", -1, "delete segments early once disk usage exceeds this percent (1-100)")
 	addonRocketMQClusterStatusCmd.Flags().Bool("more", false, "include per-broker runtime details (-m)")
 
 	addonInstallCmd.Flags().Int("namesrv-port", 0, "RocketMQ NameServer host port (0=auto-assign from 9876; standalone only — cluster members use the fixed 9876)")

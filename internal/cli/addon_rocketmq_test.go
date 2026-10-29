@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/mars-base/pgcli/internal/config"
 )
@@ -112,6 +113,27 @@ func TestRocketMQCommandTree(t *testing.T) {
 		}
 		if f.DefValue != def {
 			t.Errorf("rocketmq consume --%s default = %q, want %q", flag, f.DefValue, def)
+		}
+	}
+	show, _, err := addonRocketMQCmd.Find([]string{"retention", "show"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if show.Flags().Lookup("name") == nil {
+		t.Error("rocketmq retention show --name not registered")
+	}
+	set, _, err := addonRocketMQCmd.Find([]string{"retention", "set"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for flag, def := range map[string]string{"name": "", "hours": "-1", "delete-when": "", "disk-ratio": "-1"} {
+		f := set.Flags().Lookup(flag)
+		if f == nil {
+			t.Errorf("rocketmq retention set --%s not registered", flag)
+			continue
+		}
+		if f.DefValue != def {
+			t.Errorf("rocketmq retention set --%s default = %q, want %q", flag, f.DefValue, def)
 		}
 	}
 }
@@ -261,6 +283,84 @@ prod             prod            1         3                10.0.0.2:10911      
 	}
 	if brokers, masters := rocketMQClusterSummary("#ClusterName BrokerName\n", "prod"); brokers != 0 || masters != 0 {
 		t.Errorf("header-only summary = %d/%d", brokers, masters)
+	}
+}
+
+func TestParseRocketMQBrokerConfig(t *testing.T) {
+	output := `============127.0.0.1:10911============
+brokerClusterName                     = rmq
+fileReservedTime                      = 72
+deleteWhen                            = 04
+diskMaxUsedSpaceRatio                 = 75
+customValue                           = a = b
+no value line
+`
+	values := parseRocketMQBrokerConfig(output)
+	for key, want := range map[string]string{
+		"brokerClusterName":     "rmq",
+		"fileReservedTime":      "72",
+		"deleteWhen":            "04",
+		"diskMaxUsedSpaceRatio": "75",
+		"customValue":           "a = b",
+	} {
+		if got := values[key]; got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+	if _, ok := values[""]; ok {
+		t.Error("header line produced an empty key")
+	}
+}
+
+func retentionFlagSet() *pflag.FlagSet {
+	fs := pflag.NewFlagSet("retention", pflag.ContinueOnError)
+	fs.Int("hours", -1, "")
+	fs.String("delete-when", "", "")
+	fs.Int("disk-ratio", -1, "")
+	return fs
+}
+
+func TestRocketMQRetentionSettings(t *testing.T) {
+	fs := retentionFlagSet()
+	if _, err := rocketMQRetentionSettings(fs); err == nil || !strings.Contains(err.Error(), "no settings") {
+		t.Errorf("no flags = %v, want no settings error", err)
+	}
+
+	fs = retentionFlagSet()
+	for key, value := range map[string]string{"hours": "24", "delete-when": "04;16", "disk-ratio": "80"} {
+		if err := fs.Set(key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := rocketMQRetentionSettings(fs)
+	if err != nil {
+		t.Fatalf("rocketMQRetentionSettings: %v", err)
+	}
+	want := map[string]string{"fileReservedTime": "24", "deleteWhen": "04;16", "diskMaxUsedSpaceRatio": "80"}
+	if !maps.Equal(got, want) {
+		t.Errorf("settings = %v, want %v", got, want)
+	}
+
+	bad := []struct {
+		flag  string
+		value string
+		want  string
+	}{
+		{"hours", "0", "--hours"},
+		{"hours", "8761", "--hours"},
+		{"delete-when", "24", "--delete-when"},
+		{"delete-when", "04;", "--delete-when"},
+		{"disk-ratio", "0", "--disk-ratio"},
+		{"disk-ratio", "101", "--disk-ratio"},
+	}
+	for _, tt := range bad {
+		fs := retentionFlagSet()
+		if err := fs.Set(tt.flag, tt.value); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := rocketMQRetentionSettings(fs); err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Errorf("%s=%s = %v, want %q", tt.flag, tt.value, err, tt.want)
+		}
 	}
 }
 

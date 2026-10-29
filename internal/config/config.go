@@ -2068,6 +2068,14 @@ const (
 	DefaultRocketMQProxyHeap   = "256m"
 )
 
+// Default broker commitlog retention. Consumption never deletes messages;
+// segments are removed by age or disk pressure.
+const (
+	DefaultRocketMQFileReservedTime      = 72
+	DefaultRocketMQDeleteWhen            = "04"
+	DefaultRocketMQDiskMaxUsedSpaceRatio = 75
+)
+
 // RocketMQConfig holds a managed RocketMQ 5.x deployment. Every instance runs
 // three containers under host networking: namesrv, broker and proxy.
 //
@@ -2110,6 +2118,13 @@ type RocketMQConfig struct {
 	// (controller mode, listener addresses, ports, store paths) are rejected.
 	Settings map[string]string `yaml:"settings,omitempty"`
 
+	// Commitlog retention. Messages are never removed by consumption; old
+	// segments are deleted after FileReservedTime hours at DeleteWhen o'clock,
+	// or earlier when disk usage exceeds DiskMaxUsedSpaceRatio percent.
+	FileReservedTime      int    `yaml:"file_reserved_time,omitempty"`
+	DeleteWhen            string `yaml:"delete_when,omitempty"`
+	DiskMaxUsedSpaceRatio int    `yaml:"disk_max_used_space_ratio,omitempty"`
+
 	// Autostart starts the containers on host boot (pg autostart enable --rocketmq).
 	Autostart bool `yaml:"autostart,omitempty"`
 }
@@ -2146,6 +2161,19 @@ func RocketMQVIPAddr(c RocketMQConfig) string {
 // RocketMQHAAddr is the advertised broker HA address.
 func RocketMQHAAddr(c RocketMQConfig) string {
 	return fmt.Sprintf("%s:%d", c.AdvertiseHost, RocketMQHAPort(c))
+}
+
+// RocketMQBrokerAddr is the advertised broker listener address.
+func RocketMQBrokerAddr(c RocketMQConfig) string {
+	return fmt.Sprintf("%s:%d", c.AdvertiseHost, c.BrokerPort)
+}
+
+var rocketMQDeleteWhenRe = regexp.MustCompile(`^([01]?[0-9]|2[0-3])(;[01]?[0-9]|;2[0-3])*$`)
+
+// ValidRocketMQDeleteWhen reports whether value is a broker deleteWhen
+// schedule: one or more hours 0-23 separated by semicolons.
+func ValidRocketMQDeleteWhen(value string) bool {
+	return rocketMQDeleteWhenRe.MatchString(value)
 }
 
 // ValidRocketMQVersion reports whether version is a supported 5.x release.
@@ -2354,6 +2382,9 @@ var rocketMQManagedSettings = map[string]bool{
 	"enableControllerInNamesrv": true,
 	"enableElectUncleanMaster":  true,
 	"notifyBrokerRoleChanged":   true,
+	"fileReservedTime":          true,
+	"deleteWhen":                true,
+	"diskMaxUsedSpaceRatio":     true,
 }
 
 // ValidateRocketMQSettings checks user-supplied broker.conf overrides.
@@ -4709,6 +4740,15 @@ func (c *Config) Validate() error {
 		if err := ValidateRocketMQSettings(rc.Settings); err != nil {
 			return fmt.Errorf("addons.rocketmq.%s.settings: %w", name, err)
 		}
+		if rc.FileReservedTime < 1 || rc.FileReservedTime > 8760 {
+			return fmt.Errorf("addons.rocketmq.%s.file_reserved_time must be between 1 and 8760 hours, got %d", name, rc.FileReservedTime)
+		}
+		if !ValidRocketMQDeleteWhen(rc.DeleteWhen) {
+			return fmt.Errorf("addons.rocketmq.%s.delete_when %q must be one or more hours 0-23 separated by ';'", name, rc.DeleteWhen)
+		}
+		if rc.DiskMaxUsedSpaceRatio < 1 || rc.DiskMaxUsedSpaceRatio > 100 {
+			return fmt.Errorf("addons.rocketmq.%s.disk_max_used_space_ratio must be between 1 and 100, got %d", name, rc.DiskMaxUsedSpaceRatio)
+		}
 		advertiseIP := net.ParseIP(rc.AdvertiseHost)
 		if rc.Clustered() {
 			if !ValidRocketMQName(rc.Cluster) {
@@ -6181,6 +6221,15 @@ func (c *Config) ApplyDefaults() {
 		}
 		if addon.ProxyHeap == "" {
 			addon.ProxyHeap = DefaultRocketMQProxyHeap
+		}
+		if addon.FileReservedTime == 0 {
+			addon.FileReservedTime = DefaultRocketMQFileReservedTime
+		}
+		if addon.DeleteWhen == "" {
+			addon.DeleteWhen = DefaultRocketMQDeleteWhen
+		}
+		if addon.DiskMaxUsedSpaceRatio == 0 {
+			addon.DiskMaxUsedSpaceRatio = DefaultRocketMQDiskMaxUsedSpaceRatio
 		}
 		addonDir := filepath.Join(rocketMQBaseDir, "addon", "rocketmq", name)
 		if addon.ConfigDir == "" {
