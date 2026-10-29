@@ -79,7 +79,7 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartRabbitMQ(c) && !hasAutostartNginx(c) {
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartRabbitMQ(c) && !hasAutostartRocketMQ(c) && !hasAutostartNginx(c) {
 		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --kafka / --rabbitmq / --nginx)")
 		return nil
 	}
@@ -328,6 +328,13 @@ func startAutostart() error {
 	// rabbitmq nodes. No dependency on other addons; StartContainer includes
 	// readiness and the admin-credential reconciliation.
 	if err := startAutostartRabbitMQ(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// rocketmq instances. StartContainers re-renders the three configs and
+	// starts namesrv -> broker -> proxy; a cluster member may wait for the
+	// controller quorum, which StartContainers tolerates.
+	if err := startAutostartRocketMQ(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -1521,6 +1528,56 @@ func startAutostartRabbitMQ(c *config.Config) error {
 			continue
 		}
 		fmt.Printf("  [OK] rabbitmq %q started (AMQP %s)\n", name, rabbitmq.AMQPAddr(rc))
+	}
+	return firstErr
+}
+
+func hasAutostartRocketMQ(c *config.Config) bool {
+	for _, rc := range c.Addons.RocketMQ {
+		if rc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartRocketMQ starts each autostart-enabled RocketMQ instance.
+// StartContainers re-renders the configs, is idempotent and does not wait for
+// broker registration: on a cluster member the controller quorum may need the
+// other hosts, which boot independently.
+func startAutostartRocketMQ(c *config.Config) error {
+	var names []string
+	for name, rc := range c.Addons.RocketMQ {
+		if rc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	m, err := podman.NewRocketMQManager(c)
+	if err != nil {
+		fmt.Printf("  [X] rocketmq autostart: %v\n", err)
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		rc := c.Addons.RocketMQ[name]
+		already, err := m.StartContainers(&rc)
+		if err != nil {
+			fmt.Printf("  [X] rocketmq autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if already {
+			fmt.Printf("  [OK] rocketmq %q already running\n", name)
+			continue
+		}
+		fmt.Printf("  [OK] rocketmq %q started (namesrv %s, proxy %s:%d)\n", name,
+			strings.Join(mustRocketMQNamesrvAddrs(rc), ";"), rc.AdvertiseHost, rc.ProxyPort)
 	}
 	return firstErr
 }

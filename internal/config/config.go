@@ -167,6 +167,7 @@ type TopAddonsConfig struct {
 	ClickHouse      map[string]ClickHouseConfig      `yaml:"clickhouse,omitempty"`
 	Kafka           map[string]KafkaConfig           `yaml:"kafka,omitempty"`
 	RabbitMQ        map[string]RabbitMQConfig        `yaml:"rabbitmq,omitempty"`
+	RocketMQ        map[string]RocketMQConfig        `yaml:"rocketmq,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -2039,6 +2040,361 @@ func ValidateRabbitMQSettings(settings map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// DefaultRocketMQVersion pins the RocketMQ 5.x release pulled from the
+// official image. RocketMQ 4.x master/slave and DLedger deployments are not
+// supported.
+const DefaultRocketMQVersion = "5.5.0"
+
+// DefaultRocketMQImageTag is the official upstream image.
+const DefaultRocketMQImageTag = "docker.io/apache/rocketmq:5.5.0"
+
+// RocketMQ roles always use these listener ports in cluster mode: every
+// member must be reachable on the controller and nameserver addresses from
+// every peer. Standalone instances may override them.
+const (
+	DefaultRocketMQNamesrvPort    = 9876
+	DefaultRocketMQControllerPort = 9877
+	DefaultRocketMQProxyPort      = 8080
+	DefaultRocketMQGRPCPort       = 8081
+	DefaultRocketMQBrokerPort     = 10911
+)
+
+// Default JVM heap sizes, kept small enough for a 2 GiB test host.
+const (
+	DefaultRocketMQHeap        = "512m"
+	DefaultRocketMQNamesrvHeap = "256m"
+	DefaultRocketMQProxyHeap   = "256m"
+)
+
+// RocketMQConfig holds a managed RocketMQ 5.x deployment. Every instance runs
+// three containers under host networking: namesrv, broker and proxy.
+//
+// Cluster is empty for a standalone instance. A non-empty Cluster switches to
+// the controller auto-failover topology: NameServer embeds a DLedger
+// controller, the broker runs in controller mode, and every member shares the
+// same cluster name, controller peer set and fixed listener ports.
+type RocketMQConfig struct {
+	ContainerName string `yaml:"container_name,omitempty"` // pgcli-rocketmq<ns>-<name>; role suffix added at run time
+	Name          string `yaml:"name,omitempty"`           // addon key, defaults to the map key
+	Version       string `yaml:"version,omitempty"`        // 5.x release, e.g. "5.5.0"
+	ImageTag      string `yaml:"image_tag,omitempty"`      // docker.io/apache/rocketmq:<version>
+
+	// ConfigDir is mounted read-only at /etc/rocketmq and holds namesrv.conf,
+	// broker.conf and rmq-proxy.json. DataDir holds broker store and controller
+	// state; logs live next to it under logs/<role>.
+	ConfigDir string `yaml:"config_dir,omitempty"`
+	DataDir   string `yaml:"data_dir,omitempty"`
+
+	// Cluster is the multi-host group name. Non-empty switches to cluster
+	// mode. Peers is the complete controller membership as ID@HOST, including
+	// the local member.
+	Cluster       string   `yaml:"cluster,omitempty"`
+	AdvertiseHost string   `yaml:"advertise_host,omitempty"`
+	ControllerID  string   `yaml:"controller_id,omitempty"`
+	Peers         []string `yaml:"peers,omitempty"`
+
+	NamesrvPort    int `yaml:"namesrv_port,omitempty"`
+	BrokerPort     int `yaml:"broker_port,omitempty"`
+	ProxyPort      int `yaml:"proxy_port,omitempty"`      // remoting listener
+	GRPCPort       int `yaml:"grpc_port,omitempty"`       // gRPC listener
+	ControllerPort int `yaml:"controller_port,omitempty"` // cluster only
+
+	// Heap sizes passed as JAVA_OPT_EXT.
+	Heap        string `yaml:"heap,omitempty"`         // broker
+	NamesrvHeap string `yaml:"namesrv_heap,omitempty"` // nameserver
+	ProxyHeap   string `yaml:"proxy_heap,omitempty"`   // proxy
+
+	// Settings are additional broker.conf overrides. pgcli-managed keys
+	// (controller mode, listener addresses, ports, store paths) are rejected.
+	Settings map[string]string `yaml:"settings,omitempty"`
+
+	// Autostart starts the containers on host boot (pg autostart enable --rocketmq).
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// Clustered reports whether this RocketMQ entry runs in controller failover
+// cluster mode.
+func (r RocketMQConfig) Clustered() bool { return r.Cluster != "" }
+
+// ClusterName returns the broker cluster name: the cluster name in cluster
+// mode, otherwise the instance name.
+func (r RocketMQConfig) ClusterName() string {
+	if r.Clustered() {
+		return r.Cluster
+	}
+	return r.Name
+}
+
+// RocketMQContainerName returns the container name for one role.
+func RocketMQContainerName(c RocketMQConfig, role string) string {
+	return c.ContainerName + "-" + role
+}
+
+// RocketMQVIPPort is the broker VIP listener port (broker port - 2).
+func RocketMQVIPPort(c RocketMQConfig) int { return c.BrokerPort - 2 }
+
+// RocketMQHAPort is the broker HA replication port (broker port + 1).
+func RocketMQHAPort(c RocketMQConfig) int { return c.BrokerPort + 1 }
+
+// RocketMQVIPAddr is the advertised broker VIP address.
+func RocketMQVIPAddr(c RocketMQConfig) string {
+	return fmt.Sprintf("%s:%d", c.AdvertiseHost, RocketMQVIPPort(c))
+}
+
+// RocketMQHAAddr is the advertised broker HA address.
+func RocketMQHAAddr(c RocketMQConfig) string {
+	return fmt.Sprintf("%s:%d", c.AdvertiseHost, RocketMQHAPort(c))
+}
+
+// ValidRocketMQVersion reports whether version is a supported 5.x release.
+func ValidRocketMQVersion(version string) bool {
+	ok, _ := regexp.MatchString(`^5\.[0-9]+(\.[0-9]+)?$`, version)
+	return ok
+}
+
+// RocketMQImageTagForVersion returns the upstream image reference for a
+// RocketMQ version.
+func RocketMQImageTagForVersion(version string) (string, bool) {
+	if !ValidRocketMQVersion(version) {
+		return "", false
+	}
+	return "docker.io/apache/rocketmq:" + version, true
+}
+
+// ValidRocketMQName reports whether name is a safe RocketMQ instance or
+// cluster key.
+func ValidRocketMQName(name string) bool {
+	ok, _ := regexp.MatchString(`^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$`, name)
+	return ok
+}
+
+var rocketMQControllerIDRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]{0,31}$`)
+
+// ValidRocketMQControllerID reports whether id is a valid DLedger member id.
+// Hyphens and underscores are rejected to keep the ID@HOST peer syntax
+// unambiguous.
+func ValidRocketMQControllerID(id string) bool {
+	return rocketMQControllerIDRe.MatchString(id)
+}
+
+// RocketMQPeer is one member of the embedded controller quorum.
+type RocketMQPeer struct {
+	ID   string
+	Host string
+}
+
+// String renders the persistent ID@HOST form.
+func (p RocketMQPeer) String() string { return p.ID + "@" + p.Host }
+
+// ParseRocketMQPeer parses an ID@HOST controller peer. The host must be a
+// non-loopback IPv4 address; the controller port is fixed and implicit.
+func ParseRocketMQPeer(raw string) (RocketMQPeer, error) {
+	raw = strings.TrimSpace(raw)
+	id, host, ok := strings.Cut(raw, "@")
+	if !ok {
+		return RocketMQPeer{}, fmt.Errorf("peer %q must be ID@HOST", raw)
+	}
+	if !ValidRocketMQControllerID(id) {
+		return RocketMQPeer{}, fmt.Errorf("peer %q has an invalid controller id (use [A-Za-z][A-Za-z0-9]{0,31})", raw)
+	}
+	if strings.Contains(host, ":") {
+		return RocketMQPeer{}, fmt.Errorf("peer %q must carry a bare IPv4 host, without a port", raw)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.To4() == nil {
+		return RocketMQPeer{}, fmt.Errorf("peer %q host must be an IPv4 address", raw)
+	}
+	if ip.IsUnspecified() {
+		return RocketMQPeer{}, fmt.Errorf("peer %q host must not be a wildcard address", raw)
+	}
+	if ip.IsLoopback() {
+		return RocketMQPeer{}, fmt.Errorf("peer %q host must not be a loopback address", raw)
+	}
+	return RocketMQPeer{ID: id, Host: host}, nil
+}
+
+// NormalizeRocketMQPeers validates the peer list, folds in the local member
+// when it is omitted, checks for duplicate ids/hosts and returns the complete
+// set sorted by controller id.
+func NormalizeRocketMQPeers(peers []string, selfID, selfHost string) ([]string, error) {
+	self, err := ParseRocketMQPeer(selfID + "@" + selfHost)
+	if err != nil {
+		return nil, fmt.Errorf("local controller: %w", err)
+	}
+	byID := map[string]RocketMQPeer{}
+	byHost := map[string]string{}
+	out := make([]RocketMQPeer, 0, len(peers)+1)
+	for _, raw := range peers {
+		peer, err := ParseRocketMQPeer(raw)
+		if err != nil {
+			return nil, err
+		}
+		if prev, ok := byID[peer.ID]; ok {
+			return nil, fmt.Errorf("peer id %q is duplicated (also used by %s)", peer.ID, prev)
+		}
+		if prev, ok := byHost[peer.Host]; ok {
+			return nil, fmt.Errorf("peer host %q is duplicated (ids %s and %s)", peer.Host, prev, peer.ID)
+		}
+		byID[peer.ID] = peer
+		byHost[peer.Host] = peer.ID
+		out = append(out, peer)
+	}
+	if prev, ok := byID[self.ID]; ok {
+		if prev.Host != self.Host {
+			return nil, fmt.Errorf("peer id %q points at %s but this node advertises %s", self.ID, prev.Host, self.Host)
+		}
+	} else if prev, ok := byHost[self.Host]; ok {
+		return nil, fmt.Errorf("peer host %s is already used by controller id %q", self.Host, prev)
+	} else {
+		out = append(out, self)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	result := make([]string, len(out))
+	for i, peer := range out {
+		result[i] = peer.String()
+	}
+	return result, nil
+}
+
+// RocketMQPeers returns the validated, sorted controller membership. The
+// returned slice includes the local member. Standalone instances have no
+// peers.
+func RocketMQPeers(c RocketMQConfig) ([]RocketMQPeer, error) {
+	if !c.Clustered() {
+		if len(c.Peers) > 0 {
+			return nil, fmt.Errorf("peers require cluster mode")
+		}
+		return nil, nil
+	}
+	normalized, err := NormalizeRocketMQPeers(c.Peers, c.ControllerID, c.AdvertiseHost)
+	if err != nil {
+		return nil, err
+	}
+	peers := make([]RocketMQPeer, 0, len(normalized))
+	for _, raw := range normalized {
+		peer, err := ParseRocketMQPeer(raw)
+		if err != nil {
+			return nil, err
+		}
+		peers = append(peers, peer)
+	}
+	if len(peers) < 2 {
+		return nil, fmt.Errorf("cluster mode requires at least one remote peer (ID@HOST); the local peer is added automatically")
+	}
+	return peers, nil
+}
+
+// RocketMQNamesrvAddrs returns the nameserver client addresses, sorted by
+// controller id in cluster mode.
+func RocketMQNamesrvAddrs(c RocketMQConfig) ([]string, error) {
+	if !c.Clustered() {
+		return []string{fmt.Sprintf("127.0.0.1:%d", c.NamesrvPort)}, nil
+	}
+	peers, err := RocketMQPeers(c)
+	if err != nil {
+		return nil, err
+	}
+	addrs := make([]string, len(peers))
+	for i, peer := range peers {
+		addrs[i] = fmt.Sprintf("%s:%d", peer.Host, DefaultRocketMQNamesrvPort)
+	}
+	return addrs, nil
+}
+
+// RocketMQControllerAddrs returns the controller addresses used by brokers,
+// sorted by controller id.
+func RocketMQControllerAddrs(c RocketMQConfig) ([]string, error) {
+	if !c.Clustered() {
+		return nil, fmt.Errorf("controller addresses require cluster mode")
+	}
+	peers, err := RocketMQPeers(c)
+	if err != nil {
+		return nil, err
+	}
+	addrs := make([]string, len(peers))
+	for i, peer := range peers {
+		addrs[i] = fmt.Sprintf("%s:%d", peer.Host, DefaultRocketMQControllerPort)
+	}
+	return addrs, nil
+}
+
+// RocketMQMinInSyncReplicas is 2 with three or more members and 1 with two.
+func RocketMQMinInSyncReplicas(c RocketMQConfig) int {
+	if len(c.Peers) < 3 {
+		return 1
+	}
+	return 2
+}
+
+var rocketMQSettingKeyRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// rocketMQManagedSettings are broker.conf keys pgcli renders itself. Letting a
+// user override them would break controller election, listener addressing or
+// the stored data paths.
+var rocketMQManagedSettings = map[string]bool{
+	"brokerClusterName":         true,
+	"brokerName":                true,
+	"brokerId":                  true,
+	"brokerRole":                true,
+	"brokerIP1":                 true,
+	"brokerIP2":                 true,
+	"listenPort":                true,
+	"haListenPort":              true,
+	"namesrvAddr":               true,
+	"enableControllerMode":      true,
+	"controllerAddr":            true,
+	"storePathRootDir":          true,
+	"storePathCommitLog":        true,
+	"storePathEpochFile":        true,
+	"autoCreateTopicEnable":     true,
+	"allAckInSyncStateSet":      true,
+	"minInSyncReplicas":         true,
+	"enableControllerInNamesrv": true,
+	"enableElectUncleanMaster":  true,
+	"notifyBrokerRoleChanged":   true,
+}
+
+// ValidateRocketMQSettings checks user-supplied broker.conf overrides.
+func ValidateRocketMQSettings(settings map[string]string) error {
+	keys := make([]string, 0, len(settings))
+	for key := range settings {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if !rocketMQSettingKeyRe.MatchString(key) {
+			return fmt.Errorf("settings key %q must contain only letters, digits, '.', '_' and '-'", key)
+		}
+		if rocketMQManagedSettings[key] || strings.HasPrefix(key, "controller") {
+			return fmt.Errorf("settings key %q is managed by pgcli and cannot be overridden", key)
+		}
+		if strings.ContainsAny(settings[key], "\x00\r\n") {
+			return fmt.Errorf("settings value for %q must not contain control characters", key)
+		}
+	}
+	return nil
+}
+
+var rocketMQHeapRe = regexp.MustCompile(`^([0-9]+)([gm])$`)
+
+// ParseRocketMQHeap validates a JVM heap size such as "512m" or "2g" and
+// returns it lowercased. Empty means the image default applies.
+func ParseRocketMQHeap(value string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(value))
+	if v == "" {
+		return "", nil
+	}
+	m := rocketMQHeapRe.FindStringSubmatch(v)
+	if m == nil {
+		return "", fmt.Errorf("invalid heap size %q: use a unit, e.g. 512m or 4g", value)
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil || n < 1 {
+		return "", fmt.Errorf("invalid heap size %q: must be at least 1m or 1g", value)
+	}
+	return v, nil
 }
 
 // influxDBManagedKeys are the config keys pgcli renders itself; a
@@ -4291,6 +4647,143 @@ func (c *Config) Validate() error {
 			rabbitMQPorts[field.value] = name + "." + field.name
 		}
 	}
+	// RocketMQ instances: 5.x only, paths absolute, heap sizes valid, the
+	// controller topology and ports consistent, and all listeners (including
+	// the broker's derived VIP/HA ports) unique per host.
+	var rocketMQClustered []string
+	for name, rc := range c.Addons.RocketMQ {
+		if rc.Clustered() {
+			rocketMQClustered = append(rocketMQClustered, name)
+		}
+	}
+	if len(rocketMQClustered) > 1 {
+		sort.Strings(rocketMQClustered)
+		return fmt.Errorf("addons.rocketmq: at most one clustered RocketMQ instance may run per host (found %s): every cluster member needs the fixed controller and listener ports", strings.Join(rocketMQClustered, ", "))
+	}
+	rocketMQPorts := make(map[int]string, 7*len(c.Addons.RocketMQ))
+	addRocketMQPort := func(name, field string, port int) error {
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("addons.rocketmq.%s.%s must be between 1 and 65535, got %d", name, field, port)
+		}
+		if prev, dup := rocketMQPorts[port]; dup {
+			return fmt.Errorf("addons.rocketmq.%s.%s %d is already used by %s (RocketMQ ports must be unique)", name, field, port, prev)
+		}
+		rocketMQPorts[port] = name + "." + field
+		return nil
+	}
+	for name, rc := range c.Addons.RocketMQ {
+		if !ValidRocketMQName(rc.Name) {
+			return fmt.Errorf("addons.rocketmq.%s.name %q must match [A-Za-z0-9][A-Za-z0-9_-]{0,47}", name, rc.Name)
+		}
+		if !ValidRocketMQVersion(rc.Version) {
+			return fmt.Errorf("addons.rocketmq.%s.version %q must be a RocketMQ 5.x release", name, rc.Version)
+		}
+		if tag, ok := RocketMQImageTagForVersion(rc.Version); !ok {
+			return fmt.Errorf("addons.rocketmq.%s.version %q is not supported", name, rc.Version)
+		} else if rc.ImageTag != tag {
+			return fmt.Errorf("addons.rocketmq.%s.image_tag %q does not match version %s (%s)", name, rc.ImageTag, rc.Version, tag)
+		}
+		for _, field := range []struct {
+			name  string
+			value string
+		}{
+			{"config_dir", rc.ConfigDir},
+			{"data_dir", rc.DataDir},
+		} {
+			if field.value == "" || !filepath.IsAbs(field.value) {
+				return fmt.Errorf("addons.rocketmq.%s.%s must be an absolute path, got %q", name, field.name, field.value)
+			}
+		}
+		for _, field := range []struct {
+			name  string
+			value string
+		}{
+			{"heap", rc.Heap},
+			{"namesrv_heap", rc.NamesrvHeap},
+			{"proxy_heap", rc.ProxyHeap},
+		} {
+			if _, err := ParseRocketMQHeap(field.value); err != nil {
+				return fmt.Errorf("addons.rocketmq.%s.%s: %w", name, field.name, err)
+			}
+		}
+		if err := ValidateRocketMQSettings(rc.Settings); err != nil {
+			return fmt.Errorf("addons.rocketmq.%s.settings: %w", name, err)
+		}
+		advertiseIP := net.ParseIP(rc.AdvertiseHost)
+		if rc.Clustered() {
+			if !ValidRocketMQName(rc.Cluster) {
+				return fmt.Errorf("addons.rocketmq.%s.cluster %q must match [A-Za-z0-9][A-Za-z0-9_-]{0,47}", name, rc.Cluster)
+			}
+			if !ValidRocketMQControllerID(rc.ControllerID) {
+				return fmt.Errorf("addons.rocketmq.%s.controller_id must match [A-Za-z][A-Za-z0-9]{0,31}", name)
+			}
+			if advertiseIP == nil || advertiseIP.To4() == nil || advertiseIP.IsUnspecified() {
+				return fmt.Errorf("addons.rocketmq.%s.advertise_host must be a concrete IPv4 address, got %q", name, rc.AdvertiseHost)
+			}
+			if advertiseIP.IsLoopback() {
+				return fmt.Errorf("addons.rocketmq.%s.advertise_host must not be loopback in cluster mode", name)
+			}
+			if _, err := RocketMQPeers(rc); err != nil {
+				return fmt.Errorf("addons.rocketmq.%s: %w", name, err)
+			}
+			for _, fixed := range []struct {
+				name string
+				got  int
+				want int
+			}{
+				{"namesrv_port", rc.NamesrvPort, DefaultRocketMQNamesrvPort},
+				{"broker_port", rc.BrokerPort, DefaultRocketMQBrokerPort},
+				{"proxy_port", rc.ProxyPort, DefaultRocketMQProxyPort},
+				{"grpc_port", rc.GRPCPort, DefaultRocketMQGRPCPort},
+				{"controller_port", rc.ControllerPort, DefaultRocketMQControllerPort},
+			} {
+				if fixed.got != fixed.want {
+					return fmt.Errorf("addons.rocketmq.%s.%s must be %d in cluster mode, got %d", name, fixed.name, fixed.want, fixed.got)
+				}
+			}
+		} else {
+			if len(rc.Peers) > 0 {
+				return fmt.Errorf("addons.rocketmq.%s.peers require cluster mode", name)
+			}
+			if rc.ControllerID != "" {
+				return fmt.Errorf("addons.rocketmq.%s.controller_id requires cluster mode", name)
+			}
+			if rc.ControllerPort != 0 {
+				return fmt.Errorf("addons.rocketmq.%s.controller_port requires cluster mode", name)
+			}
+			if advertiseIP == nil || advertiseIP.To4() == nil || advertiseIP.IsUnspecified() {
+				return fmt.Errorf("addons.rocketmq.%s.advertise_host must be a concrete IPv4 address, got %q", name, rc.AdvertiseHost)
+			}
+		}
+		ports := []struct {
+			name  string
+			value int
+		}{
+			{"namesrv_port", rc.NamesrvPort},
+			{"broker_port", rc.BrokerPort},
+			{"proxy_port", rc.ProxyPort},
+			{"grpc_port", rc.GRPCPort},
+		}
+		if rc.Clustered() {
+			ports = append(ports, struct {
+				name  string
+				value int
+			}{"controller_port", rc.ControllerPort})
+		}
+		for _, field := range ports {
+			if err := addRocketMQPort(name, field.name, field.value); err != nil {
+				return err
+			}
+		}
+		if rc.BrokerPort != 0 {
+			if err := addRocketMQPort(name, "vip_port", RocketMQVIPPort(rc)); err != nil {
+				return err
+			}
+			if err := addRocketMQPort(name, "ha_port", RocketMQHAPort(rc)); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
@@ -5649,6 +6142,56 @@ func (c *Config) ApplyDefaults() {
 		c.Addons.RabbitMQ[name] = addon
 	}
 
+	// Top-level RocketMQ instances. The official image runs as uid/gid 3000;
+	// config, broker store, controller state and logs live under
+	// <base>/addon/rocketmq/<name>/. Ports are assigned by autoAssignPorts so
+	// standalone instances can coexist on one host.
+	rocketMQBaseDir := platform.DefaultConfigDir()
+	if c.BaseDir != "" {
+		rocketMQBaseDir = c.BaseDir
+	}
+	for name, addon := range c.Addons.RocketMQ {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.Version == "" {
+			addon.Version = DefaultRocketMQVersion
+		}
+		if addon.ImageTag == "" {
+			if tag, ok := RocketMQImageTagForVersion(addon.Version); ok {
+				addon.ImageTag = tag
+			}
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-rocketmq" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if !addon.Clustered() && addon.AdvertiseHost == "" {
+			addon.AdvertiseHost = "127.0.0.1"
+		}
+		if addon.Clustered() && addon.ControllerID != "" && addon.AdvertiseHost != "" {
+			if peers, err := NormalizeRocketMQPeers(addon.Peers, addon.ControllerID, addon.AdvertiseHost); err == nil {
+				addon.Peers = peers
+			}
+		}
+		if addon.Heap == "" {
+			addon.Heap = DefaultRocketMQHeap
+		}
+		if addon.NamesrvHeap == "" {
+			addon.NamesrvHeap = DefaultRocketMQNamesrvHeap
+		}
+		if addon.ProxyHeap == "" {
+			addon.ProxyHeap = DefaultRocketMQProxyHeap
+		}
+		addonDir := filepath.Join(rocketMQBaseDir, "addon", "rocketmq", name)
+		if addon.ConfigDir == "" {
+			addon.ConfigDir = filepath.Join(addonDir, "config")
+		}
+		if addon.DataDir == "" {
+			addon.DataDir = filepath.Join(addonDir, "data")
+		}
+		c.Addons.RocketMQ[name] = addon
+	}
+
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
 	c.autoAssignPorts()
 }
@@ -6305,6 +6848,116 @@ func (c *Config) autoAssignPorts() {
 				}
 			}
 			c.Addons.RabbitMQ[name] = addon
+		}
+	}
+
+	// Allocate RocketMQ listener ports. Cluster members use the fixed
+	// controller topology ports, and exactly one clustered instance may run per
+	// host. Standalone instances draw namesrv/broker/proxy/gRPC ports from the
+	// RocketMQ defaults, reserving the broker's derived VIP and HA ports too.
+	// Explicit ports are pre-marked so a later draw cannot steal them.
+	{
+		rocketMQNames := make([]string, 0, len(c.Addons.RocketMQ))
+		for name := range c.Addons.RocketMQ {
+			rocketMQNames = append(rocketMQNames, name)
+		}
+		sort.Strings(rocketMQNames)
+
+		assigned := map[int]bool{}
+		portFree := func(port int) bool {
+			if port < 1 || port > 65535 || assigned[port] {
+				return false
+			}
+			return usedPorts == nil || !usedPorts[port]
+		}
+		reserve := func(port int) {
+			if port >= 1 && port <= 65535 {
+				assigned[port] = true
+			}
+		}
+
+		for _, name := range rocketMQNames {
+			addon := c.Addons.RocketMQ[name]
+			if !addon.Clustered() {
+				continue
+			}
+			if addon.NamesrvPort == 0 {
+				addon.NamesrvPort = DefaultRocketMQNamesrvPort
+			}
+			if addon.BrokerPort == 0 {
+				addon.BrokerPort = DefaultRocketMQBrokerPort
+			}
+			if addon.ProxyPort == 0 {
+				addon.ProxyPort = DefaultRocketMQProxyPort
+			}
+			if addon.GRPCPort == 0 {
+				addon.GRPCPort = DefaultRocketMQGRPCPort
+			}
+			if addon.ControllerPort == 0 {
+				addon.ControllerPort = DefaultRocketMQControllerPort
+			}
+			c.Addons.RocketMQ[name] = addon
+		}
+		for _, name := range rocketMQNames {
+			addon := c.Addons.RocketMQ[name]
+			reserve(addon.NamesrvPort)
+			reserve(addon.BrokerPort)
+			reserve(addon.ProxyPort)
+			reserve(addon.GRPCPort)
+			reserve(addon.ControllerPort)
+			if addon.BrokerPort != 0 {
+				reserve(RocketMQVIPPort(addon))
+				reserve(RocketMQHAPort(addon))
+			}
+		}
+
+		nextNamesrv := DefaultRocketMQNamesrvPort
+		nextBroker := DefaultRocketMQBrokerPort
+		nextProxy := DefaultRocketMQProxyPort
+		nextGRPC := DefaultRocketMQGRPCPort
+		nextFree := func(next *int) int {
+			for !portFree(*next) {
+				*next++
+			}
+			p := *next
+			*next++
+			assigned[p] = true
+			return p
+		}
+		for _, name := range rocketMQNames {
+			addon := c.Addons.RocketMQ[name]
+			if addon.Clustered() {
+				continue
+			}
+			if addon.NamesrvPort == 0 {
+				addon.NamesrvPort = nextFree(&nextNamesrv)
+			} else if addon.NamesrvPort >= nextNamesrv {
+				nextNamesrv = addon.NamesrvPort + 1
+			}
+			if addon.BrokerPort == 0 {
+				for nextBroker <= 65535 &&
+					(!portFree(nextBroker) || !portFree(nextBroker-2) || !portFree(nextBroker+1)) {
+					nextBroker++
+				}
+				addon.BrokerPort = nextBroker
+				reserve(nextBroker)
+				reserve(nextBroker - 2)
+				reserve(nextBroker + 1)
+				nextBroker++
+			} else if addon.BrokerPort >= nextBroker {
+				nextBroker = addon.BrokerPort + 1
+			}
+			if addon.ProxyPort == 0 {
+				addon.ProxyPort = nextFree(&nextProxy)
+			} else if addon.ProxyPort >= nextProxy {
+				nextProxy = addon.ProxyPort + 1
+			}
+			if addon.GRPCPort == 0 {
+				addon.GRPCPort = nextFree(&nextGRPC)
+			} else if addon.GRPCPort >= nextGRPC {
+				nextGRPC = addon.GRPCPort + 1
+			}
+			c.Addons.RocketMQ[name] = addon
 		}
 	}
 
