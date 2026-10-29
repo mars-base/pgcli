@@ -1,12 +1,12 @@
 ---
 title: "RabbitMQ"
-description: "Run a single-node RabbitMQ broker as a managed addon — AMQP plus the management web UI/API, optional TLS (generated CA or bring your own certificate), and queue list/purge/delete via rabbitmqctl"
+description: "Run a single-node RabbitMQ broker as a managed addon — AMQP plus the management web UI/API, optional TLS (generated CA or bring your own certificate), and queue management (list/declare/inspect, publish/get, bind/unbind, purge/delete)"
 weight: 66
 ---
 
 `pg addon install rabbitmq` runs **RabbitMQ 4.4.0** as a managed container from the official `docker.io/library/rabbitmq` image (the `-management` variant, which bundles the web UI and HTTP API). Like Kafka and ClickHouse, RabbitMQ is a **top-level addon**: pgcli renders `rabbitmq.conf`, owns the administrator account, bind-mounts the data directory and runs the container on the host network.
 
-The addon is deliberately **single-node**. It does not configure clustering, federation, shovel, MQTT or STOMP; advanced administration (vhosts, users, policies, exchanges, bindings) is done through the management UI or `pg addon rabbitmq shell` + `rabbitmqctl`.
+The addon is deliberately **single-node**. It does not configure clustering, federation, shovel, MQTT or STOMP; advanced administration (vhosts, users, permissions, policies and exchanges) is done through the management UI or `pg addon rabbitmq shell` + `rabbitmqctl`. Common queue operations are wrapped by `pg addon rabbitmq queue` (see [Queues and messages](#queues-and-messages)).
 
 > **Authentication is always on.** AMQP and the management UI require the administrator account pgcli creates (default `admin`, generated 20-character password). `--listen` defaults to `127.0.0.1`. When you expose it on a network, treat the password as the security boundary: TLS encrypts traffic but does **not** authenticate clients (`verify_none`, `fail_if_no_peer_cert = false`).
 
@@ -73,7 +73,7 @@ pw="$(pg addon password rabbitmq --name rmq)"
 curl -fsS -u "admin:$pw" http://127.0.0.1:15672/api/overview
 ```
 
-The UI is the supported path for everything the CLI does not wrap: vhosts, users, permissions, policies, exchanges, bindings and per-queue inspection.
+The UI is the supported path for everything the CLI does not wrap: vhosts, users, permissions, policies and exchange definitions. Common queue operations are available as `pg addon rabbitmq queue ...` commands (see [Queues and messages](#queues-and-messages)).
 
 ## Ports
 
@@ -154,37 +154,136 @@ The files are copied into the instance's `config/tls/` as `public.crt` and `priv
 
 With BYO TLS the source files are left untouched and pgcli does not renew the certificate — replace the source files and re-run `install --force` (or `--tls=false --force` to go back to plaintext).
 
-## Queues
+## Queues and messages
 
-Queue management goes through `rabbitmqctl` inside the container; it does not depend on the management HTTP password and works even if the UI port is firewalled off.
+`queue list`, `purge` and `delete` run `rabbitmqctl` inside the container and do
+not need the management HTTP password. The other queue commands — `declare`,
+`info`, `publish`, `get`, `bind`, `unbind`, `bindings` — use the management HTTP
+API with the stored administrator credentials; the instance must be running and
+the management port must be reachable from the host.
 
 ```bash
+# declare and inspect
 pg addon rabbitmq queue list --name rmq
-pg addon rabbitmq queue list --name rmq --vhost orders
-pg addon rabbitmq queue purge orders --name rmq --vhost orders --yes
+pg addon rabbitmq queue declare orders --name rmq
+pg addon rabbitmq queue info orders --name rmq
+pg addon rabbitmq queue info orders --name rmq --json
+
+# publish and consume
+pg addon rabbitmq queue publish orders --payload '{"id":1}' --name rmq
+echo '{"id":2}' | pg addon rabbitmq queue publish orders --payload-file - --name rmq
+pg addon rabbitmq queue get orders --count 10             # peek: messages stay queued
+pg addon rabbitmq queue get orders --count 10 --consume   # ack: remove them
+pg addon rabbitmq queue get orders --json
+
+# bindings (a real exchange is required; the default exchange cannot be bound)
+pg addon rabbitmq queue bind orders --exchange amq.topic --routing-key 'order.*' --name rmq
+pg addon rabbitmq queue bindings orders --name rmq
+pg addon rabbitmq queue unbind orders --exchange amq.topic --routing-key 'order.*' --name rmq
+
+# cleanup
+pg addon rabbitmq queue purge orders --name rmq --yes
 pg addon rabbitmq queue delete orders --name rmq --yes
 pg addon rabbitmq queue delete orders --name rmq --if-empty --if-unused
 ```
 
-- `list` prints `name`, `type`, `messages`, `ready`, `unacked` and `consumers`. An empty vhost prints `no queues`.
-- `purge` removes every **message** from a queue but keeps the queue. `delete` removes the queue itself. Both ask for confirmation unless `--yes` is given.
-- `--if-empty` / `--if-unused` (delete only) forward RabbitMQ's conditional checks: the delete fails instead of removing a non-empty queue or one with consumers.
-- `--vhost` defaults to `/`.
-- The instance must be running for every queue command.
+- `list` prints `name`, `type`, `messages`, `ready`, `unacked` and `consumers`;
+  an empty vhost prints `no queues`.
+- `declare` creates a **durable classic** queue by default. RabbitMQ 4.x removed
+  transient (non-durable, non-exclusive) queues, so `--durable=false` is
+  rejected before the request is sent. `--type quorum` declares a quorum queue
+  (it must be durable and cannot be auto-delete). Repeatable
+  `--argument KEY=VALUE` sets queue arguments; values that parse as JSON keep
+  their JSON type (`--argument x-max-priority=10`).
+- **Message retention.** `--message-ttl 30m` (or a number of milliseconds) sets
+  `x-message-ttl`: a message that waits in the queue longer is dropped, or
+  dead-lettered when the queue has `x-dead-letter-exchange`. A single message
+  can carry its own TTL with `--property 'expiration="60000"'`.
+- **Automatic deletion.** `--auto-delete` deletes the queue when its last
+  consumer disconnects. `--expires 24h` sets `x-expires`: the queue itself —
+  including any messages still in it — is deleted once it has been unused for
+  that long. A queue counts as used only when it has a consumer, is redeclared,
+  or is accessed with `basic.get`; **publishing alone does not reset the
+  timer**. The value must be positive (`0` is rejected by RabbitMQ). Both can
+  also be set with `--argument`.
+- `info` shows type, state, durable, auto-delete, message counters, consumers,
+  memory, policy, arguments and node. `--json` prints the raw management API
+  document. Counters are updated by RabbitMQ's stats collector, so they can lag
+  a few seconds behind publish/get.
+- `publish` sends one message. Exactly one of `--payload` or `--payload-file`
+  is required (use `-` to read stdin). `--exchange` defaults to `amq.default`
+  (the default exchange, which routes to the queue named by the routing key);
+  `--routing-key` defaults to the queue name. Repeatable
+  `--property KEY=VALUE` sets message properties, e.g.
+  `--property delivery_mode=2 --property 'content_type="application/json"'`.
+  An unroutable message prints a warning but is not an error.
+- `get` peeks by default (`ack_requeue_true`); `--consume` acknowledges and
+  removes the returned messages (`ack_requeue_false`). `--count` defaults to 1;
+  `--json` prints the raw API response.
+- `bind` / `unbind` require `--exchange` and refuse `amq.default` (the default
+  exchange is bound implicitly). `--routing-key` defaults to the queue name.
+  Repeatable `--argument` supports argument-based (headers) bindings. `unbind`
+  without `--argument` removes every binding from that exchange with the given
+  routing key; with `--argument` it removes only the exactly matching binding.
+- `bindings` lists a queue's bindings and their arguments (`--json` for the raw
+  document).
+- `purge` removes every **message** but keeps the queue; `delete` removes the
+  queue itself. Both ask for confirmation unless `--yes` is given.
+  `--if-empty` / `--if-unused` (delete only) forward RabbitMQ's conditional
+  checks: the delete fails instead of removing a non-empty queue or one with
+  consumers.
+- Every queue command accepts `--name` and `--vhost` (default `/`) and requires
+  the instance to be running.
 
-To declare a queue or publish a test message, use the management UI (`Queues → Add a new queue`) or the management HTTP API:
+### Retention examples
+
+A queue declared without retention flags keeps messages **indefinitely**:
+there is no default TTL. Messages leave the queue only when they are consumed,
+purged, dead-lettered, or the queue itself is deleted. Concrete limits:
 
 ```bash
-pw="$(pg addon password rabbitmq --name rmq)"
-curl -fsS -u "admin:$pw" -X PUT http://127.0.0.1:15672/api/queues/%2F/demo \
-  -H 'content-type: application/json' \
-  -d '{"durable":true}'
-curl -fsS -u "admin:$pw" -X POST http://127.0.0.1:15672/api/exchanges/%2F/amq.default/publish \
-  -H 'content-type: application/json' \
-  -d '{"properties":{},"routing_key":"demo","payload":"hello","payload_encoding":"string"}'
+# Queue-level TTL: every message expires 24 hours after it was published
+pg addon rabbitmq queue declare orders --message-ttl 24h --name rmq
+
+# Per-message TTL: this message expires 60 seconds after publishing
+# (`expiration` is a string property in milliseconds)
+pg addon rabbitmq queue publish orders --payload '{"id":1}' \
+  --property 'expiration="60000"' --name rmq
+
+# Idle queue deletion (not a message TTL): the queue itself and its
+# messages are removed after 1 hour without consumers, redeclare or basic.get
+pg addon rabbitmq queue declare scratch --expires 1h --name rmq
+
+# Capacity cap instead of a time limit: keep at most 10000 messages
+pg addon rabbitmq queue declare backlog --argument x-max-length=10000 --name rmq
+
+# Route expired messages to a dead-letter exchange instead of dropping them
+pg addon rabbitmq queue declare dlq-demo --message-ttl 24h \
+  --argument x-dead-letter-exchange=dlx --name rmq
 ```
 
-`pg addon rabbitmq shell` opens `/bin/bash` in the container; `rabbitmqctl` and `rabbitmq-diagnostics` are available there for everything the CLI and API do not cover.
+`--message-ttl` and `--expires` only apply when the queue is first declared.
+To change retention on an existing queue without deleting it, use a policy:
+
+```bash
+pg addon rabbitmq shell --name rmq
+rabbitmqctl set_policy orders-ttl '^orders$' \
+  '{"message-ttl":86400000,"max-length":10000}' --apply-to queues
+rabbitmqctl list_policies
+```
+
+Policies match queue names by regular expression, apply to new and existing
+queues, and take precedence over the equivalent `x-*` queue arguments. A policy
+can also be created in the management UI under **Admin → Policies**.
+
+The same retention limits can be applied without redeclaring a queue through a
+RabbitMQ **policy** (`message-ttl`, `expires`, `max-length`,
+`max-length-bytes`); pgcli does not wrap policies yet — use the management UI or
+`rabbitmqctl set_policy`.
+
+`pg addon rabbitmq shell` opens `/bin/bash` in the container; `rabbitmqctl` and
+`rabbitmq-diagnostics` are available there for everything the CLI and API do not
+cover.
 
 ## Status and lifecycle
 
@@ -303,18 +402,41 @@ pgcli-managed keys are rejected rather than silently overridden: `listeners.*`, 
 | Argument/flag | Default | Description |
 |---|---|---|
 | `--name NAME` | `rabbitmq` | Instance to operate on |
-| `-- COMMAND...` | `/bin/bash` | `shell` only: run a command instead of an interactive shell |
 
-### `pg addon rabbitmq queue list|purge|delete`
+### `pg addon rabbitmq queue ...`
 
-| Argument/flag | Default | Description |
-|---|---|---|
-| `QUEUE` | — | Queue name (`purge`/`delete`, positional) |
-| `--name NAME` | `rabbitmq` | Instance to operate on |
-| `--vhost VHOST` | `/` | Virtual host |
-| `--yes` | false | Skip the confirmation prompt (`purge`/`delete`) |
-| `--if-empty` | false | `delete` only: fail instead of deleting a queue with messages |
-| `--if-unused` | false | `delete` only: fail instead of deleting a queue with consumers |
+Every queue subcommand accepts `--name NAME` (default `rabbitmq`) and
+`--vhost VHOST` (default `/`).
+
+| Command | Argument/flag | Default | Description |
+|---|---|---|---|
+| `list` | — | — | Show queues with message and consumer counts |
+| `declare QUEUE` | `--durable` | true | Declare a durable queue (`false` is rejected by RabbitMQ 4.x) |
+| | `--auto-delete` | false | Delete the queue when its last consumer disconnects |
+| | `--type TYPE` | `classic` | `classic` or `quorum` |
+| | `--message-ttl DURATION` | — | Set `x-message-ttl` (e.g. `30m`, `24h`, or milliseconds) |
+| | `--expires DURATION` | — | Set `x-expires`: delete the queue after this much idle time (must be > 0) |
+| | `--argument K=V` | — | Extra queue argument; repeatable; JSON values keep their type |
+| `info QUEUE` | `--json` | false | Print the raw management API document |
+| `publish QUEUE` | `--payload TEXT` | — | Message body (mutually exclusive with `--payload-file`) |
+| | `--payload-file FILE` | — | Read the body from a file; `-` reads stdin |
+| | `--exchange NAME` | `amq.default` | Target exchange |
+| | `--routing-key KEY` | queue name | Routing key |
+| | `--property K=V` | — | Message property; repeatable; JSON values keep their type |
+| `get QUEUE` | `--count N` | 1 | Maximum messages to fetch |
+| | `--consume` | false | Ack and remove the messages (default: peek and requeue) |
+| | `--json` | false | Print the raw management API response |
+| `bind QUEUE` | `--exchange NAME` | — | Source exchange (required; `amq.default` rejected) |
+| | `--routing-key KEY` | queue name | Routing key |
+| | `--argument K=V` | — | Binding argument; repeatable |
+| `unbind QUEUE` | `--exchange NAME` | — | Source exchange (required) |
+| | `--routing-key KEY` | queue name | Routing key |
+| | `--argument K=V` | — | Remove only the exactly matching binding; omit to remove all matches |
+| `bindings QUEUE` | `--json` | false | Print the raw management API document |
+| `purge QUEUE` | `--yes` | false | Skip the confirmation prompt |
+| `delete QUEUE` | `--yes` | false | Skip the confirmation prompt |
+| | `--if-empty` | false | Fail instead of deleting a queue with messages |
+| | `--if-unused` | false | Fail instead of deleting a queue with consumers |
 
 ### Lifecycle, logs, autostart
 

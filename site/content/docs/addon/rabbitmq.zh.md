@@ -1,6 +1,6 @@
 ---
 title: "RabbitMQ"
-description: "以托管插件方式运行单节点 RabbitMQ broker——AMQP 与 management Web UI/API、可选 TLS（自动生成 CA 或自带证书）、通过 rabbitmqctl 管理队列 list/purge/delete"
+description: "以托管插件方式运行单节点 RabbitMQ broker——AMQP 与 management Web UI/API、可选 TLS（自动生成 CA 或自带证书）、以及队列管理（list/declare/info、publish/get、bind/unbind、purge/delete）"
 weight: 66
 ---
 
@@ -10,8 +10,9 @@ Kafka、ClickHouse 一样，RabbitMQ 是**顶层插件**：pgcli 负责渲染 `r
 管理员账号、绑定挂载数据目录，并以 host 网络启动容器。
 
 本插件刻意只做**单节点**：不配置集群、federation、shovel、MQTT 或 STOMP；vhost、用户、
-策略、exchange、binding 等高级管理通过 management UI 或 `pg addon rabbitmq shell` 里的
-`rabbitmqctl` 完成。
+权限、策略、exchange 等高级管理通过 management UI 或 `pg addon rabbitmq shell` 里的
+`rabbitmqctl` 完成。常用队列操作已封装为 `pg addon rabbitmq queue` 子命令（见
+[队列与消息](#队列与消息)）。
 
 > **认证始终开启。** AMQP 与 management UI 都需要 pgcli 创建的管理员账号（默认
 > `admin`，20 位自动生成密码）。`--listen` 默认 `127.0.0.1`。对外暴露时，密码就是安全
@@ -83,8 +84,8 @@ pw="$(pg addon password rabbitmq --name rmq)"
 curl -fsS -u "admin:$pw" http://127.0.0.1:15672/api/overview
 ```
 
-CLI 未封装的能力——vhost、用户、权限、策略、exchange、binding 以及逐队列检查——都通过
-UI 完成。
+CLI 未封装的能力——vhost、用户、权限、策略与 exchange 定义——都通过 UI 完成。
+常用队列操作已提供 `pg addon rabbitmq queue ...` 命令（见[队列与消息](#队列与消息)）。
 
 ## 端口
 
@@ -183,39 +184,113 @@ pgcli 会校验：
 使用自带证书时，源文件不会被改动，pgcli 也不会自动续期——替换源文件后重新执行
 `install --force`（或 `--tls=false --force` 回到明文）。
 
-## 队列
+## 队列与消息
 
-队列管理走容器内的 `rabbitmqctl`，不依赖 management HTTP 密码，即使 UI 端口被防火墙挡住
-也能用。
+`queue list`、`purge`、`delete` 走容器内的 `rabbitmqctl`，不依赖 management HTTP 密码。
+其余队列命令——`declare`、`info`、`publish`、`get`、`bind`、`unbind`、`bindings`——通过
+management HTTP API 使用已保存的管理员凭据，要求实例正在运行且宿主能访问 management 端口。
 
 ```bash
+# 声明与查看
 pg addon rabbitmq queue list --name rmq
-pg addon rabbitmq queue list --name rmq --vhost orders
-pg addon rabbitmq queue purge orders --name rmq --vhost orders --yes
+pg addon rabbitmq queue declare orders --name rmq
+pg addon rabbitmq queue info orders --name rmq
+pg addon rabbitmq queue info orders --name rmq --json
+
+# 发布与消费
+pg addon rabbitmq queue publish orders --payload '{"id":1}' --name rmq
+echo '{"id":2}' | pg addon rabbitmq queue publish orders --payload-file - --name rmq
+pg addon rabbitmq queue get orders --count 10             # peek：消息保留在队列
+pg addon rabbitmq queue get orders --count 10 --consume   # ack：取出并删除
+pg addon rabbitmq queue get orders --json
+
+# 绑定（必须是真实 exchange；默认 exchange 不能显式绑定）
+pg addon rabbitmq queue bind orders --exchange amq.topic --routing-key 'order.*' --name rmq
+pg addon rabbitmq queue bindings orders --name rmq
+pg addon rabbitmq queue unbind orders --exchange amq.topic --routing-key 'order.*' --name rmq
+
+# 清理
+pg addon rabbitmq queue purge orders --name rmq --yes
 pg addon rabbitmq queue delete orders --name rmq --yes
 pg addon rabbitmq queue delete orders --name rmq --if-empty --if-unused
 ```
 
-- `list` 打印 `name`、`type`、`messages`、`ready`、`unacked`、`consumers`。空 vhost 打印
+- `list` 打印 `name`、`type`、`messages`、`ready`、`unacked`、`consumers`；空 vhost 打印
   `no queues`。
-- `purge` 清空队列中的**消息**但保留队列；`delete` 删除队列本身。两者默认要求确认，`--yes`
-  可跳过。
-- `--if-empty` / `--if-unused`（仅 delete）透传 RabbitMQ 的条件检查：队列非空或有消费者时
-  删除失败，而不是直接删掉。
-- `--vhost` 默认 `/`。
-- 所有队列命令都要求实例正在运行。
+- `declare` 默认创建**持久化 classic** 队列。RabbitMQ 4.x 已移除 transient（非持久化且
+  非 exclusive）队列，因此 `--durable=false` 会在发出请求前直接报错。`--type quorum`
+  创建 quorum 队列（必须持久化，且不能 auto-delete）。可重复的
+  `--argument KEY=VALUE` 设置队列参数；能按 JSON 解析的值保留 JSON 类型（如
+  `--argument x-max-priority=10`）。
+- **消息保留时间。** `--message-ttl 30m`（或毫秒数）设置 `x-message-ttl`：在队列中等待超过
+  该时间的消息会被丢弃；若队列配置了 `x-dead-letter-exchange` 则转死信。单条消息也可用
+  `--property 'expiration="60000"'` 设置自己的 TTL。
+- **自动删除。** `--auto-delete` 在最后一个消费者断开后删除队列。`--expires 24h` 设置
+  `x-expires`：队列连续闲置该时长后，**队列本身连同其中剩余消息**一起删除。只有存在
+  消费者、被重新声明、或通过 `basic.get` 访问才算“使用过”；**单纯发布消息不会重置
+  计时器**。该值必须为正数（`0` 会被 RabbitMQ 拒绝）。两者也可通过 `--argument` 设置。
+- `info` 显示 type、state、durable、auto-delete、消息计数、consumers、memory、policy、
+  arguments 与 node；`--json` 输出 management API 原始文档。计数由 RabbitMQ 统计模块异步
+  刷新，可能比 publish/get 滞后几秒。
+- `publish` 发送一条消息。`--payload` 与 `--payload-file` 必须二选一（`-` 表示 stdin）。
+  `--exchange` 默认 `amq.default`（默认 exchange，按 routing key 直接路由到同名队列）；
+  `--routing-key` 默认队列名。可重复的 `--property KEY=VALUE` 设置消息属性，例如
+  `--property delivery_mode=2 --property 'content_type="application/json"'`。消息未被路由时
+  只打印警告，命令仍成功。
+- `get` 默认 peek（`ack_requeue_true`）；`--consume` 确认并删除取出的消息
+  （`ack_requeue_false`）。`--count` 默认 1；`--json` 输出 API 原始响应。
+- `bind` / `unbind` 必填 `--exchange`，并拒绝 `amq.default`（默认 exchange 是隐式绑定）。
+  `--routing-key` 默认队列名。可重复的 `--argument` 支持基于参数（headers）的绑定。
+  `unbind` 不带 `--argument` 时删除该 exchange 下所有同 routing key 的绑定；带
+  `--argument` 时只删除参数完全一致的那条。
+- `bindings` 列出队列的绑定及其参数（`--json` 输出原始文档）。
+- `purge` 清空队列中的**消息**但保留队列；`delete` 删除队列本身。两者默认要求确认，
+  `--yes` 可跳过。`--if-empty` / `--if-unused`（仅 delete）透传 RabbitMQ 的条件检查：队列
+  非空或有消费者时删除失败，而不是直接删掉。
+- 所有队列命令都接受 `--name` 与 `--vhost`（默认 `/`），并要求实例正在运行。
 
-声明队列或发送测试消息可用 management UI（`Queues → Add a new queue`）或 HTTP API：
+### 限制保留时间样例
+
+不带保留参数的队列会**无限期保留消息**：默认没有 TTL。消息只会因为被消费、purge、
+进入死信，或队列本身被删除而离开。常见限制方式：
 
 ```bash
-pw="$(pg addon password rabbitmq --name rmq)"
-curl -fsS -u "admin:$pw" -X PUT http://127.0.0.1:15672/api/queues/%2F/demo \
-  -H 'content-type: application/json' \
-  -d '{"durable":true}'
-curl -fsS -u "admin:$pw" -X POST http://127.0.0.1:15672/api/exchanges/%2F/amq.default/publish \
-  -H 'content-type: application/json' \
-  -d '{"properties":{},"routing_key":"demo","payload":"hello","payload_encoding":"string"}'
+# 队列级 TTL：发布后 24 小时过期
+pg addon rabbitmq queue declare orders --message-ttl 24h --name rmq
+
+# 单条消息 TTL：这条消息 60 秒后过期
+# （expiration 是毫秒字符串属性）
+pg addon rabbitmq queue publish orders --payload '{"id":1}' \
+  --property 'expiration="60000"' --name rmq
+
+# 队列闲置删除（不是消息 TTL）：连续 1 小时无消费者、未被重新声明、
+# 未被 get 访问后，队列本身及其中消息一起删除
+pg addon rabbitmq queue declare scratch --expires 1h --name rmq
+
+# 按容量而非时间限制：最多保留 10000 条消息
+pg addon rabbitmq queue declare backlog --argument x-max-length=10000 --name rmq
+
+# 过期消息转入死信交换机，而不是直接丢弃
+pg addon rabbitmq queue declare dlq-demo --message-ttl 24h \
+  --argument x-dead-letter-exchange=dlx --name rmq
 ```
+
+`--message-ttl` 与 `--expires` 只在队列首次声明时生效。要修改已存在队列的保留策略而不
+删除队列，使用 policy：
+
+```bash
+pg addon rabbitmq shell --name rmq
+rabbitmqctl set_policy orders-ttl '^orders$' \
+  '{"message-ttl":86400000,"max-length":10000}' --apply-to queues
+rabbitmqctl list_policies
+```
+
+policy 按队列名正则匹配，对新建和已有队列都生效，并优先于同名的 `x-*` 队列参数。也可以
+在 management UI 的 **Admin → Policies** 中创建。
+
+同样的保留限制也可以不重新声明队列，直接通过 RabbitMQ **policy**（`message-ttl`、
+`expires`、`max-length`、`max-length-bytes`）施加；pgcli 暂未封装 policy，请使用
+management UI 或 `rabbitmqctl set_policy`。
 
 `pg addon rabbitmq shell` 打开容器内的 `/bin/bash`；`rabbitmqctl` 与
 `rabbitmq-diagnostics` 都在里面，可处理 CLI 和 API 未覆盖的操作。
@@ -363,18 +438,40 @@ pgcli 托管的键会被拒绝而不是被静默覆盖：`listeners.*`、`ssl_op
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--name NAME` | `rabbitmq` | 目标实例 |
-| `-- COMMAND...` | `/bin/bash` | 仅 `shell`：执行命令而不是打开交互 shell |
 
-### `pg addon rabbitmq queue list|purge|delete`
+### `pg addon rabbitmq queue ...`
 
-| 参数 | 默认值 | 说明 |
-|---|---|---|
-| `QUEUE` | — | 队列名（`purge`/`delete`，位置参数） |
-| `--name NAME` | `rabbitmq` | 目标实例 |
-| `--vhost VHOST` | `/` | 虚拟主机 |
-| `--yes` | false | 跳过确认提示（`purge`/`delete`） |
-| `--if-empty` | false | 仅 `delete`：队列非空时失败而不是删除 |
-| `--if-unused` | false | 仅 `delete`：队列有消费者时失败而不是删除 |
+所有队列子命令都接受 `--name NAME`（默认 `rabbitmq`）与 `--vhost VHOST`（默认 `/`）。
+
+| 命令 | 参数 | 默认值 | 说明 |
+|---|---|---|---|
+| `list` | — | — | 列出队列及消息/消费者计数 |
+| `declare QUEUE` | `--durable` | true | 声明持久化队列（RabbitMQ 4.x 拒绝 `false`） |
+| | `--auto-delete` | false | 最后一个消费者断开后删除队列 |
+| | `--type TYPE` | `classic` | `classic` 或 `quorum` |
+| | `--message-ttl DURATION` | — | 设置 `x-message-ttl`（如 `30m`、`24h` 或毫秒） |
+| | `--expires DURATION` | — | 设置 `x-expires`：队列闲置该时长后删除（必须 > 0） |
+| | `--argument K=V` | — | 额外队列参数；可重复；JSON 值保留类型 |
+| `info QUEUE` | `--json` | false | 输出 management API 原始文档 |
+| `publish QUEUE` | `--payload TEXT` | — | 消息体（与 `--payload-file` 互斥） |
+| | `--payload-file FILE` | — | 从文件读取消息体；`-` 表示 stdin |
+| | `--exchange NAME` | `amq.default` | 目标 exchange |
+| | `--routing-key KEY` | 队列名 | routing key |
+| | `--property K=V` | — | 消息属性；可重复；JSON 值保留类型 |
+| `get QUEUE` | `--count N` | 1 | 最多取出的消息数 |
+| | `--consume` | false | ack 并删除消息（默认 peek 后重新入队） |
+| | `--json` | false | 输出 management API 原始响应 |
+| `bind QUEUE` | `--exchange NAME` | — | 源 exchange（必填；拒绝 `amq.default`） |
+| | `--routing-key KEY` | 队列名 | routing key |
+| | `--argument K=V` | — | 绑定参数；可重复 |
+| `unbind QUEUE` | `--exchange NAME` | — | 源 exchange（必填） |
+| | `--routing-key KEY` | 队列名 | routing key |
+| | `--argument K=V` | — | 仅删除参数完全一致的绑定；省略则删除所有匹配项 |
+| `bindings QUEUE` | `--json` | false | 输出 management API 原始文档 |
+| `purge QUEUE` | `--yes` | false | 跳过确认提示 |
+| `delete QUEUE` | `--yes` | false | 跳过确认提示 |
+| | `--if-empty` | false | 队列非空时失败而不是删除 |
+| | `--if-unused` | false | 队列有消费者时失败而不是删除 |
 
 ### 生命周期、日志、autostart
 

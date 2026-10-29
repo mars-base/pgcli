@@ -1,11 +1,18 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -302,6 +309,7 @@ func runAddonInstallRabbitMQ(cmd *cobra.Command) error {
 	fmt.Printf("  Password: pg addon password rabbitmq --name %s\n", name)
 	fmt.Printf("  Status:   pg addon rabbitmq status --name %s\n", name)
 	fmt.Printf("  Queues:   pg addon rabbitmq queue list --name %s\n", name)
+	fmt.Printf("  Declare:  pg addon rabbitmq queue declare orders --name %s\n", name)
 	fmt.Printf("  Shell:    pg addon rabbitmq shell --name %s\n", name)
 	return nil
 }
@@ -478,6 +486,95 @@ func rabbitMQVhost(cmd *cobra.Command) string {
 	return vhost
 }
 
+// rabbitMQAPI resolves a running instance and returns a management API client.
+func rabbitMQAPI(cmd *cobra.Command) (*rabbitmq.APIClient, config.RabbitMQConfig, error) {
+	_, rc, err := requireRabbitMQRunning(cmd)
+	if err != nil {
+		return nil, rc, err
+	}
+	return rabbitmq.NewAPIClient(rc), rc, nil
+}
+
+// parseRabbitMQKeyValues parses repeatable KEY=VALUE flags. Values that parse
+// as JSON keep their JSON type (numbers, booleans, objects); anything else is
+// a string.
+func parseRabbitMQKeyValues(flag string, pairs []string) (map[string]any, error) {
+	out := make(map[string]any, len(pairs))
+	for _, pair := range pairs {
+		key, value, ok := strings.Cut(pair, "=")
+		key = strings.TrimSpace(key)
+		if !ok || key == "" {
+			return nil, fmt.Errorf("invalid --%s %q: use KEY=VALUE", flag, pair)
+		}
+		var parsed any
+		if err := json.Unmarshal([]byte(value), &parsed); err != nil {
+			parsed = value
+		}
+		out[key] = parsed
+	}
+	return out, nil
+}
+
+func rabbitMQFormatValue(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return x
+	case bool:
+		return strconv.FormatBool(x)
+	case float64:
+		return strconv.FormatFloat(x, 'f', -1, 64)
+	default:
+		data, err := json.Marshal(x)
+		if err != nil {
+			return fmt.Sprint(x)
+		}
+		return string(data)
+	}
+}
+
+func rabbitMQFormatArguments(m map[string]any) string {
+	if len(m) == 0 {
+		return "{}"
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+rabbitMQFormatValue(m[k]))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func rabbitMQPrintJSON(raw []byte) {
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, raw, "", "  "); err != nil {
+		fmt.Println(string(raw))
+		return
+	}
+	fmt.Println(buf.String())
+}
+
+// rabbitMQDurationMS converts a Go duration or a bare number of milliseconds
+// to the integer milliseconds RabbitMQ queue arguments expect.
+func rabbitMQDurationMS(flag, value string) (int64, error) {
+	if ms, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if ms < 0 {
+			return 0, fmt.Errorf("--%s must not be negative", flag)
+		}
+		return ms, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("invalid --%s %q: use milliseconds or a duration such as 30m, 24h", flag, value)
+	}
+	return int64(d / time.Millisecond), nil
+}
+
 func runAddonRabbitMQQueueList(cmd *cobra.Command) error {
 	m, rc, err := requireRabbitMQRunning(cmd)
 	if err != nil {
@@ -562,6 +659,347 @@ func runAddonRabbitMQQueueDelete(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+type rabbitMQQueueDeclareOptions struct {
+	durable       bool
+	autoDelete    bool
+	queueType     string
+	arguments     map[string]any
+	messageTTL    int64
+	queueExpires  int64
+	messageTTLSet bool
+	expiresSet    bool
+}
+
+// parseRabbitMQQueueDeclareFlags validates declare flags before any container
+// or API work.
+func parseRabbitMQQueueDeclareFlags(fs *pflag.FlagSet) (rabbitMQQueueDeclareOptions, error) {
+	var opts rabbitMQQueueDeclareOptions
+	opts.durable, _ = fs.GetBool("durable")
+	opts.autoDelete, _ = fs.GetBool("auto-delete")
+	opts.queueType, _ = fs.GetString("type")
+	if opts.queueType != "classic" && opts.queueType != "quorum" {
+		return opts, fmt.Errorf("invalid --type %q: use classic or quorum", opts.queueType)
+	}
+	if !opts.durable {
+		return opts, fmt.Errorf("RabbitMQ 4.x rejects transient (non-durable) non-exclusive queues; declare a durable queue")
+	}
+	if opts.queueType == "quorum" && opts.autoDelete {
+		return opts, fmt.Errorf("quorum queues must be durable and cannot be auto-delete")
+	}
+	argFlags, _ := fs.GetStringArray("argument")
+	arguments, err := parseRabbitMQKeyValues("argument", argFlags)
+	if err != nil {
+		return opts, err
+	}
+	arguments["x-queue-type"] = opts.queueType
+	if fs.Changed("message-ttl") {
+		ttlText, _ := fs.GetString("message-ttl")
+		opts.messageTTL, err = rabbitMQDurationMS("message-ttl", ttlText)
+		if err != nil {
+			return opts, err
+		}
+		opts.messageTTLSet = true
+		arguments["x-message-ttl"] = opts.messageTTL
+	}
+	if fs.Changed("expires") {
+		expiresText, _ := fs.GetString("expires")
+		opts.queueExpires, err = rabbitMQDurationMS("expires", expiresText)
+		if err != nil {
+			return opts, err
+		}
+		opts.expiresSet = true
+		if opts.queueExpires <= 0 {
+			return opts, fmt.Errorf("--expires must be a positive duration (x-expires cannot be 0)")
+		}
+		arguments["x-expires"] = opts.queueExpires
+	}
+	opts.arguments = arguments
+	return opts, nil
+}
+
+func runAddonRabbitMQQueueDeclare(cmd *cobra.Command, args []string) error {
+	opts, err := parseRabbitMQQueueDeclareFlags(cmd.Flags())
+	if err != nil {
+		return err
+	}
+	api, rc, err := rabbitMQAPI(cmd)
+	if err != nil {
+		return err
+	}
+	queue := args[0]
+	vhost := rabbitMQVhost(cmd)
+	err = api.DeclareQueue(vhost, queue, rabbitmq.QueueDeclareOptions{
+		Durable:    opts.durable,
+		AutoDelete: opts.autoDelete,
+		Arguments:  opts.arguments,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("✓ queue %q declared on rabbitmq %q (vhost %s, type %s, durable %t, auto-delete %t)\n",
+		queue, rc.Name, vhost, opts.queueType, opts.durable, opts.autoDelete)
+	if opts.messageTTLSet {
+		fmt.Printf("  message TTL:  %d ms (messages expire while waiting in the queue)\n", opts.messageTTL)
+	}
+	if opts.expiresSet {
+		fmt.Printf("  queue expiry: %d ms (deleted after being unused for this long)\n", opts.queueExpires)
+	}
+	return nil
+}
+
+func runAddonRabbitMQQueueInfo(cmd *cobra.Command, args []string) error {
+	api, rc, err := rabbitMQAPI(cmd)
+	if err != nil {
+		return err
+	}
+	queue := args[0]
+	vhost := rabbitMQVhost(cmd)
+	info, raw, err := api.QueueInfo(vhost, queue)
+	if err != nil {
+		return err
+	}
+	if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
+		rabbitMQPrintJSON(raw)
+		return nil
+	}
+	fmt.Printf("queue %q on rabbitmq %q (vhost %s)\n", queue, rc.Name, vhost)
+	for _, field := range [][2]string{
+		{"type", "type"},
+		{"state", "state"},
+		{"durable", "durable"},
+		{"auto-delete", "auto_delete"},
+		{"messages", "messages"},
+		{"ready", "messages_ready"},
+		{"unacked", "messages_unacknowledged"},
+		{"consumers", "consumers"},
+		{"memory", "memory"},
+		{"policy", "policy"},
+		{"arguments", "arguments"},
+		{"node", "node"},
+	} {
+		v, ok := info[field[1]]
+		if !ok {
+			continue
+		}
+		fmt.Printf("  %-14s %s\n", field[0]+":", rabbitMQFormatValue(v))
+	}
+	return nil
+}
+
+func runAddonRabbitMQQueuePublish(cmd *cobra.Command, args []string) error {
+	api, rc, err := rabbitMQAPI(cmd)
+	if err != nil {
+		return err
+	}
+	queue := args[0]
+	vhost := rabbitMQVhost(cmd)
+	payload, _ := cmd.Flags().GetString("payload")
+	payloadFile, _ := cmd.Flags().GetString("payload-file")
+	payloadSet := cmd.Flags().Changed("payload")
+	fileSet := cmd.Flags().Changed("payload-file")
+	if payloadSet == fileSet {
+		return fmt.Errorf("pass exactly one of --payload or --payload-file (- for stdin)")
+	}
+	if fileSet {
+		if payloadFile == "-" {
+			data, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				return fmt.Errorf("reading stdin: %w", err)
+			}
+			payload = string(data)
+		} else {
+			data, err := os.ReadFile(payloadFile)
+			if err != nil {
+				return fmt.Errorf("reading --payload-file: %w", err)
+			}
+			payload = string(data)
+		}
+	}
+	exchange, _ := cmd.Flags().GetString("exchange")
+	if exchange == "" {
+		exchange = "amq.default"
+	}
+	routingKey, _ := cmd.Flags().GetString("routing-key")
+	if !cmd.Flags().Changed("routing-key") {
+		routingKey = queue
+	}
+	propertyFlags, _ := cmd.Flags().GetStringArray("property")
+	properties, err := parseRabbitMQKeyValues("property", propertyFlags)
+	if err != nil {
+		return err
+	}
+	routed, err := api.Publish(vhost, exchange, routingKey, payload, properties)
+	if err != nil {
+		return err
+	}
+	if !routed {
+		fmt.Fprintf(os.Stderr, "[!] message was not routed (exchange %q, routing key %q) — no matching binding\n", exchange, routingKey)
+		return nil
+	}
+	fmt.Printf("✓ published %d byte(s) to exchange %q (routing key %q) on rabbitmq %q (vhost %s)\n",
+		len(payload), exchange, routingKey, rc.Name, vhost)
+	return nil
+}
+
+func runAddonRabbitMQQueueGet(cmd *cobra.Command, args []string) error {
+	api, rc, err := rabbitMQAPI(cmd)
+	if err != nil {
+		return err
+	}
+	queue := args[0]
+	vhost := rabbitMQVhost(cmd)
+	count, _ := cmd.Flags().GetInt("count")
+	if count <= 0 {
+		return fmt.Errorf("--count must be greater than 0")
+	}
+	consume, _ := cmd.Flags().GetBool("consume")
+	ackmode := "ack_requeue_true"
+	if consume {
+		ackmode = "ack_requeue_false"
+	}
+	messages, raw, err := api.Get(vhost, queue, count, ackmode)
+	if err != nil {
+		return err
+	}
+	if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
+		rabbitMQPrintJSON(raw)
+		return nil
+	}
+	if len(messages) == 0 {
+		fmt.Printf("no messages in queue %q on rabbitmq %q (vhost %s)\n", queue, rc.Name, vhost)
+		return nil
+	}
+	for i, msg := range messages {
+		exchange := msg.Exchange
+		if exchange == "" {
+			exchange = "(default)"
+		}
+		fmt.Printf("--- message %d/%d (exchange %q, routing key %q, redelivered %t) ---\n",
+			i+1, len(messages), exchange, msg.RoutingKey, msg.Redelivered)
+		if len(msg.Properties) > 0 {
+			fmt.Printf("properties: %s\n", rabbitMQFormatArguments(msg.Properties))
+		}
+		if msg.PayloadEncoding == "base64" {
+			fmt.Printf("payload (base64): %s\n", msg.Payload)
+		} else {
+			fmt.Println(msg.Payload)
+		}
+	}
+	if consume {
+		fmt.Printf("✓ consumed %d message(s) from queue %q\n", len(messages), queue)
+	} else {
+		fmt.Printf("✓ peeked %d message(s) from queue %q (not removed; use --consume to ack)\n", len(messages), queue)
+	}
+	return nil
+}
+
+func rabbitMQExchangeFlag(cmd *cobra.Command) (string, error) {
+	exchange, _ := cmd.Flags().GetString("exchange")
+	if exchange == "" || exchange == "amq.default" {
+		return "", fmt.Errorf("--exchange is required and must name a real exchange (the default exchange cannot be bound explicitly)")
+	}
+	return exchange, nil
+}
+
+func rabbitMQRoutingKey(cmd *cobra.Command, queue string) string {
+	routingKey, _ := cmd.Flags().GetString("routing-key")
+	if !cmd.Flags().Changed("routing-key") {
+		return queue
+	}
+	return routingKey
+}
+
+func runAddonRabbitMQQueueBind(cmd *cobra.Command, args []string) error {
+	api, rc, err := rabbitMQAPI(cmd)
+	if err != nil {
+		return err
+	}
+	queue := args[0]
+	exchange, err := rabbitMQExchangeFlag(cmd)
+	if err != nil {
+		return err
+	}
+	vhost := rabbitMQVhost(cmd)
+	routingKey := rabbitMQRoutingKey(cmd, queue)
+	argFlags, _ := cmd.Flags().GetStringArray("argument")
+	arguments, err := parseRabbitMQKeyValues("argument", argFlags)
+	if err != nil {
+		return err
+	}
+	if err := api.Bind(vhost, queue, exchange, routingKey, arguments); err != nil {
+		return err
+	}
+	fmt.Printf("✓ bound queue %q to exchange %q (routing key %q) on rabbitmq %q (vhost %s)\n",
+		queue, exchange, routingKey, rc.Name, vhost)
+	return nil
+}
+
+func runAddonRabbitMQQueueUnbind(cmd *cobra.Command, args []string) error {
+	api, rc, err := rabbitMQAPI(cmd)
+	if err != nil {
+		return err
+	}
+	queue := args[0]
+	exchange, err := rabbitMQExchangeFlag(cmd)
+	if err != nil {
+		return err
+	}
+	vhost := rabbitMQVhost(cmd)
+	routingKey := rabbitMQRoutingKey(cmd, queue)
+	var arguments map[string]any
+	if cmd.Flags().Changed("argument") {
+		argFlags, _ := cmd.Flags().GetStringArray("argument")
+		arguments, err = parseRabbitMQKeyValues("argument", argFlags)
+		if err != nil {
+			return err
+		}
+	}
+	removed, err := api.Unbind(vhost, queue, exchange, routingKey, arguments)
+	if err != nil {
+		return err
+	}
+	if removed == 0 {
+		fmt.Printf("no matching binding from exchange %q to queue %q (routing key %q) on rabbitmq %q (vhost %s)\n",
+			exchange, queue, routingKey, rc.Name, vhost)
+		return nil
+	}
+	fmt.Printf("✓ removed %d binding(s) from exchange %q to queue %q (routing key %q) on rabbitmq %q (vhost %s)\n",
+		removed, exchange, queue, routingKey, rc.Name, vhost)
+	return nil
+}
+
+func runAddonRabbitMQQueueBindings(cmd *cobra.Command, args []string) error {
+	api, rc, err := rabbitMQAPI(cmd)
+	if err != nil {
+		return err
+	}
+	queue := args[0]
+	vhost := rabbitMQVhost(cmd)
+	bindings, raw, err := api.QueueBindings(vhost, queue)
+	if err != nil {
+		return err
+	}
+	if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
+		rabbitMQPrintJSON(raw)
+		return nil
+	}
+	if len(bindings) == 0 {
+		fmt.Printf("no bindings for queue %q on rabbitmq %q (vhost %s)\n", queue, rc.Name, vhost)
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "EXCHANGE\tROUTING KEY\tARGUMENTS")
+	for _, b := range bindings {
+		rk := b.RoutingKey
+		if rk == "" {
+			rk = "(empty)"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\n", b.Source, rk, rabbitMQFormatArguments(b.Arguments))
+	}
+	w.Flush()
+	return nil
+}
+
 // --- command tree -----------------------------------------------------------
 
 var addonRabbitMQCmd = &cobra.Command{
@@ -582,7 +1020,7 @@ every start, so the password stored in pg.yaml is always the live one.
 Subcommands:
   status    Show container state, endpoints, version and paths
   shell     Open a bash shell in the container
-  queue     List, purge or delete queues (via rabbitmqctl)
+  queue     List/declare/inspect queues, publish/get messages and manage bindings
 
 Examples:
   pg addon install rabbitmq --name rmq
@@ -590,6 +1028,10 @@ Examples:
   pg addon install rabbitmq --tls-cert cert.pem --tls-key key.pem
   pg addon rabbitmq status --name rmq
   pg addon rabbitmq queue list --name rmq
+  pg addon rabbitmq queue declare orders --name rmq
+  pg addon rabbitmq queue publish orders --payload '{"id":1}' --name rmq
+  pg addon rabbitmq queue get orders --count 5 --name rmq
+  pg addon rabbitmq queue bind orders --exchange events --routing-key 'order.*' --name rmq
   pg addon rabbitmq queue purge orders --name rmq --yes
   pg addon rabbitmq queue delete orders --name rmq --vhost / --if-empty
   pg logs addon rabbitmq --name rmq -f
@@ -610,13 +1052,78 @@ var addonRabbitMQShellCmd = &cobra.Command{
 
 var addonRabbitMQQueueCmd = &cobra.Command{
 	Use:   "queue",
-	Short: "List, purge and delete queues",
+	Short: "Manage queues, messages and bindings",
+	Long: `Manage queues in a RabbitMQ instance.
+
+list and purge/delete use rabbitmqctl inside the container. declare, info,
+publish, get, bind, unbind and bindings go through the management HTTP API.
+
+Subcommands:
+  list       List queues with message and consumer counts
+  declare    Declare a queue (create, or verify an identical one)
+  info       Show one queue's state, counters and arguments
+  publish    Publish a single message through an exchange
+  get        Peek at or consume messages from a queue
+  bind       Create a binding from an exchange to a queue
+  unbind     Remove matching bindings
+  bindings   List a queue's bindings
+  purge      Remove all messages from a queue
+  delete     Delete a queue`,
 }
 
 var addonRabbitMQQueueListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List queues with message and consumer counts",
 	RunE:  func(cmd *cobra.Command, _ []string) error { return runAddonRabbitMQQueueList(cmd) },
+}
+
+var addonRabbitMQQueueDeclareCmd = &cobra.Command{
+	Use:   "declare QUEUE",
+	Short: "Declare a queue (create, or verify an identical one)",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runAddonRabbitMQQueueDeclare,
+}
+
+var addonRabbitMQQueueInfoCmd = &cobra.Command{
+	Use:   "info QUEUE",
+	Short: "Show one queue's state, counters and arguments",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runAddonRabbitMQQueueInfo,
+}
+
+var addonRabbitMQQueuePublishCmd = &cobra.Command{
+	Use:   "publish QUEUE",
+	Short: "Publish a single message through an exchange",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runAddonRabbitMQQueuePublish,
+}
+
+var addonRabbitMQQueueGetCmd = &cobra.Command{
+	Use:   "get QUEUE",
+	Short: "Peek at or consume messages from a queue",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runAddonRabbitMQQueueGet,
+}
+
+var addonRabbitMQQueueBindCmd = &cobra.Command{
+	Use:   "bind QUEUE",
+	Short: "Create a binding from an exchange to a queue",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runAddonRabbitMQQueueBind,
+}
+
+var addonRabbitMQQueueUnbindCmd = &cobra.Command{
+	Use:   "unbind QUEUE",
+	Short: "Remove bindings from an exchange to a queue",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runAddonRabbitMQQueueUnbind,
+}
+
+var addonRabbitMQQueueBindingsCmd = &cobra.Command{
+	Use:   "bindings QUEUE",
+	Short: "List a queue's bindings",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runAddonRabbitMQQueueBindings,
 }
 
 var addonRabbitMQQueuePurgeCmd = &cobra.Command{
@@ -636,16 +1143,33 @@ var addonRabbitMQQueueDeleteCmd = &cobra.Command{
 func init() {
 	addonCmd.AddCommand(addonRabbitMQCmd)
 	addonRabbitMQCmd.AddCommand(addonRabbitMQStatusCmd, addonRabbitMQShellCmd, addonRabbitMQQueueCmd)
-	addonRabbitMQQueueCmd.AddCommand(addonRabbitMQQueueListCmd, addonRabbitMQQueuePurgeCmd, addonRabbitMQQueueDeleteCmd)
+	addonRabbitMQQueueCmd.AddCommand(
+		addonRabbitMQQueueListCmd,
+		addonRabbitMQQueueDeclareCmd,
+		addonRabbitMQQueueInfoCmd,
+		addonRabbitMQQueuePublishCmd,
+		addonRabbitMQQueueGetCmd,
+		addonRabbitMQQueueBindCmd,
+		addonRabbitMQQueueUnbindCmd,
+		addonRabbitMQQueueBindingsCmd,
+		addonRabbitMQQueuePurgeCmd,
+		addonRabbitMQQueueDeleteCmd,
+	)
 
 	for _, sub := range []*cobra.Command{
 		addonRabbitMQStatusCmd, addonRabbitMQShellCmd,
-		addonRabbitMQQueueListCmd, addonRabbitMQQueuePurgeCmd, addonRabbitMQQueueDeleteCmd,
+		addonRabbitMQQueueListCmd, addonRabbitMQQueueDeclareCmd, addonRabbitMQQueueInfoCmd,
+		addonRabbitMQQueuePublishCmd, addonRabbitMQQueueGetCmd,
+		addonRabbitMQQueueBindCmd, addonRabbitMQQueueUnbindCmd, addonRabbitMQQueueBindingsCmd,
+		addonRabbitMQQueuePurgeCmd, addonRabbitMQQueueDeleteCmd,
 	} {
 		sub.Flags().String("name", "", "rabbitmq instance name (default \"rabbitmq\")")
 	}
 	for _, sub := range []*cobra.Command{
-		addonRabbitMQQueueListCmd, addonRabbitMQQueuePurgeCmd, addonRabbitMQQueueDeleteCmd,
+		addonRabbitMQQueueListCmd, addonRabbitMQQueueDeclareCmd, addonRabbitMQQueueInfoCmd,
+		addonRabbitMQQueuePublishCmd, addonRabbitMQQueueGetCmd,
+		addonRabbitMQQueueBindCmd, addonRabbitMQQueueUnbindCmd, addonRabbitMQQueueBindingsCmd,
+		addonRabbitMQQueuePurgeCmd, addonRabbitMQQueueDeleteCmd,
 	} {
 		sub.Flags().String("vhost", "/", "RabbitMQ virtual host")
 	}
@@ -654,6 +1178,32 @@ func init() {
 	}
 	addonRabbitMQQueueDeleteCmd.Flags().Bool("if-empty", false, "only delete the queue when it has no messages")
 	addonRabbitMQQueueDeleteCmd.Flags().Bool("if-unused", false, "only delete the queue when it has no consumers")
+
+	addonRabbitMQQueueDeclareCmd.Flags().Bool("durable", true, "declare a durable queue")
+	addonRabbitMQQueueDeclareCmd.Flags().Bool("auto-delete", false, "delete the queue when its last consumer disconnects")
+	addonRabbitMQQueueDeclareCmd.Flags().String("type", "classic", "queue type: classic or quorum")
+	addonRabbitMQQueueDeclareCmd.Flags().String("message-ttl", "", "drop messages that wait in the queue longer than this (e.g. 30m, 24h, or milliseconds)")
+	addonRabbitMQQueueDeclareCmd.Flags().String("expires", "", "delete the queue after it is unused for this long (e.g. 24h, or milliseconds)")
+	addonRabbitMQQueueDeclareCmd.Flags().StringArray("argument", nil, "queue argument KEY=VALUE (repeatable; JSON values keep their type)")
+
+	addonRabbitMQQueueInfoCmd.Flags().Bool("json", false, "print the raw management API JSON")
+
+	addonRabbitMQQueuePublishCmd.Flags().String("payload", "", "message body")
+	addonRabbitMQQueuePublishCmd.Flags().String("payload-file", "", "read the message body from a file (- for stdin)")
+	addonRabbitMQQueuePublishCmd.Flags().String("exchange", "amq.default", "target exchange (amq.default routes by queue name)")
+	addonRabbitMQQueuePublishCmd.Flags().String("routing-key", "", "routing key (default: the queue name)")
+	addonRabbitMQQueuePublishCmd.Flags().StringArray("property", nil, "message property KEY=VALUE (repeatable; JSON values keep their type)")
+
+	addonRabbitMQQueueGetCmd.Flags().Int("count", 1, "maximum number of messages to fetch")
+	addonRabbitMQQueueGetCmd.Flags().Bool("consume", false, "acknowledge and remove the fetched messages (default: peek and requeue)")
+	addonRabbitMQQueueGetCmd.Flags().Bool("json", false, "print the raw management API JSON")
+
+	for _, sub := range []*cobra.Command{addonRabbitMQQueueBindCmd, addonRabbitMQQueueUnbindCmd} {
+		sub.Flags().String("exchange", "", "source exchange (required)")
+		sub.Flags().String("routing-key", "", "routing key (default: the queue name)")
+		sub.Flags().StringArray("argument", nil, "binding argument KEY=VALUE (repeatable; JSON values keep their type)")
+	}
+	addonRabbitMQQueueBindingsCmd.Flags().Bool("json", false, "print the raw management API JSON")
 
 	addonInstallCmd.Flags().Int("amqp-port", 0, "RabbitMQ AMQP host port (0=auto-assign from rabbitmq_start_port, default 5672)")
 	addonInstallCmd.Flags().Int("management-port", 0, "RabbitMQ management web UI/API host port (0=auto-assign from rabbitmq_management_start_port, default 15672)")

@@ -92,7 +92,7 @@ func TestRabbitMQCommandTree(t *testing.T) {
 			t.Errorf("addon rabbitmq %s: %v", name, err)
 		}
 	}
-	for _, name := range []string{"list", "purge", "delete"} {
+	for _, name := range []string{"list", "declare", "info", "publish", "get", "bind", "unbind", "bindings", "purge", "delete"} {
 		cmd, _, err := addonRabbitMQCmd.Find([]string{"queue", name})
 		if err != nil {
 			t.Errorf("addon rabbitmq queue %s: %v", name, err)
@@ -103,6 +103,26 @@ func TestRabbitMQCommandTree(t *testing.T) {
 		}
 		if cmd.Flags().Lookup("vhost") == nil {
 			t.Errorf("addon rabbitmq queue %s: --vhost flag not registered", name)
+		}
+	}
+	wantFlags := map[string][]string{
+		"declare":  {"durable", "auto-delete", "type", "message-ttl", "expires", "argument"},
+		"info":     {"json"},
+		"publish":  {"payload", "payload-file", "exchange", "routing-key", "property"},
+		"get":      {"count", "consume", "json"},
+		"bind":     {"exchange", "routing-key", "argument"},
+		"unbind":   {"exchange", "routing-key", "argument"},
+		"bindings": {"json"},
+	}
+	for name, flags := range wantFlags {
+		cmd, _, err := addonRabbitMQCmd.Find([]string{"queue", name})
+		if err != nil {
+			continue
+		}
+		for _, flag := range flags {
+			if cmd.Flags().Lookup(flag) == nil {
+				t.Errorf("addon rabbitmq queue %s: --%s flag not registered", name, flag)
+			}
 		}
 	}
 	for _, name := range []string{"purge", "delete"} {
@@ -154,6 +174,146 @@ func TestRabbitMQInstallFlagsRegistered(t *testing.T) {
 		if f := addonInstallCmd.Flags().Lookup(name); !strings.Contains(f.Usage, "RabbitMQ") {
 			t.Errorf("--%s help does not mention RabbitMQ: %q", name, f.Usage)
 		}
+	}
+}
+
+func TestParseRabbitMQKeyValues(t *testing.T) {
+	got, err := parseRabbitMQKeyValues("argument", []string{
+		"x-message-ttl=60000",
+		"x-queue-mode=lazy",
+		"x-dead-letter-exchange=dlx",
+		"x-max-priority=10",
+		"x-truncate=false",
+		`x-meta={"a":1}`,
+	})
+	if err != nil {
+		t.Fatalf("parseRabbitMQKeyValues: %v", err)
+	}
+	if got["x-message-ttl"] != float64(60000) {
+		t.Errorf("x-message-ttl = %#v", got["x-message-ttl"])
+	}
+	if got["x-queue-mode"] != "lazy" || got["x-dead-letter-exchange"] != "dlx" {
+		t.Errorf("string values = %#v / %#v", got["x-queue-mode"], got["x-dead-letter-exchange"])
+	}
+	if got["x-max-priority"] != float64(10) || got["x-truncate"] != false {
+		t.Errorf("typed values = %#v / %#v", got["x-max-priority"], got["x-truncate"])
+	}
+	meta, ok := got["x-meta"].(map[string]any)
+	if !ok || meta["a"] != float64(1) {
+		t.Errorf("x-meta = %#v", got["x-meta"])
+	}
+	if _, err := parseRabbitMQKeyValues("argument", []string{"novalue"}); err == nil || !strings.Contains(err.Error(), "KEY=VALUE") {
+		t.Errorf("missing '=' error = %v", err)
+	}
+	if _, err := parseRabbitMQKeyValues("argument", []string{"=1"}); err == nil || !strings.Contains(err.Error(), "KEY=VALUE") {
+		t.Errorf("empty key error = %v", err)
+	}
+}
+
+func TestRabbitMQDurationMS(t *testing.T) {
+	cases := map[string]int64{
+		"0":      0,
+		"60000":  60000,
+		"30m":    1800000,
+		"24h":    86400000,
+		"1500ms": 1500,
+	}
+	for input, want := range cases {
+		got, err := rabbitMQDurationMS("message-ttl", input)
+		if err != nil || got != want {
+			t.Errorf("rabbitMQDurationMS(%q) = %d, %v; want %d", input, got, err, want)
+		}
+	}
+	for _, bad := range []string{"-1", "soon", "10x"} {
+		if _, err := rabbitMQDurationMS("message-ttl", bad); err == nil {
+			t.Errorf("rabbitMQDurationMS(%q) succeeded, want error", bad)
+		}
+	}
+}
+
+func TestParseRabbitMQQueueDeclareFlags(t *testing.T) {
+	newCmd := func() *cobra.Command {
+		cmd := &cobra.Command{Use: "declare"}
+		cmd.Flags().Bool("durable", true, "")
+		cmd.Flags().Bool("auto-delete", false, "")
+		cmd.Flags().String("type", "classic", "")
+		cmd.Flags().String("message-ttl", "", "")
+		cmd.Flags().String("expires", "", "")
+		cmd.Flags().StringArray("argument", nil, "")
+		return cmd
+	}
+	parse := func(flags map[string]string) (rabbitMQQueueDeclareOptions, error) {
+		cmd := newCmd()
+		for key, value := range flags {
+			if err := cmd.Flags().Set(key, value); err != nil {
+				t.Fatalf("set %s=%s: %v", key, value, err)
+			}
+		}
+		return parseRabbitMQQueueDeclareFlags(cmd.Flags())
+	}
+
+	t.Run("defaults", func(t *testing.T) {
+		opts, err := parse(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !opts.durable || opts.autoDelete || opts.queueType != "classic" {
+			t.Errorf("defaults = %+v", opts)
+		}
+		if opts.arguments["x-queue-type"] != "classic" {
+			t.Errorf("arguments = %v", opts.arguments)
+		}
+		if _, ok := opts.arguments["x-message-ttl"]; ok || opts.messageTTLSet {
+			t.Errorf("message TTL set without flag: %+v", opts)
+		}
+		if _, ok := opts.arguments["x-expires"]; ok || opts.expiresSet {
+			t.Errorf("expires set without flag: %+v", opts)
+		}
+	})
+
+	t.Run("ttl, expiry and extra arguments", func(t *testing.T) {
+		opts, err := parse(map[string]string{
+			"type":        "quorum",
+			"message-ttl": "30m",
+			"expires":     "24h",
+			"argument":    "x-max-priority=10",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if opts.queueType != "quorum" || opts.arguments["x-queue-type"] != "quorum" {
+			t.Errorf("queue type = %+v", opts)
+		}
+		if !opts.messageTTLSet || opts.messageTTL != 1800000 || opts.arguments["x-message-ttl"] != int64(1800000) {
+			t.Errorf("message TTL = %+v", opts)
+		}
+		if !opts.expiresSet || opts.queueExpires != 86400000 || opts.arguments["x-expires"] != int64(86400000) {
+			t.Errorf("expires = %+v", opts)
+		}
+		if opts.arguments["x-max-priority"] != float64(10) {
+			t.Errorf("arguments = %v", opts.arguments)
+		}
+	})
+
+	bad := []struct {
+		name   string
+		flags  map[string]string
+		substr string
+	}{
+		{"invalid type", map[string]string{"type": "stream"}, "use classic or quorum"},
+		{"transient queue", map[string]string{"durable": "false"}, "transient"},
+		{"quorum auto-delete", map[string]string{"type": "quorum", "auto-delete": "true"}, "cannot be auto-delete"},
+		{"bad message ttl", map[string]string{"message-ttl": "soon"}, "message-ttl"},
+		{"bad expires", map[string]string{"expires": "-5"}, "expires"},
+		{"zero expires", map[string]string{"expires": "0"}, "positive"},
+		{"bad argument", map[string]string{"argument": "novalue"}, "KEY=VALUE"},
+	}
+	for _, tt := range bad {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := parse(tt.flags); err == nil || !strings.Contains(err.Error(), tt.substr) {
+				t.Errorf("error = %v, want %q", err, tt.substr)
+			}
+		})
 	}
 }
 
