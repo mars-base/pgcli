@@ -2,9 +2,11 @@ package podman
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -514,14 +516,47 @@ func (m *RocketMQManager) MQAdmin(k *config.RocketMQConfig, args ...string) (str
 	return string(out), nil
 }
 
+// ConsumeMessages runs mqadmin consumeMessage in a transient container and
+// streams its output to the caller. consumeMessage otherwise waits for new
+// messages indefinitely, so the command is wrapped in the image's timeout(1);
+// exit code 124 means that timeout expired and is reported as timedOut rather
+// than an error.
+func (m *RocketMQManager) ConsumeMessages(ctx context.Context, k *config.RocketMQConfig, timeout time.Duration, args ...string) (timedOut bool, err error) {
+	cmd := podmanCommandContext(ctx, m.podman, rocketMQConsumeArgs(*k, timeout, args...)...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.WaitDelay = 5 * time.Second
+	err = cmd.Run()
+	if err == nil {
+		return false, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 124 {
+		return true, nil
+	}
+	return false, fmt.Errorf("podman run mqadmin consumeMessage: %w", err)
+}
+
 // rocketMQAdminArgs builds the mqadmin argv and supplies the local NameServer
 // address unless the caller already passed -n.
 func rocketMQAdminArgs(k config.RocketMQConfig, args ...string) []string {
+	return rocketMQAdminExecArgs(k, []string{"sh", "mqadmin"}, args)
+}
+
+// rocketMQConsumeArgs runs consumeMessage under the image's timeout(1) so a
+// debug pull consumer cannot run forever.
+func rocketMQConsumeArgs(k config.RocketMQConfig, timeout time.Duration, args ...string) []string {
+	prefix := []string{"timeout", fmt.Sprintf("%ds", int(timeout.Seconds())), "sh", "mqadmin"}
+	return rocketMQAdminExecArgs(k, prefix, args)
+}
+
+func rocketMQAdminExecArgs(k config.RocketMQConfig, prefix, args []string) []string {
 	runArgs := []string{
 		"run", "--rm", "--network", "host", "--http-proxy=false",
 		"-e", "JAVA_OPT_EXT=-Xms192m -Xmx192m",
-		k.ImageTag, "sh", "mqadmin",
+		k.ImageTag,
 	}
+	runArgs = append(runArgs, prefix...)
 	runArgs = append(runArgs, args...)
 	if !slices.Contains(args, "-n") {
 		runArgs = append(runArgs, "-n", fmt.Sprintf("127.0.0.1:%d", k.NamesrvPort))

@@ -212,50 +212,6 @@ peer 列表；pgcli 不会联系其他节点。
 单机默认 `127.0.0.1`，其他主机上的客户端需要使用设置了 `--advertise-host` 的安装。集群模式
 每台成员都要求非 loopback 的 IPv4 `--advertise-host`，各主机上的 proxy 通告本机地址。
 
-## pgcli 创建的内容
-
-以默认 base 目录下的 `rmq` 实例为例：
-
-```text
-~/.pgcli/addon/rocketmq/rmq/
-├── config/
-│   ├── namesrv.conf
-│   ├── broker.conf
-│   └── rmq-proxy.json
-├── data/
-│   ├── broker/        # broker store：commitlog、consumequeue、index……
-│   └── controller/    # 仅集群模式：DLedger controller 状态
-└── logs/
-    ├── namesrv/
-    ├── broker/
-    └── proxy/
-```
-
-容器（默认名称；配置了 namespace 时会在 `pgcli-rocketmq` 后插入后缀）：
-
-- `pgcli-rocketmq-rmq-namesrv`
-- `pgcli-rocketmq-rmq-broker`
-- `pgcli-rocketmq-rmq-proxy`
-
-三个容器都使用 `--network host`、`--restart unless-stopped` 和 30 秒停止超时。挂载：
-
-- `config/` → `/etc/rocketmq`（只读）
-- `data/broker/` → `/home/rocketmq/store`
-- `data/controller/` → `/home/rocketmq/DledgerController`（仅集群模式，且只挂给 NameServer 容器）
-- `logs/<role>/` → `/home/rocketmq/logs`
-
-官方镜像以 **uid/gid 3000** 运行。pgcli 创建可写目录后，rootless Podman 通过
-`podman unshare chown`、rootful 运行则通过 `os.Chown` 把目录交给该用户。配置文件权限为
-`0644`，config 目录以只读方式挂载。
-
-渲染出的 `namesrv.conf` 包含监听端口；集群模式还包含 `enableControllerInNamesrv=true`、
-DLedger group/peers/self id、controller store 路径、`enableElectUncleanMaster=false` 和
-`notifyBrokerRoleChanged=true`。`broker.conf` 包含 broker cluster/group 名、监听与 HA 端口、
-store 路径、通告 IP 以及 controller/NameServer 地址。proxy JSON 包含 `proxyMode=CLUSTER`、
-proxy cluster 名、NameServer 地址列表和 gRPC/remoting 端口；`remotingAccessAddr` 和
-`localServeAddr` 特意只写裸 host，因为 RocketMQ 会自行拼接 remoting 端口。
-`--config-option` 只追加到 `broker.conf`。
-
 ## Topic 与消息
 
 为兼容启用了 topic 自动创建（`autoCreateTopicEnable=true`），但建议显式创建，以保证队列数
@@ -282,8 +238,24 @@ pg addon rocketmq shell --service namesrv --name rmq -- \
   sh mqadmin queryMsgByKey -t surge -k k1 -n 127.0.0.1:9876
 ```
 
-`send` 会打印 `sendMessage` 结果，包括 message id、发送状态和队列。删除 topic 会删掉它的
-所有消息，除非加 `--yes`，否则会先要求确认：
+`send` 会打印 `sendMessage` 结果，包括 message id、发送状态和队列。用带边界的一次性调试消费者把消息拉回来：
+
+```bash
+pg addon rocketmq consume surge --count 10 --timeout 30s --name rmq
+
+# 只读一个队列，从起始 offset 开始
+pg addon rocketmq consume surge --queue 0 --offset 0 --count 50 --name rmq
+
+# 按时间窗口读取（epoch 毫秒或 yyyy-MM-dd#HH:mm:ss:SSS）
+pg addon rocketmq consume surge --begin 1793264528000 --end 1793264535000 \
+  --count 0 --name rmq
+```
+
+`consume` 在一次性容器里运行 `mqadmin consumeMessage`，把消息打印到终端。它把 topic 各队列当前的消息拉完就退出；`--timeout`（默认 `30s`）是容器内的硬性安全上限，Ctrl-C 可提前结束。它只做拉取和打印，不删除消息，也不提交消费位点。
+
+`--count` 是 mqadmin 的消息预算（默认 `10`）；mqadmin 按队列计算，实际打印的条数可能略少于请求值，`--count 0` 表示不设预算。`--queue`/`--offset` 只读一个队列，broker 名默认取实例的单 broker 名（`--broker` 可覆盖）。`--begin`/`--end` 接受 epoch 毫秒或 `yyyy-MM-dd#HH:mm:ss:SSS`；mqadmin 会把时间边界换算成队列 offset，因此结束边界可能包含恰好在其后的一条消息。
+
+删除 topic 会删掉它的所有消息，除非加 `--yes`，否则会先要求确认：
 
 ```bash
 pg addon rocketmq topic delete surge --name rmq --yes

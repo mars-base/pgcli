@@ -3,6 +3,7 @@ package cli
 import (
 	"maps"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -55,7 +56,7 @@ func TestParseRocketMQConfigOptions(t *testing.T) {
 }
 
 func TestRocketMQCommandTree(t *testing.T) {
-	for _, name := range []string{"status", "shell", "topic", "send", "cluster"} {
+	for _, name := range []string{"status", "shell", "topic", "send", "consume", "cluster"} {
 		if _, _, err := addonRocketMQCmd.Find([]string{name}); err != nil {
 			t.Errorf("addon rocketmq %s: %v", name, err)
 		}
@@ -94,6 +95,23 @@ func TestRocketMQCommandTree(t *testing.T) {
 	for _, flag := range []string{"key", "tags"} {
 		if send.Flags().Lookup(flag) == nil {
 			t.Errorf("rocketmq send --%s not registered", flag)
+		}
+	}
+	consume, _, err := addonRocketMQCmd.Find([]string{"consume"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for flag, def := range map[string]string{
+		"name": "", "group": "pgcli-consume", "count": "10",
+		"timeout": "30s", "queue": "-1", "broker": "", "offset": "-1", "begin": "", "end": "",
+	} {
+		f := consume.Flags().Lookup(flag)
+		if f == nil {
+			t.Errorf("rocketmq consume --%s not registered", flag)
+			continue
+		}
+		if f.DefValue != def {
+			t.Errorf("rocketmq consume --%s default = %q, want %q", flag, f.DefValue, def)
 		}
 	}
 }
@@ -143,6 +161,45 @@ func TestRocketMQTopicName(t *testing.T) {
 		if validRocketMQTopicName(name) {
 			t.Errorf("topic %q should be invalid", name)
 		}
+	}
+}
+
+func TestRocketMQConsumerGroup(t *testing.T) {
+	for _, name := range []string{"pgcli-consume", "group_1", "A1", strings.Repeat("a", 127)} {
+		if !validRocketMQConsumerGroup(name) {
+			t.Errorf("group %q should be valid", name)
+		}
+	}
+	for _, name := range []string{"", "bad.group", "has space", "%RETRY%g", strings.Repeat("a", 128)} {
+		if validRocketMQConsumerGroup(name) {
+			t.Errorf("group %q should be invalid", name)
+		}
+	}
+}
+
+func TestRocketMQConsumeArgsFor(t *testing.T) {
+	single := config.RocketMQConfig{Name: "rmq"}
+	got := rocketMQConsumeArgsFor(single, "surge", "pgcli-consume", 10, -1, "", -1, "", "")
+	want := []string{"consumeMessage", "-t", "surge", "-g", "pgcli-consume", "-c", "10"}
+	if !slices.Equal(got, want) {
+		t.Errorf("default args = %v, want %v", got, want)
+	}
+
+	clustered := config.RocketMQConfig{Name: "rmq", Cluster: "prod"}
+	got = rocketMQConsumeArgsFor(clustered, "surge", "g", 0, 2, "",
+		5, "2026-01-01#00:00:00:000", "2026-01-02#00:00:00:000")
+	want = []string{
+		"consumeMessage", "-t", "surge", "-g", "g", "-c", "1073741824",
+		"-b", "prod", "-i", "2", "-o", "5",
+		"-s", "2026-01-01#00:00:00:000", "-e", "2026-01-02#00:00:00:000",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("cluster args = %v, want %v", got, want)
+	}
+
+	got = rocketMQConsumeArgsFor(single, "surge", "g", 1, 0, "custom", -1, "", "")
+	if !slices.Contains(got, "custom") || slices.Contains(got, "rmq") {
+		t.Errorf("explicit broker override = %v", got)
 	}
 }
 

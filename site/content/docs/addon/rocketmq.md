@@ -182,42 +182,6 @@ The proxy is the single client entry point in both modes and runs in `CLUSTER` m
 
 A standalone instance defaults to `127.0.0.1`, so a client on another host needs an install with `--advertise-host` set to the host's reachable IP. In cluster mode every member requires a non-loopback IPv4 `--advertise-host` and the proxy on each host advertises that host.
 
-## What pgcli creates
-
-For instance `rmq` with the default base directory:
-
-```text
-~/.pgcli/addon/rocketmq/rmq/
-├── config/
-│   ├── namesrv.conf
-│   ├── broker.conf
-│   └── rmq-proxy.json
-├── data/
-│   ├── broker/        # broker store: commitlog, consumequeue, index, ...
-│   └── controller/    # cluster mode only: DLedger controller state
-└── logs/
-    ├── namesrv/
-    ├── broker/
-    └── proxy/
-```
-
-Containers (default names; a configured namespace inserts a suffix after `pgcli-rocketmq`):
-
-- `pgcli-rocketmq-rmq-namesrv`
-- `pgcli-rocketmq-rmq-broker`
-- `pgcli-rocketmq-rmq-proxy`
-
-All three use `--network host`, `--restart unless-stopped` and a 30-second stop timeout. Mounts:
-
-- `config/` → `/etc/rocketmq` (read-only)
-- `data/broker/` → `/home/rocketmq/store`
-- `data/controller/` → `/home/rocketmq/DledgerController` (cluster mode, NameServer container only)
-- `logs/<role>/` → `/home/rocketmq/logs`
-
-The official image runs as **uid/gid 3000**. pgcli creates the writable directories and hands them to that user through `podman unshare chown` for rootless Podman, or `os.Chown` when running as root. Config files are `0644` and the config directory is mounted read-only.
-
-The rendered `namesrv.conf` contains the listener and, in cluster mode, `enableControllerInNamesrv=true`, the DLedger group/peers/self id, the controller store path, `enableElectUncleanMaster=false` and `notifyBrokerRoleChanged=true`. `broker.conf` contains the broker cluster/group name, listen and HA ports, store paths, the advertised IP and the controller/NameServer addresses. The proxy JSON contains `proxyMode=CLUSTER`, the proxy cluster name, the NameServer address list and the gRPC/remoting ports; `remotingAccessAddr` and `localServeAddr` deliberately carry a bare host because RocketMQ appends the remoting port itself. `--config-option` values are appended to `broker.conf` only.
-
 ## Topics and messages
 
 Topic auto-creation is enabled (`autoCreateTopicEnable=true`) for compatibility, but explicit creation is recommended so queue counts are deterministic:
@@ -239,7 +203,24 @@ pg addon rocketmq shell --service namesrv --name rmq -- \
   sh mqadmin queryMsgByKey -t surge -k k1 -n 127.0.0.1:9876
 ```
 
-`send` prints the `sendMessage` result, including the message id, send status and queue. Deleting a topic removes all of its messages and asks for confirmation unless `--yes` is passed:
+`send` prints the `sendMessage` result, including the message id, send status and queue. Pull messages back with a bounded debug consumer:
+
+```bash
+pg addon rocketmq consume surge --count 10 --timeout 30s --name rmq
+
+# one queue, from the start
+pg addon rocketmq consume surge --queue 0 --offset 0 --count 50 --name rmq
+
+# messages in a time window (epoch milliseconds or yyyy-MM-dd#HH:mm:ss:SSS)
+pg addon rocketmq consume surge --begin 1793264528000 --end 1793264535000 \
+  --count 0 --name rmq
+```
+
+`consume` runs `mqadmin consumeMessage` in a throwaway container and prints messages to the terminal. It drains the topic's queues and exits; `--timeout` (default `30s`) is a hard safety limit enforced inside the container, and Ctrl-C stops early. It is a pull-only debug viewer: it does not delete messages and does not commit consumer offsets.
+
+`--count` is mqadmin's message budget (default `10`); mqadmin accounts it per queue, so a run can print slightly fewer messages than requested. `--count 0` removes the budget. `--queue`/`--offset` read one queue and use the instance's broker name (`--broker` overrides it). `--begin`/`--end` accept epoch milliseconds or `yyyy-MM-dd#HH:mm:ss:SSS`; mqadmin converts the boundaries to queue offsets, so the end of the window can include the first message at or after it.
+
+Deleting a topic removes all of its messages and asks for confirmation unless `--yes` is passed:
 
 ```bash
 pg addon rocketmq topic delete surge --name rmq --yes

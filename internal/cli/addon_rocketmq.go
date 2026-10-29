@@ -1,12 +1,16 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -783,6 +787,33 @@ func validRocketMQTopicName(topic string) bool {
 	return rocketMQTopicNameRe.MatchString(topic)
 }
 
+func validRocketMQConsumerGroup(group string) bool {
+	return rocketMQTopicNameRe.MatchString(group)
+}
+
+func rocketMQConsumeArgsFor(rc config.RocketMQConfig, topic, group string, count, queue int, broker string, offset int64, begin, end string) []string {
+	if count == 0 {
+		count = 1 << 30
+	}
+	args := []string{"consumeMessage", "-t", topic, "-g", group, "-c", strconv.Itoa(count)}
+	if queue >= 0 {
+		if broker == "" {
+			broker = rc.ClusterName()
+		}
+		args = append(args, "-b", broker, "-i", strconv.Itoa(queue))
+	}
+	if offset >= 0 {
+		args = append(args, "-o", strconv.FormatInt(offset, 10))
+	}
+	if begin != "" {
+		args = append(args, "-s", begin)
+	}
+	if end != "" {
+		args = append(args, "-e", end)
+	}
+	return args
+}
+
 var rocketMQSystemTopics = map[string]bool{
 	"TBW102":                      true,
 	"SELF_TEST_TOPIC":             true,
@@ -908,6 +939,57 @@ func runAddonRocketMQSend(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runAddonRocketMQConsume(cmd *cobra.Command, args []string) error {
+	topic := args[0]
+	if !validRocketMQTopicName(topic) {
+		return fmt.Errorf("invalid topic name %q: use letters, digits, '_' and '-' (max 127 chars)", topic)
+	}
+	group, _ := cmd.Flags().GetString("group")
+	if !validRocketMQConsumerGroup(group) {
+		return fmt.Errorf("invalid --group %q: use letters, digits, '_' and '-' (max 127 chars)", group)
+	}
+	count, _ := cmd.Flags().GetInt("count")
+	if count < 0 {
+		return fmt.Errorf("--count must be >= 0 (0 = all available messages)")
+	}
+	timeout, _ := cmd.Flags().GetDuration("timeout")
+	if timeout <= 0 {
+		return fmt.Errorf("--timeout must be greater than 0")
+	}
+	queue, _ := cmd.Flags().GetInt("queue")
+	offset, _ := cmd.Flags().GetInt64("offset")
+	broker, _ := cmd.Flags().GetString("broker")
+	if offset >= 0 && queue < 0 {
+		return fmt.Errorf("--offset requires --queue")
+	}
+	if broker != "" && queue < 0 {
+		return fmt.Errorf("--broker requires --queue")
+	}
+
+	m, rc, err := requireRocketMQRunning(cmd)
+	if err != nil {
+		return err
+	}
+
+	begin, _ := cmd.Flags().GetString("begin")
+	end, _ := cmd.Flags().GetString("end")
+	consumeArgs := rocketMQConsumeArgsFor(rc, topic, group, count, queue, broker, offset, begin, end)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	timedOut, err := m.ConsumeMessages(ctx, &rc, timeout, consumeArgs...)
+	if err != nil {
+		if ctx.Err() != nil {
+			fmt.Fprintln(os.Stderr, "consume interrupted")
+			return nil
+		}
+		return fmt.Errorf("consuming topic %q: %w", topic, err)
+	}
+	if timedOut {
+		fmt.Fprintf(os.Stderr, "consume stopped after %s (--timeout)\n", timeout)
+	}
+	return nil
+}
+
 func runAddonRocketMQClusterStatus(cmd *cobra.Command, _ []string) error {
 	m, rc, err := requireRocketMQRunning(cmd)
 	if err != nil {
@@ -963,6 +1045,7 @@ Subcommands:
   shell     Open bash in one role container (--service namesrv|broker|proxy)
   topic     Create, list, describe or delete topics
   send      Send one message to a topic
+  consume   Pull and print messages from a topic (debug consumer)
   cluster   Show the clusterList table (registered brokers and roles)
 
 Examples:
@@ -980,6 +1063,7 @@ Examples:
   pg addon rocketmq topic list --name rmq
   pg addon rocketmq topic describe demo --name rmq
   pg addon rocketmq send demo "hello" --key k1 --tags demo --name rmq
+  pg addon rocketmq consume demo --count 5 --timeout 30s --name rmq
   pg addon rocketmq cluster status --name rmq
   pg addon rocketmq shell --service namesrv --name rmq
   pg logs addon rocketmq --name rmq --service broker -f
@@ -1042,6 +1126,25 @@ var addonRocketMQSendCmd = &cobra.Command{
 	RunE:  runAddonRocketMQSend,
 }
 
+var addonRocketMQConsumeCmd = &cobra.Command{
+	Use:   "consume TOPIC",
+	Short: "Pull and print messages from a topic",
+	Long: `Pull messages from a topic with mqadmin consumeMessage and print them.
+
+The pull drains the topic's queues and then exits; --timeout is a safety
+bound enforced inside the container, so a stuck run cannot hang your shell.
+Ctrl-C ends the run early. This is a debugging pull consumer: it does not
+delete messages.
+
+--count is mqadmin's message budget. mqadmin accounts it per queue, so a run
+may print slightly fewer messages than requested; 0 removes the budget.
+--begin/--end accept "yyyy-MM-dd#HH:mm:ss:SSS" or epoch milliseconds.
+--queue and --offset select one queue and use the instance's broker name
+unless --broker overrides it.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runAddonRocketMQConsume,
+}
+
 var addonRocketMQClusterCmd = &cobra.Command{
 	Use:   "cluster",
 	Short: "Inspect registered brokers and controller-assigned roles",
@@ -1055,14 +1158,14 @@ var addonRocketMQClusterStatusCmd = &cobra.Command{
 
 func init() {
 	addonCmd.AddCommand(addonRocketMQCmd)
-	addonRocketMQCmd.AddCommand(addonRocketMQStatusCmd, addonRocketMQShellCmd, addonRocketMQTopicCmd, addonRocketMQSendCmd, addonRocketMQClusterCmd)
+	addonRocketMQCmd.AddCommand(addonRocketMQStatusCmd, addonRocketMQShellCmd, addonRocketMQTopicCmd, addonRocketMQSendCmd, addonRocketMQConsumeCmd, addonRocketMQClusterCmd)
 	addonRocketMQTopicCmd.AddCommand(addonRocketMQTopicCreateCmd, addonRocketMQTopicListCmd, addonRocketMQTopicDescribeCmd, addonRocketMQTopicDeleteCmd)
 	addonRocketMQClusterCmd.AddCommand(addonRocketMQClusterStatusCmd)
 
 	for _, sub := range []*cobra.Command{
 		addonRocketMQStatusCmd, addonRocketMQShellCmd,
 		addonRocketMQTopicCreateCmd, addonRocketMQTopicListCmd, addonRocketMQTopicDescribeCmd, addonRocketMQTopicDeleteCmd,
-		addonRocketMQSendCmd, addonRocketMQClusterStatusCmd,
+		addonRocketMQSendCmd, addonRocketMQConsumeCmd, addonRocketMQClusterStatusCmd,
 	} {
 		sub.Flags().String("name", "", "rocketmq instance name (default \"rocketmq\")")
 	}
@@ -1072,6 +1175,14 @@ func init() {
 	addonRocketMQTopicDeleteCmd.Flags().Bool("yes", false, "skip the confirmation prompt")
 	addonRocketMQSendCmd.Flags().String("key", "", "message key (searchable with mqadmin queryMsgByKey)")
 	addonRocketMQSendCmd.Flags().String("tags", "", "message tag")
+	addonRocketMQConsumeCmd.Flags().String("group", "pgcli-consume", "consumer group used for the pull")
+	addonRocketMQConsumeCmd.Flags().Int("count", 10, "mqadmin message budget (may print slightly fewer; 0 = all available)")
+	addonRocketMQConsumeCmd.Flags().Duration("timeout", 30*time.Second, "hard safety limit for the run, enforced in the container")
+	addonRocketMQConsumeCmd.Flags().Int("queue", -1, "only read this queue id (default: all queues)")
+	addonRocketMQConsumeCmd.Flags().String("broker", "", "broker name for --queue/--offset (default: the instance's broker)")
+	addonRocketMQConsumeCmd.Flags().Int64("offset", -1, "start offset (requires --queue)")
+	addonRocketMQConsumeCmd.Flags().String("begin", "", "only messages after this timestamp (yyyy-MM-dd#HH:mm:ss:SSS or epoch millis)")
+	addonRocketMQConsumeCmd.Flags().String("end", "", "only messages before this timestamp (yyyy-MM-dd#HH:mm:ss:SSS or epoch millis)")
 	addonRocketMQClusterStatusCmd.Flags().Bool("more", false, "include per-broker runtime details (-m)")
 
 	addonInstallCmd.Flags().Int("namesrv-port", 0, "RocketMQ NameServer host port (0=auto-assign from 9876; standalone only — cluster members use the fixed 9876)")

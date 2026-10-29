@@ -1,8 +1,10 @@
 package podman
 
 import (
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mars-base/pgcli/internal/config"
 )
@@ -170,6 +172,34 @@ func TestRocketMQAdminArgsAddsNamesrv(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("explicit -n duplicated: %v", got)
+	}
+}
+
+func TestRocketMQConsumeArgs(t *testing.T) {
+	got := rocketMQConsumeArgs(rocketMQTestStandalone(), 30*time.Second,
+		"consumeMessage", "-t", "demo", "-g", "pgcli-consume", "-c", "5")
+	want := []string{
+		"run", "--rm", "--network", "host", "--http-proxy=false",
+		"-e", "JAVA_OPT_EXT=-Xms192m -Xmx192m",
+		"docker.io/apache/rocketmq:5.5.0", "timeout", "30s", "sh", "mqadmin",
+		"consumeMessage", "-t", "demo", "-g", "pgcli-consume", "-c", "5",
+		"-n", "127.0.0.1:9876",
+	}
+	assertArgs(t, got, want)
+
+	got = rocketMQConsumeArgs(rocketMQTestStandalone(), 90*time.Second,
+		"consumeMessage", "-t", "demo", "-n", "10.0.0.9:9876")
+	count := 0
+	for _, arg := range got {
+		if arg == "-n" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("explicit -n duplicated: %v", got)
+	}
+	if !slices.Contains(got, "90s") {
+		t.Errorf("timeout duration missing: %v", got)
 	}
 }
 
