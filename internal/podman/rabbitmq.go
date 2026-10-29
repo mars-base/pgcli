@@ -1,10 +1,12 @@
 package podman
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -161,13 +163,28 @@ func (m *RabbitMQManager) ensureFiles(k *config.RabbitMQConfig) error {
 	if err := rabbitmq.WritePlugins(*k); err != nil {
 		return err
 	}
-	return rabbitmq.WriteConfig(*k)
+	if err := rabbitmq.WriteConfig(*k); err != nil {
+		return err
+	}
+	if k.Cluster == "" {
+		return nil
+	}
+	if err := rabbitmq.WriteErlangCookie(*k); err != nil {
+		return err
+	}
+	return m.ensureRabbitMQFileOwner(rabbitmq.CookiePath(*k), "Erlang cookie")
 }
 
 // ensureTLSKeyOwner hands the private key to the image's rabbitmq user, which
 // is the only file in the read-only TLS mount that needs it.
 func (m *RabbitMQManager) ensureTLSKeyOwner(k config.RabbitMQConfig) error {
-	path := filepath.Join(rabbitmq.TLSDir(k), "private.key")
+	return m.ensureRabbitMQFileOwner(filepath.Join(rabbitmq.TLSDir(k), "private.key"), "TLS key")
+}
+
+// ensureRabbitMQFileOwner chowns a host file to the image's rabbitmq user so
+// the unprivileged server process can read it. Rootless podman cannot chown to
+// a container uid directly; `podman unshare` maps it into the user namespace.
+func (m *RabbitMQManager) ensureRabbitMQFileOwner(path, what string) error {
 	if err := podmanUnshareChown(m.podman, rabbitmq.ContainerUID, rabbitmq.ContainerGID, path); err == nil {
 		return nil
 	}
@@ -176,8 +193,8 @@ func (m *RabbitMQManager) ensureTLSKeyOwner(k config.RabbitMQConfig) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("chowning RabbitMQ TLS key %s to %d:%d (the image's rabbitmq user): rootless podman does this through `podman unshare`; on a rootful host run pgcli as root, or pre-chown the file manually",
-		path, rabbitmq.ContainerUID, rabbitmq.ContainerGID)
+	return fmt.Errorf("chowning RabbitMQ %s %s to %d:%d (the image's rabbitmq user): rootless podman does this through `podman unshare`; on a rootful host run pgcli as root, or pre-chown the file manually",
+		what, path, rabbitmq.ContainerUID, rabbitmq.ContainerGID)
 }
 
 func (m *RabbitMQManager) createContainer(k *config.RabbitMQConfig) error {
@@ -205,6 +222,26 @@ func rabbitmqCreateArgs(k config.RabbitMQConfig) []string {
 	if k.TLS {
 		args = append(args, "-v", fmt.Sprintf("%s:%s:ro,z", hostMountPath(rabbitmq.TLSDir(k)), rabbitmq.ContainerTLSDir))
 	}
+	if k.Cluster != "" {
+		// The peer-visible identity is the Erlang node name. Long names are
+		// required for IPs/FQDNs; short hostnames must stay short or the
+		// distribution handshake uses a different name than the registered one.
+		longName := true
+		if _, host, err := config.ParseRabbitMQNodeName(k.NodeName); err == nil {
+			longName = config.RabbitMQNodeUsesLongName(host)
+		}
+		args = append(args,
+			"-e", "RABBITMQ_NODENAME="+k.NodeName,
+			"-e", "RABBITMQ_USE_LONGNAME="+strconv.FormatBool(longName),
+			"-e", "ERL_EPMD_ADDRESS="+k.Listen,
+			"-e", fmt.Sprintf("ERL_EPMD_PORT=%d", k.EPMDPort),
+			"-e", fmt.Sprintf("RABBITMQ_DIST_PORT=%d", k.DistPort),
+			"-e", "RABBITMQ_DEFAULT_USER="+k.AdminUser,
+			"-e", "RABBITMQ_DEFAULT_PASS="+k.AdminPassword,
+			k.ImageTag,
+		)
+		return args
+	}
 	args = append(args,
 		"-e", "RABBITMQ_NODENAME=rabbit@localhost",
 		"-e", "ERL_EPMD_ADDRESS=127.0.0.1",
@@ -217,36 +254,95 @@ func rabbitmqCreateArgs(k config.RabbitMQConfig) []string {
 	return args
 }
 
-// waitReady polls the broker diagnostics until the node answers.
+// waitReady polls the broker diagnostics until the node answers. A cluster
+// member additionally waits for the peer discovery step to finish. await_startup
+// itself fails fast while the node is still registering with EPMD, so it is
+// retried until the overall deadline.
 func (m *RabbitMQManager) waitReady(k *config.RabbitMQConfig) error {
+	if k.Cluster != "" {
+		deadline := time.Now().Add(180 * time.Second)
+		var lastErr error
+		var lastOut string
+		for {
+			attempt := time.Until(deadline)
+			if attempt <= 0 {
+				break
+			}
+			if attempt > 10*time.Second {
+				attempt = 10 * time.Second
+			}
+			out, err := execIdleKilled(m.podman, attempt, defaultIdleKill,
+				"exec", k.ContainerName, "rabbitmqctl", "-q", "await_startup")
+			if err == nil {
+				return nil
+			}
+			// With peers present, a peer can dial back into the CLI's ephemeral
+			// RPC endpoint; await_startup then succeeds silently but the CLI
+			// never exits, so the idle watchdog reports ErrCLIHung. The AMQP
+			// listener opens at the end of boot, so an open port means ready.
+			if errors.Is(err, ErrCLIHung) && rabbitMQAMQPPortOpen(k) {
+				return nil
+			}
+			lastErr, lastOut = err, out
+			time.Sleep(500 * time.Millisecond)
+		}
+		detail := strings.TrimSpace(lastOut)
+		if detail != "" {
+			return fmt.Errorf("RabbitMQ cluster node %s did not start (container %s): %w (%s)", k.NodeName, k.ContainerName, lastErr, detail)
+		}
+		return fmt.Errorf("RabbitMQ cluster node %s did not start (container %s): %w", k.NodeName, k.ContainerName, lastErr)
+	}
 	deadline := time.Now().Add(90 * time.Second)
 	var lastErr error
+	var lastOut string
 	for {
-		out, err := execIdleKilled(m.podman, 15*time.Second, defaultIdleKill,
-			"exec", k.ContainerName, "rabbitmq-diagnostics", "-q", "ping")
+		attempt := time.Until(deadline)
+		if attempt <= 0 {
+			break
+		}
+		if attempt > 30*time.Second {
+			attempt = 30 * time.Second
+		}
+		// ping answers as soon as the Erlang node is up, which can be before
+		// the rabbit app starts; await_startup waits for the app itself.
+		out, err := execIdleKilled(m.podman, attempt, defaultIdleKill,
+			"exec", k.ContainerName, "rabbitmqctl", "-q", "await_startup")
 		if err == nil {
 			return nil
 		}
-		lastErr = err
-		if time.Now().After(deadline) {
-			detail := strings.TrimSpace(out)
-			if detail != "" {
-				return fmt.Errorf("RabbitMQ did not become ready (container %s): %w (%s)", k.ContainerName, lastErr, detail)
-			}
-			return fmt.Errorf("RabbitMQ did not become ready (container %s): %w", k.ContainerName, lastErr)
-		}
+		lastErr, lastOut = err, out
 		time.Sleep(500 * time.Millisecond)
 	}
+	detail := strings.TrimSpace(lastOut)
+	if detail != "" {
+		return fmt.Errorf("RabbitMQ did not become ready (container %s): %w (%s)", k.ContainerName, lastErr, detail)
+	}
+	return fmt.Errorf("RabbitMQ did not become ready (container %s): %w", k.ContainerName, lastErr)
+}
+
+// rabbitMQAMQPPortOpen reports whether the broker's AMQP listener accepts
+// connections, which happens at the end of the boot sequence.
+func rabbitMQAMQPPortOpen(k *config.RabbitMQConfig) bool {
+	conn, err := net.DialTimeout("tcp", rabbitmq.AMQPAddr(*k), 2*time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }
 
 // EnsureAdmin reconciles the stored administrator credentials with the running
 // node. RABBITMQ_DEFAULT_* only seeds an empty mnesia, so an existing data dir
 // needs an explicit password/tags/permissions update after every start.
 func (m *RabbitMQManager) EnsureAdmin(k *config.RabbitMQConfig) error {
+	// No -q: with cluster peers the rabbitmqctl CLI is known to linger after a
+	// successful RPC, and execIdleKilled only ends that wedge once output has
+	// been seen. Silent success would otherwise burn the hard cap and report a
+	// false failure.
 	ctl := func(args ...string) (string, error) {
-		execArgs := []string{"exec", k.ContainerName, "rabbitmqctl", "-q"}
+		execArgs := []string{"exec", k.ContainerName, "rabbitmqctl"}
 		execArgs = append(execArgs, args...)
-		return execIdleKilled(m.podman, 30*time.Second, defaultIdleKill, execArgs...)
+		return execIdleKilled(m.podman, 120*time.Second, defaultIdleKill, execArgs...)
 	}
 	if out, err := ctl("change_password", k.AdminUser, k.AdminPassword); err != nil {
 		if out2, err2 := ctl("add_user", k.AdminUser, k.AdminPassword); err2 != nil {
@@ -363,6 +459,18 @@ func (m *RabbitMQManager) Queue(k *config.RabbitMQConfig, vhost string, args ...
 	execArgs := []string{"exec", k.ContainerName, "rabbitmqctl"}
 	execArgs = append(execArgs, QueueCtlArgs(vhost, args[0], args[1:]...)...)
 	return execIdleKilled(m.podman, 30*time.Second, defaultIdleKill, execArgs...)
+}
+
+// ClusterStatus returns `rabbitmqctl cluster_status` output: running and
+// stopped nodes, partitions and the listener endpoints.
+func (m *RabbitMQManager) ClusterStatus(k *config.RabbitMQConfig) (string, error) {
+	return m.ExecOutput(k, "rabbitmqctl", "-q", "cluster_status")
+}
+
+// ForgetClusterNode removes an offline node from the cluster metadata. Run it
+// from a surviving member after the target node has been stopped.
+func (m *RabbitMQManager) ForgetClusterNode(k *config.RabbitMQConfig, node string) (string, error) {
+	return m.ExecOutput(k, "rabbitmqctl", "-q", "forget_cluster_node", node)
 }
 
 // LogsTail prints the last lines of the container log to stderr.

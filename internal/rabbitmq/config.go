@@ -34,6 +34,9 @@ const (
 	tlsDirName     = "tls"
 	pluginsName    = "enabled_plugins"
 	pluginsContent = "[rabbitmq_management].\n"
+	// clusterPluginsContent pre-enables peer discovery. It must be present
+	// before the first boot: discovery only runs while Mnesia is empty.
+	clusterPluginsContent = "[rabbitmq_management,rabbitmq_peer_discovery_etcd].\n"
 	// leaf renewal horizon, matching the other TLS addons.
 	renewBefore = 30 * 24 * time.Hour
 )
@@ -63,9 +66,21 @@ func TLSCAPath(c config.RabbitMQConfig) string {
 	return filepath.Join(TLSDir(c), tlsca.CACertFile)
 }
 
+// AdvertiseHost is the address clients and peers use. In cluster mode it is
+// the host part of the Erlang node name (Listen is usually 0.0.0.0, which is
+// not a dialable client address); standalone keeps Listen.
+func AdvertiseHost(c config.RabbitMQConfig) string {
+	if c.Cluster != "" {
+		if _, host, err := config.ParseRabbitMQNodeName(c.NodeName); err == nil {
+			return host
+		}
+	}
+	return c.Listen
+}
+
 // AMQPAddr is the plaintext AMQP endpoint.
 func AMQPAddr(c config.RabbitMQConfig) string {
-	return net.JoinHostPort(c.Listen, strconv.Itoa(c.AMQPPort))
+	return net.JoinHostPort(AdvertiseHost(c), strconv.Itoa(c.AMQPPort))
 }
 
 // AMQPSAddr is the TLS AMQP endpoint (empty when TLS is off).
@@ -73,12 +88,12 @@ func AMQPSAddr(c config.RabbitMQConfig) string {
 	if !c.TLS {
 		return ""
 	}
-	return net.JoinHostPort(c.Listen, strconv.Itoa(c.AMQPTLSPort))
+	return net.JoinHostPort(AdvertiseHost(c), strconv.Itoa(c.AMQPTLSPort))
 }
 
 // ManagementURL is the management web UI/API base URL.
 func ManagementURL(c config.RabbitMQConfig) string {
-	return "http://" + net.JoinHostPort(c.Listen, strconv.Itoa(c.ManagementPort))
+	return "http://" + net.JoinHostPort(AdvertiseHost(c), strconv.Itoa(c.ManagementPort))
 }
 
 // ManagementTLSURL is the HTTPS management URL (empty when TLS is off).
@@ -86,7 +101,7 @@ func ManagementTLSURL(c config.RabbitMQConfig) string {
 	if !c.TLS {
 		return ""
 	}
-	return "https://" + net.JoinHostPort(c.Listen, strconv.Itoa(c.ManagementTLSPort))
+	return "https://" + net.JoinHostPort(AdvertiseHost(c), strconv.Itoa(c.ManagementTLSPort))
 }
 
 // RenderConfig returns the complete rabbitmq.conf. Every listener, path and
@@ -134,11 +149,32 @@ func RenderConfig(c config.RabbitMQConfig) (string, error) {
 	writeKey(&b, "default_permissions.write", ".*")
 	b.WriteString("\n")
 
-	// Keep each instance's Erlang distribution loopback-only and pinned to its
-	// own port; multi-instance hosts share the network namespace.
-	writeKey(&b, "distribution.listener.interface", "127.0.0.1")
+	// Keep a standalone instance's Erlang distribution loopback-only and pinned
+	// to its own port; multi-instance hosts share the network namespace. A
+	// cluster member must accept distribution connections from its peers.
+	distIface := "127.0.0.1"
+	if c.Cluster != "" {
+		distIface = c.Listen
+	}
+	writeKey(&b, "distribution.listener.interface", distIface)
 	writeKey(&b, "distribution.listener.port_range.min", strconv.Itoa(c.DistPort))
 	writeKey(&b, "distribution.listener.port_range.max", strconv.Itoa(c.DistPort))
+
+	if c.Cluster != "" {
+		endpoints, err := config.NormalizeRabbitMQEtcdEndpoints(c.EtcdEndpoints)
+		if err != nil {
+			return "", err
+		}
+		if len(endpoints) == 0 {
+			return "", fmt.Errorf("cluster mode requires at least one etcd endpoint")
+		}
+		b.WriteString("\n")
+		writeKey(&b, "cluster_formation.peer_discovery_backend", "etcd")
+		for i, endpoint := range endpoints {
+			writeKey(&b, fmt.Sprintf("cluster_formation.etcd.endpoints.%d", i+1), endpoint)
+		}
+		writeKey(&b, "cluster_formation.etcd.cluster_name", c.Cluster)
+	}
 
 	if len(c.Settings) > 0 {
 		b.WriteString("\n")
@@ -171,17 +207,62 @@ func WriteConfig(c config.RabbitMQConfig) error {
 	return writeFileAtomic(c.ConfigPath, []byte(content), 0o644)
 }
 
-// WritePlugins pins the enabled plugin set to management only. Upstream
-// management images may enable rabbitmq_prometheus at build time; overriding
-// enabled_plugins keeps behavior deterministic and avoids a second unsecured
-// listener on a fixed port shared by every instance.
+// WritePlugins pins the enabled plugin set: management only for a standalone
+// node. A cluster member also pre-enables peer discovery, which must be
+// active before Mnesia is initialised. Upstream management images may enable
+// rabbitmq_prometheus at build time; overriding enabled_plugins keeps
+// behavior deterministic and avoids a second unsecured listener on a fixed
+// port shared by every instance.
 func WritePlugins(c config.RabbitMQConfig) error {
-	return writeFileAtomic(PluginsFile(c), []byte(pluginsContent), 0o644)
+	content := pluginsContent
+	if c.Cluster != "" {
+		content = clusterPluginsContent
+	}
+	return writeFileAtomic(PluginsFile(c), []byte(content), 0o644)
 }
 
 // WriteSecret stores the admin password in the instance secret file (0600).
 func WriteSecret(c config.RabbitMQConfig) error {
 	return writeFileAtomic(c.SecretPath, []byte(c.AdminPassword+"\n"), 0o600)
+}
+
+// CookiePath is the host path of the Erlang cookie file. The image mounts the
+// data dir as /var/lib/rabbitmq, so this is the $HOME/.erlang.cookie both the
+// server and rabbitmqctl read.
+func CookiePath(c config.RabbitMQConfig) string {
+	return filepath.Join(c.DataDir, ".erlang.cookie")
+}
+
+// SecretsKeyPrefix is the etcd prefix for the shared cluster secrets. It stays
+// separate from the peer-discovery keys RabbitMQ writes below /rabbitmq.
+func SecretsKeyPrefix(cluster string) string {
+	return "/pgcli/rabbitmq/clusters/" + cluster + "/secrets"
+}
+
+// ErlangCookieKey is the etcd key holding the cluster's shared Erlang cookie.
+func ErlangCookieKey(cluster string) string {
+	return SecretsKeyPrefix(cluster) + "/erlang_cookie"
+}
+
+// AdminPasswordKey is the etcd key holding the cluster's shared admin password.
+func AdminPasswordKey(cluster string) string {
+	return SecretsKeyPrefix(cluster) + "/admin_password"
+}
+
+// WriteErlangCookie provisions the shared cluster cookie before the container
+// starts. The official image ignores RABBITMQ_ERLANG_COOKIE and otherwise lets
+// Erlang generate a random per-node cookie, so members only agree through this
+// file. The podman manager chowns it to the image's rabbitmq user.
+func WriteErlangCookie(c config.RabbitMQConfig) error {
+	if c.Cluster == "" || c.ErlangCookie == "" {
+		return nil
+	}
+	path := CookiePath(c)
+	content := []byte(c.ErlangCookie + "\n")
+	if existing, err := os.ReadFile(path); err == nil && string(existing) == string(content) {
+		return nil
+	}
+	return writeFileAtomic(path, content, 0o400)
 }
 
 // EnsureTLSCerts generates the CA/leaf pair or installs the bring-your-own

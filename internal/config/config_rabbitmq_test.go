@@ -191,3 +191,211 @@ func TestRabbitMQValidateDuplicateAcrossInstances(t *testing.T) {
 		t.Fatalf("Validate() = %v, want duplicate-port error", err)
 	}
 }
+
+func TestRabbitMQClusterApplyDefaults(t *testing.T) {
+	cfg := Default()
+	cfg.BaseDir = "/srv/pg"
+	cfg.RabbitMQStartPort = 30000
+	cfg.RabbitMQMgmtStartPort = 30100
+	cfg.Addons.RabbitMQ = map[string]RabbitMQConfig{
+		"mq": {
+			Cluster:       "lab",
+			NodeName:      "rabbit@node1",
+			EtcdEndpoints: []string{"10.0.0.1:2379"},
+			ErlangCookie:  "shared-cookie",
+			AdminPassword: "secret",
+		},
+	}
+	cfg.ApplyDefaults()
+
+	rc := cfg.Addons.RabbitMQ["mq"]
+	if rc.Listen != "0.0.0.0" {
+		t.Errorf("Listen = %q, want 0.0.0.0 in cluster mode", rc.Listen)
+	}
+	if rc.EPMDPort != DefaultRabbitMQClusteredEPMDPort {
+		t.Errorf("EPMDPort = %d, want %d", rc.EPMDPort, DefaultRabbitMQClusteredEPMDPort)
+	}
+	if rc.DistPort != DefaultRabbitMQClusteredDistPort {
+		t.Errorf("DistPort = %d, want %d", rc.DistPort, DefaultRabbitMQClusteredDistPort)
+	}
+	if rc.AMQPPort != 30000 || rc.ManagementPort != 30100 {
+		t.Errorf("AMQP/management ports = %d/%d, want 30000/30100", rc.AMQPPort, rc.ManagementPort)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestParseRabbitMQNodeName(t *testing.T) {
+	valid := []struct {
+		node      string
+		name      string
+		host      string
+		longNames bool
+	}{
+		{"rabbit@node1", "rabbit", "node1", false},
+		{"rabbit@node.example.com", "rabbit", "node.example.com", true},
+		{"mq-1@10.241.20.147", "mq-1", "10.241.20.147", true},
+	}
+	for _, tt := range valid {
+		name, host, err := ParseRabbitMQNodeName(tt.node)
+		if err != nil {
+			t.Errorf("ParseRabbitMQNodeName(%q) = %v", tt.node, err)
+			continue
+		}
+		if name != tt.name || host != tt.host {
+			t.Errorf("ParseRabbitMQNodeName(%q) = %q, %q; want %q, %q", tt.node, name, host, tt.name, tt.host)
+		}
+		if got := RabbitMQNodeUsesLongName(host); got != tt.longNames {
+			t.Errorf("RabbitMQNodeUsesLongName(%q) = %t, want %t", host, got, tt.longNames)
+		}
+	}
+
+	invalid := map[string]string{
+		"":                 "exactly one '@'",
+		"rabbit":           "exactly one '@'",
+		"rabbit@node@host": "exactly one '@'",
+		"@node1":           "before '@'",
+		"rabbit@":          "after '@'",
+		"bad name@node1":   "before '@'",
+		"rabbit@localhost": "loopback",
+		"rabbit@127.0.0.1": "loopback",
+		"rabbit@0.0.0.0":   "loopback or unspecified",
+		"rabbit@::1":       "IPv4 address or hostname",
+		"rabbit@fe80::1":   "IPv4 address or hostname",
+		"rabbit@node/1":    "IPv4 address or hostname",
+		"rabbit@node_name": "not a valid hostname",
+	}
+	for node, want := range invalid {
+		if _, _, err := ParseRabbitMQNodeName(node); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("ParseRabbitMQNodeName(%q) = %v, want %q", node, err, want)
+		}
+	}
+}
+
+func TestNormalizeRabbitMQEtcdEndpoints(t *testing.T) {
+	got, err := NormalizeRabbitMQEtcdEndpoints([]string{
+		" http://10.0.0.2:2379 ",
+		"10.0.0.1:2379",
+		"10.0.0.2:2379",
+		"http://node.example.com:2379",
+	})
+	if err != nil {
+		t.Fatalf("NormalizeRabbitMQEtcdEndpoints: %v", err)
+	}
+	want := []string{"10.0.0.1:2379", "10.0.0.2:2379", "node.example.com:2379"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("endpoints = %v, want %v", got, want)
+	}
+
+	bad := map[string]string{
+		"https://10.0.0.1:2379":     "TLS (https://)",
+		"user:pass@10.0.0.1:2379":   "authentication",
+		"http://10.0.0.1:2379/path": "path",
+		"10.0.0.1":                  "host:port",
+		"10.0.0.1:0":                "invalid port",
+		"10.0.0.1:70000":            "invalid port",
+		"":                          "must not be empty",
+	}
+	for endpoint, wantSub := range bad {
+		if _, err := NormalizeRabbitMQEtcdEndpoints([]string{endpoint}); err == nil || !strings.Contains(err.Error(), wantSub) {
+			t.Errorf("NormalizeRabbitMQEtcdEndpoints(%q) = %v, want %q", endpoint, err, wantSub)
+		}
+	}
+}
+
+func TestValidateRabbitMQErlangCookie(t *testing.T) {
+	for _, ok := range []string{"cookie", "A1b2C3d4E5", strings.Repeat("x", 255)} {
+		if err := ValidateRabbitMQErlangCookie(ok); err != nil {
+			t.Errorf("ValidateRabbitMQErlangCookie(%q) = %v", ok, err)
+		}
+	}
+	bad := map[string]string{
+		"":                       "must not be empty",
+		"has space":              "whitespace",
+		"line\nbreak":            "whitespace",
+		strings.Repeat("x", 256): "at most 255",
+	}
+	for cookie, want := range bad {
+		if err := ValidateRabbitMQErlangCookie(cookie); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("ValidateRabbitMQErlangCookie(%q) = %v, want %q", cookie, err, want)
+		}
+	}
+}
+
+func TestRabbitMQClusterValidate(t *testing.T) {
+	base := func() *Config {
+		cfg := Default()
+		cfg.BaseDir = "/srv/pg"
+		cfg.RabbitMQStartPort = 31000
+		cfg.RabbitMQMgmtStartPort = 31100
+		cfg.Addons.RabbitMQ = map[string]RabbitMQConfig{
+			"mq": {
+				Cluster:       "lab",
+				NodeName:      "rabbit@node1",
+				EtcdEndpoints: []string{"10.0.0.1:2379"},
+				ErlangCookie:  "shared-cookie",
+				AdminPassword: "secret",
+			},
+		}
+		cfg.ApplyDefaults()
+		return cfg
+	}
+	if err := base().Validate(); err != nil {
+		t.Fatalf("valid cluster config: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		edit func(*RabbitMQConfig)
+		want string
+	}{
+		{"standalone with node name", func(rc *RabbitMQConfig) { rc.Cluster = "" }, "node_name requires cluster"},
+		{"standalone with endpoints", func(rc *RabbitMQConfig) { rc.Cluster = ""; rc.NodeName = "" }, "etcd_endpoints requires cluster"},
+		{"standalone with cookie", func(rc *RabbitMQConfig) { rc.Cluster = ""; rc.NodeName = ""; rc.EtcdEndpoints = nil }, "erlang_cookie requires cluster"},
+		{"bad cluster name", func(rc *RabbitMQConfig) { rc.Cluster = "bad cluster" }, "cluster"},
+		{"bad node name", func(rc *RabbitMQConfig) { rc.NodeName = "rabbit@localhost" }, "loopback"},
+		{"missing endpoints", func(rc *RabbitMQConfig) { rc.EtcdEndpoints = nil }, "etcd_endpoints is required"},
+		{"https endpoint", func(rc *RabbitMQConfig) { rc.EtcdEndpoints = []string{"https://10.0.0.1:2379"} }, "https://"},
+		{"missing cookie", func(rc *RabbitMQConfig) { rc.ErlangCookie = "" }, "Erlang cookie must not be empty"},
+		{"loopback listen", func(rc *RabbitMQConfig) { rc.Listen = "127.0.0.1" }, "must not be loopback"},
+		{"wrong epmd port", func(rc *RabbitMQConfig) { rc.EPMDPort = 4400 }, "must be 4369"},
+		{"wrong dist port", func(rc *RabbitMQConfig) { rc.DistPort = 26000 }, "must be 25672"},
+		{"managed cluster setting", func(rc *RabbitMQConfig) {
+			rc.Settings = map[string]string{"cluster_formation.peer_discovery_backend": "static"}
+		}, "managed by pgcli"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base()
+			rc := cfg.Addons.RabbitMQ["mq"]
+			tc.edit(&rc)
+			cfg.Addons.RabbitMQ["mq"] = rc
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate() = %v, want error containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestRabbitMQClusteredInstancePerHost(t *testing.T) {
+	cfg := Default()
+	cfg.BaseDir = "/srv/pg"
+	cfg.RabbitMQStartPort = 32000
+	cfg.RabbitMQMgmtStartPort = 32100
+	cluster := RabbitMQConfig{
+		Cluster:       "lab",
+		NodeName:      "rabbit@node1",
+		EtcdEndpoints: []string{"10.0.0.1:2379"},
+		ErlangCookie:  "shared-cookie",
+		AdminPassword: "secret",
+	}
+	other := cluster
+	other.NodeName = "rabbit@node2"
+	cfg.Addons.RabbitMQ = map[string]RabbitMQConfig{"mq": cluster, "mq2": other}
+	cfg.ApplyDefaults()
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "at most one clustered RabbitMQ instance") {
+		t.Fatalf("Validate() = %v, want one-clustered-instance error", err)
+	}
+}

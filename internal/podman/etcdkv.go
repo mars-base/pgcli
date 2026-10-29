@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -84,6 +85,49 @@ func (e *etcdClient) put(key, value string) error {
 	return err
 }
 
+// putMany atomically writes every key/value pair in one transaction. With no
+// compare clause the transaction always commits, so either all writes land or
+// the request fails as a whole.
+func (e *etcdClient) putMany(values map[string]string) error {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	ops := make([]map[string]any, 0, len(keys))
+	for _, key := range keys {
+		ops = append(ops, map[string]any{
+			"request_put": map[string]string{
+				"key":   base64.StdEncoding.EncodeToString([]byte(key)),
+				"value": base64.StdEncoding.EncodeToString([]byte(values[key])),
+			},
+		})
+	}
+	_, err := e.post("/v3/kv/txn", map[string]any{"success": ops})
+	return err
+}
+
+func (e *etcdClient) get(key string) (string, bool, error) {
+	data, err := e.post("/v3/kv/range", map[string]string{
+		"key": base64.StdEncoding.EncodeToString([]byte(key)),
+	})
+	if err != nil {
+		return "", false, err
+	}
+	var resp etcdRangeResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return "", false, fmt.Errorf("parsing etcd range response: %w", err)
+	}
+	if len(resp.Kvs) == 0 {
+		return "", false, nil
+	}
+	value, err := base64.StdEncoding.DecodeString(resp.Kvs[0].Value)
+	if err != nil {
+		return "", false, fmt.Errorf("decoding etcd value: %w", err)
+	}
+	return string(value), true, nil
+}
+
 func (e *etcdClient) delete(key string) error {
 	_, err := e.post("/v3/kv/deleterange", map[string]string{
 		"key": base64.StdEncoding.EncodeToString([]byte(key)),
@@ -125,6 +169,21 @@ func (e *etcdClient) getPrefix(prefix string) (map[string]string, error) {
 		out[string(k)] = string(v)
 	}
 	return out, nil
+}
+
+// EtcdGetValue reads a single key through the etcd v3 REST gateway. The
+// endpoint list is host:port (an http:// prefix is tolerated) and is tried in
+// order. found is false when the key does not exist.
+func EtcdGetValue(endpoints []string, key string) (value string, found bool, err error) {
+	return newEtcdClient(endpoints).get(key)
+}
+
+// EtcdPutValues writes key/value pairs atomically in one transaction.
+func EtcdPutValues(endpoints []string, values map[string]string) error {
+	if len(values) == 0 {
+		return nil
+	}
+	return newEtcdClient(endpoints).putMany(values)
 }
 
 // prefixEnd computes the exclusive upper bound for an etcd prefix range:

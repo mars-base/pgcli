@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -60,38 +62,364 @@ func rabbitMQAdminPassword(secretPath string) (string, error) {
 	return generatePassword(20)
 }
 
+// rabbitMQDirEmpty reports whether path is absent or has no entries. A new
+// clustered member must not inherit Mnesia state from an older standalone
+// instance: peer discovery only runs on an empty data dir.
+func rabbitMQDirEmpty(path string) (bool, error) {
+	entries, err := os.ReadDir(path)
+	if os.IsNotExist(err) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return len(entries) == 0, nil
+}
+
 // rabbitMQInstallOptions captures the Changed bits so a --force re-install
 // keeps stored values for flags that were not passed.
 type rabbitMQInstallOptions struct {
-	listenSet         bool
-	amqpPortSet       bool
-	managementPortSet bool
-	tlsPortSet        bool
-	tlsSet            bool
-	tlsCertSet        bool
-	tlsKeySet         bool
-	adminUserSet      bool
-	adminPasswordSet  bool
-	versionSet        bool
-	dataDirSet        bool
-	settingsSet       bool
+	listenSet            bool
+	amqpPortSet          bool
+	managementPortSet    bool
+	tlsPortSet           bool
+	tlsSet               bool
+	tlsCertSet           bool
+	tlsKeySet            bool
+	adminUserSet         bool
+	adminPasswordSet     bool
+	adminPasswordFileSet bool
+	versionSet           bool
+	dataDirSet           bool
+	settingsSet          bool
+	clusterSet           bool
+	nodeNameSet          bool
+	etcdSet              bool
+	etcdEndpointsSet     bool
+	erlangCookieFileSet  bool
+	secretsFromEtcdSet   bool
 }
 
 func readRabbitMQInstallOptions(fs *pflag.FlagSet) rabbitMQInstallOptions {
 	return rabbitMQInstallOptions{
-		listenSet:         fs.Changed("listen"),
-		amqpPortSet:       fs.Changed("amqp-port"),
-		managementPortSet: fs.Changed("management-port"),
-		tlsPortSet:        fs.Changed("tls-port"),
-		tlsSet:            fs.Changed("tls"),
-		tlsCertSet:        fs.Changed("tls-cert"),
-		tlsKeySet:         fs.Changed("tls-key"),
-		adminUserSet:      fs.Changed("admin-user"),
-		adminPasswordSet:  fs.Changed("admin-password"),
-		versionSet:        fs.Changed("version"),
-		dataDirSet:        fs.Changed("data-dir"),
-		settingsSet:       fs.Changed("config-option"),
+		listenSet:            fs.Changed("listen"),
+		amqpPortSet:          fs.Changed("amqp-port"),
+		managementPortSet:    fs.Changed("management-port"),
+		tlsPortSet:           fs.Changed("tls-port"),
+		tlsSet:               fs.Changed("tls"),
+		tlsCertSet:           fs.Changed("tls-cert"),
+		tlsKeySet:            fs.Changed("tls-key"),
+		adminUserSet:         fs.Changed("admin-user"),
+		adminPasswordSet:     fs.Changed("admin-password"),
+		adminPasswordFileSet: fs.Changed("admin-password-file"),
+		versionSet:           fs.Changed("version"),
+		dataDirSet:           fs.Changed("data-dir"),
+		settingsSet:          fs.Changed("config-option"),
+		clusterSet:           fs.Changed("cluster"),
+		nodeNameSet:          fs.Changed("node-name"),
+		etcdSet:              fs.Changed("etcd"),
+		etcdEndpointsSet:     fs.Changed("etcd-endpoints"),
+		erlangCookieFileSet:  fs.Changed("erlang-cookie-file"),
+		secretsFromEtcdSet:   fs.Changed("secrets-from-etcd"),
 	}
+}
+
+// readRabbitMQSecretFile reads a shared secret from disk. Only trailing
+// newlines are stripped so a password may contain interior spaces; the value
+// is validated by the caller's kind.
+func readRabbitMQSecretFile(path, kind string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("reading %s file %s: %w", kind, path, err)
+	}
+	value := strings.TrimRight(string(data), "\r\n")
+	if value == "" {
+		return "", fmt.Errorf("%s file %s is empty", kind, path)
+	}
+	if strings.ContainsRune(value, '\x00') {
+		return "", fmt.Errorf("%s file %s must not contain NUL bytes", kind, path)
+	}
+	return value, nil
+}
+
+func rabbitMQSecretPath(flag, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("--%s must not be empty", flag)
+	}
+	abs, err := filepath.Abs(value)
+	if err != nil {
+		return "", fmt.Errorf("resolving --%s %s: %w", flag, value, err)
+	}
+	return abs, nil
+}
+
+func rabbitMQGenerateErlangCookie() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generating Erlang cookie: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+func writeRabbitMQSecretFile(path, value string, force bool) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("creating directory for %s: %w", path, err)
+	}
+	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+	if force {
+		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	}
+	f, err := os.OpenFile(path, flags, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("%s already exists (use --force to overwrite)", path)
+		}
+		return fmt.Errorf("creating %s: %w", path, err)
+	}
+	if _, err := f.WriteString(value + "\n"); err != nil {
+		f.Close()
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	// The open mode only applies on creation; --force may have reused a file
+	// with broader permissions.
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("setting permissions on %s: %w", path, err)
+	}
+	return nil
+}
+
+func resolveRabbitMQSecretEtcdEndpoints(members, explicit []string) ([]string, error) {
+	if len(explicit) > 0 {
+		return config.NormalizeRabbitMQEtcdEndpoints(explicit)
+	}
+	if len(members) == 0 {
+		return nil, nil
+	}
+	c, _, err := loadAddonCfg()
+	if err != nil {
+		return nil, err
+	}
+	return resolveRabbitMQEtcdEndpoints(c, members, explicit)
+}
+
+// readRabbitMQSecretsFromEtcd loads the shared cookie and admin password that
+// "secret generate" published. Both are cluster-level values: clients never
+// need them to connect.
+func readRabbitMQSecretsFromEtcd(endpoints []string, cluster string) (string, string, error) {
+	cookieKey := rabbitmq.ErlangCookieKey(cluster)
+	cookie, found, err := podman.EtcdGetValue(endpoints, cookieKey)
+	if err != nil {
+		return "", "", fmt.Errorf("reading Erlang cookie from etcd: %w", err)
+	}
+	if !found {
+		return "", "", fmt.Errorf("etcd key %s not found; run 'pg addon rabbitmq secret generate --cluster %s' on the management host first", cookieKey, cluster)
+	}
+	if err := config.ValidateRabbitMQErlangCookie(cookie); err != nil {
+		return "", "", fmt.Errorf("etcd key %s: %w", cookieKey, err)
+	}
+	passwordKey := rabbitmq.AdminPasswordKey(cluster)
+	password, found, err := podman.EtcdGetValue(endpoints, passwordKey)
+	if err != nil {
+		return "", "", fmt.Errorf("reading admin password from etcd: %w", err)
+	}
+	if !found {
+		return "", "", fmt.Errorf("etcd key %s not found; run 'pg addon rabbitmq secret generate --cluster %s' on the management host first", passwordKey, cluster)
+	}
+	if strings.ContainsAny(password, "\r\n") {
+		return "", "", fmt.Errorf("etcd key %s must not contain line breaks", passwordKey)
+	}
+	return cookie, password, nil
+}
+
+func runAddonRabbitMQSecretGenerate(cmd *cobra.Command) error {
+	cluster, err := cmd.Flags().GetString("cluster")
+	if err != nil {
+		return err
+	}
+	if !config.ValidRabbitMQClusterName(cluster) {
+		return fmt.Errorf("--cluster %q is not a valid RabbitMQ cluster name (letters, digits, '_' and '-', starting with a letter or digit, max 48 chars)", cluster)
+	}
+	members, err := cmd.Flags().GetStringSlice("etcd")
+	if err != nil {
+		return err
+	}
+	explicit, err := cmd.Flags().GetStringSlice("etcd-endpoints")
+	if err != nil {
+		return err
+	}
+	endpoints, err := resolveRabbitMQSecretEtcdEndpoints(members, explicit)
+	if err != nil {
+		return err
+	}
+	if len(endpoints) == 0 {
+		return fmt.Errorf("--etcd <member,...> or --etcd-endpoints <host:port,...> is required so the secrets can be published to etcd")
+	}
+	cookieFlag, err := cmd.Flags().GetString("cookie-file")
+	if err != nil {
+		return err
+	}
+	passwordFlag, err := cmd.Flags().GetString("admin-password-file")
+	if err != nil {
+		return err
+	}
+	force, err := cmd.Flags().GetBool("force")
+	if err != nil {
+		return err
+	}
+	keepCookie, err := cmd.Flags().GetBool("keep-cookie")
+	if err != nil {
+		return err
+	}
+	if keepCookie && !force {
+		return fmt.Errorf("--keep-cookie requires --force")
+	}
+	cookiePath, err := rabbitMQSecretPath("cookie-file", cookieFlag)
+	if err != nil {
+		return err
+	}
+	passwordPath, err := rabbitMQSecretPath("admin-password-file", passwordFlag)
+	if err != nil {
+		return err
+	}
+	if cookiePath == passwordPath {
+		return fmt.Errorf("--cookie-file and --admin-password-file must be different paths")
+	}
+	cookieKey := rabbitmq.ErlangCookieKey(cluster)
+	passwordKey := rabbitmq.AdminPasswordKey(cluster)
+	if !force {
+		for _, path := range []string{cookiePath, passwordPath} {
+			if _, err := os.Stat(path); err == nil {
+				return fmt.Errorf("%s already exists (use --force to overwrite)", path)
+			} else if !os.IsNotExist(err) {
+				return fmt.Errorf("checking %s: %w", path, err)
+			}
+		}
+		for _, key := range []string{cookieKey, passwordKey} {
+			_, found, err := podman.EtcdGetValue(endpoints, key)
+			if err != nil {
+				return fmt.Errorf("checking etcd key %s: %w", key, err)
+			}
+			if found {
+				return fmt.Errorf("etcd key %s already exists (use --force to overwrite)", key)
+			}
+		}
+	}
+	cookie := ""
+	if keepCookie {
+		foundCookie, found, err := podman.EtcdGetValue(endpoints, cookieKey)
+		if err != nil {
+			return fmt.Errorf("reading etcd key %s: %w", cookieKey, err)
+		}
+		if !found {
+			return fmt.Errorf("etcd key %s not found; omit --keep-cookie to generate a new cookie", cookieKey)
+		}
+		if err := config.ValidateRabbitMQErlangCookie(foundCookie); err != nil {
+			return fmt.Errorf("etcd key %s: %w", cookieKey, err)
+		}
+		cookie = foundCookie
+	} else {
+		cookie, err = rabbitMQGenerateErlangCookie()
+		if err != nil {
+			return err
+		}
+	}
+	password, err := generatePassword(24)
+	if err != nil {
+		return err
+	}
+	if err := writeRabbitMQSecretFile(cookiePath, cookie, force); err != nil {
+		return err
+	}
+	if err := writeRabbitMQSecretFile(passwordPath, password, force); err != nil {
+		return err
+	}
+	values := map[string]string{passwordKey: password}
+	if !keepCookie {
+		values[cookieKey] = cookie
+	}
+	if err := podman.EtcdPutValues(endpoints, values); err != nil {
+		return fmt.Errorf("writing secrets to etcd: %w", err)
+	}
+	fmt.Println("Generated shared cluster secrets (values are not printed):")
+	if keepCookie {
+		fmt.Printf("  Erlang cookie:  %s (kept; unchanged)\n", cookiePath)
+	} else {
+		fmt.Printf("  Erlang cookie:  %s\n", cookiePath)
+	}
+	fmt.Printf("  Admin password: %s\n", passwordPath)
+	fmt.Printf("  Etcd:           %s\n", strings.Join(endpoints, ", "))
+	fmt.Printf("  Keys:           %s\n", cookieKey)
+	fmt.Printf("                  %s\n\n", passwordKey)
+	fmt.Println("Install each member with --secrets-from-etcd and the same --cluster and etcd endpoints.")
+	return nil
+}
+
+// resolveRabbitMQEtcdEndpoints turns --etcd-endpoints (external, preferred)
+// or --etcd (local addon member names) into a normalized endpoint list.
+func resolveRabbitMQEtcdEndpoints(c *config.Config, members, explicit []string) ([]string, error) {
+	if len(explicit) > 0 {
+		return config.NormalizeRabbitMQEtcdEndpoints(explicit)
+	}
+	if len(members) == 0 {
+		return nil, nil
+	}
+	endpoints := make([]string, 0, len(members))
+	for _, member := range members {
+		member = strings.TrimSpace(member)
+		ec, ok := c.Addons.Etcd[member]
+		if !ok {
+			return nil, fmt.Errorf("etcd member %q not found (see 'pg addon list')", member)
+		}
+		endpoints = append(endpoints, net.JoinHostPort(ec.AdvertiseAddr(), strconv.Itoa(ec.ClientPort)))
+	}
+	return config.NormalizeRabbitMQEtcdEndpoints(endpoints)
+}
+
+// preflightRabbitMQEtcdEndpoints fails before any container work when none of
+// the configured etcd endpoints answers. Peer discovery needs etcd for the
+// first boot; an already-formed node does not consult it on restart.
+func preflightRabbitMQEtcdEndpoints(endpoints []string) error {
+	if len(endpoints) == 0 {
+		return fmt.Errorf("cluster mode requires at least one etcd endpoint")
+	}
+	var failures []string
+	for _, endpoint := range endpoints {
+		conn, err := net.DialTimeout("tcp", endpoint, 3*time.Second)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		failures = append(failures, fmt.Sprintf("%s (%v)", endpoint, err))
+	}
+	return fmt.Errorf("no etcd endpoint is reachable: %s — start etcd or fix --etcd/--etcd-endpoints", strings.Join(failures, ", "))
+}
+
+// checkRabbitMQTopologyImmutable rejects changes to the identity fields that
+// decide cluster membership. Etcd endpoints may change; the admin password may
+// be rotated (but must be rotated on every member).
+func checkRabbitMQTopologyImmutable(stored, next config.RabbitMQConfig) error {
+	if stored.Cluster != next.Cluster {
+		return fmt.Errorf("rabbitmq %q is installed as %s; changing --cluster is not supported — remove it with --clean-data and install a new instance",
+			next.Name, rabbitMQDescribeMode(stored))
+	}
+	if stored.NodeName != "" && stored.NodeName != next.NodeName {
+		return fmt.Errorf("rabbitmq %q is installed as node %q; changing --node-name is not supported", next.Name, stored.NodeName)
+	}
+	if stored.ErlangCookie != "" && stored.ErlangCookie != next.ErlangCookie && next.ErlangCookie != "" {
+		return fmt.Errorf("rabbitmq %q has a stored Erlang cookie; changing it is not supported — every member must keep the same cookie", next.Name)
+	}
+	return nil
+}
+
+func rabbitMQDescribeMode(rc config.RabbitMQConfig) string {
+	if rc.Cluster == "" {
+		return "a standalone node"
+	}
+	return fmt.Sprintf("cluster %q", rc.Cluster)
 }
 
 // parseRabbitMQConfigOptions parses repeatable KEY=VALUE overrides for
@@ -114,6 +442,49 @@ func parseRabbitMQConfigOptions(options []string) (map[string]string, error) {
 
 // applyRabbitMQInstallFlags overlays the explicitly set install flags on k.
 func applyRabbitMQInstallFlags(k *config.RabbitMQConfig, fs *pflag.FlagSet, opts rabbitMQInstallOptions) error {
+	if opts.adminPasswordSet && opts.adminPasswordFileSet {
+		return fmt.Errorf("pass either --admin-password or --admin-password-file, not both")
+	}
+	if opts.secretsFromEtcdSet {
+		fromEtcd, _ := fs.GetBool("secrets-from-etcd")
+		if fromEtcd && (opts.erlangCookieFileSet || opts.adminPasswordFileSet) {
+			return fmt.Errorf("--secrets-from-etcd cannot be combined with --erlang-cookie-file or --admin-password-file")
+		}
+		if fromEtcd && opts.adminPasswordSet {
+			return fmt.Errorf("--secrets-from-etcd cannot be combined with --admin-password")
+		}
+	}
+	if opts.clusterSet {
+		k.Cluster, _ = fs.GetString("cluster")
+	}
+	if opts.nodeNameSet {
+		k.NodeName, _ = fs.GetString("node-name")
+	}
+	if k.Cluster != "" && opts.adminPasswordSet {
+		return fmt.Errorf("cluster mode rejects --admin-password; use --secrets-from-etcd or --admin-password-file so every member shares the same credential")
+	}
+	if opts.erlangCookieFileSet {
+		path, _ := fs.GetString("erlang-cookie-file")
+		cookie, err := readRabbitMQSecretFile(path, "Erlang cookie")
+		if err != nil {
+			return fmt.Errorf("--erlang-cookie-file: %w", err)
+		}
+		if err := config.ValidateRabbitMQErlangCookie(cookie); err != nil {
+			return fmt.Errorf("--erlang-cookie-file: %w", err)
+		}
+		k.ErlangCookie = cookie
+	}
+	if opts.adminPasswordFileSet {
+		path, _ := fs.GetString("admin-password-file")
+		password, err := readRabbitMQSecretFile(path, "admin password")
+		if err != nil {
+			return fmt.Errorf("--admin-password-file: %w", err)
+		}
+		if strings.ContainsAny(password, "\r\n") {
+			return fmt.Errorf("--admin-password-file %s must not contain line breaks", path)
+		}
+		k.AdminPassword = password
+	}
 	if opts.versionSet {
 		k.Version, _ = fs.GetString("version")
 	}
@@ -203,6 +574,11 @@ func runAddonInstallRabbitMQ(cmd *cobra.Command) error {
 	if !config.ValidRabbitMQName(name) {
 		return fmt.Errorf("invalid RabbitMQ instance name %q: use letters, digits, '_' and '-', starting with a letter or digit (max 48 chars)", name)
 	}
+	for _, flag := range []string{"advertise-host", "node-id", "peer", "join"} {
+		if cmd.Flags().Changed(flag) {
+			return fmt.Errorf("RabbitMQ does not use --%s; its peer-visible identity is --node-name NAME@HOST", flag)
+		}
+	}
 	fmt.Printf("=== pg addon install rabbitmq (%s) ===\n", name)
 
 	c, path, err := loadAddonCfg()
@@ -214,6 +590,7 @@ func runAddonInstallRabbitMQ(cmd *cobra.Command) error {
 	}
 	opts := readRabbitMQInstallOptions(cmd.Flags())
 	force, _ := cmd.Flags().GetBool("force")
+	secretsFromEtcd, _ := cmd.Flags().GetBool("secrets-from-etcd")
 	c.ApplyDefaults()
 	stored, present := c.Addons.RabbitMQ[name]
 
@@ -246,6 +623,76 @@ func runAddonInstallRabbitMQ(cmd *cobra.Command) error {
 	c.ApplyDefaults()
 	rc = c.Addons.RabbitMQ[name]
 
+	if present {
+		if err := checkRabbitMQTopologyImmutable(stored, rc); err != nil {
+			return err
+		}
+		if rc.Cluster != "" && opts.adminPasswordFileSet && rc.AdminPassword != stored.AdminPassword {
+			fmt.Fprintln(os.Stderr, "[!] admin password changed: apply the same password to EVERY cluster member; each node reconciles the shared admin account against its own stored value on start")
+		}
+	}
+	if rc.Cluster == "" && (opts.nodeNameSet || opts.etcdSet || opts.etcdEndpointsSet || opts.erlangCookieFileSet || secretsFromEtcd) {
+		return fmt.Errorf("--node-name, --etcd, --etcd-endpoints, --erlang-cookie-file and --secrets-from-etcd require --cluster")
+	}
+	if rc.Cluster != "" {
+		if opts.etcdSet || opts.etcdEndpointsSet {
+			members, _ := cmd.Flags().GetStringSlice("etcd")
+			explicit, _ := cmd.Flags().GetStringSlice("etcd-endpoints")
+			endpoints, err := resolveRabbitMQEtcdEndpoints(c, members, explicit)
+			if err != nil {
+				return err
+			}
+			rc.EtcdEndpoints = endpoints
+			c.Addons.RabbitMQ[name] = rc
+		}
+		if len(rc.EtcdEndpoints) > 0 {
+			endpoints, err := config.NormalizeRabbitMQEtcdEndpoints(rc.EtcdEndpoints)
+			if err != nil {
+				return err
+			}
+			rc.EtcdEndpoints = endpoints
+			c.Addons.RabbitMQ[name] = rc
+		}
+		if !present {
+			empty, err := rabbitMQDirEmpty(rc.DataDir)
+			if err != nil {
+				return err
+			}
+			if !empty {
+				return fmt.Errorf("data dir %s already contains RabbitMQ state; a clustered member needs an empty data dir — remove the previous instance with 'pg addon remove rabbitmq --name %s --clean-data' and reinstall", rc.DataDir, name)
+			}
+		}
+		if rc.NodeName == "" {
+			return fmt.Errorf("cluster mode requires --node-name NAME@HOST (unique per member and resolvable from every other member)")
+		}
+		if len(rc.EtcdEndpoints) == 0 {
+			return fmt.Errorf("cluster mode requires --etcd <member,...> (local etcd addon members) or --etcd-endpoints <host:port,...> (external etcd)")
+		}
+		if secretsFromEtcd {
+			cookie, password, err := readRabbitMQSecretsFromEtcd(rc.EtcdEndpoints, rc.Cluster)
+			if err != nil {
+				return err
+			}
+			rc.ErlangCookie = cookie
+			rc.AdminPassword = password
+			c.Addons.RabbitMQ[name] = rc
+			if present {
+				if err := checkRabbitMQTopologyImmutable(stored, rc); err != nil {
+					return err
+				}
+				if rc.AdminPassword != stored.AdminPassword {
+					fmt.Fprintln(os.Stderr, "[!] admin password changed: apply the same password to EVERY cluster member; each node reconciles the shared admin account against its own stored value on start")
+				}
+			}
+		}
+		if rc.ErlangCookie == "" {
+			return fmt.Errorf("cluster mode requires --erlang-cookie-file FILE or --secrets-from-etcd with the Erlang cookie shared by every member")
+		}
+		if rc.AdminPassword == "" {
+			return fmt.Errorf("cluster mode requires --admin-password-file FILE or --secrets-from-etcd with the admin password shared by every member")
+		}
+	}
+
 	if rc.AdminPassword == "" {
 		pw, err := rabbitMQAdminPassword(rc.SecretPath)
 		if err != nil {
@@ -256,6 +703,11 @@ func runAddonInstallRabbitMQ(cmd *cobra.Command) error {
 	}
 	if err := validateRabbitMQBYOTLS(rc); err != nil {
 		return err
+	}
+	if rc.Cluster != "" {
+		if err := preflightRabbitMQEtcdEndpoints(rc.EtcdEndpoints); err != nil {
+			return err
+		}
 	}
 	if err := c.Validate(); err != nil {
 		return err
@@ -284,6 +736,9 @@ func runAddonInstallRabbitMQ(cmd *cobra.Command) error {
 		return fmt.Errorf("  [X] %v", err)
 	}
 	fmt.Printf("  [OK] container: %s\n", rc.ContainerName)
+	if rc.Cluster != "" {
+		fmt.Printf("  [i] cluster member registered; if no peer is running yet this node stays a single-member cluster until the others install\n")
+	}
 
 	fmt.Println()
 	fmt.Printf("✓ RabbitMQ %q installed\n", name)
@@ -292,6 +747,11 @@ func runAddonInstallRabbitMQ(cmd *cobra.Command) error {
 	fmt.Printf("  Container:  %s\n", rc.ContainerName)
 	fmt.Printf("  AMQP:       amqp://%s\n", rabbitmq.AMQPAddr(rc))
 	fmt.Printf("  Management: %s\n", rabbitmq.ManagementURL(rc))
+	if rc.Cluster != "" {
+		fmt.Printf("  Cluster:    %s\n", rc.Cluster)
+		fmt.Printf("  Node:       %s\n", rc.NodeName)
+		fmt.Printf("  Etcd:       %s\n", strings.Join(rc.EtcdEndpoints, ", "))
+	}
 	if rc.TLS {
 		fmt.Printf("  AMQPS:      amqps://%s\n", rabbitmq.AMQPSAddr(rc))
 		fmt.Printf("  Mgmt TLS:   %s\n", rabbitmq.ManagementTLSURL(rc))
@@ -437,6 +897,11 @@ func runAddonRabbitMQStatus(cmd *cobra.Command) error {
 	fmt.Printf("  Version:    %s\n", rc.Version)
 	fmt.Printf("  Image:      %s\n", rc.ImageTag)
 	fmt.Printf("  Container:  %s\n", rc.ContainerName)
+	if rc.Cluster != "" {
+		fmt.Printf("  Cluster:    %s\n", rc.Cluster)
+		fmt.Printf("  Node:       %s\n", rc.NodeName)
+		fmt.Printf("  Etcd:       %s\n", strings.Join(rc.EtcdEndpoints, ", "))
+	}
 	fmt.Printf("  Listen:     %s\n", rc.Listen)
 	fmt.Printf("  AMQP:       amqp://%s\n", rabbitmq.AMQPAddr(rc))
 	fmt.Printf("  Management: %s\n", rabbitmq.ManagementURL(rc))
@@ -474,6 +939,64 @@ func runAddonRabbitMQShell(cmd *cobra.Command) error {
 		fmt.Fprintf(os.Stderr, "[!] rabbitmq %q is not running — start it with: pg addon start rabbitmq --name %s\n", name, name)
 	}
 	return m.Exec(&rc, true)
+}
+
+// --- cluster commands -------------------------------------------------------
+
+func requireRabbitMQCluster(cmd *cobra.Command) (*podman.RabbitMQManager, config.RabbitMQConfig, error) {
+	m, rc, err := requireRabbitMQRunning(cmd)
+	if err != nil {
+		return nil, rc, err
+	}
+	if rc.Cluster == "" {
+		return nil, rc, fmt.Errorf("rabbitmq %q is a standalone instance; cluster commands require an instance installed with --cluster", rc.Name)
+	}
+	return m, rc, nil
+}
+
+func runAddonRabbitMQClusterStatus(cmd *cobra.Command) error {
+	m, rc, err := requireRabbitMQCluster(cmd)
+	if err != nil {
+		return err
+	}
+	out, err := m.ClusterStatus(&rc)
+	if err != nil {
+		return err
+	}
+	fmt.Print(out)
+	if !strings.HasSuffix(out, "\n") {
+		fmt.Println()
+	}
+	return nil
+}
+
+func runAddonRabbitMQClusterForget(cmd *cobra.Command, args []string) error {
+	m, rc, err := requireRabbitMQCluster(cmd)
+	if err != nil {
+		return err
+	}
+	node := args[0]
+	if _, _, err := config.ParseRabbitMQNodeName(node); err != nil {
+		return fmt.Errorf("invalid node name %q: %w", node, err)
+	}
+	if node == rc.NodeName {
+		return fmt.Errorf("refusing to forget the local node %q; run this command on a surviving member", node)
+	}
+	yes, _ := cmd.Flags().GetBool("yes")
+	if !yes && !confirmPrompt(fmt.Sprintf("Remove node %q from cluster %q? It must be stopped first. [y/N] ", node, rc.Cluster)) {
+		fmt.Println("aborted")
+		return nil
+	}
+	out, err := m.ForgetClusterNode(&rc, node)
+	if err != nil {
+		return err
+	}
+	if msg := strings.TrimSpace(out); msg != "" {
+		fmt.Println(msg)
+	}
+	fmt.Printf("✓ node %q removed from cluster %q\n", node, rc.Cluster)
+	fmt.Println("  Rebalance quorum queues on a remaining member: rabbitmq-queues rebalance quorum")
+	return nil
 }
 
 // --- queue commands ---------------------------------------------------------
@@ -671,12 +1194,16 @@ type rabbitMQQueueDeclareOptions struct {
 }
 
 // parseRabbitMQQueueDeclareFlags validates declare flags before any container
-// or API work.
-func parseRabbitMQQueueDeclareFlags(fs *pflag.FlagSet) (rabbitMQQueueDeclareOptions, error) {
+// work. defaultType applies when --type is not given: quorum on a cluster
+// member (the only replicated, HA-capable queue type), classic standalone.
+func parseRabbitMQQueueDeclareFlags(fs *pflag.FlagSet, defaultType string) (rabbitMQQueueDeclareOptions, error) {
 	var opts rabbitMQQueueDeclareOptions
 	opts.durable, _ = fs.GetBool("durable")
 	opts.autoDelete, _ = fs.GetBool("auto-delete")
 	opts.queueType, _ = fs.GetString("type")
+	if opts.queueType == "" {
+		opts.queueType = defaultType
+	}
 	if opts.queueType != "classic" && opts.queueType != "quorum" {
 		return opts, fmt.Errorf("invalid --type %q: use classic or quorum", opts.queueType)
 	}
@@ -717,12 +1244,22 @@ func parseRabbitMQQueueDeclareFlags(fs *pflag.FlagSet) (rabbitMQQueueDeclareOpti
 	return opts, nil
 }
 
+// rabbitMQDefaultQueueType picks the queue type when --type is omitted:
+// quorum on a cluster member (the only replicated HA-capable type in RabbitMQ
+// 4.x), classic standalone.
+func rabbitMQDefaultQueueType(rc config.RabbitMQConfig) string {
+	if rc.Cluster != "" {
+		return "quorum"
+	}
+	return "classic"
+}
+
 func runAddonRabbitMQQueueDeclare(cmd *cobra.Command, args []string) error {
-	opts, err := parseRabbitMQQueueDeclareFlags(cmd.Flags())
+	api, rc, err := rabbitMQAPI(cmd)
 	if err != nil {
 		return err
 	}
-	api, rc, err := rabbitMQAPI(cmd)
+	opts, err := parseRabbitMQQueueDeclareFlags(cmd.Flags(), rabbitMQDefaultQueueType(rc))
 	if err != nil {
 		return err
 	}
@@ -1004,14 +1541,25 @@ func runAddonRabbitMQQueueBindings(cmd *cobra.Command, args []string) error {
 
 var addonRabbitMQCmd = &cobra.Command{
 	Use:   "rabbitmq",
-	Short: "Manage single-node RabbitMQ container instances",
+	Short: "Manage RabbitMQ container instances (standalone or cluster)",
 	Long: `Manage RabbitMQ add-on instances (official rabbitmq management image).
 
-pgcli runs RabbitMQ as a single node with host networking. AMQP, the
-management web UI/API and Erlang distribution are bound to --listen
-(default 127.0.0.1) and allocated from separate port pools, so several
-instances coexist on one host. TLS is optional but additive: --tls keeps the
-plaintext AMQP/management listeners and adds AMQPS plus management HTTPS.
+pgcli runs RabbitMQ as a single node with host networking, or as one member of
+a multi-host cluster built through etcd peer discovery. AMQP, the management
+web UI/API and Erlang distribution are bound to --listen (default 127.0.0.1
+standalone, 0.0.0.0 in a cluster) and allocated from separate port pools, so
+several standalone instances coexist on one host. TLS is optional but
+additive: --tls keeps the plaintext AMQP/management listeners and adds AMQPS
+plus management HTTPS.
+
+Cluster mode requires --cluster NAME, --node-name NODE@HOST, at least one etcd
+endpoint (--etcd or --etcd-endpoints), and shared secrets across every member.
+Generate the shared Erlang cookie and admin password once with
+"pg addon rabbitmq secret generate" (it publishes them to etcd), then install
+each member with --secrets-from-etcd. The older --erlang-cookie-file /
+--admin-password-file pair is still accepted for manually distributed files.
+Members discover each other through etcd on first boot; nodes with an
+already-initialised data directory rejoin through their last-seen peers.
 
 The administrator account is created on first boot and reconciled by pgcli on
 every start, so the password stored in pg.yaml is always the live one.
@@ -1021,12 +1569,19 @@ Subcommands:
   status    Show container state, endpoints, version and paths
   shell     Open a bash shell in the container
   queue     List/declare/inspect queues, publish/get messages and manage bindings
+  cluster   Show cluster status and forget decommissioned members
+  secret    Generate the shared Erlang cookie and admin password files
 
 Examples:
   pg addon install rabbitmq --name rmq
   pg addon install rabbitmq --listen 0.0.0.0 --tls
   pg addon install rabbitmq --tls-cert cert.pem --tls-key key.pem
+  pg addon rabbitmq secret generate --cluster lab --etcd-endpoints 10.0.0.1:2379
+  pg addon install rabbitmq --name mq --cluster lab \
+    --node-name rabbit@node1 --etcd-endpoints 10.0.0.1:2379 --secrets-from-etcd
   pg addon rabbitmq status --name rmq
+  pg addon rabbitmq cluster status --name mq
+  pg addon rabbitmq cluster forget rabbit@node3 --name mq --yes
   pg addon rabbitmq queue list --name rmq
   pg addon rabbitmq queue declare orders --name rmq
   pg addon rabbitmq queue publish orders --payload '{"id":1}' --name rmq
@@ -1048,6 +1603,65 @@ var addonRabbitMQShellCmd = &cobra.Command{
 	Use:   "shell",
 	Short: "Open a bash shell in the RabbitMQ container",
 	RunE:  func(cmd *cobra.Command, _ []string) error { return runAddonRabbitMQShell(cmd) },
+}
+
+var addonRabbitMQClusterCmd = &cobra.Command{
+	Use:   "cluster",
+	Short: "Inspect and repair RabbitMQ cluster membership",
+	Long: `Inspect and repair a RabbitMQ cluster from one member.
+
+Members join automatically through etcd on first boot and rejoin through their
+last-seen peers after a restart, so no manual join step is needed. Use
+"forget" only for a member that will not come back.`,
+}
+
+var addonRabbitMQClusterStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show cluster members, partitions and listeners",
+	RunE:  func(cmd *cobra.Command, _ []string) error { return runAddonRabbitMQClusterStatus(cmd) },
+}
+
+var addonRabbitMQClusterForgetCmd = &cobra.Command{
+	Use:   "forget NODE",
+	Short: "Remove an offline node from the cluster",
+	Long: `Remove an offline node from the cluster metadata.
+
+Stop the target node first and run this on a surviving member. Afterwards
+rebalance quorum queues (inside the container: rabbitmq-queues rebalance quorum)
+so replicas are placed on the remaining nodes.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runAddonRabbitMQClusterForget,
+}
+
+var addonRabbitMQSecretCmd = &cobra.Command{
+	Use:   "secret",
+	Short: "Generate and publish the shared cluster secrets",
+	Long: `Generate the files shared by every member of a RabbitMQ cluster.
+
+Cluster members must use the same Erlang cookie and administrator password.
+"generate" creates both files and stores their contents in etcd, so every
+member can read them with --secrets-from-etcd during install instead of
+copying files between hosts.`,
+}
+
+var addonRabbitMQSecretGenerateCmd = &cobra.Command{
+	Use:   "generate",
+	Short: "Generate the shared secrets and write them to etcd",
+	Long: `Generate the shared Erlang cookie and administrator password, write both local
+files with mode 0600, and publish their contents to etcd for the cluster.
+
+The values are not printed. Existing files and etcd keys are left untouched
+unless --force is given. Install each member with --secrets-from-etcd and the
+same --cluster / etcd endpoints; no file copying between hosts is needed. The
+secrets are stored in etcd as plain text, so restrict access to the etcd
+client port to the cluster and management hosts.
+
+After members are installed the Erlang cookie is immutable. To rotate only the
+administrator password, use --force --keep-cookie: the existing cookie is
+re-read from etcd and republished unchanged. Regenerating the cookie with
+--force alone is only safe before any member has been installed.`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, _ []string) error { return runAddonRabbitMQSecretGenerate(cmd) },
 }
 
 var addonRabbitMQQueueCmd = &cobra.Command{
@@ -1142,7 +1756,16 @@ var addonRabbitMQQueueDeleteCmd = &cobra.Command{
 
 func init() {
 	addonCmd.AddCommand(addonRabbitMQCmd)
-	addonRabbitMQCmd.AddCommand(addonRabbitMQStatusCmd, addonRabbitMQShellCmd, addonRabbitMQQueueCmd)
+	addonRabbitMQCmd.AddCommand(addonRabbitMQStatusCmd, addonRabbitMQShellCmd, addonRabbitMQQueueCmd, addonRabbitMQClusterCmd, addonRabbitMQSecretCmd)
+	addonRabbitMQClusterCmd.AddCommand(addonRabbitMQClusterStatusCmd, addonRabbitMQClusterForgetCmd)
+	addonRabbitMQSecretCmd.AddCommand(addonRabbitMQSecretGenerateCmd)
+	addonRabbitMQSecretGenerateCmd.Flags().String("cluster", "", "RabbitMQ cluster name shared by every member (required)")
+	addonRabbitMQSecretGenerateCmd.Flags().StringSlice("etcd", nil, "local etcd addon member name(s) holding the secrets, e.g. --etcd dcs (repeatable or comma-separated)")
+	addonRabbitMQSecretGenerateCmd.Flags().StringSlice("etcd-endpoints", nil, "etcd endpoints as host:port holding the secrets, e.g. 10.0.0.1:2379 (repeatable or comma-separated; takes precedence over --etcd)")
+	addonRabbitMQSecretGenerateCmd.Flags().String("cookie-file", "/tmp/rmq.cookie", "local output path for the shared Erlang cookie file")
+	addonRabbitMQSecretGenerateCmd.Flags().String("admin-password-file", "/tmp/rmq.admin", "local output path for the shared administrator password file")
+	addonRabbitMQSecretGenerateCmd.Flags().Bool("force", false, "overwrite existing files and etcd keys")
+	addonRabbitMQSecretGenerateCmd.Flags().Bool("keep-cookie", false, "with --force: keep the existing Erlang cookie and rotate only the admin password (the cookie is immutable once members are installed)")
 	addonRabbitMQQueueCmd.AddCommand(
 		addonRabbitMQQueueListCmd,
 		addonRabbitMQQueueDeclareCmd,
@@ -1158,6 +1781,7 @@ func init() {
 
 	for _, sub := range []*cobra.Command{
 		addonRabbitMQStatusCmd, addonRabbitMQShellCmd,
+		addonRabbitMQClusterStatusCmd, addonRabbitMQClusterForgetCmd,
 		addonRabbitMQQueueListCmd, addonRabbitMQQueueDeclareCmd, addonRabbitMQQueueInfoCmd,
 		addonRabbitMQQueuePublishCmd, addonRabbitMQQueueGetCmd,
 		addonRabbitMQQueueBindCmd, addonRabbitMQQueueUnbindCmd, addonRabbitMQQueueBindingsCmd,
@@ -1173,7 +1797,7 @@ func init() {
 	} {
 		sub.Flags().String("vhost", "/", "RabbitMQ virtual host")
 	}
-	for _, sub := range []*cobra.Command{addonRabbitMQQueuePurgeCmd, addonRabbitMQQueueDeleteCmd} {
+	for _, sub := range []*cobra.Command{addonRabbitMQQueuePurgeCmd, addonRabbitMQQueueDeleteCmd, addonRabbitMQClusterForgetCmd} {
 		sub.Flags().Bool("yes", false, "skip the confirmation prompt")
 	}
 	addonRabbitMQQueueDeleteCmd.Flags().Bool("if-empty", false, "only delete the queue when it has no messages")
@@ -1181,7 +1805,7 @@ func init() {
 
 	addonRabbitMQQueueDeclareCmd.Flags().Bool("durable", true, "declare a durable queue")
 	addonRabbitMQQueueDeclareCmd.Flags().Bool("auto-delete", false, "delete the queue when its last consumer disconnects")
-	addonRabbitMQQueueDeclareCmd.Flags().String("type", "classic", "queue type: classic or quorum")
+	addonRabbitMQQueueDeclareCmd.Flags().String("type", "", "queue type: classic or quorum (default: quorum on a cluster, classic standalone)")
 	addonRabbitMQQueueDeclareCmd.Flags().String("message-ttl", "", "drop messages that wait in the queue longer than this (e.g. 30m, 24h, or milliseconds)")
 	addonRabbitMQQueueDeclareCmd.Flags().String("expires", "", "delete the queue after it is unused for this long (e.g. 24h, or milliseconds)")
 	addonRabbitMQQueueDeclareCmd.Flags().StringArray("argument", nil, "queue argument KEY=VALUE (repeatable; JSON values keep their type)")
@@ -1207,4 +1831,10 @@ func init() {
 
 	addonInstallCmd.Flags().Int("amqp-port", 0, "RabbitMQ AMQP host port (0=auto-assign from rabbitmq_start_port, default 5672)")
 	addonInstallCmd.Flags().Int("management-port", 0, "RabbitMQ management web UI/API host port (0=auto-assign from rabbitmq_management_start_port, default 15672)")
+	addonInstallCmd.Flags().String("node-name", "", "RabbitMQ cluster: this member's Erlang node name NODE@HOST, e.g. rabbit@node1 (required on first install; HOST must resolve from every member and must not be loopback; immutable after install)")
+	addonInstallCmd.Flags().StringSlice("etcd", nil, "RabbitMQ cluster: local etcd addon member name(s) used for peer discovery, e.g. --etcd dcs (repeatable or comma-separated); alternative to --etcd-endpoints")
+	addonInstallCmd.Flags().StringSlice("etcd-endpoints", nil, "RabbitMQ cluster: etcd endpoints as host:port for peer discovery, e.g. 10.0.0.1:2379,10.0.0.2:2379 (repeatable or comma-separated; an http:// prefix is stripped; takes precedence over --etcd)")
+	addonInstallCmd.Flags().String("erlang-cookie-file", "", "RabbitMQ cluster: file holding the shared Erlang cookie (required on first cluster install unless --secrets-from-etcd; must be identical on every member and is immutable after install)")
+	addonInstallCmd.Flags().String("admin-password-file", "", "read the admin password from FILE instead of --admin-password (required on first RabbitMQ cluster install unless --secrets-from-etcd; also accepted standalone)")
+	addonInstallCmd.Flags().Bool("secrets-from-etcd", false, "RabbitMQ cluster: read the shared Erlang cookie and admin password from etcd keys written by 'pg addon rabbitmq secret generate'")
 }

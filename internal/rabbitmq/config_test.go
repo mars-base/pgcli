@@ -166,6 +166,53 @@ func TestWriteSecret(t *testing.T) {
 	}
 }
 
+func TestWriteErlangCookie(t *testing.T) {
+	rc := testRabbitMQ(t)
+	rc.Cluster = "lab"
+	rc.ErlangCookie = "shared-cookie"
+	if err := WriteErlangCookie(rc); err != nil {
+		t.Fatalf("WriteErlangCookie: %v", err)
+	}
+	data, err := os.ReadFile(CookiePath(rc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "shared-cookie\n" {
+		t.Errorf("cookie = %q, want %q", data, "shared-cookie\n")
+	}
+	info, err := os.Stat(CookiePath(rc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o400 {
+		t.Errorf("cookie mode = %o, want 400", info.Mode().Perm())
+	}
+
+	// A rotated cookie rewrites the file even though the old one is 0400.
+	rc.ErlangCookie = "rotated-cookie"
+	if err := WriteErlangCookie(rc); err != nil {
+		t.Fatalf("WriteErlangCookie (rotate): %v", err)
+	}
+	data, err = os.ReadFile(CookiePath(rc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "rotated-cookie\n" {
+		t.Errorf("rotated cookie = %q", data)
+	}
+}
+
+func TestWriteErlangCookieStandaloneNoop(t *testing.T) {
+	rc := testRabbitMQ(t)
+	rc.ErlangCookie = "shared-cookie"
+	if err := WriteErlangCookie(rc); err != nil {
+		t.Fatalf("WriteErlangCookie: %v", err)
+	}
+	if _, err := os.Stat(CookiePath(rc)); !os.IsNotExist(err) {
+		t.Errorf("standalone instance must not get a cookie file, stat err = %v", err)
+	}
+}
+
 func TestEnsureTLSCertsGenerated(t *testing.T) {
 	rc := testRabbitMQ(t)
 	rc.TLS = true
@@ -266,6 +313,88 @@ func TestEndpoints(t *testing.T) {
 	}
 	if got := ManagementTLSURL(rc); got != "https://127.0.0.1:15671" {
 		t.Errorf("ManagementTLSURL = %q", got)
+	}
+}
+
+func TestRenderConfigCluster(t *testing.T) {
+	rc := testRabbitMQ(t)
+	rc.Cluster = "lab"
+	rc.NodeName = "rabbit@node1"
+	rc.Listen = "0.0.0.0"
+	rc.EtcdEndpoints = []string{"http://10.0.0.2:2379", "10.0.0.1:2379"}
+	got, err := RenderConfig(rc)
+	if err != nil {
+		t.Fatalf("RenderConfig: %v", err)
+	}
+	for _, want := range []string{
+		"listeners.tcp.default = 0.0.0.0:5672\n",
+		"management.tcp.ip = 0.0.0.0\n",
+		"distribution.listener.interface = 0.0.0.0\n",
+		"cluster_formation.peer_discovery_backend = etcd\n",
+		"cluster_formation.etcd.endpoints.1 = 10.0.0.1:2379\n",
+		"cluster_formation.etcd.endpoints.2 = 10.0.0.2:2379\n",
+		"cluster_formation.etcd.cluster_name = lab\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("cluster RenderConfig missing %q:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"erlang_cookie", "default_pass", "secret"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("cluster RenderConfig leaked %q:\n%s", unwanted, got)
+		}
+	}
+}
+
+func TestRenderConfigStandaloneHasNoClusterFormation(t *testing.T) {
+	rc := testRabbitMQ(t)
+	got, err := RenderConfig(rc)
+	if err != nil {
+		t.Fatalf("RenderConfig: %v", err)
+	}
+	if strings.Contains(got, "cluster_formation") {
+		t.Errorf("standalone RenderConfig contains cluster_formation:\n%s", got)
+	}
+}
+
+func TestWritePluginsCluster(t *testing.T) {
+	rc := testRabbitMQ(t)
+	rc.Cluster = "lab"
+	rc.NodeName = "rabbit@node1"
+	rc.EtcdEndpoints = []string{"10.0.0.1:2379"}
+	if err := WritePlugins(rc); err != nil {
+		t.Fatalf("WritePlugins: %v", err)
+	}
+	data, err := os.ReadFile(PluginsFile(rc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "[rabbitmq_management,rabbitmq_peer_discovery_etcd].\n" {
+		t.Errorf("enabled_plugins = %q", data)
+	}
+}
+
+func TestEndpointsClusterUseNodeHost(t *testing.T) {
+	rc := testRabbitMQ(t)
+	rc.Cluster = "lab"
+	rc.NodeName = "rabbit@10.241.20.147"
+	rc.Listen = "0.0.0.0"
+	rc.TLS = true
+	if got := AMQPAddr(rc); got != "10.241.20.147:5672" {
+		t.Errorf("AMQPAddr = %q, want the node host, not 0.0.0.0", got)
+	}
+	if got := AMQPSAddr(rc); got != "10.241.20.147:5671" {
+		t.Errorf("AMQPSAddr = %q", got)
+	}
+	if got := ManagementURL(rc); got != "http://10.241.20.147:15672" {
+		t.Errorf("ManagementURL = %q", got)
+	}
+	if got := ManagementTLSURL(rc); got != "https://10.241.20.147:15671" {
+		t.Errorf("ManagementTLSURL = %q", got)
+	}
+	rc.NodeName = "rabbit@node1"
+	if got := AdvertiseHost(rc); got != "node1" {
+		t.Errorf("AdvertiseHost = %q, want node1", got)
 	}
 }
 

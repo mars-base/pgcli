@@ -67,6 +67,60 @@ func TestRabbitMQCreateArgsNoPublishedPorts(t *testing.T) {
 	}
 }
 
+func TestRabbitMQCreateArgsCluster(t *testing.T) {
+	rc := testRabbitMQNode(t)
+	rc.Cluster = "lab"
+	rc.NodeName = "rabbit@10.0.0.1"
+	rc.ErlangCookie = "shared-cookie"
+	rc.Listen = "0.0.0.0"
+	got := rabbitmqCreateArgs(rc)
+	want := []string{
+		"run", "-d",
+		"--name", "pgcli-rabbitmq-test",
+		"--network", "host",
+		"--http-proxy=false",
+		"--restart", "unless-stopped",
+		"--stop-timeout", "30",
+		"-v", rc.DataDir + ":" + rabbitmq.ContainerDataDir + ":z",
+		"-v", rc.ConfigPath + ":" + rabbitmq.ContainerConfigFile + ":ro,z",
+		"-v", filepath.Join(filepath.Dir(rc.ConfigPath), "enabled_plugins") + ":" + rabbitmq.ContainerPluginsFile + ":ro,z",
+		"-e", "RABBITMQ_NODENAME=rabbit@10.0.0.1",
+		"-e", "RABBITMQ_USE_LONGNAME=true",
+		"-e", "ERL_EPMD_ADDRESS=0.0.0.0",
+		"-e", "ERL_EPMD_PORT=4369",
+		"-e", "RABBITMQ_DIST_PORT=25672",
+		"-e", "RABBITMQ_DEFAULT_USER=admin",
+		"-e", "RABBITMQ_DEFAULT_PASS=secret",
+		rc.ImageTag,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("cluster rabbitmqCreateArgs:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestRabbitMQCreateArgsClusterShortHostname(t *testing.T) {
+	rc := testRabbitMQNode(t)
+	rc.Cluster = "lab"
+	rc.NodeName = "rabbit@node1"
+	rc.ErlangCookie = "shared-cookie"
+	rc.Listen = "0.0.0.0"
+	got := rabbitmqCreateArgs(rc)
+	var found bool
+	for i := 0; i+1 < len(got); i++ {
+		if got[i] == "-e" && got[i+1] == "RABBITMQ_USE_LONGNAME=false" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("short hostname must disable long names: %q", got)
+	}
+	for _, arg := range got {
+		if arg == "RABBITMQ_NODENAME=rabbit@localhost" {
+			t.Errorf("cluster argv kept the standalone node name: %q", got)
+		}
+	}
+}
+
 func TestRabbitMQCreateArgsTLSMount(t *testing.T) {
 	rc := testRabbitMQNode(t)
 	rc.TLS = true

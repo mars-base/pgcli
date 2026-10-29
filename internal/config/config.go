@@ -1788,10 +1788,23 @@ const DefaultRabbitMQVersion = "4.4.0"
 // DefaultRabbitMQImageTag is the official upstream management image.
 const DefaultRabbitMQImageTag = "docker.io/library/rabbitmq:4.4.0-management"
 
-// RabbitMQConfig holds a managed single-node RabbitMQ container. State lives
-// in a bind-mounted data dir; every listener shares the config's Listen
-// address under host networking. TLS adds AMQPS and management HTTPS next to
-// the plaintext listeners.
+// Cluster members pin the host-level Erlang infrastructure ports: every node
+// in a cluster must accept peer connections on these fixed ports, so exactly
+// one clustered RabbitMQ container may run per host.
+const (
+	DefaultRabbitMQClusteredEPMDPort = 4369
+	DefaultRabbitMQClusteredDistPort = 25672
+)
+
+// RabbitMQConfig holds a managed RabbitMQ container. State lives in a
+// bind-mounted data dir; every listener shares the config's Listen address
+// under host networking. TLS adds AMQPS and management HTTPS next to the
+// plaintext listeners.
+//
+// Cluster is empty for a standalone node. A non-empty Cluster turns on etcd
+// peer discovery: all members share the cluster name, the Erlang cookie and
+// the admin password, while each member has a unique NodeName and may use
+// different EtcdEndpoints.
 type RabbitMQConfig struct {
 	ContainerName string `yaml:"container_name,omitempty"` // pgcli-rabbitmq<ns>-<name>
 	Name          string `yaml:"name,omitempty"`           // addon key, defaults to the map key
@@ -1804,17 +1817,25 @@ type RabbitMQConfig struct {
 	DataDir    string `yaml:"data_dir,omitempty"`    // mounted at /var/lib/rabbitmq
 	SecretPath string `yaml:"secret_path,omitempty"` // 0600 admin password file
 
-	Listen            string `yaml:"listen,omitempty"`              // bind address, default 127.0.0.1
+	Listen            string `yaml:"listen,omitempty"`              // bind address, default 127.0.0.1 (cluster: 0.0.0.0)
 	AMQPPort          int    `yaml:"amqp_port,omitempty"`           // default pool base 5672
 	ManagementPort    int    `yaml:"management_port,omitempty"`     // default pool base 15672
 	TLS               bool   `yaml:"tls,omitempty"`                 // add AMQPS + management HTTPS
 	AMQPTLSPort       int    `yaml:"amqp_tls_port,omitempty"`       // default pool base 5671
 	ManagementTLSPort int    `yaml:"management_tls_port,omitempty"` // default pool base 15671
-	EPMDPort          int    `yaml:"epmd_port,omitempty"`           // default pool base 4369
-	DistPort          int    `yaml:"dist_port,omitempty"`           // default pool base 25672
+	EPMDPort          int    `yaml:"epmd_port,omitempty"`           // default pool base 4369; cluster: fixed 4369
+	DistPort          int    `yaml:"dist_port,omitempty"`           // default pool base 25672; cluster: fixed 25672
+
+	// Cluster turns on etcd-based peer discovery. All members must use the
+	// same name; it is an etcd cluster_name, so multiple RabbitMQ clusters
+	// can share one etcd deployment.
+	Cluster       string   `yaml:"cluster,omitempty"`
+	NodeName      string   `yaml:"node_name,omitempty"`      // rabbit@host; required in cluster mode, unique per member
+	EtcdEndpoints []string `yaml:"etcd_endpoints,omitempty"` // normalized host:port list (plain HTTP)
+	ErlangCookie  string   `yaml:"erlang_cookie,omitempty"`  // shared Erlang cookie (secret); cluster only
 
 	AdminUser     string `yaml:"admin_user,omitempty"`     // default admin
-	AdminPassword string `yaml:"admin_password,omitempty"` // generated at install
+	AdminPassword string `yaml:"admin_password,omitempty"` // generated at install (cluster: required input)
 
 	// CertFile/KeyFile are bring-your-own TLS inputs; the manager copies them
 	// into the instance config dir and never reads them again.
@@ -1858,6 +1879,126 @@ func ValidRabbitMQAdminUser(user string) bool {
 	return ok
 }
 
+// ValidRabbitMQClusterName reports whether name is a safe etcd cluster_name
+// for RabbitMQ peer discovery.
+func ValidRabbitMQClusterName(name string) bool {
+	ok, _ := regexp.MatchString(`^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$`, name)
+	return ok
+}
+
+var (
+	rabbitMQNodeNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+	rabbitMQNodeHostRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$`)
+)
+
+// ParseRabbitMQNodeName splits and validates a RabbitMQ Erlang node name
+// (NAME@HOST). The host must be resolvable by every other cluster member, so
+// loopback, unspecified addresses and IPv6 literals are rejected.
+func ParseRabbitMQNodeName(node string) (name, host string, err error) {
+	if strings.Count(node, "@") != 1 {
+		return "", "", fmt.Errorf("node name %q must have the form NAME@HOST with exactly one '@'", node)
+	}
+	name, host, _ = strings.Cut(node, "@")
+	if !rabbitMQNodeNameRe.MatchString(name) {
+		return "", "", fmt.Errorf("node name %q: the part before '@' must match [A-Za-z0-9_-]+", node)
+	}
+	if host == "" || strings.ContainsAny(host, " \t\r\n/:") {
+		return "", "", fmt.Errorf("node name %q: the part after '@' must be an IPv4 address or hostname", node)
+	}
+	if strings.EqualFold(host, "localhost") {
+		return "", "", fmt.Errorf("node name %q uses a loopback host, which other cluster members cannot reach; use a LAN address or a resolvable hostname", node)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.To4() == nil {
+			return "", "", fmt.Errorf("node name %q: IPv6 hosts are not supported in cluster mode", node)
+		}
+		if ip.IsLoopback() || ip.IsUnspecified() {
+			return "", "", fmt.Errorf("node name %q uses a loopback or unspecified host; use a LAN address or a resolvable hostname", node)
+		}
+	} else if !rabbitMQNodeHostRe.MatchString(host) {
+		return "", "", fmt.Errorf("node name %q: %q is not a valid hostname", node, host)
+	}
+	return name, host, nil
+}
+
+// RabbitMQNodeUsesLongName reports whether RabbitMQ must start with long
+// names (RABBITMQ_USE_LONGNAME=true) for the given node host: IP addresses and
+// FQDNs need it, short hostnames do not need it.
+func RabbitMQNodeUsesLongName(host string) bool {
+	return net.ParseIP(host) != nil || strings.Contains(host, ".")
+}
+
+// NormalizeRabbitMQEtcdEndpoints validates, deduplicates and sorts a list of
+// etcd endpoints. Only plain HTTP is supported: the peer discovery plugin is
+// configured with bare host:port pairs and this version has no etcd TLS/auth
+// support.
+func NormalizeRabbitMQEtcdEndpoints(endpoints []string) ([]string, error) {
+	if len(endpoints) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]bool, len(endpoints))
+	out := make([]string, 0, len(endpoints))
+	for _, raw := range endpoints {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			return nil, fmt.Errorf("etcd endpoint must not be empty")
+		}
+		lower := strings.ToLower(value)
+		if strings.HasPrefix(lower, "https://") {
+			return nil, fmt.Errorf("etcd endpoint %q: TLS (https://) is not supported; use plain HTTP on a trusted network", raw)
+		}
+		if strings.HasPrefix(lower, "http://") {
+			value = value[len("http://"):]
+		}
+		if strings.Contains(value, "://") {
+			return nil, fmt.Errorf("etcd endpoint %q: unsupported scheme (only plain http:// is supported)", raw)
+		}
+		if strings.Contains(value, "@") {
+			return nil, fmt.Errorf("etcd endpoint %q: userinfo and authentication are not supported", raw)
+		}
+		if strings.ContainsAny(value, "/?#") {
+			return nil, fmt.Errorf("etcd endpoint %q must be host:port without a path, query or fragment", raw)
+		}
+		host, portText, err := net.SplitHostPort(value)
+		if err != nil {
+			return nil, fmt.Errorf("etcd endpoint %q must be host:port: %w", raw, err)
+		}
+		port, err := strconv.Atoi(portText)
+		if err != nil || port < 1 || port > 65535 {
+			return nil, fmt.Errorf("etcd endpoint %q has an invalid port %q (want 1-65535)", raw, portText)
+		}
+		if host == "" || (net.ParseIP(host) == nil && !rabbitMQNodeHostRe.MatchString(host)) {
+			return nil, fmt.Errorf("etcd endpoint %q has an invalid host %q", raw, host)
+		}
+		normalized := net.JoinHostPort(host, strconv.Itoa(port))
+		if seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		out = append(out, normalized)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// ValidateRabbitMQErlangCookie checks the shared cluster cookie. RabbitMQ
+// treats it as an opaque string, but whitespace/control characters cannot be
+// passed through the container environment safely.
+func ValidateRabbitMQErlangCookie(cookie string) error {
+	if cookie == "" {
+		return fmt.Errorf("Erlang cookie must not be empty")
+	}
+	if len(cookie) > 255 {
+		return fmt.Errorf("Erlang cookie must be at most 255 bytes")
+	}
+	for _, r := range cookie {
+		if r <= 0x20 || r == 0x7f {
+			return fmt.Errorf("Erlang cookie must not contain whitespace or control characters")
+		}
+	}
+	return nil
+}
+
 var rabbitMQSettingKeyRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // rabbitMQManagedSettingPrefixes are rendered by pgcli itself; overriding them
@@ -1874,6 +2015,7 @@ var rabbitMQManagedSettingPrefixes = []string{
 	"default_permissions.",
 	"loopback_users.",
 	"distribution.listener.",
+	"cluster_formation",
 }
 
 // ValidateRabbitMQSettings checks user-supplied rabbitmq.conf overrides.
@@ -4014,6 +4156,16 @@ func (c *Config) Validate() error {
 	}
 	// RabbitMQ instances: names are directory keys, paths absolute, the listen
 	// address is an IP, and all listeners are unique per host.
+	var rabbitMQClustered []string
+	for name, rc := range c.Addons.RabbitMQ {
+		if rc.Cluster != "" {
+			rabbitMQClustered = append(rabbitMQClustered, name)
+		}
+	}
+	if len(rabbitMQClustered) > 1 {
+		sort.Strings(rabbitMQClustered)
+		return fmt.Errorf("addons.rabbitmq: at most one clustered RabbitMQ instance may run per host (found %s): every cluster member needs the fixed EPMD and distribution ports", strings.Join(rabbitMQClustered, ", "))
+	}
 	rabbitMQPorts := make(map[int]string, 6*len(c.Addons.RabbitMQ))
 	for name, rc := range c.Addons.RabbitMQ {
 		if !ValidRabbitMQName(rc.Name) {
@@ -4036,6 +4188,39 @@ func (c *Config) Validate() error {
 		if strings.ContainsAny(rc.AdminPassword, "\x00\r\n") {
 			return fmt.Errorf("addons.rabbitmq.%s.admin_password must not contain control characters", name)
 		}
+		if rc.Cluster == "" {
+			if rc.NodeName != "" {
+				return fmt.Errorf("addons.rabbitmq.%s.node_name requires cluster", name)
+			}
+			if len(rc.EtcdEndpoints) > 0 {
+				return fmt.Errorf("addons.rabbitmq.%s.etcd_endpoints requires cluster", name)
+			}
+			if rc.ErlangCookie != "" {
+				return fmt.Errorf("addons.rabbitmq.%s.erlang_cookie requires cluster", name)
+			}
+		} else {
+			if !ValidRabbitMQClusterName(rc.Cluster) {
+				return fmt.Errorf("addons.rabbitmq.%s.cluster %q must match [A-Za-z0-9][A-Za-z0-9_-]{0,47}", name, rc.Cluster)
+			}
+			if _, _, err := ParseRabbitMQNodeName(rc.NodeName); err != nil {
+				return fmt.Errorf("addons.rabbitmq.%s.node_name: %w", name, err)
+			}
+			if len(rc.EtcdEndpoints) == 0 {
+				return fmt.Errorf("addons.rabbitmq.%s.etcd_endpoints is required in cluster mode", name)
+			}
+			if _, err := NormalizeRabbitMQEtcdEndpoints(rc.EtcdEndpoints); err != nil {
+				return fmt.Errorf("addons.rabbitmq.%s.etcd_endpoints: %w", name, err)
+			}
+			if err := ValidateRabbitMQErlangCookie(rc.ErlangCookie); err != nil {
+				return fmt.Errorf("addons.rabbitmq.%s.erlang_cookie: %w", name, err)
+			}
+			if rc.EPMDPort != DefaultRabbitMQClusteredEPMDPort {
+				return fmt.Errorf("addons.rabbitmq.%s.epmd_port must be %d in cluster mode (every member must reach every peer's EPMD)", name, DefaultRabbitMQClusteredEPMDPort)
+			}
+			if rc.DistPort != DefaultRabbitMQClusteredDistPort {
+				return fmt.Errorf("addons.rabbitmq.%s.dist_port must be %d in cluster mode (every member must reach every peer's distribution listener)", name, DefaultRabbitMQClusteredDistPort)
+			}
+		}
 		for _, field := range []struct {
 			name  string
 			value string
@@ -4050,6 +4235,9 @@ func (c *Config) Validate() error {
 		}
 		if net.ParseIP(rc.Listen) == nil {
 			return fmt.Errorf("addons.rabbitmq.%s.listen must be an IP address, got %q", name, rc.Listen)
+		}
+		if rc.Cluster != "" && net.ParseIP(rc.Listen).IsLoopback() {
+			return fmt.Errorf("addons.rabbitmq.%s.listen must not be loopback in cluster mode; peers must reach the distribution and management listeners", name)
 		}
 		if (rc.CertFile == "") != (rc.KeyFile == "") {
 			return fmt.Errorf("addons.rabbitmq.%s.cert_file and key_file must be set together", name)
@@ -5425,10 +5613,24 @@ func (c *Config) ApplyDefaults() {
 			addon.ContainerName = "pgcli-rabbitmq" + nsSuffix(c.Namespace) + "-" + name
 		}
 		if addon.Listen == "" {
-			addon.Listen = "127.0.0.1"
+			if addon.Cluster != "" {
+				addon.Listen = "0.0.0.0"
+			} else {
+				addon.Listen = "127.0.0.1"
+			}
 		}
 		if addon.AdminUser == "" {
 			addon.AdminUser = "admin"
+		}
+		if addon.Cluster != "" {
+			// Peer discovery requires every member to be reachable on the
+			// host-level Erlang ports; only one clustered member fits a host.
+			if addon.EPMDPort == 0 {
+				addon.EPMDPort = DefaultRabbitMQClusteredEPMDPort
+			}
+			if addon.DistPort == 0 {
+				addon.DistPort = DefaultRabbitMQClusteredDistPort
+			}
 		}
 		if !addon.TLS {
 			addon.AMQPTLSPort = 0

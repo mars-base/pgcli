@@ -1,15 +1,23 @@
 package cli
 
 import (
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/spf13/cobra"
 
 	"github.com/mars-base/pgcli/internal/certgen"
 	"github.com/mars-base/pgcli/internal/config"
+	"github.com/mars-base/pgcli/internal/rabbitmq"
 )
 
 func rabbitMQTestInstallCmd() *cobra.Command {
@@ -26,8 +34,19 @@ func rabbitMQTestInstallCmd() *cobra.Command {
 	cmd.Flags().String("tls-key", "", "")
 	cmd.Flags().String("admin-user", "", "")
 	cmd.Flags().String("admin-password", "", "")
+	cmd.Flags().String("admin-password-file", "", "")
+	cmd.Flags().String("cluster", "", "")
+	cmd.Flags().String("node-name", "", "")
+	cmd.Flags().StringSlice("etcd", nil, "")
+	cmd.Flags().StringSlice("etcd-endpoints", nil, "")
+	cmd.Flags().String("erlang-cookie-file", "", "")
+	cmd.Flags().Bool("secrets-from-etcd", false, "")
 	cmd.Flags().StringArray("config-option", nil, "")
 	cmd.Flags().Bool("force", false, "")
+	cmd.Flags().String("advertise-host", "", "")
+	cmd.Flags().Int("node-id", 0, "")
+	cmd.Flags().StringArray("peer", nil, "")
+	cmd.Flags().String("join", "", "")
 	return cmd
 }
 
@@ -87,10 +106,52 @@ func TestParseRabbitMQConfigOptions(t *testing.T) {
 }
 
 func TestRabbitMQCommandTree(t *testing.T) {
-	for _, name := range []string{"status", "shell", "queue"} {
+	for _, name := range []string{"status", "shell", "queue", "cluster", "secret"} {
 		if _, _, err := addonRabbitMQCmd.Find([]string{name}); err != nil {
 			t.Errorf("addon rabbitmq %s: %v", name, err)
 		}
+	}
+	generate, _, err := addonRabbitMQCmd.Find([]string{"secret", "generate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for flag, def := range map[string]string{
+		"cluster":             "",
+		"cookie-file":         "/tmp/rmq.cookie",
+		"admin-password-file": "/tmp/rmq.admin",
+		"force":               "false",
+		"keep-cookie":         "false",
+	} {
+		got := generate.Flags().Lookup(flag)
+		if got == nil {
+			t.Errorf("addon rabbitmq secret generate: --%s not registered", flag)
+			continue
+		}
+		if got.DefValue != def {
+			t.Errorf("addon rabbitmq secret generate: --%s default = %q, want %q", flag, got.DefValue, def)
+		}
+	}
+	for _, flag := range []string{"etcd", "etcd-endpoints"} {
+		if generate.Flags().Lookup(flag) == nil {
+			t.Errorf("addon rabbitmq secret generate: --%s not registered", flag)
+		}
+	}
+	for _, name := range []string{"status", "forget"} {
+		cmd, _, err := addonRabbitMQCmd.Find([]string{"cluster", name})
+		if err != nil {
+			t.Errorf("addon rabbitmq cluster %s: %v", name, err)
+			continue
+		}
+		if cmd.Flags().Lookup("name") == nil {
+			t.Errorf("addon rabbitmq cluster %s: --name flag not registered", name)
+		}
+	}
+	forget, _, err := addonRabbitMQCmd.Find([]string{"cluster", "forget"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forget.Flags().Lookup("yes") == nil {
+		t.Error("addon rabbitmq cluster forget: --yes flag not registered")
 	}
 	for _, name := range []string{"list", "declare", "info", "publish", "get", "bind", "unbind", "bindings", "purge", "delete"} {
 		cmd, _, err := addonRabbitMQCmd.Find([]string{"queue", name})
@@ -147,19 +208,26 @@ func TestRabbitMQCommandTree(t *testing.T) {
 
 func TestRabbitMQInstallFlagsRegistered(t *testing.T) {
 	want := map[string]string{
-		"amqp-port":       "int",
-		"management-port": "int",
-		"tls":             "bool",
-		"tls-port":        "int",
-		"tls-cert":        "string",
-		"tls-key":         "string",
-		"admin-user":      "string",
-		"admin-password":  "string",
-		"config-option":   "stringArray",
-		"listen":          "string",
-		"version":         "string",
-		"data-dir":        "string",
-		"force":           "bool",
+		"amqp-port":           "int",
+		"management-port":     "int",
+		"tls":                 "bool",
+		"tls-port":            "int",
+		"tls-cert":            "string",
+		"tls-key":             "string",
+		"admin-user":          "string",
+		"admin-password":      "string",
+		"admin-password-file": "string",
+		"cluster":             "string",
+		"node-name":           "string",
+		"etcd":                "stringSlice",
+		"etcd-endpoints":      "stringSlice",
+		"erlang-cookie-file":  "string",
+		"secrets-from-etcd":   "bool",
+		"config-option":       "stringArray",
+		"listen":              "string",
+		"version":             "string",
+		"data-dir":            "string",
+		"force":               "bool",
 	}
 	for name, typ := range want {
 		f := addonInstallCmd.Flags().Lookup(name)
@@ -236,24 +304,24 @@ func TestParseRabbitMQQueueDeclareFlags(t *testing.T) {
 		cmd := &cobra.Command{Use: "declare"}
 		cmd.Flags().Bool("durable", true, "")
 		cmd.Flags().Bool("auto-delete", false, "")
-		cmd.Flags().String("type", "classic", "")
+		cmd.Flags().String("type", "", "")
 		cmd.Flags().String("message-ttl", "", "")
 		cmd.Flags().String("expires", "", "")
 		cmd.Flags().StringArray("argument", nil, "")
 		return cmd
 	}
-	parse := func(flags map[string]string) (rabbitMQQueueDeclareOptions, error) {
+	parse := func(defaultType string, flags map[string]string) (rabbitMQQueueDeclareOptions, error) {
 		cmd := newCmd()
 		for key, value := range flags {
 			if err := cmd.Flags().Set(key, value); err != nil {
 				t.Fatalf("set %s=%s: %v", key, value, err)
 			}
 		}
-		return parseRabbitMQQueueDeclareFlags(cmd.Flags())
+		return parseRabbitMQQueueDeclareFlags(cmd.Flags(), defaultType)
 	}
 
 	t.Run("defaults", func(t *testing.T) {
-		opts, err := parse(nil)
+		opts, err := parse("classic", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -271,8 +339,28 @@ func TestParseRabbitMQQueueDeclareFlags(t *testing.T) {
 		}
 	})
 
+	t.Run("cluster default is quorum", func(t *testing.T) {
+		opts, err := parse("quorum", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if opts.queueType != "quorum" || opts.arguments["x-queue-type"] != "quorum" {
+			t.Errorf("defaults = %+v", opts)
+		}
+	})
+
+	t.Run("explicit type wins over default", func(t *testing.T) {
+		opts, err := parse("quorum", map[string]string{"type": "classic"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if opts.queueType != "classic" || opts.arguments["x-queue-type"] != "classic" {
+			t.Errorf("explicit classic ignored: %+v", opts)
+		}
+	})
+
 	t.Run("ttl, expiry and extra arguments", func(t *testing.T) {
-		opts, err := parse(map[string]string{
+		opts, err := parse("classic", map[string]string{
 			"type":        "quorum",
 			"message-ttl": "30m",
 			"expires":     "24h",
@@ -310,10 +398,19 @@ func TestParseRabbitMQQueueDeclareFlags(t *testing.T) {
 	}
 	for _, tt := range bad {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := parse(tt.flags); err == nil || !strings.Contains(err.Error(), tt.substr) {
+			if _, err := parse("classic", tt.flags); err == nil || !strings.Contains(err.Error(), tt.substr) {
 				t.Errorf("error = %v, want %q", err, tt.substr)
 			}
 		})
+	}
+}
+
+func TestRabbitMQDefaultQueueType(t *testing.T) {
+	if got := rabbitMQDefaultQueueType(config.RabbitMQConfig{}); got != "classic" {
+		t.Errorf("standalone default = %q, want classic", got)
+	}
+	if got := rabbitMQDefaultQueueType(config.RabbitMQConfig{Cluster: "lab"}); got != "quorum" {
+		t.Errorf("cluster default = %q, want quorum", got)
 	}
 }
 
@@ -552,5 +649,482 @@ func TestAddonPasswordsIncludesRabbitMQ(t *testing.T) {
 	}
 	if got := addonPasswords(cfg)["rabbitmq:rmq"]; got != "secret" {
 		t.Errorf("rabbitmq:rmq password = %q, want secret", got)
+	}
+}
+
+func TestReadRabbitMQSecretFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret")
+	if err := os.WriteFile(path, []byte("pw with spaces \r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readRabbitMQSecretFile(path, "admin password")
+	if err != nil || got != "pw with spaces " {
+		t.Errorf("readRabbitMQSecretFile = %q, %v; want interior spaces kept and newline stripped", got, err)
+	}
+
+	empty := filepath.Join(dir, "empty")
+	if err := os.WriteFile(empty, []byte("\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readRabbitMQSecretFile(empty, "admin password"); err == nil || !strings.Contains(err.Error(), "is empty") {
+		t.Errorf("empty file error = %v", err)
+	}
+
+	nul := filepath.Join(dir, "nul")
+	if err := os.WriteFile(nul, []byte("a\x00b"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readRabbitMQSecretFile(nul, "admin password"); err == nil || !strings.Contains(err.Error(), "NUL") {
+		t.Errorf("NUL file error = %v", err)
+	}
+
+	if _, err := readRabbitMQSecretFile(filepath.Join(dir, "missing"), "admin password"); err == nil || !strings.Contains(err.Error(), "reading") {
+		t.Errorf("missing file error = %v", err)
+	}
+}
+
+func TestResolveRabbitMQEtcdEndpoints(t *testing.T) {
+	cfg := config.Default()
+	cfg.Addons.Etcd = map[string]config.EtcdConfig{
+		"dcs": {Name: "dcs", AdvertiseHost: "10.0.0.5", ClientPort: 2379},
+	}
+
+	got, err := resolveRabbitMQEtcdEndpoints(cfg, []string{"dcs"}, nil)
+	if err != nil {
+		t.Fatalf("local member: %v", err)
+	}
+	if len(got) != 1 || got[0] != "10.0.0.5:2379" {
+		t.Errorf("local member endpoints = %v, want [10.0.0.5:2379]", got)
+	}
+
+	got, err = resolveRabbitMQEtcdEndpoints(cfg, []string{"dcs"}, []string{"192.168.1.9:2379"})
+	if err != nil {
+		t.Fatalf("explicit endpoints: %v", err)
+	}
+	if len(got) != 1 || got[0] != "192.168.1.9:2379" {
+		t.Errorf("explicit endpoints = %v, want explicit to take precedence", got)
+	}
+
+	if _, err := resolveRabbitMQEtcdEndpoints(cfg, []string{"missing"}, nil); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("unknown member error = %v", err)
+	}
+
+	if got, err := resolveRabbitMQEtcdEndpoints(cfg, nil, nil); err != nil || len(got) != 0 {
+		t.Errorf("no endpoints = %v, %v; want empty", got, err)
+	}
+}
+
+func TestCheckRabbitMQTopologyImmutable(t *testing.T) {
+	stored := config.RabbitMQConfig{
+		Name:          "mq",
+		Cluster:       "lab",
+		NodeName:      "rabbit@node1",
+		ErlangCookie:  "shared-cookie",
+		EtcdEndpoints: []string{"10.0.0.1:2379"},
+	}
+	next := stored
+	if err := checkRabbitMQTopologyImmutable(stored, next); err != nil {
+		t.Errorf("unchanged topology = %v", err)
+	}
+
+	next = stored
+	next.EtcdEndpoints = []string{"10.0.0.2:2379"}
+	if err := checkRabbitMQTopologyImmutable(stored, next); err != nil {
+		t.Errorf("etcd endpoints must be mutable: %v", err)
+	}
+
+	next = stored
+	next.Cluster = "other"
+	if err := checkRabbitMQTopologyImmutable(stored, next); err == nil || !strings.Contains(err.Error(), "changing --cluster") {
+		t.Errorf("cluster change error = %v", err)
+	}
+
+	next = stored
+	next.NodeName = "rabbit@node2"
+	if err := checkRabbitMQTopologyImmutable(stored, next); err == nil || !strings.Contains(err.Error(), "changing --node-name") {
+		t.Errorf("node name change error = %v", err)
+	}
+
+	next = stored
+	next.ErlangCookie = "other-cookie"
+	if err := checkRabbitMQTopologyImmutable(stored, next); err == nil || !strings.Contains(err.Error(), "stored Erlang cookie") {
+		t.Errorf("cookie change error = %v", err)
+	}
+
+	standalone := config.RabbitMQConfig{Name: "mq"}
+	next = config.RabbitMQConfig{Name: "mq", Cluster: "lab"}
+	if err := checkRabbitMQTopologyImmutable(standalone, next); err == nil || !strings.Contains(err.Error(), "changing --cluster") {
+		t.Errorf("standalone-to-cluster error = %v", err)
+	}
+}
+
+func TestRabbitMQClusterInstallRejectsMissingInputs(t *testing.T) {
+	newConfig := func() {
+		cfg := config.Default()
+		cfg.BaseDir = t.TempDir()
+		cfg.RabbitMQStartPort = 33000
+		cfg.RabbitMQMgmtStartPort = 33100
+		writeRabbitMQTestConfig(t, cfg)
+	}
+	secretFile := func(content string) string {
+		path := filepath.Join(t.TempDir(), "secret")
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	cookie := secretFile("shared-cookie\n")
+	adminPw := secretFile("admin-secret\n")
+
+	baseCluster := func(cmd *cobra.Command) {
+		cmd.Flags().Set("cluster", "lab")
+		cmd.Flags().Set("node-name", "rabbit@10.0.0.1")
+		cmd.Flags().Set("etcd-endpoints", "10.0.0.1:2379")
+		cmd.Flags().Set("erlang-cookie-file", cookie)
+		cmd.Flags().Set("admin-password-file", adminPw)
+	}
+
+	t.Run("cluster fields without cluster", func(t *testing.T) {
+		newConfig()
+		cmd := rabbitMQTestInstallCmd()
+		cmd.Flags().Set("node-name", "rabbit@10.0.0.1")
+		err := runAddonInstallRabbitMQ(cmd)
+		if err == nil || !strings.Contains(err.Error(), "require --cluster") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+
+	t.Run("missing node name", func(t *testing.T) {
+		newConfig()
+		cmd := rabbitMQTestInstallCmd()
+		baseCluster(cmd)
+		cmd.Flags().Set("node-name", "")
+		err := runAddonInstallRabbitMQ(cmd)
+		if err == nil || !strings.Contains(err.Error(), "requires --node-name") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+
+	t.Run("missing etcd endpoints", func(t *testing.T) {
+		newConfig()
+		cmd := rabbitMQTestInstallCmd()
+		baseCluster(cmd)
+		cmd.Flags().Set("etcd-endpoints", "")
+		err := runAddonInstallRabbitMQ(cmd)
+		if err == nil || !strings.Contains(err.Error(), "--etcd-endpoints") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+
+	t.Run("missing cookie file", func(t *testing.T) {
+		newConfig()
+		cmd := rabbitMQTestInstallCmd()
+		cmd.Flags().Set("cluster", "lab")
+		cmd.Flags().Set("node-name", "rabbit@10.0.0.1")
+		cmd.Flags().Set("etcd-endpoints", "10.0.0.1:2379")
+		cmd.Flags().Set("admin-password-file", adminPw)
+		err := runAddonInstallRabbitMQ(cmd)
+		if err == nil || !strings.Contains(err.Error(), "requires --erlang-cookie-file") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+
+	t.Run("missing admin password file", func(t *testing.T) {
+		newConfig()
+		cmd := rabbitMQTestInstallCmd()
+		cmd.Flags().Set("cluster", "lab")
+		cmd.Flags().Set("node-name", "rabbit@10.0.0.1")
+		cmd.Flags().Set("etcd-endpoints", "10.0.0.1:2379")
+		cmd.Flags().Set("erlang-cookie-file", cookie)
+		err := runAddonInstallRabbitMQ(cmd)
+		if err == nil || !strings.Contains(err.Error(), "requires --admin-password-file") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+
+	t.Run("plaintext admin password rejected", func(t *testing.T) {
+		newConfig()
+		cmd := rabbitMQTestInstallCmd()
+		cmd.Flags().Set("cluster", "lab")
+		cmd.Flags().Set("node-name", "rabbit@10.0.0.1")
+		cmd.Flags().Set("etcd-endpoints", "10.0.0.1:2379")
+		cmd.Flags().Set("erlang-cookie-file", cookie)
+		cmd.Flags().Set("admin-password", "plaintext")
+		err := runAddonInstallRabbitMQ(cmd)
+		if err == nil || !strings.Contains(err.Error(), "cluster mode rejects --admin-password") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+
+	t.Run("unreachable etcd", func(t *testing.T) {
+		newConfig()
+		cmd := rabbitMQTestInstallCmd()
+		baseCluster(cmd)
+		cmd.Flags().Set("etcd-endpoints", "127.0.0.1:1")
+		err := runAddonInstallRabbitMQ(cmd)
+		if err == nil || !strings.Contains(err.Error(), "no etcd endpoint is reachable") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+
+	for _, flag := range []string{"advertise-host", "node-id", "peer", "join"} {
+		t.Run("rejects --"+flag, func(t *testing.T) {
+			newConfig()
+			cmd := rabbitMQTestInstallCmd()
+			switch flag {
+			case "node-id":
+				cmd.Flags().Set(flag, "3")
+			default:
+				cmd.Flags().Set(flag, "value")
+			}
+			err := runAddonInstallRabbitMQ(cmd)
+			if err == nil || !strings.Contains(err.Error(), "does not use --"+flag) {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+type rabbitMQEtcdStub struct {
+	mu sync.Mutex
+	kv map[string]string
+}
+
+func newRabbitMQEtcdStub() *rabbitMQEtcdStub {
+	return &rabbitMQEtcdStub{kv: make(map[string]string)}
+}
+
+func (s *rabbitMQEtcdStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch r.URL.Path {
+	case "/v3/kv/range":
+		var req struct {
+			Key string `json:"key"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		key, _ := base64.StdEncoding.DecodeString(req.Key)
+		resp := map[string]any{}
+		if value, ok := s.kv[string(key)]; ok {
+			resp["kvs"] = []map[string]string{{
+				"key":   req.Key,
+				"value": base64.StdEncoding.EncodeToString([]byte(value)),
+			}}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	case "/v3/kv/txn":
+		var req struct {
+			Success []struct {
+				RequestPut struct {
+					Key   string `json:"key"`
+					Value string `json:"value"`
+				} `json:"request_put"`
+			} `json:"success"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		for _, op := range req.Success {
+			key, _ := base64.StdEncoding.DecodeString(op.RequestPut.Key)
+			value, _ := base64.StdEncoding.DecodeString(op.RequestPut.Value)
+			s.kv[string(key)] = string(value)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"succeeded": true})
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *rabbitMQEtcdStub) value(key string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.kv[key]
+	return value, ok
+}
+
+func (s *rabbitMQEtcdStub) set(key, value string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.kv[key] = value
+}
+
+func (s *rabbitMQEtcdStub) delete(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.kv, key)
+}
+
+func rabbitMQTestSecretGenerateCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "generate"}
+	cmd.Flags().String("cluster", "", "")
+	cmd.Flags().StringSlice("etcd", nil, "")
+	cmd.Flags().StringSlice("etcd-endpoints", nil, "")
+	cmd.Flags().String("cookie-file", "", "")
+	cmd.Flags().String("admin-password-file", "", "")
+	cmd.Flags().Bool("force", false, "")
+	cmd.Flags().Bool("keep-cookie", false, "")
+	return cmd
+}
+
+func TestRabbitMQSecretGeneratePublishesToEtcd(t *testing.T) {
+	stub := newRabbitMQEtcdStub()
+	srv := httptest.NewServer(stub)
+	defer srv.Close()
+	endpoint := strings.TrimPrefix(srv.URL, "http://")
+	dir := t.TempDir()
+	cookiePath := filepath.Join(dir, "rmq.cookie")
+	passwordPath := filepath.Join(dir, "rmq.admin")
+
+	cmd := rabbitMQTestSecretGenerateCmd()
+	for flag, value := range map[string]string{
+		"cluster":             "lab",
+		"etcd-endpoints":      endpoint,
+		"cookie-file":         cookiePath,
+		"admin-password-file": passwordPath,
+	} {
+		if err := cmd.Flags().Set(flag, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := runAddonRabbitMQSecretGenerate(cmd); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	cookieData, err := os.ReadFile(cookiePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie := strings.TrimSpace(string(cookieData))
+	if len(cookie) != 64 {
+		t.Errorf("cookie length = %d, want 64 hex chars", len(cookie))
+	}
+	if _, err := hex.DecodeString(cookie); err != nil {
+		t.Errorf("cookie is not hex: %v", err)
+	}
+	passwordData, err := os.ReadFile(passwordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	password := strings.TrimSpace(string(passwordData))
+	if len(password) != 24 {
+		t.Errorf("password length = %d, want 24", len(password))
+	}
+	for _, path := range []string{cookiePath, passwordPath} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("%s mode = %o, want 600", path, info.Mode().Perm())
+		}
+	}
+	if got, ok := stub.value(rabbitmq.ErlangCookieKey("lab")); !ok || got != cookie {
+		t.Errorf("etcd cookie = %q (found %v), want file content", got, ok)
+	}
+	if got, ok := stub.value(rabbitmq.AdminPasswordKey("lab")); !ok || got != password {
+		t.Errorf("etcd password = %q (found %v), want file content", got, ok)
+	}
+
+	if err := runAddonRabbitMQSecretGenerate(cmd); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("second generate without --force = %v, want exists error", err)
+	}
+
+	if err := cmd.Flags().Set("force", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runAddonRabbitMQSecretGenerate(cmd); err != nil {
+		t.Fatalf("generate --force: %v", err)
+	}
+	rotated, err := os.ReadFile(cookiePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(rotated)); got == cookie {
+		t.Error("--force did not rotate the cookie")
+	}
+	if got, ok := stub.value(rabbitmq.ErlangCookieKey("lab")); !ok || got != strings.TrimSpace(string(rotated)) {
+		t.Errorf("etcd cookie after --force = %q (found %v)", got, ok)
+	}
+
+	if err := cmd.Flags().Set("keep-cookie", "true"); err != nil {
+		t.Fatal(err)
+	}
+	passwordAfterForce := readRabbitMQTestFile(t, passwordPath)
+	if err := runAddonRabbitMQSecretGenerate(cmd); err != nil {
+		t.Fatalf("generate --force --keep-cookie: %v", err)
+	}
+	if got := readRabbitMQTestFile(t, cookiePath); got != strings.TrimSpace(string(rotated)) {
+		t.Errorf("--keep-cookie changed the cookie to %q", got)
+	}
+	rotatedPassword := readRabbitMQTestFile(t, passwordPath)
+	if rotatedPassword == passwordAfterForce {
+		t.Error("--keep-cookie did not rotate the admin password")
+	}
+	if got, ok := stub.value(rabbitmq.ErlangCookieKey("lab")); !ok || got != strings.TrimSpace(string(rotated)) {
+		t.Errorf("etcd cookie after --keep-cookie = %q (found %v)", got, ok)
+	}
+	if got, ok := stub.value(rabbitmq.AdminPasswordKey("lab")); !ok || got != rotatedPassword {
+		t.Errorf("etcd password after --keep-cookie = %q (found %v)", got, ok)
+	}
+}
+
+func readRabbitMQTestFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func TestRabbitMQSecretGenerateRequiresEtcd(t *testing.T) {
+	cmd := rabbitMQTestSecretGenerateCmd()
+	cmd.Flags().Set("cluster", "lab")
+	cmd.Flags().Set("cookie-file", filepath.Join(t.TempDir(), "c"))
+	cmd.Flags().Set("admin-password-file", filepath.Join(t.TempDir(), "p"))
+	err := runAddonRabbitMQSecretGenerate(cmd)
+	if err == nil || !strings.Contains(err.Error(), "--etcd") {
+		t.Fatalf("error = %v, want missing etcd endpoint error", err)
+	}
+}
+
+func TestReadRabbitMQSecretsFromEtcd(t *testing.T) {
+	stub := newRabbitMQEtcdStub()
+	srv := httptest.NewServer(stub)
+	defer srv.Close()
+	endpoints := []string{strings.TrimPrefix(srv.URL, "http://")}
+	stub.set(rabbitmq.ErlangCookieKey("lab"), "shared-cookie")
+	stub.set(rabbitmq.AdminPasswordKey("lab"), "shared-password")
+
+	cookie, password, err := readRabbitMQSecretsFromEtcd(endpoints, "lab")
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if cookie != "shared-cookie" || password != "shared-password" {
+		t.Errorf("read = %q / %q", cookie, password)
+	}
+
+	stub.delete(rabbitmq.AdminPasswordKey("lab"))
+	if _, _, err := readRabbitMQSecretsFromEtcd(endpoints, "lab"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("missing key error = %v", err)
+	}
+}
+
+func TestRabbitMQSecretsFromEtcdRejectsFileFlags(t *testing.T) {
+	for _, flag := range []string{"erlang-cookie-file", "admin-password-file"} {
+		cmd := rabbitMQTestInstallCmd()
+		cmd.Flags().Set("secrets-from-etcd", "true")
+		cmd.Flags().Set(flag, "value")
+		opts := readRabbitMQInstallOptions(cmd.Flags())
+		err := applyRabbitMQInstallFlags(&config.RabbitMQConfig{Name: "mq", Cluster: "lab"}, cmd.Flags(), opts)
+		if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+			t.Errorf("%s with --secrets-from-etcd = %v, want conflict error", flag, err)
+		}
 	}
 }
