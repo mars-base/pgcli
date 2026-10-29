@@ -57,6 +57,8 @@ pg addon install rabbitmq --name rmq
   Config:     /home/you/.pgcli/addon/rabbitmq/rmq/config/rabbitmq.conf
 ```
 
+⚠️ A standalone instance declares durable **classic** queues, but their messages are **not persistent by default**. Classic message persistence is a per-message property that the **publisher must set on every publish** (`--property delivery_mode=2` with `pg addon rabbitmq queue publish`, or `delivery_mode=2` in the application's AMQP client); there is no queue argument or policy that enables it. Without it, a broker restart keeps the queue but drops its messages. Cluster mode uses quorum queues, which persist every message automatically.
+
 A second instance takes the next free port from every pool (for example AMQP `5673`, management `15673`, EPMD `4370`, distribution `25673`):
 
 ```bash
@@ -293,6 +295,8 @@ pg addon rabbitmq queue info orders --name rmq --json
 # publish and consume
 pg addon rabbitmq queue publish orders --payload '{"id":1}' --name rmq
 echo '{"id":2}' | pg addon rabbitmq queue publish orders --payload-file - --name rmq
+# standalone classic queue: persist the message across a broker restart
+pg addon rabbitmq queue publish orders --payload '{"id":3}' --property delivery_mode=2 --name rmq
 pg addon rabbitmq queue get orders --count 10             # peek: messages stay queued
 pg addon rabbitmq queue get orders --count 10 --consume   # ack: remove them
 pg addon rabbitmq queue get orders --json
@@ -339,6 +343,17 @@ pg addon rabbitmq queue delete orders --name rmq --if-empty --if-unused
   `--property KEY=VALUE` sets message properties, e.g.
   `--property delivery_mode=2 --property 'content_type="application/json"'`.
   An unroutable message prints a warning but is not an error.
+- **Standalone persistence.** A standalone instance declares a durable
+  **classic** queue (not replicated), but durability applies to the queue, not
+  its messages. **Classic message persistence is a per-message property set by
+  the publisher on every publish**: pass `--property delivery_mode=2` to
+  `queue publish`, or set `delivery_mode=2` in the application's AMQP client.
+  No queue argument or policy can enable it (`--argument delivery_mode=2` has
+  no effect). Without it, a broker restart (`stop`/`start`, container
+  recreation or a host reboot) keeps the queue but drops the messages. With it,
+  messages survive as long as the instance data dir is kept (never
+  `remove --clean-data`); a lost disk is unrecoverable. Cluster quorum queues
+  persist and replicate every message regardless of delivery mode.
 - `get` peeks by default (`ack_requeue_true`); `--consume` acknowledges and
   removes the returned messages (`ack_requeue_false`). `--count` defaults to 1;
   `--json` prints the raw API response.
@@ -579,7 +594,7 @@ Every queue subcommand accepts `--name NAME` (default `rabbitmq`) and
 | | `--payload-file FILE` | — | Read the body from a file; `-` reads stdin |
 | | `--exchange NAME` | `amq.default` | Target exchange |
 | | `--routing-key KEY` | queue name | Routing key |
-| | `--property K=V` | — | Message property; repeatable; JSON values keep their type |
+| | `--property K=V` | — | Message property; repeatable; a standalone classic message needs `delivery_mode=2` set on every publish to survive a broker restart (no queue-level switch exists); JSON values keep their type |
 | `get QUEUE` | `--count N` | 1 | Maximum messages to fetch |
 | | `--consume` | false | Ack and remove the messages (default: peek and requeue) |
 | | `--json` | false | Print the raw management API response |

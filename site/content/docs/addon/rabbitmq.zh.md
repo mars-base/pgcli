@@ -69,6 +69,12 @@ pg addon install rabbitmq --name rmq
   Config:     /home/you/.pgcli/addon/rabbitmq/rmq/config/rabbitmq.conf
 ```
 
+⚠️ 单机版创建的是持久化 **classic** 队列，但**消息默认不持久化**。classic 的消息持久化是
+逐条消息的属性，**必须由发布端在每次 publish 时设置**（`pg addon rabbitmq queue publish`
+加 `--property delivery_mode=2`，应用客户端设置 `delivery_mode=2`），不存在队列参数或
+policy 级别的开关。未设置时 broker 重启后队列仍在、消息丢失。集群模式使用 quorum 队列，
+会自动持久化所有消息。
+
 第二个实例会从各自的端口池取下一个空闲端口（例如 AMQP `5673`、management `15673`、
 EPMD `4370`、distribution `25673`）：
 
@@ -370,6 +376,8 @@ pg addon rabbitmq queue info orders --name rmq --json
 # 发布与消费
 pg addon rabbitmq queue publish orders --payload '{"id":1}' --name rmq
 echo '{"id":2}' | pg addon rabbitmq queue publish orders --payload-file - --name rmq
+# 单机 classic 队列：让消息在 broker 重启后仍然保留
+pg addon rabbitmq queue publish orders --payload '{"id":3}' --property delivery_mode=2 --name rmq
 pg addon rabbitmq queue get orders --count 10             # peek：消息保留在队列
 pg addon rabbitmq queue get orders --count 10 --consume   # ack：取出并删除
 pg addon rabbitmq queue get orders --json
@@ -408,6 +416,14 @@ pg addon rabbitmq queue delete orders --name rmq --if-empty --if-unused
   `--routing-key` 默认队列名。可重复的 `--property KEY=VALUE` 设置消息属性，例如
   `--property delivery_mode=2 --property 'content_type="application/json"'`。消息未被路由时
   只打印警告，命令仍成功。
+- **单机持久化。** 单机实例默认声明**持久化 classic** 队列（不复制），但 durable 只作用于
+  队列本身，不作用于消息。**classic 的消息持久化是每条消息的属性，必须由发布端在每次
+  publish 时设置**：命令行加 `--property delivery_mode=2`，应用客户端则在 AMQP 发布代码中
+  设置 `delivery_mode=2`。队列参数或 policy 无法开启该行为（`--argument
+  delivery_mode=2` 不生效）。未设置时消息是 transient，broker 重启（`stop`/`start`、
+  容器重建或宿主机重启）后队列还在、消息丢失。设置后只要实例数据目录保留（不要
+  `remove --clean-data`），消息即可恢复；磁盘损坏则无法恢复。集群的 quorum 队列不依赖
+  delivery mode，所有消息都会持久化并复制。
 - `get` 默认 peek（`ack_requeue_true`）；`--consume` 确认并删除取出的消息
   （`ack_requeue_false`）。`--count` 默认 1；`--json` 输出 API 原始响应。
 - `bind` / `unbind` 必填 `--exchange`，并拒绝 `amq.default`（默认 exchange 是隐式绑定）。
@@ -682,7 +698,7 @@ pgcli 托管的键会被拒绝而不是被静默覆盖：`listeners.*`、`ssl_op
 | | `--payload-file FILE` | — | 从文件读取消息体；`-` 表示 stdin |
 | | `--exchange NAME` | `amq.default` | 目标 exchange |
 | | `--routing-key KEY` | 队列名 | routing key |
-| | `--property K=V` | — | 消息属性；可重复；JSON 值保留类型 |
+| | `--property K=V` | — | 消息属性；可重复；单机 classic 消息必须在每次 publish 时设置 `delivery_mode=2` 才能跨 broker 重启保留（不存在队列级开关）；JSON 值保留类型 |
 | `get QUEUE` | `--count N` | 1 | 最多取出的消息数 |
 | | `--consume` | false | ack 并删除消息（默认 peek 后重新入队） |
 | | `--json` | false | 输出 management API 原始响应 |
