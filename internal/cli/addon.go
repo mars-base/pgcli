@@ -377,6 +377,7 @@ Currently supported add-ons:
   vlagent     vlagent — the official VictoriaLogs log agent (single container from docker.io/victoriametrics/vlagent; pure CLI flags, no config file; one HTTP ingest port from vlagent_start_port (default 9429); --remote-write-url URL(s) ending in /insert/native forward collected logs to VictoriaLogs; --log-path mounts any host file/dir read-only at the same path and --include/--exclude select files with vlagent's native glob syntax (*, /**/, ?, [a-z], {a,b}) — no regex; no --include means <dir>/**/*.log for dirs and the file itself for files; NO auth — defaults to 0.0.0.0, use --listen 127.0.0.1 for loopback; Linux host network, macOS bridge)
   alertmanager Alertmanager — the alert dedup/grouping/routing frontend of the Prometheus stack (single container from docker.io/prom/alertmanager; rendered alertmanager.yml with a no-op or --webhook-url web.hook receiver, or --conf-file; SIGHUP reload; cluster gossip disabled; NO web login — defaults to 0.0.0.0 guarded only by the network, and silences are dangerous, use --listen 127.0.0.1 for loopback; wired to Prometheus from the Prometheus side via --alertmanager-url; Linux host network, macOS bridge)
   nodeexporter node_exporter — the official Prometheus host-metrics exporter (single container from docker.io/prom/node-exporter; pure CLI flags, no config file, no state; pgcli hard-wires read-only mounts of the host /proc, /sys and / and points --path.procfs/sysfs/rootfs at them so it reports HOST metrics, not container ones; --extra-arg for collector flags; NO auth/TLS — defaults to 0.0.0.0 (a Prometheus scraping it is usually on another host), guarded only by the network; reached by Prometheus via "pg addon install prometheus --scrape node-exporter=<this-host>:<port>"; own port pool, default 9100; Linux host network, macOS bridge)
+  pgexporter    pg_exporter — Pigsty's declarative PostgreSQL metrics exporter (single container from docker.io/pgsty/pg_exporter; pure env/flags, the 460+ default collectors are baked into the binary, no config file needed, no state; monitors a pgcli instance via --pg-name OR ANY remote PostgreSQL — the point being unified collection of databases pgcli does not manage. The remote target is given ONE of two mutually exclusive URLs: --admin-dsn (an admin URL used once to create a low-privilege pg_monitor role, then discarded — only its credential-free address is stored, the exporter connects as the monitor role) or --dsn (dial-as-is: pgcli runs NO SQL, the exporter uses this URL's own credentials — for a role that already exists or a database pgcli must not touch); local mode derives its admin creds automatically; optional custom collectors via --config-file + SIGHUP reload; /up /primary /replica health probes; NO auth/TLS and admin endpoints (/reload /explain /stat) — defaults to 0.0.0.0 guarded only by the network; reached by Prometheus via "pg addon install prometheus --scrape pg=<this-host>:<port>"; own port pool, default 9630; Linux host network, macOS bridge)
   gitea       Gitea — the self-hosted Git service (single container from docker.io/gitea/gitea; web login auto-generated and created via "gitea admin user create"; optional --ssh-port for clone/push over SSH; SQLite by default or --dsn to put its metadata in a PostgreSQL you already run; defaults to 0.0.0.0 since a Git host is reached from other machines; Linux host network, macOS bridge)
   beegfs      BeeGFS — the scale-out parallel filesystem (mgmtd/meta/storage services from ghcr.io/thinkparq/beegfs — brought up in dependency order by one install; by default all three on this host = a converged single-host filesystem, --roles scopes it to a subset and a --roles-without-mgmtd host joins an existing cluster via --mgmtd-host/--node-id/--password — every host runs its own pgcli, pgcli never SSHes; --storage-target repeats for multiple disks/targets; fixed protocol ports 8008/8010/8005/8003, meta/storage cannot move so one filesystem per host; shared conn-auth secret (generated on the mgmtd host), mgmtd TLS disabled; an unlicensed build caps client mounts at five — pgcli never generates a license but CARRIES a ThinkParQ PEM via --license-file / "pg addon beegfs license" (mgmtd-only); the kernel-module client is never installed — "pg addon beegfs mount-hint" prints its config, "join-hint" the per-host join commands; Linux host network only)
   juicefs     JuiceFS — S3-backed POSIX filesystem installed as a HOST BINARY (GitHub releases + sha256; no container): an EXTERNAL S3 backend given explicitly (--s3-endpoint http(s)://host:port + --access-key/--secret-key — no same-host addon auto-detection; buckets via "pg mc" by hand, pgcli prints the exact command) and an explicit metadata URL (--dsn: postgres://, redis:// or sqlite3://); mounts a plain host directory; "pg addon juicefs mount|umount|status"; Linux only
@@ -891,7 +892,7 @@ pg.yaml.`,
 // shaped for $(...) capture in scripts.
 var addonPasswordCmd = &cobra.Command{
 	Use:   "password <addon>",
-	Short: "Print an add-on's stored password (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin/Grafana/Gitea web login password, BeeGFS conn-auth secret, juicefs S3 secret, zerofs encryption password, influxdb admin password)",
+	Short: "Print an add-on's stored password (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin/Grafana/Gitea web login password, BeeGFS conn-auth secret, juicefs S3 secret, zerofs encryption password, influxdb admin password, pgexporter monitor-role password)",
 	Long: `Print the password stored for one add-on instance: the Redis
 requirepass (generated by pgcli), the Predixy proxy password (the
 operator-supplied copy of the proxied cluster's requirepass), the
@@ -904,7 +905,9 @@ value every daemon and client must carry — not a login, but the addon's only
 credential), or the JuiceFS S3 secret-key it formatted the volume with, or the
 ZeroFS encryption password (the DEK wrap key — losing it means losing the
 volume's data; pass it back to "pg addon install zerofs --encryption-password"
-to re-attach a bucket after a remove).
+to re-attach a bucket after a remove). The pgexporter entry is the password of
+the low-privilege monitor role pgcli created on the target — the credentials
+pg_exporter connects with, not a PostgreSQL admin password.
 
 The single value goes to stdout with no decoration, so it composes into
 scripts and app config:
@@ -1130,16 +1133,18 @@ Examples:
 func init() {
 	rootCmd.AddCommand(addonCmd)
 	addonCmd.AddCommand(addonInstallCmd, addonListCmd, addonPasswordCmd, addonRemoveCmd, addonStartCmd, addonStopCmd)
-	addonCmd.AddCommand(addonNginxCmd, addonHAProxyCmd, addonPrometheusCmd, addonAlertmanagerCmd, addonGiteaCmd)
+	addonCmd.AddCommand(addonNginxCmd, addonHAProxyCmd, addonPrometheusCmd, addonAlertmanagerCmd, addonGiteaCmd, addonPGExporterCmd)
 	addonNginxCmd.AddCommand(addonNginxReloadCmd, addonNginxTestCmd, addonNginxExecCmd)
 	addonHAProxyCmd.AddCommand(addonHAProxyReloadCmd)
 	addonPrometheusCmd.AddCommand(addonPrometheusReloadCmd)
 	addonAlertmanagerCmd.AddCommand(addonAlertmanagerReloadCmd)
+	addonPGExporterCmd.AddCommand(addonPGExporterReloadCmd)
 	addonGiteaCmd.AddCommand(addonGiteaUserCmd)
 	addonGiteaUserCmd.AddCommand(addonGiteaUserCreateCmd, addonGiteaUserDeleteCmd, addonGiteaUserListCmd)
 	addonHAProxyReloadCmd.Flags().String("name", "", "haproxy instance name")
 	addonPrometheusReloadCmd.Flags().String("name", "", "prometheus instance name (default \"prometheus\")")
 	addonAlertmanagerReloadCmd.Flags().String("name", "", "alertmanager instance name (default \"alertmanager\")")
+	addonPGExporterReloadCmd.Flags().String("name", "", "pgexporter instance name (default \"pgexporter\")")
 	addonNginxReloadCmd.Flags().String("name", "", "nginx instance name (default \"nginx\")")
 	addonNginxTestCmd.Flags().String("name", "", "nginx instance name (default \"nginx\")")
 	addonNginxTestCmd.Flags().String("conf-file", "", "path to an nginx.conf file to test directly (no installed instance required; overrides --name)")
@@ -1157,8 +1162,11 @@ func init() {
 	addonGiteaUserListCmd.Flags().String("name", "", "gitea instance name (default \"gitea\")")
 
 	// Basic flags
-	addonInstallCmd.Flags().String("dsn", "", "pgbouncer/postgrest: PG instance connection string for remote mode (postgres://user:pass@host:port/db) / influx2tsdb: the TimescaleDB target for an unmanaged/remote server (mutually exclusive with --pg-name) / pgadmin: a one-time server to pre-register in its UI (mutually exclusive with --pg-name there) / seaweedfs: the filer's shared metadata PostgreSQL for --cluster (REQUIRED; must be reachable from EVERY host, so use the host-published port / LAN address, not an instance's container-local 127.0.0.1:5432; the metadata database itself must already exist — pgcli only probes connectivity and never creates or drops databases here, weed's postgres2 store creates its own tables inside it) / gitea: the metadata database instead of the embedded SQLite (optional; same contract — the database must already exist, Gitea creates its own schema on first boot, and it must be reachable from the Gitea container)")
-	addonInstallCmd.Flags().String("pg-name", "", "name to identify a remote PgBouncer or PostgREST (required with --dsn) / influx2tsdb: resolve the target DSN from this locally-managed TimescaleDB instance (its admin DSN is re-derived on every start) / pgadmin: resolve the DSN from this locally-managed instance instead of passing --dsn (its own addon --name is unrelated to this)")
+	addonInstallCmd.Flags().String("dsn", "", "pgbouncer/postgrest: PG instance connection string for remote mode (postgres://user:pass@host:port/db) / influx2tsdb: the TimescaleDB target for an unmanaged/remote server (mutually exclusive with --pg-name) / pgadmin: a one-time server to pre-register in its UI (mutually exclusive with --pg-name there) / seaweedfs: the filer's shared metadata PostgreSQL for --cluster (REQUIRED; must be reachable from EVERY host, so use the host-published port / LAN address, not an instance's container-local 127.0.0.1:5432; the metadata database itself must already exist — pgcli only probes connectivity and never creates or drops databases here, weed's postgres2 store creates its own tables inside it) / gitea: the metadata database instead of the embedded SQLite (optional; same contract — the database must already exist, Gitea creates its own schema on first boot, and it must be reachable from the Gitea container) / pgexporter: dial-as-is — the exporter connects with THIS URL's own credentials and pgcli runs NO role-creation SQL on the target (mutually exclusive with --pg-name and --admin-dsn; use it when a suitable role already exists or pgcli must not touch the database — to instead have pgcli create the monitor role, pass --admin-dsn alone, whose host/port/database become the target)")
+	addonInstallCmd.Flags().String("admin-dsn", "", "pgexporter only: an ADMIN-privileged connection string (postgres://...) naming a remote target to monitor — used ONCE to create a low-privilege pg_monitor role there (the CREATE ROLE/GRANT SQL runs with it), then DISCARDED: only its credential-free address (host/port/database) is stored in pg.yaml and the exporter connects as the monitor role thereafter. Mutually exclusive with --dsn and --pg-name; invalid with --pg-name (local admin credentials are derived automatically)")
+	addonInstallCmd.Flags().String("monitor-user", "", "pgexporter only: name of the low-privilege monitoring role pgcli creates on the target (default \"pgexporter\"; plain identifier only, granted pg_monitor)")
+	addonInstallCmd.Flags().String("config-file", "", "pgexporter: path to a custom pg_exporter collector YAML, mounted read-only at /etc/pg_exporter.yml (the binary's baked-in default collector set is used when unset; reload after edits with `pg addon pgexporter reload`)")
+	addonInstallCmd.Flags().String("pg-name", "", "name to identify a remote PgBouncer or PostgREST (required with --dsn) / influx2tsdb: resolve the target DSN from this locally-managed TimescaleDB instance (its admin DSN is re-derived on every start) / pgadmin: resolve the DSN from this locally-managed instance instead of passing --dsn (its own addon --name is unrelated to this) / pgexporter: monitor this locally-managed instance (its admin DSN is re-derived on every start and used once to create the monitor role; mutually exclusive with --dsn and --admin-dsn)")
 	addonInstallCmd.Flags().Int("max-client-conn", 0, "maximum number of client connections allowed (default 100)")
 	addonInstallCmd.Flags().Int("default-pool-size", 0, "number of server connections per user/database pair (default 20)")
 
@@ -1239,7 +1247,7 @@ func init() {
 
 	// victoriametrics flags (top-level time-series database)
 	addonInstallCmd.Flags().String("retention-months", "", "VictoriaMetrics data retention in months (default \"1\"); e.g. 3 = 3 months")
-	addonInstallCmd.Flags().StringArray("extra-arg", nil, "VictoriaMetrics/VictoriaLogs/vlagent/nodeexporter: extra CLI flag passed to the binary (repeatable), e.g. --extra-arg -search.maxUniqueTimeseries=1000000 or --extra-arg --no-collector.cpufreq — appended last so last-wins overrides earlier flags")
+	addonInstallCmd.Flags().StringArray("extra-arg", nil, "VictoriaMetrics/VictoriaLogs/vlagent/nodeexporter/pgexporter: extra CLI flag passed to the binary (repeatable), e.g. --extra-arg -search.maxUniqueTimeseries=1000000 or --extra-arg --no-collector.cpufreq or --extra-arg --auto-discovery=false — appended last so last-wins overrides earlier flags")
 
 	// vmcluster/vlcluster flags (VictoriaMetrics / VictoriaLogs cluster — cross-host, horizontal scaling)
 	addonInstallCmd.Flags().StringArray("storage-node", nil, "cluster storage node address (repeatable). vmcluster: host:insertPort:selectPort, e.g. 10.0.0.1:8483:8484 — lists ALL vmstorage nodes for sharding/replication. vlcluster: host:storagePort, e.g. 10.0.0.1:9432 — lists ALL vlstorage nodes for sharding (no replication). Omit for converged single-host (auto-derived)")
@@ -1354,6 +1362,8 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallVictoriaMetrics(cmd)
 	case "nodeexporter":
 		return runAddonInstallNodeExporter(cmd)
+	case "pgexporter":
+		return runAddonInstallPGExporter(cmd)
 	case "vmcluster":
 		return runAddonInstallVMCluster(cmd)
 	case "vlcluster":
@@ -1391,7 +1401,7 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -5647,6 +5657,43 @@ func runAddonList(showPassword bool) error {
 		}
 	}
 
+	// pgexporter (PostgreSQL-metrics exporter, top-level addon; stateless, dials
+	// a local instance or any remote server — the target is shown redacted, the
+	// monitor password is never printed here).
+	section("Web add-ons (pgexporter):", len(cfg.Addons.PGExporter) > 0)
+	if pe, err := podman.NewPGExporterManager(cfg); err == nil {
+		for _, name := range sortedAddonNames(cfg.Addons.PGExporter) {
+			pc := cfg.Addons.PGExporter[name]
+			status := "stopped"
+			if running, err := pe.ContainerRunning(pc.ContainerName); err == nil && running {
+				status = "running"
+			}
+			fmt.Printf("  %s (name: %s)\n", "pgexporter", name)
+			fmt.Printf("    Status:      %s\n", status)
+			fmt.Printf("    Metrics:     http://%s:%d/metrics\n", pc.Listen, pc.HostPort)
+			fmt.Printf("    Target:      %s\n", pgexporterTargetSummary(pc))
+			cl, cv := pgexporterConnectParts(pc)
+			fmt.Printf("    %-12s %s\n", cl, cv)
+			if pc.ConfigFile != "" {
+				fmt.Printf("    Config:      %s\n", pc.ConfigFile)
+			}
+			if len(pc.ExtraArgs) > 0 {
+				fmt.Printf("    Extra args:  %s\n", strings.Join(pc.ExtraArgs, " "))
+			}
+			fmt.Printf("    Image:       %s\n", pc.ImageTag)
+			fmt.Printf("    Container:   %s\n", pc.ContainerName)
+		}
+	} else if len(cfg.Addons.PGExporter) > 0 {
+		for _, name := range sortedAddonNames(cfg.Addons.PGExporter) {
+			pc := cfg.Addons.PGExporter[name]
+			fmt.Printf("  %s (name: %s)\n", "pgexporter", name)
+			fmt.Printf("    Status:      n/a (%v)\n", err)
+			fmt.Printf("    Metrics:     http://%s:%d/metrics\n", pc.Listen, pc.HostPort)
+			fmt.Printf("    Target:      %s\n", pgexporterTargetSummary(pc))
+			fmt.Printf("    Container:   %s\n", pc.ContainerName)
+		}
+	}
+
 	// vmcluster (VictoriaMetrics cluster — cross-host, horizontal scaling)
 	section("Cluster add-ons (vmcluster):", len(cfg.Addons.VMCluster) > 0)
 	if vmc, err := podman.NewVMClusterManager(cfg); err == nil {
@@ -6386,6 +6433,13 @@ func addonPasswords(cfg *config.Config) map[string]string {
 	for name, zc := range cfg.Addons.Zerofs {
 		out["zerofs:"+name] = zc.EncryptionPassword
 	}
+	// pgexporter's credential is the monitor role's password — pgcli generated it
+	// and ran CREATE ROLE with it on the target, so `pg addon password
+	// pgexporter` is the only way back to the password the exporter connects
+	// with (it is also embedded in MonitorDSN, but this prints it bare).
+	for name, pc := range cfg.Addons.PGExporter {
+		out["pgexporter:"+name] = pc.MonitorPassword
+	}
 	return out
 }
 
@@ -6480,6 +6534,8 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemoveVictoriaMetrics(cmd)
 	case "nodeexporter":
 		return runAddonRemoveNodeExporter(cmd)
+	case "pgexporter":
+		return runAddonRemovePGExporter(cmd)
 	case "vmcluster":
 		return runAddonRemoveVMCluster(cmd)
 	case "vlcluster":
@@ -6517,7 +6573,7 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -6828,6 +6884,8 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartVictoriaMetrics(cmd)
 	case "nodeexporter":
 		return runAddonStartNodeExporter(cmd)
+	case "pgexporter":
+		return runAddonStartPGExporter(cmd)
 	case "vmcluster":
 		return runAddonStartVMCluster(cmd)
 	case "vlcluster":
@@ -6865,7 +6923,7 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 	case "rocketmq":
 		return runAddonStartRocketMQ(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
 	}
 }
 
@@ -6905,6 +6963,8 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopVictoriaMetrics(cmd)
 	case "nodeexporter":
 		return runAddonStopNodeExporter(cmd)
+	case "pgexporter":
+		return runAddonStopPGExporter(cmd)
 	case "vmcluster":
 		return runAddonStopVMCluster(cmd)
 	case "vlcluster":
@@ -6941,7 +7001,7 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 	case "rocketmq":
 		return runAddonStopRocketMQ(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
 	}
 }
 
@@ -9922,6 +9982,48 @@ Examples:
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonAlertmanagerReload(cmd)
+	},
+}
+
+// ---------------------------------------------------------------------------
+// pgexporter-specific subcommands: reload
+// ---------------------------------------------------------------------------
+
+var addonPGExporterCmd = &cobra.Command{
+	Use:   "pgexporter",
+	Short: "Manage pg_exporter addon instances",
+	Long: `Manage pg_exporter addon instances with dedicated subcommands.
+
+Subcommands:
+  reload   Hot-reload the collector config via SIGHUP (no container recreate)
+
+Examples:
+  pg addon pgexporter reload --name pgexporter   # re-read a mounted --config-file`,
+}
+
+var addonPGExporterReloadCmd = &cobra.Command{
+	Use:   "reload",
+	Short: "Hot-reload a running pg_exporter instance (SIGHUP, no container restart)",
+	Long: `Send SIGHUP to a running pg_exporter so it re-reads its collector config in
+place, without recreating the container. This is the pg_exporter equivalent of
+'pg addon prometheus reload'.
+
+pg_exporter's DEFAULT collector set is baked into the binary and needs no file,
+so if the instance was installed WITHOUT --config-file this reload is a harmless
+no-op (pgcli says so). Only an instance started with a custom --config-file has
+anything to reload — edit that YAML on the host, then reload.
+
+Connection-level changes (target DSN, port, listen, --extra-arg flags) are NOT
+covered by SIGHUP — they require 'pg addon install pgexporter ... --force' to
+recreate the container.
+
+The instance must already be running ('pg addon start pgexporter --name <name>').
+
+Examples:
+  pg addon pgexporter reload --name pgexporter`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runAddonReloadPGExporter(cmd)
 	},
 }
 

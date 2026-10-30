@@ -50,6 +50,7 @@ type Config struct {
 	SeaweedfsStartPort       int                       `yaml:"seaweedfs_start_port,omitempty"`               // starting SeaweedFS master host port, default 8400 (volume, filer, s3 take the next three free ports; gRPC twins at +10000 are reserved)
 	VictoriaMetricsStartPort int                       `yaml:"victoriametrics_start_port,omitempty"`         // starting VictoriaMetrics HTTP host port, default 8428
 	NodeExporterStartPort    int                       `yaml:"nodeexporter_start_port,omitempty"`            // starting node_exporter web host port, default 9100
+	PGExporterStartPort      int                       `yaml:"pgexporter_start_port,omitempty"`              // starting pg_exporter web host port, default 9630
 	VMClusterStartPort       int                       `yaml:"vmcluster_start_port,omitempty"`               // starting VMCluster port, default 8480 (5 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP, internal insert TCP, internal select TCP)
 	VictoriaLogsStartPort    int                       `yaml:"victorialogs_start_port,omitempty"`            // starting VictoriaLogs HTTP host port, default 9428
 	VlagentStartPort         int                       `yaml:"vlagent_start_port,omitempty"`                 // starting vlagent ingest HTTP host port, default 9429
@@ -160,6 +161,7 @@ type TopAddonsConfig struct {
 	SQLite          map[string]SQLiteConfig          `yaml:"sqlite,omitempty"`
 	VictoriaMetrics map[string]VictoriaMetricsConfig `yaml:"victoriametrics,omitempty"`
 	NodeExporter    map[string]NodeExporterConfig    `yaml:"nodeexporter,omitempty"`
+	PGExporter      map[string]PGExporterConfig      `yaml:"pgexporter,omitempty"`
 	VMCluster       map[string]VMClusterConfig       `yaml:"vmcluster,omitempty"`
 	VLCluster       map[string]VLClusterConfig       `yaml:"vlcluster,omitempty"`
 	VictoriaLogs    map[string]VictoriaLogsConfig    `yaml:"victorialogs,omitempty"`
@@ -724,6 +726,18 @@ const DefaultNodeExporterImageTag = "docker.io/prom/node-exporter:v1.12.1"
 // DefaultNodeExporterPort is node_exporter's conventional web listen port, the
 // base of its own port pool (a second instance takes the next free port).
 const DefaultNodeExporterPort = 9100
+
+// DefaultPGExporterImageTag pins the pg_exporter image. pgsty/pg_exporter is
+// the official upstream image on docker.io (pull-only — pgcli never builds it);
+// the tags carry no "v" prefix. pg_exporter is Pigsty's declarative,
+// YAML-collector-driven PostgreSQL/PgBouncer exporter — the whole default
+// collector set is baked into the binary, so pgcli needs no config file to get
+// metrics. The tag is verified pullable + runnable at implementation time.
+const DefaultPGExporterImageTag = "docker.io/pgsty/pg_exporter:1.5.0"
+
+// DefaultPGExporterPort is pg_exporter's conventional --web.listen-address port
+// (:9630), the base of its own pool (a second instance takes the next free port).
+const DefaultPGExporterPort = 9630
 
 // DefaultGiteaImageTag pins the Gitea image. gitea/gitea is the official
 // multi-arch image on docker.io (pull-only — pgcli never builds it). Note the
@@ -3181,6 +3195,74 @@ type NodeExporterConfig struct {
 	Autostart bool `yaml:"autostart,omitempty"`
 }
 
+// PGExporterConfig holds a pg_exporter addon — Pigsty's declarative
+// PostgreSQL/PgBouncer metrics exporter (https://pigsty.cc/docs/pg_exporter/).
+// Like node_exporter it is a single stateless container configured purely by
+// env/flags (the whole default collector set is baked into the binary), with no
+// rendered config file and no data dir, but unlike node_exporter it exports the
+// DATABASE's metrics, so it must know how to reach a PostgreSQL server.
+//
+// The target is given one of three ways (mutually exclusive, enforced by
+// Validate):
+//   - TargetInstance: the name of a pgcli-managed instance. The connection
+//     string is re-derived at every start from that instance's credentials, so
+//     a password rotation never goes stale in pg.yaml.
+//   - AdminDSN: any reachable PostgreSQL server, given as an ADMIN-privileged
+//     URL on the CLI. pgcli uses it once to create the monitor role, then
+//     stores only its CREDENTIAL-FREE form (host/port/database/query) — the
+//     admin user and password never land in pg.yaml. The exporter dials that
+//     address as the monitor role, re-substituted at every start.
+//   - DSN: dial-as-is — the exporter dials exactly this URL with its own
+//     credentials (e.g. a hand-created monitor role, or a server pgcli must
+//     not touch). No role-creation SQL is ever run.
+//
+// In the first two modes the exporter should NOT connect as an admin: pgcli
+// creates a low-privilege monitor role with pg_monitor membership on the
+// target, and MonitorDSN — the target URL with the monitor credentials — is
+// what actually gets handed to the container. MonitorPassword is A SECRET: it
+// is generated at install time only, never defaulted, and never printed twice.
+//
+// There is NO authentication or TLS on the exporter endpoint itself, and it
+// also serves admin endpoints (/reload, /explain, /stat), so Listen defaults to
+// 0.0.0.0 with the same eyes-open posture as the other metrics addons — guard
+// it at the network boundary.
+type PGExporterConfig struct {
+	ContainerName string `yaml:"container_name"`      // pgcli-pgexporter<ns>-<name>
+	Name          string `yaml:"name,omitempty"`      // addon key
+	ImageTag      string `yaml:"image_tag,omitempty"` // docker.io/pgsty/pg_exporter:1.5.0
+	HostPort      int    `yaml:"host_port,omitempty"` // web listen port, 9630+ auto-assigned
+	Listen        string `yaml:"listen,omitempty"`    // --web.listen-address bind, default 0.0.0.0
+	// TargetInstance is a pgcli-managed instance to monitor (DSN re-derived at
+	// every start). Mutually exclusive with DSN and AdminDSN.
+	TargetInstance string `yaml:"target_instance,omitempty"`
+	// DSN is a direct connection URL to any PostgreSQL server that the
+	// exporter dials AS GIVEN — its own credentials are the exporter's, and no
+	// role-creation SQL ever runs. Mutually exclusive with TargetInstance and
+	// AdminDSN.
+	DSN string `yaml:"dsn,omitempty"`
+	// AdminDSN is the credential-FREE form (scheme://host:port/db?query) of the
+	// admin URL given once at install via --admin-dsn: pgcli created the
+	// monitor role with the real admin credentials (never stored) and keeps
+	// only the address here. Mutually exclusive with TargetInstance and DSN.
+	AdminDSN string `yaml:"admin_dsn,omitempty"`
+	// MonitorDSN is the URL handed to pg_exporter: the target address with the
+	// monitor user and password substituted in. Contains a password.
+	MonitorDSN string `yaml:"monitor_dsn,omitempty"`
+	// MonitorPassword is A SECRET — generated at install, never defaulted, and
+	// retrievable via `pg addon password pgexporter`.
+	MonitorPassword string `yaml:"monitor_password,omitempty"`
+	// MonitorUser is the role pg_exporter connects as (default "pgexporter"),
+	// created with pg_monitor membership at install in the local and
+	// --admin-dsn modes.
+	MonitorUser string   `yaml:"monitor_user,omitempty"`
+	ConfigFile  string   `yaml:"config_file,omitempty"` // optional custom collector YAML, mounted read-only
+	ExtraArgs   []string `yaml:"extra_args,omitempty"`  // additional CLI flags, e.g. ["--auto-discovery=false"]
+	// Autostart brings this container up on host boot via the boot service
+	// (pg autostart enable --pgexporter). Start-only: it starts the existing
+	// container, so install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
 // VMClusterStorageNode is one vmstorage address that vminsert/vmselect dial.
 // Address is host:port for the insert protocol (e.g. "10.0.0.1:8483");
 // SelectPort is the select protocol port on the same host (e.g. 8484).
@@ -3852,6 +3934,7 @@ func Default() *Config {
 		SeaweedfsStartPort:       8400,
 		VictoriaMetricsStartPort: 8428,
 		NodeExporterStartPort:    DefaultNodeExporterPort,
+		PGExporterStartPort:      DefaultPGExporterPort,
 		VMClusterStartPort:       8480,
 		VictoriaLogsStartPort:    9428,
 		VlagentStartPort:         9429,
@@ -4080,6 +4163,7 @@ type displayConfig struct {
 	SeaweedfsStartPort       int                       `yaml:"seaweedfs_start_port,omitempty"`
 	VictoriaMetricsStartPort int                       `yaml:"victoriametrics_start_port,omitempty"`
 	NodeExporterStartPort    int                       `yaml:"nodeexporter_start_port,omitempty"`
+	PGExporterStartPort      int                       `yaml:"pgexporter_start_port,omitempty"`
 	VMClusterStartPort       int                       `yaml:"vmcluster_start_port,omitempty"`
 	VictoriaLogsStartPort    int                       `yaml:"victorialogs_start_port,omitempty"`
 	VlagentStartPort         int                       `yaml:"vlagent_start_port,omitempty"`
@@ -4133,6 +4217,7 @@ func (c *Config) Display() displayConfig {
 		SeaweedfsStartPort:       c.SeaweedfsStartPort,
 		VictoriaMetricsStartPort: c.VictoriaMetricsStartPort,
 		NodeExporterStartPort:    c.NodeExporterStartPort,
+		PGExporterStartPort:      c.PGExporterStartPort,
 		VMClusterStartPort:       c.VMClusterStartPort,
 		VictoriaLogsStartPort:    c.VictoriaLogsStartPort,
 		VlagentStartPort:         c.VlagentStartPort,
@@ -4407,6 +4492,47 @@ func (c *Config) Validate() error {
 		influx2Ports[ac.Port] = name
 		if ac.PoolSize < 1 || ac.PoolSize > 1000 {
 			return fmt.Errorf("addons.influx2tsdb.%s.pool_size must be between 1 and 1000, got %d", name, ac.PoolSize)
+		}
+	}
+	// pg_exporter instances: exactly one target — a local pgcli instance, a
+	// dial-as-is DSN, or the (credential-stripped) admin DSN used to create the
+	// monitor role. MonitorDSN/MonitorPassword are derived on the install path
+	// and are not validated here (a hand-written pg.yaml may not have them
+	// yet).
+	pgExporterScheme := func(field, v, name string) error {
+		u, err := url.Parse(v)
+		if err != nil || u.Host == "" || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
+			return fmt.Errorf("addons.pgexporter.%s.%s must be a postgres:// or postgresql:// URL", name, field)
+		}
+		return nil
+	}
+	for name, ac := range c.Addons.PGExporter {
+		given := 0
+		for _, v := range []string{ac.TargetInstance, ac.DSN, ac.AdminDSN} {
+			if v != "" {
+				given++
+			}
+		}
+		if given == 0 {
+			return fmt.Errorf("addons.pgexporter.%s: set exactly one of target_instance, dsn, or admin_dsn", name)
+		}
+		if given > 1 {
+			return fmt.Errorf("addons.pgexporter.%s: target_instance, dsn and admin_dsn are mutually exclusive — set exactly one", name)
+		}
+		if ac.TargetInstance != "" {
+			if _, ok := c.Instances[ac.TargetInstance]; !ok {
+				return fmt.Errorf("addons.pgexporter.%s.target_instance %q not found in instances", name, ac.TargetInstance)
+			}
+		}
+		if ac.DSN != "" {
+			if err := pgExporterScheme("dsn", ac.DSN, name); err != nil {
+				return err
+			}
+		}
+		if ac.AdminDSN != "" {
+			if err := pgExporterScheme("admin_dsn", ac.AdminDSN, name); err != nil {
+				return err
+			}
 		}
 	}
 	// ClickHouse instances: names are directory keys, paths are absolute, the
@@ -4998,6 +5124,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.NodeExporterStartPort == 0 {
 		c.NodeExporterStartPort = d.NodeExporterStartPort
+	}
+	if c.PGExporterStartPort == 0 {
+		c.PGExporterStartPort = d.PGExporterStartPort
 	}
 	if c.VMClusterStartPort == 0 {
 		c.VMClusterStartPort = d.VMClusterStartPort
@@ -5681,6 +5810,32 @@ func (c *Config) ApplyDefaults() {
 			addon.Listen = "0.0.0.0"
 		}
 		c.Addons.NodeExporter[name] = addon
+	}
+
+	// Top-level addons defaults (pg_exporter). Same shape as node_exporter —
+	// one stateless container, no data dir — but it dials a PostgreSQL target,
+	// so Listen defaults to 0.0.0.0 for the same cross-host-Prometheus reason.
+	// MonitorUser defaults to "pgexporter"; MonitorDSN / MonitorPassword / DSN
+	// / AdminDSN are NEVER defaulted here — the password is a secret generated
+	// only on the install path (the grafana precedent) and the URLs are derived
+	// or given by the user.
+	for name, addon := range c.Addons.PGExporter {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-pgexporter" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultPGExporterImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "0.0.0.0"
+		}
+		if addon.MonitorUser == "" {
+			addon.MonitorUser = "pgexporter"
+		}
+		c.Addons.PGExporter[name] = addon
 	}
 
 	// Top-level addons defaults (VictoriaLogs). Exact mirror of the
@@ -7463,6 +7618,45 @@ func (c *Config) autoAssignPorts() {
 				next = addon.HostPort + 1
 			}
 			c.Addons.NodeExporter[name] = addon
+		}
+	}
+
+	// Allocate ports for pg_exporter addons from their own pool
+	// (pgexporter_start_port, default 9630 — pg_exporter's conventional web
+	// port). One port per instance, same shape as the node_exporter block above.
+	// 9630 shares no base with any other pool (Prometheus 9090, node_exporter
+	// 9100, VictoriaLogs 9428, vlcluster 9430 all clear), so a pg_exporter
+	// instance never collides with another metrics addon.
+	{
+		peBase := c.PGExporterStartPort
+		assignedPE := map[int]bool{}
+		for _, addon := range c.Addons.PGExporter {
+			if addon.HostPort != 0 {
+				assignedPE[addon.HostPort] = true
+			}
+		}
+		next := peBase
+		nextFreePE := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedPE[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.PGExporter))
+		for name := range c.Addons.PGExporter {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.PGExporter[name]
+			if addon.HostPort == 0 && peBase > 0 {
+				addon.HostPort = nextFreePE()
+			} else if addon.HostPort >= next {
+				next = addon.HostPort + 1
+			}
+			c.Addons.PGExporter[name] = addon
 		}
 	}
 

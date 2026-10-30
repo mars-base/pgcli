@@ -79,8 +79,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartNodeExporter(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartRabbitMQ(c) && !hasAutostartRocketMQ(c) && !hasAutostartNginx(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --kafka / --rabbitmq / --nginx / --nodeexporter)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartNodeExporter(c) && !hasAutostartPGExporter(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartRabbitMQ(c) && !hasAutostartRocketMQ(c) && !hasAutostartNginx(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --kafka / --rabbitmq / --nginx / --nodeexporter / --pgexporter)")
 		return nil
 	}
 
@@ -250,6 +250,14 @@ func startAutostart() error {
 	// Stateless and independent of the PostgreSQL stack, so it boots alongside
 	// the other monitoring addons.
 	if err := startAutostartNodeExporter(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// pg_exporter instances (top-level web addon, the PostgreSQL-metrics
+	// exporter). Stateless; the monitor DSN is re-derived first so a recreated
+	// container picks up a rotated instance password. No dependency on the
+	// PostgreSQL stack beyond that.
+	if err := startAutostartPGExporter(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -1785,6 +1793,60 @@ func startAutostartNodeExporter(c *config.Config) error {
 		nc := c.Addons.NodeExporter[name]
 		if err := ne.StartContainer(&nc); err != nil {
 			fmt.Printf("  [X] nodeexporter autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartPGExporter reports whether any pg_exporter instance is
+// autostart-enabled.
+func hasAutostartPGExporter(c *config.Config) bool {
+	for _, pc := range c.Addons.PGExporter {
+		if pc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartPGExporter starts each autostart-enabled pg_exporter instance.
+// Start-only like the other web addons — no role SQL reruns at boot (creation
+// happened at install; the role lives in the target database). Unlike
+// node_exporter it needs its target DSN re-derived first, so a container
+// recreated here picks up a rotated instance password. Order is sorted by
+// instance name for deterministic boot logs.
+func startAutostartPGExporter(c *config.Config) error {
+	var names []string
+	for name, pc := range c.Addons.PGExporter {
+		if pc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	pe, err := podman.NewPGExporterManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		pc := c.Addons.PGExporter[name]
+		monitorDSN, err := pgexporterMonitorDSN(c, pc)
+		if err != nil {
+			fmt.Printf("  [X] pgexporter autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if err := pe.StartContainer(&pc, monitorDSN); err != nil {
+			fmt.Printf("  [X] pgexporter autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}
