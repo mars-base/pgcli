@@ -376,6 +376,7 @@ Currently supported add-ons:
   victorialogs VictoriaLogs — the log database of the VictoriaMetrics family (single container from docker.io/victoriametrics/victoria-logs; pure CLI flags, no config file; one HTTP port from victorialogs_start_port (default 9428) serving ingest + LogsQL queries + built-in UI; --retention for a duration like 30d (omit to keep the binary's default), --extra-arg for custom flags; NO web login — defaults to 0.0.0.0 guarded only by the network, use --listen 127.0.0.1 for loopback; Linux host network, macOS bridge)
   vlagent     vlagent — the official VictoriaLogs log agent (single container from docker.io/victoriametrics/vlagent; pure CLI flags, no config file; one HTTP ingest port from vlagent_start_port (default 9429); --remote-write-url URL(s) ending in /insert/native forward collected logs to VictoriaLogs; --log-path mounts any host file/dir read-only at the same path and --include/--exclude select files with vlagent's native glob syntax (*, /**/, ?, [a-z], {a,b}) — no regex; no --include means <dir>/**/*.log for dirs and the file itself for files; NO auth — defaults to 0.0.0.0, use --listen 127.0.0.1 for loopback; Linux host network, macOS bridge)
   alertmanager Alertmanager — the alert dedup/grouping/routing frontend of the Prometheus stack (single container from docker.io/prom/alertmanager; rendered alertmanager.yml with a no-op or --webhook-url web.hook receiver, or --conf-file; SIGHUP reload; cluster gossip disabled; NO web login — defaults to 0.0.0.0 guarded only by the network, and silences are dangerous, use --listen 127.0.0.1 for loopback; wired to Prometheus from the Prometheus side via --alertmanager-url; Linux host network, macOS bridge)
+  nodeexporter node_exporter — the official Prometheus host-metrics exporter (single container from docker.io/prom/node-exporter; pure CLI flags, no config file, no state; pgcli hard-wires read-only mounts of the host /proc, /sys and / and points --path.procfs/sysfs/rootfs at them so it reports HOST metrics, not container ones; --extra-arg for collector flags; NO auth/TLS — defaults to 0.0.0.0 (a Prometheus scraping it is usually on another host), guarded only by the network; reached by Prometheus via "pg addon install prometheus --scrape node-exporter=<this-host>:<port>"; own port pool, default 9100; Linux host network, macOS bridge)
   gitea       Gitea — the self-hosted Git service (single container from docker.io/gitea/gitea; web login auto-generated and created via "gitea admin user create"; optional --ssh-port for clone/push over SSH; SQLite by default or --dsn to put its metadata in a PostgreSQL you already run; defaults to 0.0.0.0 since a Git host is reached from other machines; Linux host network, macOS bridge)
   beegfs      BeeGFS — the scale-out parallel filesystem (mgmtd/meta/storage services from ghcr.io/thinkparq/beegfs — brought up in dependency order by one install; by default all three on this host = a converged single-host filesystem, --roles scopes it to a subset and a --roles-without-mgmtd host joins an existing cluster via --mgmtd-host/--node-id/--password — every host runs its own pgcli, pgcli never SSHes; --storage-target repeats for multiple disks/targets; fixed protocol ports 8008/8010/8005/8003, meta/storage cannot move so one filesystem per host; shared conn-auth secret (generated on the mgmtd host), mgmtd TLS disabled; an unlicensed build caps client mounts at five — pgcli never generates a license but CARRIES a ThinkParQ PEM via --license-file / "pg addon beegfs license" (mgmtd-only); the kernel-module client is never installed — "pg addon beegfs mount-hint" prints its config, "join-hint" the per-host join commands; Linux host network only)
   juicefs     JuiceFS — S3-backed POSIX filesystem installed as a HOST BINARY (GitHub releases + sha256; no container): an EXTERNAL S3 backend given explicitly (--s3-endpoint http(s)://host:port + --access-key/--secret-key — no same-host addon auto-detection; buckets via "pg mc" by hand, pgcli prints the exact command) and an explicit metadata URL (--dsn: postgres://, redis:// or sqlite3://); mounts a plain host directory; "pg addon juicefs mount|umount|status"; Linux only
@@ -1238,7 +1239,7 @@ func init() {
 
 	// victoriametrics flags (top-level time-series database)
 	addonInstallCmd.Flags().String("retention-months", "", "VictoriaMetrics data retention in months (default \"1\"); e.g. 3 = 3 months")
-	addonInstallCmd.Flags().StringArray("extra-arg", nil, "VictoriaMetrics/VictoriaLogs/vlagent: extra CLI flag passed to the binary (repeatable), e.g. --extra-arg -search.maxUniqueTimeseries=1000000 — appended last so last-wins overrides earlier flags")
+	addonInstallCmd.Flags().StringArray("extra-arg", nil, "VictoriaMetrics/VictoriaLogs/vlagent/nodeexporter: extra CLI flag passed to the binary (repeatable), e.g. --extra-arg -search.maxUniqueTimeseries=1000000 or --extra-arg --no-collector.cpufreq — appended last so last-wins overrides earlier flags")
 
 	// vmcluster/vlcluster flags (VictoriaMetrics / VictoriaLogs cluster — cross-host, horizontal scaling)
 	addonInstallCmd.Flags().StringArray("storage-node", nil, "cluster storage node address (repeatable). vmcluster: host:insertPort:selectPort, e.g. 10.0.0.1:8483:8484 — lists ALL vmstorage nodes for sharding/replication. vlcluster: host:storagePort, e.g. 10.0.0.1:9432 — lists ALL vlstorage nodes for sharding (no replication). Omit for converged single-host (auto-derived)")
@@ -1351,6 +1352,8 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallPrometheus(cmd)
 	case "victoriametrics":
 		return runAddonInstallVictoriaMetrics(cmd)
+	case "nodeexporter":
+		return runAddonInstallNodeExporter(cmd)
 	case "vmcluster":
 		return runAddonInstallVMCluster(cmd)
 	case "vlcluster":
@@ -1388,7 +1391,7 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -5615,6 +5618,35 @@ func runAddonList(showPassword bool) error {
 		}
 	}
 
+	// nodeexporter (host-metrics exporter, top-level addon; stateless, Linux host
+	// network, macOS bridge). No data dir / retention — simpler than VM.
+	section("Web add-ons (nodeexporter):", len(cfg.Addons.NodeExporter) > 0)
+	if ne, err := podman.NewNodeExporterManager(cfg); err == nil {
+		for _, name := range sortedAddonNames(cfg.Addons.NodeExporter) {
+			nc := cfg.Addons.NodeExporter[name]
+			status := "stopped"
+			if running, err := ne.ContainerRunning(nc.ContainerName); err == nil && running {
+				status = "running"
+			}
+			fmt.Printf("  %s (name: %s)\n", "nodeexporter", name)
+			fmt.Printf("    Status:      %s\n", status)
+			fmt.Printf("    Metrics:     http://%s:%d/metrics\n", nc.Listen, nc.HostPort)
+			if len(nc.ExtraArgs) > 0 {
+				fmt.Printf("    Extra args:  %s\n", strings.Join(nc.ExtraArgs, " "))
+			}
+			fmt.Printf("    Image:       %s\n", nc.ImageTag)
+			fmt.Printf("    Container:   %s\n", nc.ContainerName)
+		}
+	} else if len(cfg.Addons.NodeExporter) > 0 {
+		for _, name := range sortedAddonNames(cfg.Addons.NodeExporter) {
+			nc := cfg.Addons.NodeExporter[name]
+			fmt.Printf("  %s (name: %s)\n", "nodeexporter", name)
+			fmt.Printf("    Status:      n/a (%v)\n", err)
+			fmt.Printf("    Metrics:     http://%s:%d/metrics\n", nc.Listen, nc.HostPort)
+			fmt.Printf("    Container:   %s\n", nc.ContainerName)
+		}
+	}
+
 	// vmcluster (VictoriaMetrics cluster — cross-host, horizontal scaling)
 	section("Cluster add-ons (vmcluster):", len(cfg.Addons.VMCluster) > 0)
 	if vmc, err := podman.NewVMClusterManager(cfg); err == nil {
@@ -6446,6 +6478,8 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemovePrometheus(cmd)
 	case "victoriametrics":
 		return runAddonRemoveVictoriaMetrics(cmd)
+	case "nodeexporter":
+		return runAddonRemoveNodeExporter(cmd)
 	case "vmcluster":
 		return runAddonRemoveVMCluster(cmd)
 	case "vlcluster":
@@ -6483,7 +6517,7 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -6792,6 +6826,8 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartPrometheus(cmd)
 	case "victoriametrics":
 		return runAddonStartVictoriaMetrics(cmd)
+	case "nodeexporter":
+		return runAddonStartNodeExporter(cmd)
 	case "vmcluster":
 		return runAddonStartVMCluster(cmd)
 	case "vlcluster":
@@ -6829,7 +6865,7 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 	case "rocketmq":
 		return runAddonStartRocketMQ(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
 	}
 }
 
@@ -6867,6 +6903,8 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopPrometheus(cmd)
 	case "victoriametrics":
 		return runAddonStopVictoriaMetrics(cmd)
+	case "nodeexporter":
+		return runAddonStopNodeExporter(cmd)
 	case "vmcluster":
 		return runAddonStopVMCluster(cmd)
 	case "vlcluster":
@@ -6903,7 +6941,7 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 	case "rocketmq":
 		return runAddonStopRocketMQ(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
 	}
 }
 

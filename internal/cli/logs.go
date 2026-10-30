@@ -184,7 +184,7 @@ Examples:
 			if err != nil {
 				return err
 			}
-		case "etcd", "pgdog", "haproxy", "minio", "silo", "rustfs", "garage", "seaweedfs", "redis", "predixy", "pgadmin", "grafana", "prometheus", "alertmanager", "gitea", "beegfs", "nginx", "influxdb", "influx2tsdb", "clickhouse", "kafka", "rabbitmq", "rocketmq", "vmcluster", "vlcluster":
+		case "etcd", "pgdog", "haproxy", "minio", "silo", "rustfs", "garage", "seaweedfs", "redis", "predixy", "pgadmin", "grafana", "prometheus", "alertmanager", "nodeexporter", "gitea", "beegfs", "nginx", "influxdb", "influx2tsdb", "clickhouse", "kafka", "rabbitmq", "rocketmq", "vmcluster", "vlcluster":
 			// (patroni is handled above; it shares --name but requires --scope.)
 			if pgName != "" {
 				return fmt.Errorf("--pg-name selects a remote PgBouncer or PostgREST; use --name for an %s", addonType)
@@ -327,6 +327,15 @@ Examples:
 					return fmt.Errorf("alertmanager instance %q not found (use 'pg addon list' to see available)", name)
 				}
 				containerName = ac.ContainerName
+			case "nodeexporter":
+				if cfg.Addons.NodeExporter == nil {
+					return fmt.Errorf("no nodeexporter addons configured")
+				}
+				nc, ok := cfg.Addons.NodeExporter[name]
+				if !ok {
+					return fmt.Errorf("nodeexporter instance %q not found (use 'pg addon list' to see available)", name)
+				}
+				containerName = nc.ContainerName
 			case "gitea":
 				if cfg.Addons.Gitea == nil {
 					return fmt.Errorf("no gitea addons configured")

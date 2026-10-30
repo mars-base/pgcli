@@ -49,6 +49,7 @@ type Config struct {
 	GarageStartPort          int                       `yaml:"garage_start_port,omitempty"`                  // starting Garage S3 API host port, default 3900 (RPC, web, admin take the next three free ports)
 	SeaweedfsStartPort       int                       `yaml:"seaweedfs_start_port,omitempty"`               // starting SeaweedFS master host port, default 8400 (volume, filer, s3 take the next three free ports; gRPC twins at +10000 are reserved)
 	VictoriaMetricsStartPort int                       `yaml:"victoriametrics_start_port,omitempty"`         // starting VictoriaMetrics HTTP host port, default 8428
+	NodeExporterStartPort    int                       `yaml:"nodeexporter_start_port,omitempty"`            // starting node_exporter web host port, default 9100
 	VMClusterStartPort       int                       `yaml:"vmcluster_start_port,omitempty"`               // starting VMCluster port, default 8480 (5 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP, internal insert TCP, internal select TCP)
 	VictoriaLogsStartPort    int                       `yaml:"victorialogs_start_port,omitempty"`            // starting VictoriaLogs HTTP host port, default 9428
 	VlagentStartPort         int                       `yaml:"vlagent_start_port,omitempty"`                 // starting vlagent ingest HTTP host port, default 9429
@@ -158,6 +159,7 @@ type TopAddonsConfig struct {
 	Duckdb          map[string]DuckdbConfig          `yaml:"duckdb,omitempty"`
 	SQLite          map[string]SQLiteConfig          `yaml:"sqlite,omitempty"`
 	VictoriaMetrics map[string]VictoriaMetricsConfig `yaml:"victoriametrics,omitempty"`
+	NodeExporter    map[string]NodeExporterConfig    `yaml:"nodeexporter,omitempty"`
 	VMCluster       map[string]VMClusterConfig       `yaml:"vmcluster,omitempty"`
 	VLCluster       map[string]VLClusterConfig       `yaml:"vlcluster,omitempty"`
 	VictoriaLogs    map[string]VictoriaLogsConfig    `yaml:"victorialogs,omitempty"`
@@ -710,6 +712,18 @@ const DefaultVictoriaLogsImageTag = "docker.io/victoriametrics/victoria-logs:v1.
 // HTTP port (9429 by default), and buffers to disk before forwarding to
 // VictoriaLogs via `-remoteWrite.url` (which must end in /insert/native).
 const DefaultVlagentImageTag = "docker.io/victoriametrics/vlagent:v1.53.0"
+
+// DefaultNodeExporterImageTag pins the node_exporter image. prom/node-exporter
+// is the official upstream image on docker.io, the same publisher as
+// prom/prometheus and prom/alertmanager (pull-only — pgcli never builds it).
+// The tag is verified reachable at implementation time; node_exporter is a
+// plain static-binary exporter with no config-file format to track, so any
+// 1.x tag renders the same flags pgcli passes.
+const DefaultNodeExporterImageTag = "docker.io/prom/node-exporter:v1.12.1"
+
+// DefaultNodeExporterPort is node_exporter's conventional web listen port, the
+// base of its own port pool (a second instance takes the next free port).
+const DefaultNodeExporterPort = 9100
 
 // DefaultGiteaImageTag pins the Gitea image. gitea/gitea is the official
 // multi-arch image on docker.io (pull-only — pgcli never builds it). Note the
@@ -3137,6 +3151,36 @@ type VictoriaMetricsConfig struct {
 	Autostart bool `yaml:"autostart,omitempty"`
 }
 
+// NodeExporterConfig holds a node_exporter addon — the official Prometheus
+// host-metrics exporter (https://github.com/prometheus/node_exporter). Like
+// VictoriaMetrics it is a single stateless container configured by CLI flags
+// only (no rendered config file, no hot reload — changes recreate it), and it
+// has NO persistence, so there is no data dir and Remove never deletes data.
+//
+// The one thing that makes node_exporter different from every other web addon:
+// to report the HOST's metrics (not the container's) it must bind-mount the
+// host /proc, /sys and / read-only and be told so via --path.procfs/--path.sysfs/
+// --path.rootfs. Those mounts are hard-wired in the podman layer, not
+// configurable here — without them the exporter silently reports container
+// metrics, which is the classic container-deployment mistake.
+//
+// There is NO authentication or TLS: node_exporter just serves /metrics. It is
+// meant to be reached by a Prometheus that usually lives on a DIFFERENT host,
+// so Listen defaults to 0.0.0.0 (every interface), same posture as the other
+// metrics web addons. Reachability is guarded only by the network boundary.
+type NodeExporterConfig struct {
+	ContainerName string   `yaml:"container_name"`       // pgcli-nodeexporter<ns>-<name>
+	Name          string   `yaml:"name,omitempty"`       // addon key
+	ImageTag      string   `yaml:"image_tag,omitempty"`  // docker.io/prom/node-exporter:v1.12.1
+	HostPort      int      `yaml:"host_port,omitempty"`  // web listen port, 9100+ auto-assigned
+	Listen        string   `yaml:"listen,omitempty"`     // --web.listen-address bind, default 0.0.0.0
+	ExtraArgs     []string `yaml:"extra_args,omitempty"` // additional CLI flags, e.g. ["--no-collector.cpufreq"]
+	// Autostart brings this container up on host boot via the boot service
+	// (pg autostart enable --nodeexporter). Start-only: it starts the existing
+	// container, so install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
 // VMClusterStorageNode is one vmstorage address that vminsert/vmselect dial.
 // Address is host:port for the insert protocol (e.g. "10.0.0.1:8483");
 // SelectPort is the select protocol port on the same host (e.g. 8484).
@@ -3807,6 +3851,7 @@ func Default() *Config {
 		GarageStartPort:          3900,
 		SeaweedfsStartPort:       8400,
 		VictoriaMetricsStartPort: 8428,
+		NodeExporterStartPort:    DefaultNodeExporterPort,
 		VMClusterStartPort:       8480,
 		VictoriaLogsStartPort:    9428,
 		VlagentStartPort:         9429,
@@ -4034,6 +4079,7 @@ type displayConfig struct {
 	GarageStartPort          int                       `yaml:"garage_start_port,omitempty"`
 	SeaweedfsStartPort       int                       `yaml:"seaweedfs_start_port,omitempty"`
 	VictoriaMetricsStartPort int                       `yaml:"victoriametrics_start_port,omitempty"`
+	NodeExporterStartPort    int                       `yaml:"nodeexporter_start_port,omitempty"`
 	VMClusterStartPort       int                       `yaml:"vmcluster_start_port,omitempty"`
 	VictoriaLogsStartPort    int                       `yaml:"victorialogs_start_port,omitempty"`
 	VlagentStartPort         int                       `yaml:"vlagent_start_port,omitempty"`
@@ -4086,6 +4132,7 @@ func (c *Config) Display() displayConfig {
 		GarageStartPort:          c.GarageStartPort,
 		SeaweedfsStartPort:       c.SeaweedfsStartPort,
 		VictoriaMetricsStartPort: c.VictoriaMetricsStartPort,
+		NodeExporterStartPort:    c.NodeExporterStartPort,
 		VMClusterStartPort:       c.VMClusterStartPort,
 		VictoriaLogsStartPort:    c.VictoriaLogsStartPort,
 		VlagentStartPort:         c.VlagentStartPort,
@@ -4949,6 +4996,9 @@ func (c *Config) ApplyDefaults() {
 	if c.VictoriaMetricsStartPort == 0 {
 		c.VictoriaMetricsStartPort = d.VictoriaMetricsStartPort
 	}
+	if c.NodeExporterStartPort == 0 {
+		c.NodeExporterStartPort = d.NodeExporterStartPort
+	}
 	if c.VMClusterStartPort == 0 {
 		c.VMClusterStartPort = d.VMClusterStartPort
 	}
@@ -5610,6 +5660,27 @@ func (c *Config) ApplyDefaults() {
 			addon.Retention = "1"
 		}
 		c.Addons.VictoriaMetrics[name] = addon
+	}
+
+	// Top-level addons defaults (node_exporter). Same shape as VictoriaMetrics:
+	// one container, one port, pure CLI flags, no config file. Listen defaults
+	// to 0.0.0.0 because a Prometheus scrape target is usually on a DIFFERENT
+	// host from the server — loopback-only would break the common topology.
+	// There is no retention/data: node_exporter is stateless.
+	for name, addon := range c.Addons.NodeExporter {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-nodeexporter" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultNodeExporterImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "0.0.0.0"
+		}
+		c.Addons.NodeExporter[name] = addon
 	}
 
 	// Top-level addons defaults (VictoriaLogs). Exact mirror of the
@@ -7353,6 +7424,45 @@ func (c *Config) autoAssignPorts() {
 				next = addon.HostPort + 1
 			}
 			c.Addons.VictoriaMetrics[name] = addon
+		}
+	}
+
+	// Allocate ports for node_exporter addons from their own pool
+	// (nodeexporter_start_port, default 9100 — node_exporter's conventional web
+	// port). One port per instance, same shape as the VictoriaMetrics block
+	// above. 9100 shares no base with any other pool, so a node_exporter
+	// instance and a VictoriaMetrics/Prometheus instance always land on distinct
+	// ports.
+	{
+		neBase := c.NodeExporterStartPort
+		assignedNE := map[int]bool{}
+		for _, addon := range c.Addons.NodeExporter {
+			if addon.HostPort != 0 {
+				assignedNE[addon.HostPort] = true
+			}
+		}
+		next := neBase
+		nextFreeNE := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedNE[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.NodeExporter))
+		for name := range c.Addons.NodeExporter {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.NodeExporter[name]
+			if addon.HostPort == 0 && neBase > 0 {
+				addon.HostPort = nextFreeNE()
+			} else if addon.HostPort >= next {
+				next = addon.HostPort + 1
+			}
+			c.Addons.NodeExporter[name] = addon
 		}
 	}
 
