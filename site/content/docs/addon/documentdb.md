@@ -90,7 +90,13 @@ port = os.environ.get("MONGO_PORT", "10260")
 user = os.environ.get("MONGO_USER", "docdb_admin")
 password = quote(os.environ["MONGO_PASSWORD"], safe="")
 
-uri = f"mongodb://{user}:{password}@{host}:{port}/?directConnection=true"
+# Set MONGO_TLS=true to connect over TLS.
+use_tls = os.environ.get("MONGO_TLS", "").lower() in ("1", "true", "yes")
+params = "directConnection=true"
+if use_tls:
+    params += "&tls=true&tlsAllowInvalidCertificates=true"
+
+uri = f"mongodb://{user}:{password}@{host}:{port}/?{params}"
 client = MongoClient(uri, serverSelectionTimeoutMS=10000)
 print("ping:", client.admin.command("ping"))
 
@@ -110,7 +116,7 @@ print("OK")
 PY
 ```
 
-Run it on the host where the add-on listens; from another machine set `MONGO_HOST` to the gateway host. For TLS-only mode add `&tls=true&tlsAllowInvalidCertificates=true` to the URI (the certificate is self-signed).
+Run it on the host where the add-on listens; from another machine set `MONGO_HOST` to the gateway host. TLS is off by default in the script: run with `MONGO_TLS=true` to enable it. This works in both `allow` and `require` modes (plaintext is rejected in `require` anyway). `tlsAllowInvalidCertificates` is needed only because the auto-generated certificate is self-signed; with a certificate you trust, use `tlsCAFile="/path/to/ca.pem"` instead.
 
 ## TLS
 
@@ -125,7 +131,7 @@ Switch modes with a recreate:
 pg addon install documentdb --pg-name demo --tls-mode require --force
 ```
 
-With `require`, use `tls=true&tlsAllowInvalidCertificates=true` (or import the generated CA) on the client side.
+With `require`, enable TLS on the client as in the test code (`MONGO_TLS=true`), or use `tlsCAFile` when you want certificate validation.
 
 ## Lifecycle
 

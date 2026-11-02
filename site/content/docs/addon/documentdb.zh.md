@@ -90,7 +90,13 @@ port = os.environ.get("MONGO_PORT", "10260")
 user = os.environ.get("MONGO_USER", "docdb_admin")
 password = quote(os.environ["MONGO_PASSWORD"], safe="")
 
-uri = f"mongodb://{user}:{password}@{host}:{port}/?directConnection=true"
+# 设置 MONGO_TLS=true 以启用 TLS。
+use_tls = os.environ.get("MONGO_TLS", "").lower() in ("1", "true", "yes")
+params = "directConnection=true"
+if use_tls:
+    params += "&tls=true&tlsAllowInvalidCertificates=true"
+
+uri = f"mongodb://{user}:{password}@{host}:{port}/?{params}"
 client = MongoClient(uri, serverSelectionTimeoutMS=10000)
 print("ping:", client.admin.command("ping"))
 
@@ -110,7 +116,7 @@ print("OK")
 PY
 ```
 
-脚本在插件监听的宿主上运行；从另一台机器运行则把 `MONGO_HOST` 设为网关宿主。仅 TLS 模式下在 URI 后追加 `&tls=true&tlsAllowInvalidCertificates=true`（证书为自签）。
+脚本在插件监听的宿主上运行；从另一台机器运行则把 `MONGO_HOST` 设为网关宿主。脚本默认关闭 TLS：用 `MONGO_TLS=true` 启用。`allow` 与 `require` 模式都可用（`require` 下明文本来就会被拒绝）。只有在使用自动生成的自签证书时才需要 `tlsAllowInvalidCertificates`；如果你有可信证书，改用 `tlsCAFile="/path/to/ca.pem"`。
 
 ## TLS
 
@@ -125,7 +131,7 @@ daemon 首次启动时自动生成自签证书，并持久化到命名 volume `p
 pg addon install documentdb --pg-name demo --tls-mode require --force
 ```
 
-`require` 时客户端使用 `tls=true&tlsAllowInvalidCertificates=true`（或导入生成的 CA）。
+`require` 时按测试代码启用客户端 TLS（`MONGO_TLS=true`）；需要校验证书时改用 `tlsCAFile`。
 
 ## 生命周期
 
