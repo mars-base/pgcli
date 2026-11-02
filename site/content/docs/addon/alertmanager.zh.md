@@ -89,6 +89,149 @@ pg addon install alertmanager --name am1 \
 带**不同**的 `--webhook-url` 集合重复 install 会整体替换已存列表（一个都不传则清空回
 no-op）；正是这个 diff 决定要不要 reload。
 
+## 用 Python 接收 webhook
+
+Alertmanager 每个通知组向每个配置的 `--webhook-url` 发送一个 JSON 文档；端点必须返回
+2xx，否则 Alertmanager 会重试。一个最小的 FastAPI 接收端（`webhook_app.py`）：
+
+```python
+import logging
+
+from fastapi import FastAPI, Request
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+app = FastAPI()
+
+
+@app.post("/alertmanager")
+async def receive_alert(request: Request) -> dict:
+    payload = await request.json()
+
+    for alert in payload.get("alerts", []):
+        if alert.get("status") == "resolved":
+            continue
+
+        labels = alert.get("labels", {})
+        annotations = alert.get("annotations", {})
+        logging.warning(
+            "%s %s: %s",
+            labels.get("severity", "warning").upper(),
+            labels.get("alertname", "unknown"),
+            annotations.get("summary") or annotations.get("description", ""),
+        )
+        # 在这里交给你的通知逻辑；HTTP 响应要保持快。
+
+    return {"status": "ok"}
+```
+
+在同一台主机上运行并把 Alertmanager 指过来：
+
+```bash
+uv run --with fastapi --with uvicorn uvicorn webhook_app:app --host 0.0.0.0 --port 18801
+
+pg addon install alertmanager --name am1 \
+  --webhook-url http://127.0.0.1:18801/alertmanager
+```
+
+不用等真实告警，直接发一条测试请求：
+
+```bash
+curl -sS -X POST http://127.0.0.1:18801/alertmanager \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "version": "4",
+        "status": "firing",
+        "alerts": [{
+          "status": "firing",
+          "labels": {"alertname": "PGDown", "severity": "critical", "instance": "10.0.0.5:5432"},
+          "annotations": {"summary": "PostgreSQL instance is down"},
+          "fingerprint": "abc123"
+        }]
+      }'
+```
+
+要验证完整链路（而不是直接打接收端），把告警提交给 Alertmanager：
+
+```bash
+curl -sS -X POST http://127.0.0.1:9093/api/v2/alerts \
+  -H 'Content-Type: application/json' \
+  -d '[
+        {
+          "labels": {
+            "alertname": "PGDown",
+            "severity": "critical",
+            "instance": "10.0.0.5:5432"
+          },
+          "annotations": {
+            "summary": "PostgreSQL instance is down"
+          }
+        }
+      ]'
+
+sleep 35   # 渲染配置使用 group_wait: 30s
+```
+
+uvicorn 控制台会按上面的 `logging.basicConfig` 格式输出：
+
+```
+2026-11-02 08:28:08,123 WARNING CRITICAL PGDown: PostgreSQL instance is down
+```
+
+### 接收端在另一台主机
+
+当接收端与 Alertmanager 不在同一台主机时，接收端要绑定 `0.0.0.0`，并让
+Alertmanager 使用接收端主机上可达的 IP 与端口；`127.0.0.1` 只在两者同机时有效。
+
+在接收端主机（示例地址 `10.0.0.5`）上：
+
+```bash
+uv run --with fastapi --with uvicorn uvicorn webhook_app:app --host 0.0.0.0 --port 18801
+```
+
+先在 Alertmanager 主机上验证可达性：
+
+```bash
+curl -sS -X POST http://10.0.0.5:18801/alertmanager \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "version": "4",
+        "status": "firing",
+        "alerts": [{
+          "status": "firing",
+          "labels": {"alertname": "RemoteProbe", "severity": "info"},
+          "annotations": {"summary": "receiver reachability probe"},
+          "fingerprint": "remote-1"
+        }]
+      }'
+# {"status": "ok"}
+```
+
+然后安装（或重装）Alertmanager，使用接收端主机的 IP 与端口：
+
+```bash
+pg addon install alertmanager --name am1 \
+  --webhook-url http://10.0.0.5:18801/alertmanager
+```
+
+同名重装且 URL 变化时会热加载（SIGHUP）。接收端控制台会打印：
+
+```
+2026-11-02 08:36:22,950 WARNING INFO RemoteProbe: receiver reachability probe
+```
+
+通过 Alertmanager 提交告警后，至少等待 `group_wait`（渲染配置为 30s）再查接收端日志。
+
+- 接收端主机的防火墙需允许 Alertmanager 主机访问 TCP 18801。
+- 跨主机时不能绑定 `127.0.0.1`，必须用 `0.0.0.0`（或具体可达的网卡地址）。
+- `--webhook-url` 的路径（`/alertmanager`）必须与 FastAPI 路由一致。
+- 若 Alertmanager 主机设置了 `HTTP_PROXY`/`HTTPS_PROXY`，把接收端地址加入 `NO_PROXY`，否则 webhook 可能走代理。
+
+- 一次 POST 携带的是一个**分组**（`alerts[]`），不是单条告警，需要遍历。
+- webhook receiver 的 `send_resolved` 默认为 true，因此也会收到 `status: "resolved"`；像上面一样过滤，或在自带的 `--conf-file` 中设置 `send_resolved: false`。
+- `alerts[].fingerprint` 在重复告警之间保持不变，投递可能重叠时可用它去重。
+- 尽快返回 2xx，把慢操作移出请求路径；返回非 2xx 会让 Alertmanager 重试。
+- Alertmanager 在 Linux 默认使用宿主网络，`127.0.0.1` 可以访问同主机的接收端；macOS bridge 网络下用 `host.containers.internal`；接收端在另一台主机时用其可达地址。只要容器不在宿主网络，服务就应像上面一样绑定 `0.0.0.0`。
+
 ## 自定义配置文件（`--conf-file`）
 
 把你自己的 `alertmanager.yml` 交给 pgcli，它就完全跳过渲染：

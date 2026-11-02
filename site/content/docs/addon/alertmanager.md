@@ -97,6 +97,153 @@ rendered/copied config actually changed, and leaves it alone when it didn't;
 Re-running with a **different** `--webhook-url` set replaces the stored list wholesale
 (passing none clears it back to no-op); the diff is what decides whether to reload.
 
+## Receiving webhooks in Python
+
+Alertmanager sends one JSON document per notification group to every configured
+`--webhook-url`; the endpoint must answer with a 2xx or Alertmanager retries. A
+minimal FastAPI receiver (`webhook_app.py`):
+
+```python
+import logging
+
+from fastapi import FastAPI, Request
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+app = FastAPI()
+
+
+@app.post("/alertmanager")
+async def receive_alert(request: Request) -> dict:
+    payload = await request.json()
+
+    for alert in payload.get("alerts", []):
+        if alert.get("status") == "resolved":
+            continue
+
+        labels = alert.get("labels", {})
+        annotations = alert.get("annotations", {})
+        logging.warning(
+            "%s %s: %s",
+            labels.get("severity", "warning").upper(),
+            labels.get("alertname", "unknown"),
+            annotations.get("summary") or annotations.get("description", ""),
+        )
+        # Hand off to your notifier here; keep the HTTP response fast.
+
+    return {"status": "ok"}
+```
+
+Run it on the same host and point Alertmanager at it:
+
+```bash
+uv run --with fastapi --with uvicorn uvicorn webhook_app:app --host 0.0.0.0 --port 18801
+
+pg addon install alertmanager --name am1 \
+  --webhook-url http://127.0.0.1:18801/alertmanager
+```
+
+Test it without waiting for a real alert:
+
+```bash
+curl -sS -X POST http://127.0.0.1:18801/alertmanager \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "version": "4",
+        "status": "firing",
+        "alerts": [{
+          "status": "firing",
+          "labels": {"alertname": "PGDown", "severity": "critical", "instance": "10.0.0.5:5432"},
+          "annotations": {"summary": "PostgreSQL instance is down"},
+          "fingerprint": "abc123"
+        }]
+      }'
+```
+
+To exercise the full chain instead of posting to the receiver directly:
+
+```bash
+curl -sS -X POST http://127.0.0.1:9093/api/v2/alerts \
+  -H 'Content-Type: application/json' \
+  -d '[
+        {
+          "labels": {
+            "alertname": "PGDown",
+            "severity": "critical",
+            "instance": "10.0.0.5:5432"
+          },
+          "annotations": {
+            "summary": "PostgreSQL instance is down"
+          }
+        }
+      ]'
+
+sleep 35   # the rendered config uses group_wait: 30s
+```
+
+The uvicorn console then shows, with the `logging.basicConfig` format above:
+
+```
+2026-11-02 08:28:08,123 WARNING CRITICAL PGDown: PostgreSQL instance is down
+```
+
+### Receiver on another host
+
+When the receiver and Alertmanager run on different hosts, bind the receiver to
+`0.0.0.0` and use an address of the receiver host that is reachable from the
+Alertmanager host; `127.0.0.1` only works when both run on the same host.
+
+On the receiver host (example address `10.0.0.5`):
+
+```bash
+uv run --with fastapi --with uvicorn uvicorn webhook_app:app --host 0.0.0.0 --port 18801
+```
+
+From the Alertmanager host, verify the route before wiring it up:
+
+```bash
+curl -sS -X POST http://10.0.0.5:18801/alertmanager \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "version": "4",
+        "status": "firing",
+        "alerts": [{
+          "status": "firing",
+          "labels": {"alertname": "RemoteProbe", "severity": "info"},
+          "annotations": {"summary": "receiver reachability probe"},
+          "fingerprint": "remote-1"
+        }]
+      }'
+# {"status": "ok"}
+```
+
+Then install (or reinstall) Alertmanager with the receiver host's IP and port:
+
+```bash
+pg addon install alertmanager --name am1 \
+  --webhook-url http://10.0.0.5:18801/alertmanager
+```
+
+Reinstalling under the same name with a changed URL hot-reloads the config
+(SIGHUP). The receiver console prints:
+
+```
+2026-11-02 08:36:22,950 WARNING INFO RemoteProbe: receiver reachability probe
+```
+
+After submitting an alert through Alertmanager, wait at least `group_wait`
+(30s in the rendered config) before checking the receiver log.
+
+- The receiver host firewall must allow TCP 18801 from the Alertmanager host.
+- Do not bind the receiver to `127.0.0.1` for cross-host use; `0.0.0.0` (or a specific reachable interface address) is required.
+- The `--webhook-url` path (`/alertmanager`) must match the FastAPI route.
+- If the Alertmanager host sets `HTTP_PROXY`/`HTTPS_PROXY`, add the receiver address to `NO_PROXY`; otherwise Alertmanager may send the webhook through the proxy.
+
+- One POST carries a **group** of alerts (`alerts[]`), not a single alert; iterate it.
+- `send_resolved` defaults to true for webhook receivers, so `status: "resolved"` entries arrive too — filter them as above, or set `send_resolved: false` in your own `--conf-file`.
+- `alerts[].fingerprint` identifies an alert across repeats; use it for deduplication when deliveries may overlap.
+- Respond 2xx quickly and move slow work off the request path; a non-2xx response makes Alertmanager retry.
+- With Alertmanager on host networking (the Linux default), `127.0.0.1` reaches a receiver on the same host. Under the macOS bridge network use `host.containers.internal`; when the receiver runs on another host, use its reachable address. Bind the server to `0.0.0.0` (as above) whenever the container is not on host networking.
+
 ## Custom config file (`--conf-file`)
 
 Give pgcli your own `alertmanager.yml` and it skips rendering entirely:
