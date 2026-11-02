@@ -32,8 +32,8 @@ cards:
       desc: Patroni 高可用——自动故障切换、DCS 驱动的集群、跨主机成员、集群 PITR 与直连 SQL。
       icon: fa-solid fa-sitemap
       url: docs/ha-cluster/
-    - title: 插件
-      desc: 围绕实例或集群的一条命令配套容器：PgBouncer、etcd、PgDog、PostgREST、HAProxy、MinIO / silo / rustfs、Redis，以及 Predixy（Redis 集群代理）。
+    - title: 插件与工具箱
+      desc: "围绕实例或集群的配套服务——PgBouncer、etcd、MinIO / silo / rustfs、Redis、Kafka 等——外加独立的 [工具箱](docs/toolbox/) 工具，如 ZFS、PGMQ、SQLite + Litestream、daemon 等。"
       icon: fa-solid fa-cubes
       url: docs/addon/
     - title: 扩展

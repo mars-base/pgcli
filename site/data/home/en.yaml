@@ -32,8 +32,8 @@ cards:
       desc: Patroni high availability — automatic failover, a DCS-backed cluster, cross-host members, cluster PITR, and direct SQL.
       icon: fa-solid fa-sitemap
       url: docs/ha-cluster/
-    - title: Addons
-      desc: "One-command companion containers around an instance or cluster: PgBouncer, etcd, PgDog, PostgREST, HAProxy, MinIO / silo / rustfs, Redis, and Predixy."
+    - title: Addons & Toolbox
+      desc: "Companion services around an instance or cluster — PgBouncer, etcd, MinIO / silo / rustfs, Redis, Kafka, etc. — plus standalone [Toolbox](docs/toolbox/) utilities such as ZFS, PGMQ, SQLite + Litestream and daemons."
       icon: fa-solid fa-cubes
       url: docs/addon/
     - title: Extensions
