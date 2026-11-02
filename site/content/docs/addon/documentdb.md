@@ -55,7 +55,7 @@ The install prints the one-time password and the endpoint:
 ✓ DocumentDB gateway installed: "documentdb"
   Container:  pgcli-documentdb-documentdb
   Image:      ghcr.io/mars-base/pgcli/pgcli-documentdb-gateway:1.0.0
-  Endpoint:   mongodb://docdb_admin@127.0.0.1:10260/?directConnection=true
+  Endpoint:   mongodb://docdb_admin@127.0.0.1:10260/demo_db?directConnection=true
   Target:     instance demo (database demo_db)
   Client:     docdb_admin (DocumentDB native user)
   TLS mode:   allow
@@ -117,6 +117,121 @@ PY
 ```
 
 Run it on the host where the add-on listens; from another machine set `MONGO_HOST` to the gateway host. TLS is off by default in the script: run with `MONGO_TLS=true` to enable it. This works in both `allow` and `require` modes (plaintext is rejected in `require` anyway). `tlsAllowInvalidCertificates` is needed only because the auto-generated certificate is self-signed; with a certificate you trust, use `tlsCAFile="/path/to/ca.pem"` instead.
+
+## Management CLI (mongosh)
+
+pgcli can connect to and inspect a managed or remote gateway with `mongosh` without installing it on the host and without adding a MongoDB driver to the pgcli binary. The client runs from a separate mongosh-only image — the official mongosh 2.14.1 binary on `debian:13-slim`, no MongoDB server — which is pulled on first use and runs as a throwaway container. The pgcli binary does not grow.
+
+```bash
+pg addon documentdb shell
+pg addon documentdb shell --database app
+pg addon documentdb shell -- --eval 'db.version()'
+
+pg addon documentdb databases list
+pg addon documentdb collections list --database app
+pg addon documentdb indexes list --database app --collection orders
+```
+
+All subcommands accept the same persistent flags:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--name` | `documentdb` | Gateway add-on to connect to (explicit `--name` forces local mode and ignores `DOCDB_URI`) |
+| `--dsn` | `$DOCDB_URI` | Full MongoDB connection string — recommended for a gateway on another host |
+| `--uri` | — | Alias for `--dsn` |
+| `--host` / `--port` | — / `10260` | Alternative to `--dsn` |
+| `--username` / `--password` | `$DOCDB_USERNAME` / `$DOCDB_PASSWORD` | Credentials with `--host`; prefer the environment over `--password`, which is visible in `ps` |
+| `--tls` | false | Force TLS. Enabled automatically when a managed gateway's `--tls-mode` is `require` |
+| `--image` | `ghcr.io/mars-base/pgcli/pgcli-mongosh:2.14.1` | Client image override (private registry or offline) |
+
+`shell` opens an interactive session; `--database` selects the initial database (the gateway's target database or the URI's database by default), and arguments after `--` are forwarded to mongosh verbatim. `databases list`, `collections list`, and `indexes list` run read-only queries and print one name (or one JSON index document) per line; `indexes list` requires `--collection`.
+
+### Remote Gateways
+
+No local add-on entry is needed to drive a gateway on another host. Export the connection string once so the commands stay short:
+
+```bash
+export DOCDB_PASSWORD='...'   # from the gateway host: pg addon password documentdb
+export DOCDB_URI='mongodb://docdb_admin@10.0.0.5:10260/demo_db?authSource=admin&directConnection=true'
+
+pg addon documentdb databases list
+pg addon documentdb collections list --database demo_db
+pg addon documentdb shell -- --eval 'db.version()'
+```
+
+Use `--dsn` (or its alias `--uri`) for one-off commands:
+
+```bash
+pg addon documentdb collections list \
+  --dsn 'mongodb://docdb_admin@10.0.0.5:10260/demo_db'
+```
+
+Rules:
+
+- A password missing from the URI is filled from `DOCDB_PASSWORD`; missing userinfo is filled from `DOCDB_USERNAME`. Prefer these environment variables over `--password`, whose value appears in `ps`.
+- pgcli adds `authSource=admin`, `directConnection=true`, and `serverSelectionTimeoutMS=10000` when the URI omits them. Values already in the URI, including its database path, win.
+- `--tls` forces TLS by adding `tls=true&tlsAllowInvalidCertificates=true`. Use it with a gateway in `require` mode, or put the TLS parameters in the URI yourself.
+- `--dsn`/`--uri` cannot be combined with `--host/--port/--username/--password`, and `--name` cannot be combined with any remote flag. Explicit remote flags take precedence over `DOCDB_URI`.
+- `--host HOST --port PORT --username USER` remains available as an alternative; the password comes from `DOCDB_PASSWORD`.
+- The client host needs podman and the mongosh image, pulled from GHCR on first use (`--image` overrides it). The gateway must listen on an address reachable from the client: the default `--listen 0.0.0.0` works; `127.0.0.1` restricts it to the gateway host.
+
+Remote mode only changes where the mongosh client connects — the gateway itself still targets a local PostgreSQL instance on its own host.
+
+### Common mongosh Operations
+
+`shell` forwards everything after `--` to mongosh. Everyday commands:
+
+```javascript
+// inventory
+db                       // current database
+show dbs                 // DocumentDB lists a database only after it has a collection
+show collections
+use demo_db              // switch (creates the database implicitly on first write)
+
+// write and read
+db.users.insertOne({name: "alice", age: 30})
+db.users.insertMany([{name: "bob"}, {name: "carol", age: 41}])
+db.users.findOne({name: "alice"})
+db.users.find({age: {$gte: 30}}).forEach(printjson)
+db.users.countDocuments({age: {$gte: 30}})
+
+// update and delete
+db.users.updateOne({name: "alice"}, {$set: {age: 31}})
+db.users.updateMany({}, {$inc: {visits: 1}})
+db.users.deleteOne({name: "bob"})
+db.users.deleteMany({age: {$lt: 18}})
+
+// indexes: 1 = ascending, -1 = descending
+db.users.createIndex({name: 1})
+db.users.createIndex({tenant: 1, createdAt: -1})   // compound: tenant asc, createdAt desc
+db.users.find({tenant: "acme"}).sort({tenant: 1, createdAt: -1})  // matches the compound index
+db.users.getIndexes()                              // key shows direction, e.g. {"name":1}
+db.users.dropIndex("name_1")
+
+// remove data
+db.users.drop()
+db.dropDatabase()
+```
+
+Run a single command without entering the shell:
+
+```bash
+pg addon documentdb shell -- --quiet --eval 'db.getSiblingDB("demo_db").users.countDocuments({})'
+pg addon documentdb shell --dsn 'mongodb://docdb_admin@10.0.0.5:10260/demo_db' \
+  -- --quiet --eval 'db.users.find({age: {$gte: 30}}).forEach(printjson)'
+```
+
+- `find()` shows the first 20 documents in an interactive session; type `it` for more, or `.forEach(printjson)` to print all.
+- `_id` is unique per collection, indexed automatically, and generated when omitted. Queries on `_id` do not need another index.
+- `drop()` and `dropDatabase()` delete data irreversibly. The read-only CLI helpers (`databases list`, `collections list`, `indexes list`) never write; use `shell` for document queries and writes.
+- DocumentDB does not implement every MongoDB command or query operator; check the upstream compatibility notes when a feature is missing.
+
+Notes:
+
+- The connection string is built from the add-on's `pg.yaml` entry (client user, password, port, TLS mode) in local mode, or from `--dsn`/`DOCDB_URI` in remote mode. The password reaches the container through an environment variable passed **by name only**, so it does not appear in podman's argv (`podman inspect`'s `Config.Cmd`).
+- DocumentDB reports only databases that contain collections. When a list is empty, pgcli prints an explanatory note on **stderr** and leaves stdout empty, so scripts can keep treating stdout as data.
+- The inspection subcommands are intentionally read-only. Create/drop database, collection, index, and user operations are not exposed yet; use `shell` (or a MongoDB driver) for writes.
+- The image sets mongosh's telemetry opt-out (`/home/mongosh/.mongodb/mongosh/config`, `{"enableTelemetry":false}`). mongosh 2.14.1 may still print its telemetry notice at startup.
 
 ## TLS
 
@@ -182,7 +297,7 @@ pg exec -i demo "SELECT usename, state, count(*) FROM pg_stat_activity WHERE bac
 
 ## Limitations
 
-- Local PG 18 instances only; standalone (not Patroni/HA); `--dsn` is unsupported.
+- Local PG 18 instances only; standalone (not Patroni/HA); `--dsn` is unsupported. (The `pg addon documentdb --dsn` client flag is unrelated — it points mongosh at a gateway running elsewhere.)
 - macOS is code-complete but untested.
 - TLS uses the auto-generated self-signed certificate only; custom certificates are not exposed yet.
 - `pg destroy` deletes the instance's socket volume. Remove the gateway **before** destroying its target instance.

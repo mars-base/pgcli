@@ -327,7 +327,11 @@ func documentDBEndpoint(dc *config.DocumentDBConfig, password string) string {
 		q.Set("tls", "true")
 		q.Set("tlsAllowInvalidCertificates", "true")
 	}
-	return "mongodb://" + userinfo + "@" + host + ":" + strconv.Itoa(dc.HostPort) + "/?" + q.Encode()
+	path := "/"
+	if dc.Database != "" {
+		path = "/" + url.PathEscape(dc.Database)
+	}
+	return "mongodb://" + userinfo + "@" + host + ":" + strconv.Itoa(dc.HostPort) + path + "?" + q.Encode()
 }
 
 func printDocumentDBSummary(dc *config.DocumentDBConfig, name string, installed, force bool, password string) {
@@ -352,7 +356,7 @@ func printDocumentDBSummary(dc *config.DocumentDBConfig, name string, installed,
 		fmt.Printf("  (printed once — retrieve it later with `pg addon password documentdb --name %s`)\n", name)
 		fmt.Println()
 		fmt.Println("  Python client example (see site/content/docs/addon/documentdb.md):")
-		fmt.Printf("    mongodb://%s:<password>@%s:%d/?directConnection=true\n", dc.ClientUser, endpointHost(dc), dc.HostPort)
+		fmt.Printf("    mongodb://%s:<password>@%s:%d/%s?directConnection=true\n", dc.ClientUser, endpointHost(dc), dc.HostPort, url.PathEscape(dc.Database))
 	}
 	fmt.Println()
 	fmt.Printf("  retrieve the password: pg addon password documentdb --name %s\n", name)

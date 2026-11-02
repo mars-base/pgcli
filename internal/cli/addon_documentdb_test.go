@@ -70,20 +70,20 @@ func TestDocumentDBEndpoint(t *testing.T) {
 			name:    "wildcard allow",
 			listen:  "0.0.0.0",
 			tlsMode: "allow",
-			want:    "mongodb://docdb_admin@127.0.0.1:10260/?directConnection=true",
+			want:    "mongodb://docdb_admin@127.0.0.1:10260/app?directConnection=true",
 		},
 		{
 			name:     "loopback require",
 			listen:   "127.0.0.1",
 			tlsMode:  "require",
 			password: "p@ss",
-			want:     "mongodb://docdb_admin:p%40ss@127.0.0.1:10260/?directConnection=true&tls=true&tlsAllowInvalidCertificates=true",
+			want:     "mongodb://docdb_admin:p%40ss@127.0.0.1:10260/app?directConnection=true&tls=true&tlsAllowInvalidCertificates=true",
 		},
 		{
 			name:    "ipv6 loopback",
 			listen:  "::1",
 			tlsMode: "allow",
-			want:    "mongodb://docdb_admin@[::1]:10260/?directConnection=true",
+			want:    "mongodb://docdb_admin@[::1]:10260/app?directConnection=true",
 		},
 	}
 	for _, tt := range tests {
@@ -92,6 +92,7 @@ func TestDocumentDBEndpoint(t *testing.T) {
 				ClientUser: "docdb_admin",
 				HostPort:   10260,
 				Listen:     tt.listen,
+				Database:   "app",
 				TLSMode:    tt.tlsMode,
 			}
 			if got := documentDBEndpoint(dc, tt.password); got != tt.want {

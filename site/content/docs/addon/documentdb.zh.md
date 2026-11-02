@@ -55,7 +55,7 @@ pg addon install documentdb --pg-name demo
 ✓ DocumentDB gateway installed: "documentdb"
   Container:  pgcli-documentdb-documentdb
   Image:      ghcr.io/mars-base/pgcli/pgcli-documentdb-gateway:1.0.0
-  Endpoint:   mongodb://docdb_admin@127.0.0.1:10260/?directConnection=true
+  Endpoint:   mongodb://docdb_admin@127.0.0.1:10260/demo_db?directConnection=true
   Target:     instance demo (database demo_db)
   Client:     docdb_admin (DocumentDB native user)
   TLS mode:   allow
@@ -117,6 +117,121 @@ PY
 ```
 
 脚本在插件监听的宿主上运行；从另一台机器运行则把 `MONGO_HOST` 设为网关宿主。脚本默认关闭 TLS：用 `MONGO_TLS=true` 启用。`allow` 与 `require` 模式都可用（`require` 下明文本来就会被拒绝）。只有在使用自动生成的自签证书时才需要 `tlsAllowInvalidCertificates`；如果你有可信证书，改用 `tlsCAFile="/path/to/ca.pem"`。
+
+## 管理命令（mongosh）
+
+pgcli 可以在不往宿主机安装 mongosh、也不给 pgcli 二进制增加 MongoDB driver 的前提下，连接并巡检受管网关或远程网关。客户端由独立的 mongosh-only 镜像提供——`debian:13-slim` 上的官方 mongosh 2.14.1 单文件二进制，不含 MongoDB server——首次使用时按需拉取，并以一次性容器运行。pgcli 二进制体积不增加。
+
+```bash
+pg addon documentdb shell
+pg addon documentdb shell --database app
+pg addon documentdb shell -- --eval 'db.version()'
+
+pg addon documentdb databases list
+pg addon documentdb collections list --database app
+pg addon documentdb indexes list --database app --collection orders
+```
+
+所有子命令共用同一组持久参数：
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--name` | `documentdb` | 要连接的网关插件名（显式 `--name` 强制本地模式并忽略 `DOCDB_URI`） |
+| `--dsn` | `$DOCDB_URI` | 完整 MongoDB 连接串——跨主机连接推荐使用 |
+| `--uri` | — | `--dsn` 的别名 |
+| `--host` / `--port` | — / `10260` | `--dsn` 的备选写法 |
+| `--username` / `--password` | `$DOCDB_USERNAME` / `$DOCDB_PASSWORD` | 配合 `--host` 使用；优先用环境变量，`--password` 会出现在 `ps` 中 |
+| `--tls` | false | 强制 TLS。受管网关的 `--tls-mode` 为 `require` 时自动启用 |
+| `--image` | `ghcr.io/mars-base/pgcli/pgcli-mongosh:2.14.1` | 覆盖客户端镜像（私有仓库或离线场景） |
+
+`shell` 打开交互会话；`--database` 指定初始数据库（默认是网关的目标数据库或 URI 中的数据库），`--` 之后的参数原样转交给 mongosh。`databases list`、`collections list`、`indexes list` 执行只读查询，每行输出一个名字（索引则输出一个 JSON 文档）；`indexes list` 必须提供 `--collection`。
+
+### 跨主机连接
+
+连接另一台主机上的网关不需要本地 add-on 配置。把连接串导出一次，后续命令就很短：
+
+```bash
+export DOCDB_PASSWORD='...'   # 在网关主机执行 pg addon password documentdb 获取
+export DOCDB_URI='mongodb://docdb_admin@10.0.0.5:10260/demo_db?authSource=admin&directConnection=true'
+
+pg addon documentdb databases list
+pg addon documentdb collections list --database demo_db
+pg addon documentdb shell -- --eval 'db.version()'
+```
+
+一次性命令直接用 `--dsn`（或别名 `--uri`）：
+
+```bash
+pg addon documentdb collections list \
+  --dsn 'mongodb://docdb_admin@10.0.0.5:10260/demo_db'
+```
+
+规则：
+
+- URI 中没有密码时用 `DOCDB_PASSWORD` 补全；没有 userinfo 时用 `DOCDB_USERNAME` 补全。优先用这些环境变量，`--password` 的值会出现在 `ps` 中。
+- URI 缺少 `authSource=admin`、`directConnection=true`、`serverSelectionTimeoutMS=10000` 时 pgcli 会补上；URI 中已有的值和数据库路径优先。
+- `--tls` 会加上 `tls=true&tlsAllowInvalidCertificates=true` 强制 TLS；连接 `require` 模式的网关时使用，或自行在 URI 中写 TLS 参数。
+- `--dsn`/`--uri` 不能与 `--host/--port/--username/--password` 组合，`--name` 不能与任何远程参数组合。显式的远程参数优先于 `DOCDB_URI`。
+- `--host HOST --port PORT --username USER` 作为备选写法保留；密码来自 `DOCDB_PASSWORD`。
+- 客户端主机需要 podman 和 mongosh 镜像，首次使用时从 GHCR 拉取（可用 `--image` 覆盖）。网关必须监听客户端可达的地址：默认 `--listen 0.0.0.0` 可用，`127.0.0.1` 只允许网关主机自身访问。
+
+远程模式只改变 mongosh 客户端连接的位置——网关本身仍然连接其所在主机上的本地 PostgreSQL 实例。
+
+### 常用 mongosh 操作
+
+`shell` 会把 `--` 之后的参数原样转交给 mongosh。日常操作示例：
+
+```javascript
+// 查看
+db                       // 当前数据库
+show dbs                 // DocumentDB 只列出已经有集合的数据库
+show collections
+use demo_db              // 切换数据库（首次写入时隐式创建）
+
+// 写入与查询
+db.users.insertOne({name: "alice", age: 30})
+db.users.insertMany([{name: "bob"}, {name: "carol", age: 41}])
+db.users.findOne({name: "alice"})
+db.users.find({age: {$gte: 30}}).forEach(printjson)
+db.users.countDocuments({age: {$gte: 30}})
+
+// 更新与删除
+db.users.updateOne({name: "alice"}, {$set: {age: 31}})
+db.users.updateMany({}, {$inc: {visits: 1}})
+db.users.deleteOne({name: "bob"})
+db.users.deleteMany({age: {$lt: 18}})
+
+// 索引：1 = 升序，-1 = 降序
+db.users.createIndex({name: 1})
+db.users.createIndex({tenant: 1, createdAt: -1})   // 复合索引：tenant 升序，createdAt 降序
+db.users.find({tenant: "acme"}).sort({tenant: 1, createdAt: -1})  // 与该复合索引的方向匹配
+db.users.getIndexes()                              // key 中显示方向，如 {"name":1}
+db.users.dropIndex("name_1")
+
+// 删除数据
+db.users.drop()
+db.dropDatabase()
+```
+
+不进交互 shell，直接执行单条命令：
+
+```bash
+pg addon documentdb shell -- --quiet --eval 'db.getSiblingDB("demo_db").users.countDocuments({})'
+pg addon documentdb shell --dsn 'mongodb://docdb_admin@10.0.0.5:10260/demo_db' \
+  -- --quiet --eval 'db.users.find({age: {$gte: 30}}).forEach(printjson)'
+```
+
+- 交互模式下 `find()` 先显示前 20 条，输入 `it` 继续；`.forEach(printjson)` 可一次打印全部。
+- `_id` 在每个集合内唯一、自动建立索引，省略时自动生成；按 `_id` 查询不需要额外索引。
+- `drop()` 与 `dropDatabase()` 会不可逆地删除数据。只读 CLI 命令（`databases list`、`collections list`、`indexes list`）绝不写入；文档查询和写操作统一走 `shell`。
+- DocumentDB 并未实现 MongoDB 的全部命令和查询操作符；遇到不支持的特性时参考上游兼容性说明。
+
+说明：
+
+- 本地模式下连接串由插件的 `pg.yaml` 配置（客户端用户、密码、端口、TLS 模式）生成；远程模式下来自 `--dsn`/`DOCDB_URI`。密码通过**仅传变量名**的环境变量进入容器，因此不会出现在 podman 的 argv（`podman inspect` 的 `Config.Cmd`）里。
+- DocumentDB 只报告包含集合的数据库。列表为空时 pgcli 会在 **stderr** 打印一行说明，stdout 保持为空，脚本仍可把 stdout 当作纯数据。
+- 巡检子命令有意保持只读。建/删数据库、集合、索引和用户等写操作暂未提供；需要写入时请用 `shell`（或 MongoDB driver）。
+- 镜像内置 mongosh 的遥测关闭配置（`/home/mongosh/.mongodb/mongosh/config`，`{"enableTelemetry":false}`）；mongosh 2.14.1 启动时仍可能打印遥测提示。
 
 ## TLS
 
@@ -182,7 +297,7 @@ pg exec -i demo "SELECT usename, state, count(*) FROM pg_stat_activity WHERE bac
 
 ## 限制
 
-- 仅本地 PG 18 实例；standalone（不支持 Patroni/HA）；不支持 `--dsn`。
+- 仅本地 PG 18 实例；standalone（不支持 Patroni/HA）；不支持 `--dsn`。（`pg addon documentdb --dsn` 客户端参数是另一回事——它让 mongosh 连接别处的网关。）
 - macOS 代码完成但未实测。
 - TLS 仅支持自动生成的自签证书；暂不支持自定义证书。
 - `pg destroy` 会删除实例的 socket volume。销毁目标实例**之前**先移除网关。

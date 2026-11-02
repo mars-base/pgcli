@@ -20,6 +20,8 @@ pgcli 使用的容器镜像及其默认 tag。
 | `ghcr.io/mars-base/pgcli/pgcli-rustfs` | `1.0.0` | rustfs（Rust 实现的 S3 存储），建立在 `docker.io/rustfs/rustfs:1.0.0` 之上的 wrapper | `DefaultRustfsImageTag` |
 | `ghcr.io/mars-base/pgcli/pgcli-influxdb` | `1.13.1` | InfluxDB 1.x 单节点时序库（官方 linux/amd64 1.13.1 二进制 + Alpine），单架构；`pg addon influxdb` 与 `pg influx` 共用 | `DefaultInfluxDBImageTag` |
 | `ghcr.io/mars-base/pgcli/pgcli-influx2tsdb` | `1.3.2` | influx2tsdb-proxy：在 PostgreSQL + TimescaleDB 上提供 InfluxDB 1.x HTTP API（Line Protocol + InfluxQL），单架构 amd64、无状态；目标库可为本地实例或远程 `--dsn` | `DefaultInflux2TSDBImageTag` |
+| `ghcr.io/mars-base/pgcli/pgcli-documentdb-gateway` | `1.0.0` | DocumentDB MongoDB wire protocol 网关（官方 Rust gateway `.deb` + `debian:13-slim`），不含 MongoDB server；仅本地 PG 18 + DocumentDB 扩展，经共享 Unix socket；双架构 manifest list | `DefaultDocumentDBImageTag` |
+| `ghcr.io/mars-base/pgcli/pgcli-mongosh` | `2.14.1` | mongosh 客户端（官方 2.14.1 单文件二进制 + `debian:13-slim`），不含 MongoDB server；由 `pg addon documentdb shell`/只读巡检按需拉取，pgcli 二进制不含 MongoDB driver；双架构 manifest list | `DefaultMongoshImageTag` |
 | `docker.io/clickhouse/clickhouse-server` | `26.8.36.3` | ClickHouse 单机列式 OLAP（26.8 LTS），纯上游官方镜像无 wrapper，多架构 manifest list；host 网络 | `DefaultClickHouseImageTag`（`ClickHouseImageTagForVersion`） |
 | `docker.io/apache/kafka` | `4.4.0` | Apache Kafka 4.x（KRaft-only，无需 ZooKeeper）broker+controller combined 节点，支持单机或跨主机静态 controller quorum，纯上游官方镜像无 wrapper，多架构 manifest list；host 网络，以 uid/gid 1000 运行 | `DefaultKafkaImageTag`（`KafkaImageTagForVersion`） |
 | `docker.io/edoburu/pgbouncer` | `v1.25.2-p0` | PostgreSQL 连接池 | `DefaultPgBouncerImageTag` |
@@ -113,6 +115,14 @@ podman save -o "$TARGET/pgcli-influxdb_1.13.1.tar" \
 podman pull ghcr.io/mars-base/pgcli/pgcli-influx2tsdb:1.3.2
 podman save -o "$TARGET/pgcli-influx2tsdb_1.3.2.tar" \
   ghcr.io/mars-base/pgcli/pgcli-influx2tsdb:1.3.2
+
+# documentdb gateway / mongosh 客户端均为双架构 manifest list，先按 amd64 pull 再 save
+podman pull --platform linux/amd64 ghcr.io/mars-base/pgcli/pgcli-documentdb-gateway:1.0.0
+podman save -o "$TARGET/pgcli-documentdb-gateway_1.0.0.tar" \
+  ghcr.io/mars-base/pgcli/pgcli-documentdb-gateway:1.0.0
+podman pull --platform linux/amd64 ghcr.io/mars-base/pgcli/pgcli-mongosh:2.14.1
+podman save -o "$TARGET/pgcli-mongosh_2.14.1.tar" \
+  ghcr.io/mars-base/pgcli/pgcli-mongosh:2.14.1
 
 # clickhouse 上游镜像是多架构 manifest list，先按 amd64 pull 再 save
 podman pull --platform linux/amd64 docker.io/clickhouse/clickhouse-server:26.8.36.3
@@ -235,6 +245,15 @@ done
   把上游 influx2tsdb-proxy 1.3.2 放到 Debian 上；上游只发 amd64，所以是**单架构镜像**
   （可直接 `podman save`）。代理本身**无状态**，数据全部落在 PostgreSQL + TimescaleDB；
   无认证、无 TLS（需要时用 nginx 前置）；`make container-build-influx2tsdb` 构建
+- **pgcli-documentdb-gateway**：pgcli 自建镜像，把官方 DocumentDB gateway 1.0.0 的
+  `.deb` 安装到 `debian:13-slim`，直接运行 daemon（绕过上游 all-in-one entrypoint 和
+  telemetry），渲染的 `SetupConfiguration.json` 显式关闭 metrics/tracing；双架构
+  manifest list，`make container-build-documentdb-gateway` 构建
+- **pgcli-mongosh**：pgcli 自建镜像，只含官方 mongosh 2.14.1 单文件二进制（Node SEA
+  release，sha256 校验后 strip）和 `debian:13-slim`，**不含 MongoDB server**；
+  内置 `{"enableTelemetry":false}`。由 `pg addon documentdb shell` 与只读巡检命令
+  首次使用时按需拉取，pgcli 二进制不链接 MongoDB driver；双架构 manifest list，
+  `make container-build-mongosh` 构建
 - **clickhouse**：纯上游官方 `docker.io/clickhouse/clickhouse-server`，无 wrapper，
   pin 到当前 LTS 线 `26.8.36.3`（多架构 manifest list，amd64 + arm64）。entrypoint
   以 **root** 运行，先修复 bind mount 目录属主，再 `su clickhouse` 降权到 uid/gid
@@ -365,7 +384,7 @@ done
 
 ---
 
-**最后更新**：2026-10-28（新增 Kafka 4.4.0 镜像；2026-10-27 新增 clickhouse 与 influx2tsdb 镜像；2026-10-23 新增 vlagent 镜像；同日新增 victorialogs 镜像；此前新增 vmcluster 三镜像于 2026-10-22；
+**最后更新**：2026-11-02（新增 pgcli-mongosh；同步补入 pgcli-documentdb-gateway；2026-10-28 新增 Kafka 4.4.0 镜像；2026-10-27 新增 clickhouse 与 influx2tsdb 镜像；2026-10-23 新增 vlagent 镜像；同日新增 victorialogs 镜像；此前新增 vmcluster 三镜像于 2026-10-22；
 此前新增 victoriametrics 镜像；
 此前新增 beegfs 三镜像于 2026-10-19，gitea 于 2026-10-16
 合入时补录，alertmanager 于 2026-10-15

@@ -9,7 +9,7 @@ LDFLAGS = -s -w \
 
 PLATFORMS = linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
-.PHONY: build clean test lint install build-all gencert container-build container-push container-build-minio container-push-minio container-build-mc container-push-mc container-build-patroni container-push-patroni container-build-rustfs container-push-rustfs container-build-predixy container-push-predixy container-build-influxdb container-push-influxdb container-build-influx2tsdb container-push-influx2tsdb container-build-documentdb-gateway container-push-documentdb-gateway container-images-export
+.PHONY: build clean test lint install build-all gencert container-build container-push container-build-minio container-push-minio container-build-mc container-push-mc container-build-patroni container-push-patroni container-build-rustfs container-push-rustfs container-build-predixy container-push-predixy container-build-influxdb container-push-influxdb container-build-influx2tsdb container-push-influx2tsdb container-build-documentdb-gateway container-push-documentdb-gateway container-build-mongosh container-push-mongosh container-images-export
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) .
@@ -266,6 +266,45 @@ container-build-documentdb-gateway:
 container-push-documentdb-gateway:
 	podman manifest push $(DOCDB_GW_IMAGE) $(DOCDB_GW_IMAGE) --all
 
+# mongosh client image — only the official mongosh binary (Node SEA release
+# tarball) on debian:13-slim, no MongoDB server. Used on demand by
+# `pg addon documentdb shell|databases|collections|indexes`; pgcli pulls it only
+# when one of those commands runs, so nothing is added to the pgcli binary.
+# Dual-arch with a manifest list, same shape as minio/mc. Only bin/mongosh is
+# kept (the 92 MB crypt shared object is intentionally dropped: pgcli never
+# uses client-side field encryption). The binary is stripped when the host
+# strip supports the target arch; cross-arch failures keep the original.
+MONGOSH_VERSION      ?= 2.14.1
+MONGOSH_IMAGE         = ghcr.io/mars-base/pgcli/pgcli-mongosh:$(MONGOSH_VERSION)
+MONGOSH_BASE          = https://downloads.mongodb.com/compass
+MONGOSH_ARCHS        ?= amd64 arm64
+MONGOSH_SHA256_amd64 ?= 8d24940ebe3675959b518fd41ea16b4e2182d6a75c09777db09cfa64e18834a1
+MONGOSH_SHA256_arm64 ?= cd7f1ae986baa400b021a2c0688aa3b64d6afcc3f7ab07833417a049e0cbf98b
+
+container-build-mongosh:
+	@for a in $(MONGOSH_ARCHS); do \
+	  case $$a in \
+	    amd64) a2=x64; sha=$(MONGOSH_SHA256_amd64);; \
+	    arm64) a2=arm64; sha=$(MONGOSH_SHA256_arm64);; \
+	    *) echo "unsupported arch: $$a" >&2; exit 1;; \
+	  esac; \
+	  tgz=/tmp/mongosh-$(MONGOSH_VERSION)-linux-$$a2.tgz; \
+	  curl -sfL --retry 3 -o $$tgz $(MONGOSH_BASE)/mongosh-$(MONGOSH_VERSION)-linux-$$a2.tgz || exit 1; \
+	  echo "$$sha  $$tgz" | sha256sum -c - || exit 1; \
+	  rm -rf /tmp/mongosh-ex; mkdir -p /tmp/mongosh-ex; \
+	  tar xzf $$tgz -C /tmp/mongosh-ex || exit 1; \
+	  d=$$(find /tmp/mongosh-ex -mindepth 1 -maxdepth 1 -type d -name 'mongosh-*' | head -n1); \
+	  [ -n "$$d" ] || { echo "mongosh package layout not recognised" >&2; exit 1; }; \
+	  cp "$$d/bin/mongosh" embed/mongosh || exit 1; \
+	  if ! strip embed/mongosh 2>/dev/null; then cp "$$d/bin/mongosh" embed/mongosh; fi; \
+	  chmod 0755 embed/mongosh; \
+	  podman build --platform linux/$$a --manifest $(MONGOSH_IMAGE) -t $(MONGOSH_IMAGE)-$$a -f embed/mongosh.Containerfile embed/ || exit 1; \
+	  rm -f embed/mongosh; \
+	done
+
+container-push-mongosh:
+	podman manifest push $(MONGOSH_IMAGE) $(MONGOSH_IMAGE) --all
+
 # Offline image export for the docs/images.md catalog (see that doc's
 # "镜像导出" section for the manual equivalents and the rustfs/redis
 # manifest-list caveat). Always pulls --platform linux/amd64 FIRST so a
@@ -287,6 +326,7 @@ IMAGES := \
 	ghcr.io/mars-base/pgcli/pgcli-influxdb:1.13.1 \
 	ghcr.io/mars-base/pgcli/pgcli-influx2tsdb:1.3.2 \
 	ghcr.io/mars-base/pgcli/pgcli-documentdb-gateway:1.0.0 \
+	ghcr.io/mars-base/pgcli/pgcli-mongosh:2.14.1 \
 	ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine \
 	docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z \
 	docker.io/postgrest/postgrest:v16.3 \

@@ -751,6 +751,12 @@ const DefaultDocumentDBImageTag = "ghcr.io/mars-base/pgcli/pgcli-documentdb-gate
 // DocumentDB gateway; additional instances take the next free port.
 const DefaultDocumentDBPort = 10260
 
+// DefaultMongoshImageTag pins the pgcli-built mongosh client image used by the
+// `pg addon documentdb` inspection subcommands. It contains only the official
+// mongosh binary (no MongoDB server), is pulled on demand, and is never
+// embedded in the pgcli binary.
+const DefaultMongoshImageTag = "ghcr.io/mars-base/pgcli/pgcli-mongosh:2.14.1"
+
 // DefaultGiteaImageTag pins the Gitea image. gitea/gitea is the official
 // multi-arch image on docker.io (pull-only — pgcli never builds it). Note the
 // version line: Gitea DROPPED the historical "1." prefix in late 2026, so the

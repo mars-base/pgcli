@@ -62,6 +62,10 @@ embed/predixy-conf
 # documentdb gateway: the .deb staged as embed/documentdb-gateway.deb by
 # `make container-build-documentdb-gateway`, deleted after the build.
 embed/documentdb-gateway.deb
+
+# mongosh client: the stripped release binary staged as embed/mongosh by
+# `make container-build-mongosh`, deleted after each arch build.
+embed/mongosh
 pg
 
 # Image export: `podman save` docker-archive tars written into images/ for
