@@ -84,10 +84,24 @@ type Config struct {
 
 // DaemonConfig describes a long-running host process managed by `pg daemon`.
 type DaemonConfig struct {
-	Command   []string `yaml:"command"`
-	Dir       string   `yaml:"dir,omitempty"`
-	LogFile   string   `yaml:"log_file,omitempty"`
-	Autostart bool     `yaml:"autostart,omitempty"`
+	Command   []string         `yaml:"command"`
+	Dir       string           `yaml:"dir,omitempty"`
+	LogFile   string           `yaml:"log_file,omitempty"`
+	LogRotate *DaemonLogRotate `yaml:"log_rotate,omitempty"`
+	Autostart bool             `yaml:"autostart,omitempty"`
+}
+
+// DaemonLogRotate configures rotation of a daemon's log. A nil pointer or a
+// value with neither MaxSize nor Daily set disables rotation.
+type DaemonLogRotate struct {
+	MaxSize int64 `yaml:"max_size,omitempty"` // bytes; 0 disables size-based rotation
+	Daily   bool  `yaml:"daily,omitempty"`
+	Keep    int   `yaml:"keep,omitempty"` // rotated files to retain; 0 keeps all
+}
+
+// Enabled reports whether any rotation trigger is configured.
+func (r *DaemonLogRotate) Enabled() bool {
+	return r != nil && (r.MaxSize > 0 || r.Daily)
 }
 
 // InstanceConfig is the configuration for a single database instance.

@@ -18,13 +18,16 @@ import (
 )
 
 var (
-	daemonAddDir      string
-	daemonAddLogFile  string
-	daemonAddForce    bool
-	daemonStopTimeout time.Duration
-	daemonLogsTail    int
-	daemonLogsFollow  bool
-	daemonRemoveClean bool
+	daemonAddDir        string
+	daemonAddLogFile    string
+	daemonAddLogMaxSize string
+	daemonAddLogDaily   bool
+	daemonAddLogKeep    int
+	daemonAddForce      bool
+	daemonStopTimeout   time.Duration
+	daemonLogsTail      int
+	daemonLogsFollow    bool
+	daemonRemoveClean   bool
 )
 
 var daemonCmd = &cobra.Command{
@@ -58,7 +61,12 @@ the command belong after "--"; flags before it configure pg daemon itself.
 
 Examples:
   pg daemon add webhook --dir /opt/webhook -- /opt/webhook/.venv/bin/uvicorn app:app --port 18801
-  pg daemon add tick -- /bin/sh -c 'while true; do echo tick; sleep 1; done'`,
+  pg daemon add webhook --log-max-size 10M --log-keep 3 -- /opt/webhook/.venv/bin/uvicorn app:app --port 18801
+  pg daemon add tick -- /bin/sh -c 'while true; do echo tick; sleep 1; done'
+
+Log rotation needs --log-max-size and/or --log-rotate-daily. Rotated files are
+named <log>-YYYY-MM-DDTHH-MM-SS.mmm<ext> and live next to the active log; the
+newest active log stays at the configured path.`,
 	Args: cobra.MinimumNArgs(2),
 	RunE: runDaemonAdd,
 }
@@ -112,13 +120,28 @@ var daemonRemoveCmd = &cobra.Command{
 	RunE:  runDaemonRemove,
 }
 
+var daemonSuperviseCmd = &cobra.Command{
+	Use:    "__supervise <name>",
+	Hidden: true,
+	Args:   cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := loadConfigForDSN(); err != nil {
+			return err
+		}
+		return daemon.Supervise(cfg, args[0])
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(daemonCmd)
 	daemonCmd.AddCommand(daemonAddCmd, daemonStartCmd, daemonStopCmd, daemonRestartCmd,
-		daemonStatusCmd, daemonListCmd, daemonLogsCmd, daemonRemoveCmd)
+		daemonStatusCmd, daemonListCmd, daemonLogsCmd, daemonRemoveCmd, daemonSuperviseCmd)
 
 	daemonAddCmd.Flags().StringVar(&daemonAddDir, "dir", "", "working directory (default: current directory)")
 	daemonAddCmd.Flags().StringVar(&daemonAddLogFile, "log-file", "", "log file (default: <base>/daemon/<name>/daemon.log; relative paths resolve against --dir)")
+	daemonAddCmd.Flags().StringVar(&daemonAddLogMaxSize, "log-max-size", "", "rotate the log when it exceeds this size (e.g. 10M, 1G)")
+	daemonAddCmd.Flags().BoolVar(&daemonAddLogDaily, "log-rotate-daily", false, "rotate the log at local midnight")
+	daemonAddCmd.Flags().IntVar(&daemonAddLogKeep, "log-keep", 7, "rotated log files to retain (0 = keep all)")
 	daemonAddCmd.Flags().BoolVar(&daemonAddForce, "force", false, "replace an existing daemon (must be stopped)")
 	daemonStopCmd.Flags().DurationVar(&daemonStopTimeout, "timeout", 10*time.Second, "grace period before SIGKILL")
 	daemonLogsCmd.Flags().IntVarP(&daemonLogsTail, "tail", "n", 100, "number of lines to show")
@@ -195,6 +218,11 @@ func runDaemonAdd(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	rotate, err := daemonRotateFromFlags(cmd)
+	if err != nil {
+		return err
+	}
+
 	if err := loadConfigForDSN(); err != nil {
 		return err
 	}
@@ -207,9 +235,10 @@ func runDaemonAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	dc := config.DaemonConfig{
-		Command: append([]string{bin}, command[1:]...),
-		Dir:     dir,
-		LogFile: logFile,
+		Command:   append([]string{bin}, command[1:]...),
+		Dir:       dir,
+		LogFile:   logFile,
+		LogRotate: rotate,
 	}
 	if exists {
 		dc.Autostart = old.Autostart
@@ -231,6 +260,7 @@ func runDaemonAdd(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Command: %s\n", daemon.CommandLine(dc))
 	fmt.Printf("  Dir:     %s\n", dc.Dir)
 	fmt.Printf("  Log:     %s\n", logPath)
+	fmt.Printf("  Rotate:  %s\n", daemon.LogRotateSummary(dc.LogRotate))
 	fmt.Printf("\nStart it with: pg daemon start %s\n", name)
 	return nil
 }
@@ -244,7 +274,7 @@ func runDaemonStart(cmd *cobra.Command, args []string) error {
 	if !ok {
 		return daemonNotFound(name)
 	}
-	already, err := daemon.Start(cfg, name)
+	already, err := daemon.Start(cfg, cfgPath, name)
 	if err != nil {
 		return err
 	}
@@ -290,7 +320,7 @@ func runDaemonRestart(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
-	already, err := daemon.Start(cfg, name)
+	already, err := daemon.Start(cfg, cfgPath, name)
 	if err != nil {
 		return err
 	}
@@ -346,6 +376,7 @@ func printDaemonStatus(name string, dc config.DaemonConfig) {
 	fmt.Printf("  Command:   %s\n", daemon.CommandLine(dc))
 	fmt.Printf("  Dir:       %s\n", dc.Dir)
 	fmt.Printf("  Log:       %s\n", daemon.LogFile(cfg, name, dc))
+	fmt.Printf("  Rotate:    %s\n", daemon.LogRotateSummary(dc.LogRotate))
 	fmt.Printf("  PID file:  %s\n", daemon.PIDFile(cfg, name))
 	fmt.Printf("  Autostart: %s\n", autostart)
 }
@@ -392,7 +423,36 @@ func runDaemonLogs(cmd *cobra.Command, args []string) error {
 	if !ok {
 		return daemonNotFound(name)
 	}
-	return tailHostLog(daemon.LogFile(cfg, name, dc), daemonLogsTail, daemonLogsFollow)
+	logPath := daemon.LogFile(cfg, name, dc)
+	if daemonLogsFollow && dc.LogRotate.Enabled() {
+		return followRotatedLog(logPath, daemonLogsTail)
+	}
+	return tailHostLog(logPath, daemonLogsTail, daemonLogsFollow)
+}
+
+// daemonRotateFromFlags validates the rotation flags. A rotation config is
+// only written when at least one trigger is requested, so older daemons keep
+// the direct (unsupervised) start path.
+func daemonRotateFromFlags(cmd *cobra.Command) (*config.DaemonLogRotate, error) {
+	sizeFlag := strings.TrimSpace(daemonAddLogMaxSize)
+	if sizeFlag == "" && !daemonAddLogDaily {
+		if cmd.Flags().Changed("log-keep") {
+			return nil, fmt.Errorf("--log-keep requires --log-max-size or --log-rotate-daily")
+		}
+		return nil, nil
+	}
+	if daemonAddLogKeep < 0 {
+		return nil, fmt.Errorf("--log-keep must be >= 0")
+	}
+	rotate := &config.DaemonLogRotate{Daily: daemonAddLogDaily, Keep: daemonAddLogKeep}
+	if sizeFlag != "" {
+		size, err := parseRAM(sizeFlag)
+		if err != nil {
+			return nil, fmt.Errorf("--log-max-size: %w", err)
+		}
+		rotate.MaxSize = size
+	}
+	return rotate, nil
 }
 
 func runDaemonRemove(cmd *cobra.Command, args []string) error {

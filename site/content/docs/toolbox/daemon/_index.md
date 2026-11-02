@@ -34,9 +34,10 @@ Only Linux is supported.
   `<base>/daemon/<name>/`.
 - `pg daemon add` resolves the executable to an absolute path, so starting at
   boot does not depend on `PATH`. Arguments are stored verbatim.
-- `pg daemon start` launches the process with `setsid`, appends stdout/stderr
-  to the log, and records the pid. The process survives the `pg` command
-  exiting.
+- `pg daemon start` launches the process with `setsid` and records the pid; the
+  process survives the `pg` command exiting. When rotation is enabled, a small
+  supervisor process forwards stdout/stderr to the rotating log instead (see
+  [Log rotation](#log-rotation)).
 - Liveness is checked against `/proc/<pid>/cmdline`, so a recycled pid is not
   mistaken for the daemon.
 - Stopping signals the whole process group: `SIGTERM`, wait up to
@@ -46,8 +47,9 @@ State layout (when `--log-file` is not set):
 
 | Path | Contents |
 |---|---|
-| `<base>/daemon/<name>/daemon.log` | stdout and stderr (append, never rotated) |
+| `<base>/daemon/<name>/daemon.log` | stdout and stderr (append; rotated when configured) |
 | `<base>/daemon/<name>/daemon.pid` | `<pid>` and the recorded binary path |
+| `<base>/daemon/<name>/supervisor.log` | rotation supervisor diagnostics (only with rotation) |
 
 `<base>` is `base_dir` from `pg.yaml` when set, otherwise the platform default
 (usually `~/.pgcli`).
@@ -58,7 +60,9 @@ The daemon name and its command must be separated by `--`. Flags before `--`
 configure `pg daemon`; everything after it belongs to the command:
 
 ```bash
-pg daemon add <name> [--dir DIR] [--log-file PATH] [--force] -- <command> [args...]
+pg daemon add <name> [--dir DIR] [--log-file PATH] \
+  [--log-max-size SIZE] [--log-rotate-daily] [--log-keep N] \
+  [--force] -- <command> [args...]
 ```
 
 ```bash
@@ -77,6 +81,9 @@ pg daemon add tick -- /bin/sh -c 'while true; do date; sleep 60; done'
 |---|---|---|
 | `--dir` | current directory at `add` time | Working directory of the process; must exist |
 | `--log-file` | `<base>/daemon/<name>/daemon.log` | Stored as an absolute path. **A relative value resolves against `--dir`**; parent dir is created on start |
+| `--log-max-size` | disabled | Rotate when the log exceeds this size, e.g. `10M`, `1G` |
+| `--log-rotate-daily` | false | Rotate at local midnight |
+| `--log-keep` | 7 | Rotated files to retain; `0` keeps all. Requires one of the rotation triggers |
 | `--force` | false | Replace an existing registration; the daemon must be stopped |
 
 Notes:
@@ -145,8 +152,56 @@ pg daemon stop webhook --timeout 30s
 - `stop` affects the whole process group, so a wrapper script that spawned a
   worker does not leave the worker behind. It does **not** change the
   `autostart` flag, matching `pg stop` for instances.
-- `status` shows state, pid, command, working directory, log path and autostart
-  flag; `list` prints one table row per daemon.
+- `status` shows state, pid, command, working directory, log path, rotation
+  settings and autostart flag; `list` prints one table row per daemon.
+
+## Log rotation
+
+A long-running receiver should not grow its log without bound. Enable rotation
+when the daemon is registered:
+
+```bash
+# rotate at 10 MB, keep the 7 most recent rotated files
+pg daemon add webhook --dir /opt/webhook --log-max-size 10M --log-keep 7 -- \
+  /opt/webhook/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 18801
+
+# rotate at local midnight, keep every rotated file
+pg daemon add audit --log-rotate-daily --log-keep 0 -- /opt/bin/audit
+```
+
+- At least one trigger, `--log-max-size SIZE` or `--log-rotate-daily`, is
+  required. Passing only `--log-keep` is an error.
+- `SIZE` accepts `512K`, `10M`, `1G`, a byte count, and so on; it is rounded up
+  to whole megabytes because that is the rotation library's granularity.
+- `--log-keep N` retains the `N` newest rotated files. The default is `7`;
+  `0` keeps all of them.
+- Both triggers can be combined; whichever fires first rotates the file.
+
+Rotated files live next to the active log and are named
+`<base>-YYYY-MM-DDTHH-MM-SS.mmm<ext>`: `daemon.log` produces files such as
+`daemon-2026-11-02T17-35-24.123.log`. The active log always keeps the configured
+path, so `pg daemon logs` and external collectors can keep reading it.
+
+Rotation is lazy. The size is checked on every write, so the file may slightly
+exceed the limit before the next write triggers a rotation. A date boundary is
+applied on the first write of the new day — an idle daemon does not rotate until
+it writes again. If the daemon is restarted after midnight, the previous day's
+file is moved aside before the first new line is appended. Timestamps use local
+time.
+
+With rotation enabled, pgcli keeps a small supervisor process
+(`pg daemon __supervise <name>`) between the pid file and the command. It
+forwards stdout/stderr and owns the log file; this is what allows rotation to
+happen while no `pg` command is running. `pg daemon stop` still signals the
+whole process group, so the supervisor and the command exit together.
+Supervisor diagnostics are written to `<base>/daemon/<name>/supervisor.log`.
+
+Two side effects of rotation:
+
+- Newly created log files have mode `0600` (without rotation the log is created
+  `0644`). Adjust permissions if another user must read it.
+- `pg daemon logs <name> -f` switches to `tail -F`, so following continues in
+  the new file after a rotation.
 
 ## Remove
 
@@ -157,8 +212,9 @@ pg daemon remove webhook --clean-log
 
 `remove` stops the process and deletes the entry from `pg.yaml`. If autostart
 was enabled, the boot service is refreshed or removed when no targets remain.
-`--clean-log` also deletes `<base>/daemon/<name>/` (the default log and pid
-file). A custom `--log-file` is left untouched and reported.
+`--clean-log` also deletes `<base>/daemon/<name>/` (the default log, rotated
+backups, pid file and supervisor log). A custom `--log-file` is left untouched
+and reported; its rotated siblings stay next to it as well.
 
 ## Auto-start on boot
 
@@ -237,7 +293,7 @@ async def receive(request: Request):
 Register and run:
 
 ```bash
-pg daemon add webhook --dir /opt/webhook -- \
+pg daemon add webhook --dir /opt/webhook --log-max-size 10M --log-keep 7 -- \
   /opt/webhook/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 18801
 
 pg daemon start webhook
@@ -286,9 +342,8 @@ configuration in the command's script rather than in `~/.bashrc`.
 
 - Linux only.
 - One process per daemon entry; no supervision, backoff or restart policy.
-- Logs are appended forever and never rotated. Use a custom `--log-file` and an
-  external rotation tool for long-running receivers, or add rotation inside the
-  command.
+- Logs are appended forever unless rotation is configured; use
+  `--log-max-size` and/or `--log-rotate-daily` for long-running receivers.
 - Stopping is process-group based. A daemon that deliberately escapes its
   process group (for example with its own `setsid`) may leave children behind.
 - Registration captures the command line, not a shell. Shell syntax such as

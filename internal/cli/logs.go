@@ -765,6 +765,15 @@ func tailHostLog(path string, tail int, follow bool) error {
 	return nil
 }
 
+// followRotatedLog is tailHostLog's follow mode for rotating logs: -F keeps
+// following the path after rotation renames the active file.
+func followRotatedLog(path string, tail int) error {
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("log file %s: %w", path, err)
+	}
+	return followFile("-n", fmt.Sprintf("%d", max(tail, 10)), "-F", path)
+}
+
 // followFile runs `tail -f` with the file's parent dir made group-readable-safe
 // and forwards interrupt/TERM so Ctrl-C detaches cleanly (reusing the repo's
 // stopSignal/killSelf convention from ha_restore).

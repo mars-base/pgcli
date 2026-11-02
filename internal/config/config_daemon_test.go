@@ -32,6 +32,7 @@ func TestDaemonSaveLoadRoundTrip(t *testing.T) {
 			Command:   []string{"/opt/webhook/bin/uvicorn", "app:app", "--port", "18801"},
 			Dir:       "/opt/webhook",
 			LogFile:   "/var/log/webhook.log",
+			LogRotate: &DaemonLogRotate{MaxSize: 10 << 20, Daily: true, Keep: 3},
 			Autostart: true,
 		},
 	}
@@ -52,6 +53,20 @@ func TestDaemonSaveLoadRoundTrip(t *testing.T) {
 	}
 	if d.Dir != "/opt/webhook" || d.LogFile != "/var/log/webhook.log" || !d.Autostart {
 		t.Errorf("daemon = %+v", d)
+	}
+	if d.LogRotate == nil || d.LogRotate.MaxSize != 10<<20 || !d.LogRotate.Daily || d.LogRotate.Keep != 3 {
+		t.Errorf("LogRotate = %+v", d.LogRotate)
+	}
+	if !d.LogRotate.Enabled() {
+		t.Error("Enabled() = false, want true")
+	}
+}
+
+func TestDaemonLogRotateDisabled(t *testing.T) {
+	for _, r := range []*DaemonLogRotate{nil, {}, {Keep: 7}} {
+		if r.Enabled() {
+			t.Errorf("Enabled(%+v) = true, want false", r)
+		}
 	}
 }
 

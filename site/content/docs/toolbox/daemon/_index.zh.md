@@ -31,8 +31,9 @@ webhook 接收端、同步 agent，或任何需要在后台常驻的程序。整
   状态目录。
 - `pg daemon add` 会把可执行文件解析为绝对路径，开机时不再依赖 `PATH`；参数按
   原样保存。
-- `pg daemon start` 用 `setsid` 启动进程，把 stdout/stderr 追加到日志，并记录 pid。
-  `pg` 命令退出后进程继续运行。
+- `pg daemon start` 用 `setsid` 启动进程并记录 pid，`pg` 命令退出后进程继续运行。
+  启用轮转时，改由一个很小的 supervisor 进程把 stdout/stderr 转发到轮转日志
+  （见下文“日志轮转”）。
 - 存活检查会比对 `/proc/<pid>/cmdline`，避免 pid 被复用时误判。
 - 停止时向整个进程组发信号：先 `SIGTERM`，等待 `--timeout`，仍未退出则
   `SIGKILL`。
@@ -41,8 +42,9 @@ webhook 接收端、同步 agent，或任何需要在后台常驻的程序。整
 
 | 路径 | 内容 |
 |---|---|
-| `<base>/daemon/<name>/daemon.log` | stdout 与 stderr（追加写，不轮转） |
+| `<base>/daemon/<name>/daemon.log` | stdout 与 stderr（追加写；启用轮转后自动切分） |
 | `<base>/daemon/<name>/daemon.pid` | `<pid>` 与记录的二进制路径 |
+| `<base>/daemon/<name>/supervisor.log` | 轮转 supervisor 的诊断输出（仅启用轮转时存在） |
 
 `<base>` 优先取 `pg.yaml` 中的 `base_dir`，否则使用平台默认目录（通常是
 `~/.pgcli`）。
@@ -53,7 +55,9 @@ daemon 名称与命令之间必须用 `--` 分隔。`--` 之前的参数配置 `
 全部属于被运行的命令：
 
 ```bash
-pg daemon add <name> [--dir DIR] [--log-file PATH] [--force] -- <command> [args...]
+pg daemon add <name> [--dir DIR] [--log-file PATH] \
+  [--log-max-size SIZE] [--log-rotate-daily] [--log-keep N] \
+  [--force] -- <command> [args...]
 ```
 
 ```bash
@@ -72,6 +76,9 @@ pg daemon add tick -- /bin/sh -c 'while true; do date; sleep 60; done'
 |---|---|---|
 | `--dir` | 执行 `add` 时的当前目录 | 进程的工作目录；必须存在 |
 | `--log-file` | `<base>/daemon/<name>/daemon.log` | 保存为绝对路径。**相对路径按 `--dir` 解析**；启动时自动创建父目录 |
+| `--log-max-size` | 禁用 | 日志超过该大小时轮转，如 `10M`、`1G` |
+| `--log-rotate-daily` | false | 本地时间跨天时轮转 |
+| `--log-keep` | 7 | 保留的轮转文件数；`0` 表示全部保留。必须同时启用至少一个轮转条件 |
 | `--force` | false | 替换已存在的登记；要求 daemon 当前未运行 |
 
 注意：
@@ -131,8 +138,49 @@ pg daemon stop webhook --timeout 30s
   ——命令会失败并打印日志末尾 20 行，便于立刻定位原因。
 - `stop` 作用于整个进程组，包装脚本派生的 worker 不会残留。它**不会**改变
   `autostart` 标记，与实例的 `pg stop` 行为一致。
-- `status` 显示运行状态、pid、命令、工作目录、日志路径和 autostart 标记；
-  `list` 以表格形式每行输出一个 daemon。
+- `status` 显示运行状态、pid、命令、工作目录、日志路径、轮转设置和 autostart
+  标记；`list` 以表格形式每行输出一个 daemon。
+
+## 日志轮转
+
+长期运行的接收端不应让日志无限增长。在登记时开启轮转：
+
+```bash
+# 达到 10 MB 轮转，保留最近 7 个轮转文件
+pg daemon add webhook --dir /opt/webhook --log-max-size 10M --log-keep 7 -- \
+  /opt/webhook/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 18801
+
+# 本地时间跨天后首次写入时轮转，保留全部历史文件
+pg daemon add audit --log-rotate-daily --log-keep 0 -- /opt/bin/audit
+```
+
+- `--log-max-size SIZE` 和 `--log-rotate-daily` 至少要给一个；只给 `--log-keep`
+  会报错。
+- `SIZE` 支持 `512K`、`10M`、`1G` 或字节数等写法，并按整 MB 向上取整（轮转库
+  的粒度）。
+- `--log-keep N` 保留最新的 N 个轮转文件，默认 `7`；`0` 表示全部保留。
+- 两个触发条件可以同时启用，谁先满足就按谁轮转。
+
+轮转文件与活动日志位于同一目录，命名为 `<base>-YYYY-MM-DDTHH-MM-SS.mmm<ext>`：
+`daemon.log` 会产生类似 `daemon-2026-11-02T17-35-24.123.log` 的文件。活动日志
+始终保留配置的路径，`pg daemon logs` 和外部采集器可以继续按原路径读取。
+
+轮转是惰性的：大小在每次写入时检查，因此文件可能略微超过上限，等下一次写入
+才切换。跨天同样在下一天首次写入时处理——空闲的 daemon 不会在零点立刻换文件。
+若 daemon 在跨天后才重启，昨天的文件会先被移走，再写入新内容。时间戳使用本地
+时间。
+
+启用轮转后，pgcli 会在 pid 文件与命令之间保留一个很小的 supervisor 进程
+（`pg daemon __supervise <name>`），由它转发 stdout/stderr 并持有日志文件；
+这是在没有 `pg` 命令运行时也能轮转的原因。`pg daemon stop` 仍然向整个进程组
+发信号，supervisor 与命令一起退出。supervisor 自身的诊断输出写入
+`<base>/daemon/<name>/supervisor.log`。
+
+启用轮转后有两个额外差异：
+
+- 新建的日志文件权限为 `0600`（未启用轮转时是 `0644`）。如果其他用户需要读取，
+  请自行调整权限。
+- `pg daemon logs <name> -f` 会改用 `tail -F`，轮转后继续跟随新文件。
 
 ## 移除
 
@@ -143,8 +191,8 @@ pg daemon remove webhook --clean-log
 
 `remove` 先停止进程，再从 `pg.yaml` 删除记录。若曾启用 autostart，会刷新启动
 服务；没有剩余目标时自动卸载。`--clean-log` 还会删除
-`<base>/daemon/<name>/`（默认日志与 pid 文件）。自定义 `--log-file` 不会被删除，
-命令会给出提示。
+`<base>/daemon/<name>/`（默认日志、轮转备份、pid 文件与 supervisor 日志）。
+自定义 `--log-file` 不会被删除，命令会给出提示；它的轮转文件也留在同一目录。
 
 ## 开机自启
 
@@ -216,7 +264,7 @@ async def receive(request: Request):
 登记并启动：
 
 ```bash
-pg daemon add webhook --dir /opt/webhook -- \
+pg daemon add webhook --dir /opt/webhook --log-max-size 10M --log-keep 7 -- \
   /opt/webhook/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 18801
 
 pg daemon start webhook
@@ -263,8 +311,8 @@ tail -n 1 /opt/webhook/alerts.log
 
 - 仅支持 Linux。
 - 每个 daemon 对应一个进程；没有监督、退避或重启策略。
-- 日志只追加、不轮转。长期运行的接收端可使用自定义 `--log-file` 并配合外部
-  轮转工具，或在命令内部实现轮转。
+- 未配置轮转时日志会一直追加；长期运行的接收端请使用 `--log-max-size` 和/或
+  `--log-rotate-daily`。
 - 停止基于进程组。如果 daemon 主动脱离进程组（例如自己调用 `setsid`），其子进程
   可能残留。
 - 登记保存的是命令行而不是 shell。管道、`&&` 等 shell 语法必须显式交给

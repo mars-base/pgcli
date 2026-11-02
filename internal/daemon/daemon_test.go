@@ -23,7 +23,7 @@ func TestStartStopRunning(t *testing.T) {
 		"sleep": {Command: []string{"/bin/sh", "-c", "sleep 30"}, Dir: t.TempDir()},
 	}
 
-	already, err := Start(c, "sleep")
+	already, err := Start(c, "", "sleep")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestStartStopRunning(t *testing.T) {
 		t.Fatalf("PID = %d", pid)
 	}
 
-	already, err = Start(c, "sleep")
+	already, err = Start(c, "", "sleep")
 	if err != nil {
 		t.Fatalf("second Start: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestStartImmediateExitReportsLogTail(t *testing.T) {
 		"boom": {Command: []string{"/bin/sh", "-c", "echo boom; exit 1"}},
 	}
 
-	_, err := Start(c, "boom")
+	_, err := Start(c, "", "boom")
 	if err == nil {
 		t.Fatal("Start should fail when the process exits immediately")
 	}
@@ -72,10 +72,10 @@ func TestStartImmediateExitReportsLogTail(t *testing.T) {
 func TestStartRejectsEmptyCommand(t *testing.T) {
 	c := testConfig(t)
 	c.Daemons = map[string]config.DaemonConfig{"empty": {}}
-	if _, err := Start(c, "empty"); err == nil {
+	if _, err := Start(c, "", "empty"); err == nil {
 		t.Fatal("Start should reject an empty command")
 	}
-	if _, err := Start(c, "missing"); err == nil {
+	if _, err := Start(c, "", "missing"); err == nil {
 		t.Fatal("Start should reject an unknown daemon")
 	}
 }

@@ -71,17 +71,34 @@ func TestAliveGuardsPIDReuse(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "x.pid")
 	// Record our own pid but a binary we are not running.
-	if err := writePID(pidFile, "/definitely-not-me", os.Getpid()); err != nil {
+	if err := writePID(pidFile, "/definitely-not-me", os.Getpid(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if Alive(pidFile) {
 		t.Error("cmdline mismatch should report not-alive")
 	}
-	if err := writePID(pidFile, os.Args[0], os.Getpid()); err != nil {
+	if err := writePID(pidFile, os.Args[0], os.Getpid(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if !Alive(pidFile) {
 		t.Error("self should be alive under its own argv[0]")
+	}
+}
+
+func TestAliveRequiresMatchArgs(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "match.pid")
+	if err := writePID(pidFile, os.Args[0], os.Getpid(), []string{"__not_in_cmdline__"}); err != nil {
+		t.Fatal(err)
+	}
+	if Alive(pidFile) {
+		t.Error("missing match arg should report not-alive")
+	}
+	if err := writePID(pidFile, os.Args[0], os.Getpid(), []string{os.Args[0]}); err != nil {
+		t.Fatal(err)
+	}
+	if !Alive(pidFile) {
+		t.Error("present match arg should report alive")
 	}
 }
 

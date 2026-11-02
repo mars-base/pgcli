@@ -16,9 +16,10 @@ import (
 
 // Layout is the per-daemon state directory and its default files.
 type Layout struct {
-	StateDir string
-	LogFile  string
-	PIDFile  string
+	StateDir      string
+	LogFile       string
+	PIDFile       string
+	SupervisorLog string
 }
 
 // BaseDir returns the pgcli base directory (config BaseDir, else the platform
@@ -34,9 +35,10 @@ func BaseDir(c *config.Config) string {
 func NewLayout(c *config.Config, name string) Layout {
 	state := filepath.Join(BaseDir(c), "daemon", name)
 	return Layout{
-		StateDir: state,
-		LogFile:  filepath.Join(state, "daemon.log"),
-		PIDFile:  filepath.Join(state, "daemon.pid"),
+		StateDir:      state,
+		LogFile:       filepath.Join(state, "daemon.log"),
+		PIDFile:       filepath.Join(state, "daemon.pid"),
+		SupervisorLog: filepath.Join(state, "supervisor.log"),
 	}
 }
 
@@ -46,6 +48,35 @@ func LogFile(c *config.Config, name string, dc config.DaemonConfig) string {
 		return dc.LogFile
 	}
 	return NewLayout(c, name).LogFile
+}
+
+// LogRotateSummary renders rotation settings for status output.
+func LogRotateSummary(r *config.DaemonLogRotate) string {
+	if !r.Enabled() {
+		return "off"
+	}
+	var parts []string
+	if r.MaxSize > 0 {
+		parts = append(parts, "size "+humanMegabytes(r.MaxSize))
+	}
+	if r.Daily {
+		parts = append(parts, "daily")
+	}
+	keep := "all"
+	if r.Keep > 0 {
+		keep = strconv.Itoa(r.Keep)
+	}
+	return fmt.Sprintf("%s (keep %s)", strings.Join(parts, " + "), keep)
+}
+
+// humanMegabytes rounds up like the lumberjack MaxSize conversion, so the
+// display matches when rotation actually triggers.
+func humanMegabytes(n int64) string {
+	mb := (n + megabyte - 1) / megabyte
+	if mb >= 1024 && mb%1024 == 0 {
+		return fmt.Sprintf("%d GB", mb/1024)
+	}
+	return fmt.Sprintf("%d MB", mb)
 }
 
 // PIDFile returns the pid file path for a daemon.
@@ -77,8 +108,9 @@ func PID(c *config.Config, name string) int {
 }
 
 // Start launches the daemon if it is not already running. already is true when
-// the process was left untouched.
-func Start(c *config.Config, name string) (already bool, err error) {
+// the process was left untouched. cfgPath is the config file the supervisor
+// re-reads; it is only required when log rotation is enabled.
+func Start(c *config.Config, cfgPath, name string) (already bool, err error) {
 	dc, ok := c.Daemons[name]
 	if !ok {
 		return false, fmt.Errorf("daemon %q not found in config", name)
@@ -92,13 +124,18 @@ func Start(c *config.Config, name string) (already bool, err error) {
 	}
 
 	logFile := LogFile(c, name, dc)
-	if err := hostbin.StartDetachedSpec(hostbin.Spec{
-		Bin:     dc.Command[0],
-		Args:    dc.Command[1:],
-		Dir:     dc.Dir,
-		LogFile: logFile,
-		PIDFile: pidFile,
-	}); err != nil {
+	if dc.LogRotate.Enabled() {
+		err = startSupervised(c, cfgPath, name)
+	} else {
+		err = hostbin.StartDetachedSpec(hostbin.Spec{
+			Bin:     dc.Command[0],
+			Args:    dc.Command[1:],
+			Dir:     dc.Dir,
+			LogFile: logFile,
+			PIDFile: pidFile,
+		})
+	}
+	if err != nil {
 		return false, err
 	}
 
@@ -113,6 +150,32 @@ func Start(c *config.Config, name string) (already bool, err error) {
 		return false, fmt.Errorf("%s", msg)
 	}
 	return false, nil
+}
+
+// startSupervised detaches `pg daemon __supervise <name>` in place of the
+// daemon command so rotation keeps working after pgcli exits. The pid file
+// records the supervisor; MatchArgs keeps pid-reuse checks from accepting an
+// unrelated pg process.
+func startSupervised(c *config.Config, cfgPath, name string) error {
+	if cfgPath == "" {
+		return fmt.Errorf("daemon %q: config path required for log rotation", name)
+	}
+	absCfg, err := filepath.Abs(cfgPath)
+	if err != nil {
+		return fmt.Errorf("resolving config path: %w", err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locating pg executable: %w", err)
+	}
+	layout := NewLayout(c, name)
+	return hostbin.StartDetachedSpec(hostbin.Spec{
+		Bin:       self,
+		Args:      []string{"-c", absCfg, "daemon", "__supervise", name},
+		LogFile:   layout.SupervisorLog,
+		PIDFile:   layout.PIDFile,
+		MatchArgs: []string{"daemon", "__supervise", name},
+	})
 }
 
 // Stop terminates the daemon's process group, waiting up to grace before

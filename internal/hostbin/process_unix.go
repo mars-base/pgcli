@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -22,6 +23,10 @@ type Spec struct {
 	Dir     string
 	LogFile string
 	PIDFile string
+	// MatchArgs are extra argv fields recorded in the pid file and required by
+	// Alive, so a recycled pid running an unrelated instance of the same binary
+	// is not mistaken for this process.
+	MatchArgs []string
 }
 
 // StartDetached launches bin with args in a new session (setsid) so it
@@ -65,7 +70,7 @@ func StartDetachedSpec(s Spec) error {
 	// Detach: the child outlives us; no Wait, no zombie concern past exit.
 	_ = cmd.Process.Release()
 
-	if err := writePID(s.PIDFile, s.Bin, pid); err != nil {
+	if err := writePID(s.PIDFile, s.Bin, pid, s.MatchArgs); err != nil {
 		return err
 	}
 	return nil
@@ -94,7 +99,7 @@ func mergeEnv(base, override []string) []string {
 // forked a worker like juicefs mount -d does goes down too): TERM, wait up
 // to grace, then KILL. The pid file is removed either way.
 func Stop(pidFile string, grace time.Duration) error {
-	pid, _, err := readPID(pidFile)
+	pid, _, _, err := readPID(pidFile)
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -128,7 +133,7 @@ func Stop(pidFile string, grace time.Duration) error {
 // Alive reports whether the pid recorded in pidFile still runs the recorded
 // binary (cmdline match guards against pid reuse).
 func Alive(pidFile string) bool {
-	pid, bin, err := readPID(pidFile)
+	pid, bin, matchArgs, err := readPID(pidFile)
 	if err != nil {
 		return false
 	}
@@ -157,37 +162,67 @@ func Alive(pidFile string) bool {
 	// compare every field against the recorded path. The argv[0] basename
 	// fallback keeps compiled binaries working when they rewrite argv[0].
 	base := filepath.Base(bin)
+	matchedBin := false
 	for i, field := range fields {
 		if field == bin || (i == 0 && filepath.Base(field) == base) {
-			return true
+			matchedBin = true
+			break
 		}
 	}
-	return false
+	if !matchedBin || !containsAll(fields, matchArgs) {
+		return false
+	}
+	return true
 }
 
-func writePID(pidFile, bin string, pid int) error {
+// containsAll reports whether every want appears as an argv field.
+func containsAll(fields, want []string) bool {
+	for _, w := range want {
+		if !slices.Contains(fields, w) {
+			return false
+		}
+	}
+	return true
+}
+
+func writePID(pidFile, bin string, pid int, matchArgs []string) error {
+	var b strings.Builder
+	b.WriteString(strconv.Itoa(pid))
+	b.WriteString("\n")
+	b.WriteString(bin)
+	b.WriteString("\n")
+	for _, arg := range matchArgs {
+		b.WriteString(arg)
+		b.WriteString("\n")
+	}
 	tmp := pidFile + ".tmp"
-	if err := os.WriteFile(tmp, []byte(strconv.Itoa(pid)+"\n"+bin+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(tmp, []byte(b.String()), 0o644); err != nil {
 		return fmt.Errorf("hostbin: writing %s: %w", pidFile, err)
 	}
 	return os.Rename(tmp, pidFile)
 }
 
-// readPID parses "<pid>\n<binary>\n".
-func readPID(pidFile string) (int, string, error) {
+// readPID parses "<pid>\n<binary>\n[<match-arg>\n...]".
+func readPID(pidFile string) (int, string, []string, error) {
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
-		return 0, "", err
+		return 0, "", nil, err
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 	if len(lines) < 2 {
-		return 0, "", fmt.Errorf("hostbin: malformed pid file %s", pidFile)
+		return 0, "", nil, fmt.Errorf("hostbin: malformed pid file %s", pidFile)
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(lines[0]))
 	if err != nil {
-		return 0, "", fmt.Errorf("hostbin: pid file %s: %w", pidFile, err)
+		return 0, "", nil, fmt.Errorf("hostbin: pid file %s: %w", pidFile, err)
 	}
-	return pid, lines[1], nil
+	matchArgs := make([]string, 0, len(lines)-2)
+	for _, line := range lines[2:] {
+		if line = strings.TrimSpace(line); line != "" {
+			matchArgs = append(matchArgs, line)
+		}
+	}
+	return pid, lines[1], matchArgs, nil
 }
 
 // processGone reports whether err means the target no longer exists:

@@ -2137,7 +2137,7 @@ func startAutostartDaemons(c *config.Config) error {
 	sort.Strings(names)
 	var firstErr error
 	for _, name := range names {
-		already, err := daemon.Start(c, name)
+		already, err := daemon.Start(c, cfgPath, name)
 		if err != nil {
 			fmt.Printf("  [X] daemon autostart (%s): %v\n", name, err)
 			if firstErr == nil {
