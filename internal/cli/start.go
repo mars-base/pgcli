@@ -79,8 +79,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartNodeExporter(c) && !hasAutostartPGExporter(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartRabbitMQ(c) && !hasAutostartRocketMQ(c) && !hasAutostartNginx(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --kafka / --rabbitmq / --nginx / --nodeexporter / --pgexporter)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartNodeExporter(c) && !hasAutostartPGExporter(c) && !hasAutostartDocumentDB(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartRabbitMQ(c) && !hasAutostartRocketMQ(c) && !hasAutostartNginx(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --kafka / --rabbitmq / --nginx / --nodeexporter / --pgexporter / --documentdb)")
 		return nil
 	}
 
@@ -258,6 +258,12 @@ func startAutostart() error {
 	// container picks up a rotated instance password. No dependency on the
 	// PostgreSQL stack beyond that.
 	if err := startAutostartPGExporter(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// DocumentDB gateways (top-level addon). The instances above already ran,
+	// so each gateway's Unix-socket target can be verified before starting.
+	if err := startAutostartDocumentDB(c, path); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -1847,6 +1853,62 @@ func startAutostartPGExporter(c *config.Config) error {
 		}
 		if err := pe.StartContainer(&pc, monitorDSN); err != nil {
 			fmt.Printf("  [X] pgexporter autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartDocumentDB reports whether any DocumentDB gateway is
+// autostart-enabled.
+func hasAutostartDocumentDB(c *config.Config) bool {
+	for _, dc := range c.Addons.DocumentDB {
+		if dc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartDocumentDB starts each autostart-enabled DocumentDB gateway.
+// The target instance is started earlier in startAutostart, so a gateway whose
+// instance did not come up is reported and skipped. The pg-url/config files
+// are re-rendered first so the connection tracks the instance's current socket
+// port.
+func startAutostartDocumentDB(c *config.Config, path string) error {
+	var names []string
+	for name, dc := range c.Addons.DocumentDB {
+		if dc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	dm, err := podman.NewDocumentDBManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		dc := c.Addons.DocumentDB[name]
+		targetCfg, err := loadDocumentDBTargetConfig(path, dc.TargetInstance)
+		if err == nil {
+			_, err = verifyDocumentDBTarget(targetCfg, dc.Database)
+		}
+		if err == nil {
+			var urlFile, configFile string
+			urlFile, configFile, err = dm.WriteFiles(&dc, targetCfg.Podman.HostPort)
+			if err == nil {
+				err = dm.StartContainer(&dc, urlFile, configFile)
+			}
+		}
+		if err != nil {
+			fmt.Printf("  [X] documentdb autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}

@@ -1,11 +1,16 @@
 package podman
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -85,23 +90,34 @@ type extImageBuilder struct {
 func (b *extImageBuilder) build(fromTag string, pkgList []string, pigstyRepo string) (string, error) {
 	newTag := ExtensionImageTag(BaseImageTag(fromTag), pkgList)
 
-	// Filter to non-builtin extensions only, resolve apt package names
+	// Filter to non-builtin extensions only, resolve apt package names.
+	// DocumentDB ships as an official vendor DEB rather than through the
+	// Pigsty repo, so it is downloaded into the build context separately.
 	var aptPkgs []string
+	var checkPkgs []string
+	needDocDB := false
 	for _, name := range pkgList {
 		if ExtIsBuiltin(name) {
 			continue // already in base image
 		}
 		resolved := ResolveExtName(name)
+		if resolved == "documentdb" {
+			needDocDB = true
+			checkPkgs = append(checkPkgs, "postgresql-18-documentdb", "libicu74")
+			continue
+		}
 		pkg, _, _, _, found := LookupExtension(resolved)
 		if found && pkg != "" {
 			aptPkgs = append(aptPkgs, "postgresql-18-"+pkg)
+			checkPkgs = append(checkPkgs, "postgresql-18-"+pkg)
 		} else {
 			// Fallback: use the resolved name as package suffix
 			aptPkgs = append(aptPkgs, "postgresql-18-"+resolved)
+			checkPkgs = append(checkPkgs, "postgresql-18-"+resolved)
 		}
 	}
 
-	if len(aptPkgs) == 0 {
+	if len(checkPkgs) == 0 {
 		fmt.Println("-> All extensions are built-in (contrib), no image build needed")
 		return fromTag, nil
 	}
@@ -116,7 +132,9 @@ func (b *extImageBuilder) build(fromTag string, pkgList []string, pigstyRepo str
 	// base image when no -ext image exists at all.
 	buildFrom := newTag
 	if exists, _ := b.imageExists(newTag); exists {
-		if b.extImageHasPackages(newTag, aptPkgs) && sameImageUser(b.imageUser(newTag), baseUser) {
+		if b.extImageHasPackages(newTag, checkPkgs) &&
+			(!needDocDB || b.extImageHasDocDBPatch(newTag)) &&
+			sameImageUser(b.imageUser(newTag), baseUser) {
 			fmt.Printf("-> Extension image %s already has all required packages\n", newTag)
 			return newTag, nil
 		}
@@ -126,15 +144,26 @@ func (b *extImageBuilder) build(fromTag string, pkgList []string, pigstyRepo str
 	} else {
 		// No -ext image at all — first-time build from the plain base image.
 		buildFrom = BaseImageTag(fromTag)
-		fmt.Printf("-> Building extension image with %d package(s) (from %s)...\n", len(aptPkgs), buildFrom)
+		fmt.Printf("-> Building extension image with %d package(s) (from %s)...\n", len(checkPkgs), buildFrom)
 	}
-
-	dockerfile := extContainerfile(buildFrom, aptPkgs, pigstyRepo, baseUser)
 
 	buildDir := filepath.Join(b.dataDir, "ext-build")
 	if err := os.MkdirAll(buildDir, 0755); err != nil {
 		return "", fmt.Errorf("creating ext build directory: %w", err)
 	}
+
+	var localDebs []string
+	if needDocDB {
+		if err := ensureDocumentDBExtDeb(buildDir); err != nil {
+			return "", err
+		}
+		if err := ensureDocumentDBIcuDeb(buildDir); err != nil {
+			return "", err
+		}
+		localDebs = []string{documentdbDebFileName, documentdbIcuDebFileName}
+	}
+
+	dockerfile := extContainerfile(buildFrom, aptPkgs, localDebs, pigstyRepo, baseUser)
 
 	cfPath := filepath.Join(buildDir, "Containerfile.ext")
 	if err := os.WriteFile(cfPath, []byte(dockerfile), 0644); err != nil {
@@ -151,11 +180,37 @@ func (b *extImageBuilder) build(fromTag string, pkgList []string, pigstyRepo str
 
 // extContainerfile renders the extension image build file. baseUser is the
 // runtime user configured on the base image; an empty value means the image
-// inherits root, so no trailing USER instruction is needed.
-func extContainerfile(buildFrom string, aptPkgs []string, pigstyRepo, baseUser string) string {
+// inherits root, so no trailing USER instruction is needed. localDebs are
+// filenames in the build context (official vendor packages).
+func extContainerfile(buildFrom string, aptPkgs, localDebs []string, pigstyRepo, baseUser string) string {
 	userLine := ""
 	if baseUser != "" {
 		userLine = "USER " + baseUser + "\n"
+	}
+
+	// COPY lines and install arguments for vendor DEBs.
+	var copies strings.Builder
+	installs := append([]string(nil), aptPkgs...)
+	patchDocDB := false
+	for _, deb := range localDebs {
+		fmt.Fprintf(&copies, "COPY %s /tmp/%s\n", deb, deb)
+		installs = append(installs, "/tmp/"+deb)
+		if deb == documentdbDebFileName {
+			patchDocDB = true
+		}
+	}
+	copyLines := copies.String()
+
+	// DocumentDB's core library was built against ICU 74 but does not declare
+	// it as a dependency; make the bundled ICU 74 runtime load with it.
+	installStep := ""
+	purgeStep := ""
+	purgePkgs := ""
+	if patchDocDB {
+		installs = append(installs, "patchelf")
+		installStep = " \\\n    && (patchelf --print-needed /usr/lib/postgresql/18/lib/pg_documentdb_core.so | grep -qx libicui18n.so.74 \\\n        || patchelf --add-needed libicui18n.so.74 /usr/lib/postgresql/18/lib/pg_documentdb_core.so)"
+		purgeStep = " && apt-get purge -y patchelf"
+		purgePkgs = " patchelf"
 	}
 
 	if strings.HasSuffix(buildFrom, "-ext") {
@@ -167,10 +222,10 @@ ENV http_proxy="" HTTP_PROXY="" https_proxy="" HTTPS_PROXY="" no_proxy="" NO_PRO
 ENV DEBIAN_FRONTEND=noninteractive
 
 USER root
-RUN apt-get update \
-    && apt-get install -y %s \
-    && rm -rf /var/lib/apt/lists/*
-%s`, buildFrom, strings.Join(aptPkgs, " "), userLine)
+%sRUN apt-get update \
+    && apt-get install -y %s%s \
+    && rm -rf /var/lib/apt/lists/*%s
+%s`, buildFrom, copyLines, strings.Join(installs, " "), installStep, purgeStep, userLine)
 	}
 
 	// First-time ext build from the plain base image: set up Pigsty repo.
@@ -180,17 +235,99 @@ ENV http_proxy="" HTTP_PROXY="" https_proxy="" HTTPS_PROXY="" no_proxy="" NO_PRO
 ENV DEBIAN_FRONTEND=noninteractive
 
 USER root
-# Pigsty DEB repository (https://pigsty.io/ext/) — 576+ PG extensions
+%s# Pigsty DEB repository (https://pigsty.io/ext/) — 576+ PG extensions
 RUN apt-get update && apt-get install -y curl gnupg2 lsb-release \
     && curl -fsSL %s/key | gpg --dearmor -o /etc/apt/keyrings/pigsty.gpg \
     && . /etc/os-release \
     && echo "deb [signed-by=/etc/apt/keyrings/pigsty.gpg] %s/apt/infra generic main" > /etc/apt/sources.list.d/pigsty.list \
     && echo "deb [signed-by=/etc/apt/keyrings/pigsty.gpg] %s/apt/pgsql/${VERSION_CODENAME} ${VERSION_CODENAME} main" >> /etc/apt/sources.list.d/pigsty.list \
     && apt-get update \
-    && apt-get install -y %s \
+    && apt-get install -y %s%s \
     && rm -rf /var/lib/apt/lists/* \
-    && apt-get purge -y --auto-remove curl gnupg2 lsb-release
-%s`, buildFrom, pigstyRepo, pigstyRepo, pigstyRepo, strings.Join(aptPkgs, " "), userLine)
+    && apt-get purge -y --auto-remove curl gnupg2 lsb-release%s
+%s`, buildFrom, copyLines, pigstyRepo, pigstyRepo, pigstyRepo, strings.Join(installs, " "), installStep, purgePkgs, userLine)
+}
+
+// ensureDocumentDBExtDeb downloads the official DocumentDB PG18 extension DEB
+// for the current GOARCH into dir and verifies its pinned sha256. A cached
+// file with a matching digest is reused.
+func ensureDocumentDBExtDeb(dir string) error {
+	url, want, err := documentdbExtDebURL(runtime.GOARCH)
+	if err != nil {
+		return err
+	}
+	return downloadVerifiedFile(dir, documentdbDebFileName, "DocumentDB extension", url, want)
+}
+
+// ensureDocumentDBIcuDeb downloads the Ubuntu 24.04 ICU 74 runtime that the
+// official extension binaries were linked against (see ext_catalog.go).
+func ensureDocumentDBIcuDeb(dir string) error {
+	url, want, err := documentdbIcuDebURL(runtime.GOARCH)
+	if err != nil {
+		return err
+	}
+	return downloadVerifiedFile(dir, documentdbIcuDebFileName, "DocumentDB ICU 74 runtime", url, want)
+}
+
+// downloadVerifiedFile downloads url into dir/name unless a cached copy already
+// matches want, and verifies the sha256 either way.
+func downloadVerifiedFile(dir, name, label, url, want string) error {
+	dest := filepath.Join(dir, name)
+	if got, err := fileSHA256(dest); err == nil && strings.EqualFold(got, want) {
+		fmt.Printf("-> Using cached %s package (%s)\n", label, name)
+		return nil
+	}
+
+	fmt.Printf("-> Downloading %s package for %s...\n", label, runtime.GOARCH)
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
+		Timeout:   300 * time.Second,
+	}
+	resp, err := client.Get(url)
+	if err != nil {
+		return fmt.Errorf("documentdb: downloading %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("documentdb: downloading %s: HTTP %s", url, resp.Status)
+	}
+
+	tmp, err := os.CreateTemp(dir, "."+name+".download-*")
+	if err != nil {
+		return fmt.Errorf("documentdb: creating temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+
+	h := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(tmp, h), resp.Body); err != nil {
+		tmp.Close()
+		return fmt.Errorf("documentdb: downloading %s: %w", url, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("documentdb: writing %s: %w", tmpName, err)
+	}
+	got := hex.EncodeToString(h.Sum(nil))
+	if !strings.EqualFold(got, want) {
+		return fmt.Errorf("documentdb: checksum mismatch for %s\n  got  %s\n  want %s", url, got, want)
+	}
+	if err := os.Rename(tmpName, dest); err != nil {
+		return fmt.Errorf("documentdb: installing %s: %w", dest, err)
+	}
+	return nil
+}
+
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // imageUser returns the runtime user configured in an image, or "" when the
@@ -236,27 +373,67 @@ func (b *extImageBuilder) extImageHasPackages(imageTag string, packages []string
 	return strings.Contains(out, "all-installed")
 }
 
+// extImageHasDocDBPatch reports whether pg_documentdb_core.so carries the
+// bundled ICU 74 dependency. The string appears in the dynamic string table
+// only after patchelf --add-needed; patchelf itself is removed from the image.
+func (b *extImageBuilder) extImageHasDocDBPatch(imageTag string) bool {
+	_, err := b.run("run", "--rm", imageTag, "sh", "-c",
+		"grep -aq libicui18n.so.74 /usr/lib/postgresql/18/lib/pg_documentdb_core.so")
+	return err == nil
+}
+
+// ExtPreloadLibs returns the shared_preload_libraries entries contributed by
+// one extension, in load order. Most extensions contribute their own name.
+// documentdb is special: it needs pg_cron plus three DocumentDB libraries.
+// The second return is true for extensions that must occupy position 0.
+func ExtPreloadLibs(name string) (libs []string, preloadFirst bool) {
+	resolved := ResolveExtName(name)
+	if resolved == "documentdb" {
+		return []string{
+			"pg_cron",
+			"pg_documentdb_core",
+			"pg_documentdb",
+			"pg_documentdb_extended_rum",
+		}, false
+	}
+	if ExtNeedsPreload(name) {
+		return []string{resolved}, ExtMustBeFirst(name)
+	}
+	return nil, false
+}
+
 // BuildPreloadCSV builds the shared_preload_libraries CSV from a list of
 // extensions. Extensions with PreloadFirst are forced to position 0 (FATAL if not).
 // Returns the CSV string and whether pg_cron is present (needs cron.database_name).
 func BuildPreloadCSV(extNames []string) (csv string, hasCron bool) {
-	var preload []string
-	var first []string
+	libs, hasCron := collectPreloadLibs(extNames)
+	return strings.Join(libs, ","), hasCron
+}
+
+// collectPreloadLibs merges ExtPreloadLibs across extensions, deduplicating
+// libraries while keeping the first occurrence. PreloadFirst libraries are
+// hoisted to the front in their original order.
+func collectPreloadLibs(extNames []string) (libs []string, hasCron bool) {
+	var preload, first []string
+	seen := make(map[string]bool)
 	for _, name := range extNames {
-		if ExtNeedsPreload(name) {
-			resolved := ResolveExtName(name)
-			if ExtMustBeFirst(name) {
-				first = append(first, resolved)
+		extLibs, isFirst := ExtPreloadLibs(name)
+		for _, lib := range extLibs {
+			if seen[lib] {
 				continue
 			}
-			preload = append(preload, resolved)
-			if name == "pg_cron" || resolved == "pg_cron" {
+			seen[lib] = true
+			if isFirst {
+				first = append(first, lib)
+			} else {
+				preload = append(preload, lib)
+			}
+			if lib == "pg_cron" {
 				hasCron = true
 			}
 		}
 	}
-	preload = append(first, preload...)
-	return strings.Join(preload, ","), hasCron
+	return append(first, preload...), hasCron
 }
 
 // ExtensionImageTag derives a deterministic image tag from the base tag.
@@ -442,28 +619,157 @@ func (m *Manager) GetInstalledExtensions() ([]string, error) {
 	return names, nil
 }
 
+// ExtensionsNeedCron reports whether any of the named extensions still
+// requires pg_cron in shared_preload_libraries.
+func ExtensionsNeedCron(extNames []string) bool {
+	for _, name := range extNames {
+		libs, _ := ExtPreloadLibs(name)
+		for _, lib := range libs {
+			if lib == "pg_cron" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ExtCreateStatements returns the SQL statements that create one extension.
+// documentdb needs pg_cron first and an explicit documentdb_extended_rum:
+// CREATE EXTENSION documentdb CASCADE does not pull the RUM companion in.
+func ExtCreateStatements(name string) []string {
+	resolved := ResolveExtName(name)
+	if resolved == "documentdb" {
+		return []string{
+			"CREATE EXTENSION IF NOT EXISTS pg_cron",
+			`CREATE EXTENSION IF NOT EXISTS "documentdb" CASCADE`,
+			`CREATE EXTENSION IF NOT EXISTS "documentdb_extended_rum"`,
+		}
+	}
+	return []string{fmt.Sprintf(`CREATE EXTENSION IF NOT EXISTS "%s"`, resolved)}
+}
+
+// ExtDropStatements returns the SQL statements that drop one extension.
+// documentdb is removed in dependency order, bottom-up. pg_cron is appended
+// only when allowCronDrop is true — the caller must confirm nothing else needs
+// it and that cron.job is empty.
+func ExtDropStatements(name string, allowCronDrop bool) []string {
+	resolved := ResolveExtName(name)
+	if resolved != "documentdb" {
+		return []string{fmt.Sprintf(`DROP EXTENSION IF EXISTS "%s"`, resolved)}
+	}
+	stmts := []string{
+		`DROP EXTENSION IF EXISTS "documentdb_extended_rum"`,
+		`DROP EXTENSION IF EXISTS "documentdb"`,
+		`DROP EXTENSION IF EXISTS "documentdb_core"`,
+	}
+	if allowCronDrop {
+		stmts = append(stmts, `DROP EXTENSION IF EXISTS pg_cron`)
+	}
+	return stmts
+}
+
 // RunCreateExtensions runs CREATE EXTENSION IF NOT EXISTS for each extension.
 // Uses the resolved SQL name (e.g., "vector" for pgvector).
+// DocumentDB failures are fatal: its three CREATE statements form one unit and
+// a silent partial install would leave the gateway unusable.
 func (m *Manager) RunCreateExtensions(extNames []string) error {
+	hasDocDB := false
+	ran := make(map[string]bool)
 	for _, name := range extNames {
-		resolved := ResolveExtName(name)
-		sql := fmt.Sprintf("CREATE EXTENSION IF NOT EXISTS \"%s\"", resolved)
-		fmt.Printf("-> Running: %s\n", sql)
-		out, err := m.ExecLong("psql", "-U", m.cfg.Postgres.User, "-d", m.cfg.Postgres.Database, "-c", sql)
-		if err != nil {
+		isDocDB := ResolveExtName(name) == "documentdb"
+		hasDocDB = hasDocDB || isDocDB
+		for _, sql := range ExtCreateStatements(name) {
+			key := sql
+			if sql == "CREATE EXTENSION IF NOT EXISTS pg_cron" {
+				key = "pg_cron" // shared by documentdb and an explicit pg_cron request
+			}
+			if ran[key] {
+				continue
+			}
+			ran[key] = true
+			fmt.Printf("-> Running: %s\n", sql)
+			out, err := m.ExecLong("psql", "-U", m.cfg.Postgres.User, "-d", m.cfg.Postgres.Database, "-c", sql)
+			if err == nil {
+				continue
+			}
+			if isDocDB {
+				return fmt.Errorf("creating DocumentDB extension: %w (output: %s)", err, strings.TrimSpace(out))
+			}
 			fmt.Printf("  [!] Warning: CREATE EXTENSION %s: %v\n", name, err)
 			if out != "" {
 				fmt.Printf("  Output: %s\n", out)
 			}
 		}
 	}
+
+	if hasDocDB {
+		installed, err := m.GetInstalledExtensions()
+		if err != nil {
+			return fmt.Errorf("documentdb: verifying installed extensions: %w", err)
+		}
+		have := make(map[string]bool, len(installed))
+		for _, e := range installed {
+			have[e] = true
+		}
+		for _, want := range []string{"pg_cron", "documentdb", "documentdb_core", "documentdb_extended_rum"} {
+			if !have[want] {
+				return fmt.Errorf("documentdb: extension %q is missing after CREATE", want)
+			}
+		}
+	}
 	return nil
+}
+
+// renderExtConfBlock renders the pgcli-managed block in postgresql.conf.
+// preload is the ordered, deduplicated shared_preload_libraries list.
+// hasCron adds the pg_cron GUCs; docdb adds the DocumentDB GUCs, whose
+// localhost_connection_string points back at the instance's host port.
+func renderExtConfBlock(preload []string, hasCron, docdb bool, database string, hostPort int) string {
+	var lines []string
+	lines = append(lines, pgExtBegin)
+	if len(preload) > 0 {
+		lines = append(lines, fmt.Sprintf("shared_preload_libraries = '%s'", strings.Join(preload, ",")))
+	}
+	if hasCron {
+		// cron.database_name is postmaster-level: CREATE EXTENSION pg_cron must
+		// run in the same database the postmaster was told to use.
+		lines = append(lines,
+			fmt.Sprintf("cron.database_name = '%s'", database),
+			"cron.use_background_workers = on",
+		)
+	}
+	if docdb {
+		lines = append(lines,
+			"documentdb.enableBackgroundWorker = true",
+			"documentdb.enableBackgroundWorkerJobs = true",
+			"documentdb.indexBuildsScheduledOnBgWorker = false",
+			fmt.Sprintf("documentdb.localhost_connection_string = 'host=/var/run/postgresql port=%d'", hostPort),
+			"default_toast_compression = 'lz4'",
+			"documentdb.rum_library_load_option = 'require_documentdb_extended_rum'",
+			"documentdb.alternate_index_handler_name = 'extended_rum'",
+		)
+	}
+	lines = append(lines, pgExtEnd)
+	return "\n" + strings.Join(lines, "\n") + "\n"
+}
+
+// extBlockHasSettings reports whether a managed block carries any parameter
+// line (as opposed to only the sentinel comments).
+func extBlockHasSettings(block string) bool {
+	for line := range strings.SplitSeq(block, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line == pgExtBegin || line == pgExtEnd {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // ApplyExtensions manages shared_preload_libraries for extensions that need
 // preloading.  It replaces (or appends) a sentinel block in postgresql.conf.
-// For pg_cron, also sets cron.database_name to the configured database
-// (postmaster-level, requires restart).
+// For pg_cron (and documentdb, which depends on it), also sets
+// cron.database_name to the configured database (postmaster-level).
 // Returns needsRestart=true if any postmaster-level parameter changed.
 //
 // NOT for Patroni members: Patroni owns postgresql.conf and regenerates it
@@ -471,28 +777,15 @@ func (m *Manager) RunCreateExtensions(extNames []string) error {
 // edit-config to set postgresql.parameters.shared_preload_libraries in the
 // DCS instead — see internal/cli/ha_extension.go.
 func (m *Manager) ApplyExtensions(extNames []string) (needsRestart bool, err error) {
-	// Collect extensions that need preloading.
-	// Extensions with PreloadFirst must be at position 0 (FATAL if not),
-	// so we track them separately and prepend them after the loop.
-	var preload []string
-	var first []string
-	hasCron := false
+	preload, hasCron := collectPreloadLibs(extNames)
+	docdb := false
 	for _, name := range extNames {
-		if ExtNeedsPreload(name) {
-			resolved := ResolveExtName(name)
-			if ExtMustBeFirst(name) {
-				first = append(first, resolved)
-				continue // will be prepended below
-			}
-			preload = append(preload, resolved)
-			// Check by catalog key (pg_cron) or alias (cron)
-			if name == "pg_cron" || resolved == "pg_cron" {
-				hasCron = true
-			}
+		if ResolveExtName(name) == "documentdb" {
+			docdb = true
+			break
 		}
 	}
-	// Extensions with PreloadFirst must be first in shared_preload_libraries
-	preload = append(first, preload...)
+	hasSettings := len(preload) > 0 || hasCron || docdb
 
 	// Read current postgresql.conf
 	current, err := m.Exec("cat", pgConfPath)
@@ -500,62 +793,26 @@ func (m *Manager) ApplyExtensions(extNames []string) (needsRestart bool, err err
 		return false, fmt.Errorf("apply extensions: read postgresql.conf: %w", err)
 	}
 
-	// Build new block
-	var lines []string
-	lines = append(lines, pgExtBegin)
-	if len(preload) > 0 {
-		spl := fmt.Sprintf("shared_preload_libraries = '%s'", strings.Join(preload, ","))
-		lines = append(lines, spl)
-	}
-	// pg_cron: set cron.database_name so CREATE EXTENSION works in the user database.
-	// cron.database_name is a postmaster-level parameter, so it takes effect on restart.
-	if hasCron {
-		lines = append(lines, fmt.Sprintf("cron.database_name = '%s'", m.cfg.Postgres.Database))
-	}
-	lines = append(lines, pgExtEnd)
-	newBlock := "\n" + strings.Join(lines, "\n") + "\n"
+	newBlock := renderExtConfBlock(preload, hasCron, docdb, m.cfg.Postgres.Database, m.cfg.Podman.HostPort)
+	newBlockTrimmed := strings.Trim(newBlock, "\n")
 
-	// Check if block exists and is identical
-	if strings.Contains(current, pgExtBegin) {
-		start := strings.Index(current, pgExtBegin)
-		end := strings.Index(current[start:], pgExtEnd)
-		if end >= 0 {
-			existing := current[start : start+end+len(pgExtEnd)]
-			if existing == strings.TrimPrefix(strings.TrimSuffix(newBlock, "\n"), "\n") {
-				return false, nil // no change
-			}
+	// Extract the existing managed block, if any.
+	existing := ""
+	hasBlock := false
+	if start := strings.Index(current, pgExtBegin); start >= 0 {
+		if end := strings.Index(current[start:], pgExtEnd); end >= 0 {
+			hasBlock = true
+			existing = current[start : start+end+len(pgExtEnd)]
 		}
 	}
 
-	// Detect if shared_preload_libraries or cron.database_name is changing
-	oldSPL := ""
-	if idx := strings.Index(current, "shared_preload_libraries"); idx >= 0 {
-		lineEnd := strings.Index(current[idx:], "\n")
-		if lineEnd >= 0 {
-			oldSPL = current[idx : idx+lineEnd]
-		}
+	// Compare the entire managed block: any preload or DocumentDB GUC change
+	// is postmaster-level and needs a restart.
+	if hasBlock && existing == newBlockTrimmed {
+		return false, nil
 	}
-	newSPL := ""
-	if len(preload) > 0 {
-		newSPL = fmt.Sprintf("shared_preload_libraries = '%s'", strings.Join(preload, ","))
-	}
-	if oldSPL != newSPL {
+	if hasSettings || extBlockHasSettings(existing) {
 		needsRestart = true
-	}
-
-	// Check if cron.database_name changed
-	if hasCron {
-		oldCronDB := ""
-		if idx := strings.Index(current, "cron.database_name"); idx >= 0 {
-			lineEnd := strings.Index(current[idx:], "\n")
-			if lineEnd >= 0 {
-				oldCronDB = current[idx : idx+lineEnd]
-			}
-		}
-		newCronDB := fmt.Sprintf("cron.database_name = '%s'", m.cfg.Postgres.Database)
-		if oldCronDB != newCronDB {
-			needsRestart = true
-		}
 	}
 
 	// Build merged content: replace existing block or append

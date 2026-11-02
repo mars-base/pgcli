@@ -9,7 +9,7 @@ LDFLAGS = -s -w \
 
 PLATFORMS = linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
-.PHONY: build clean test lint install build-all gencert container-build container-push container-build-minio container-push-minio container-build-mc container-push-mc container-build-patroni container-push-patroni container-build-rustfs container-push-rustfs container-build-predixy container-push-predixy container-build-influxdb container-push-influxdb container-build-influx2tsdb container-push-influx2tsdb container-images-export
+.PHONY: build clean test lint install build-all gencert container-build container-push container-build-minio container-push-minio container-build-mc container-push-mc container-build-patroni container-push-patroni container-build-rustfs container-push-rustfs container-build-predixy container-push-predixy container-build-influxdb container-push-influxdb container-build-influx2tsdb container-push-influx2tsdb container-build-documentdb-gateway container-push-documentdb-gateway container-images-export
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) .
@@ -237,6 +237,35 @@ container-build-influx2tsdb:
 container-push-influx2tsdb:
 	podman push $(INFLUX2TSDB_IMAGE) $(INFLUX2TSDB_IMAGE)
 
+# DocumentDB gateway image — the official Rust MongoDB wire-protocol gateway
+# from the upstream .deb, on debian:13-slim (glibc 2.39+). Dual-arch with a
+# manifest list, same shape as minio/mc. The daemon is started directly: the
+# upstream /usr/bin wrapper's systemd/runuser logic is bypassed, and the add-on
+# mounts a SetupConfiguration.json with telemetry explicitly disabled.
+DOCDB_GW_VERSION     ?= 1.0.0
+DOCDB_GW_RELEASE     ?= v1.0-0
+DOCDB_GW_IMAGE        = ghcr.io/mars-base/pgcli/pgcli-documentdb-gateway:$(DOCDB_GW_VERSION)
+DOCDB_GW_BASE         = https://github.com/documentdb/documentdb/releases/download/$(DOCDB_GW_RELEASE)
+DOCDB_GW_SHA256_amd64 ?= dffa4320c001dd4f586210c86417a68d6caa3ffd4ff8cb88c83d1eb11944c4c1
+DOCDB_GW_SHA256_arm64 ?= 69ddd3b9c03c6418bd458804b2abb6de38e55553ac0a60bc0234a3aefce9d3c4
+
+container-build-documentdb-gateway:
+	@for a in amd64 arm64; do \
+	  case $$a in \
+	    amd64) sha=$(DOCDB_GW_SHA256_amd64);; \
+	    arm64) sha=$(DOCDB_GW_SHA256_arm64);; \
+	  esac; \
+	  deb=/tmp/documentdb-gateway_$(DOCDB_GW_VERSION)_$$a.deb; \
+	  curl -sfL --retry 3 -o $$deb $(DOCDB_GW_BASE)/ubuntu24.04-documentdb-gateway_$(DOCDB_GW_VERSION)_$$a.deb || exit 1; \
+	  echo "$$sha  $$deb" | sha256sum -c - || exit 1; \
+	  cp $$deb embed/documentdb-gateway.deb || exit 1; \
+	  podman build --platform linux/$$a --manifest $(DOCDB_GW_IMAGE) -t $(DOCDB_GW_IMAGE)-$$a -f embed/documentdb-gateway.Containerfile embed/ || exit 1; \
+	  rm -f embed/documentdb-gateway.deb; \
+	done
+
+container-push-documentdb-gateway:
+	podman manifest push $(DOCDB_GW_IMAGE) $(DOCDB_GW_IMAGE) --all
+
 # Offline image export for the docs/images.md catalog (see that doc's
 # "镜像导出" section for the manual equivalents and the rustfs/redis
 # manifest-list caveat). Always pulls --platform linux/amd64 FIRST so a
@@ -257,6 +286,7 @@ IMAGES := \
 	ghcr.io/mars-base/pgcli/pgcli-rustfs:1.0.0 \
 	ghcr.io/mars-base/pgcli/pgcli-influxdb:1.13.1 \
 	ghcr.io/mars-base/pgcli/pgcli-influx2tsdb:1.3.2 \
+	ghcr.io/mars-base/pgcli/pgcli-documentdb-gateway:1.0.0 \
 	ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine \
 	docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z \
 	docker.io/postgrest/postgrest:v16.3 \

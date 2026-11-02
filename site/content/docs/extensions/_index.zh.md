@@ -126,9 +126,13 @@ pg extension available
 
 参见[常用扩展](./popular/)获取常用扩展详细使用示例。
 
+## DocumentDB
+
+[DocumentDB](./documentdb/) 是 Microsoft 为 PostgreSQL 提供的文档数据库层，从官方 vendor DEB 安装，而不是 Pigsty 目录。它仅支持 PostgreSQL 18，并通过共享 Unix socket 把 MongoDB wire protocol 网关（[`pg addon install documentdb`](../addon/documentdb/)）绑定到数据库。安装它还会给实例容器添加该 socket volume。
+
 ## 目录外的扩展
 
-只有目录中的扩展（builtin + Pigsty）可以通过 `pg extension install` 安装。未知扩展名称会在构建开始前被拒绝：
+只有目录中的扩展（builtin + Pigsty）可以通过 `pg extension install` 安装；DocumentDB 是唯一例外，有专门的安装器。未知扩展名称会在构建开始前被拒绝：
 
 ```
   [X] Unknown extension(s): [nonexistent_ext]

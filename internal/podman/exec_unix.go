@@ -205,6 +205,62 @@ func execWithTimeoutRaw(binary string, args []string, timeout time.Duration) (st
 	}
 }
 
+// execWithTimeoutStdin is execWithTimeout with input fed on stdin. Used for
+// SQL that carries secrets so they never appear in a process argv.
+func execWithTimeoutStdin(podmanPath string, args []string, input string, timeout time.Duration) (string, error) {
+	slog.Debug("execWithTimeoutStdin", "args", args)
+	out, err := execWithTimeoutStdinRaw(podmanPath, args, input, timeout)
+	if err != nil && len(args) > 0 && args[0] == "exec" && isCgroupPermErr(err) {
+		slog.Debug("cgroup fallback via systemd-run (execWithTimeoutStdin)")
+		out, err = execWithTimeoutStdinRaw("systemd-run", append([]string{"--user", "--scope", "--quiet", podmanPath}, args...), input, timeout)
+	}
+	return out, err
+}
+
+func execWithTimeoutStdinRaw(binary string, args []string, input string, timeout time.Duration) (string, error) {
+	cmd := podmanCommand(binary, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stdin = strings.NewReader(input)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	type result struct {
+		out string
+		err error
+	}
+	done := make(chan result, 1)
+
+	go func() {
+		err := cmd.Run()
+		out := stdout.String()
+		if err != nil {
+			if _, ok := err.(*exec.ExitError); ok {
+				errMsg := stderr.String()
+				if errMsg == "" {
+					errMsg = out
+				}
+				done <- result{"", fmt.Errorf("podman %s: %s", strings.Join(args, " "), errMsg)}
+				return
+			}
+			done <- result{"", fmt.Errorf("podman %s: %w", strings.Join(args, " "), err)}
+			return
+		}
+		done <- result{out, nil}
+	}()
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			return "", r.err
+		}
+		return r.out, nil
+	case <-time.After(timeout):
+		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return "", fmt.Errorf("podman %s timed out after %v", strings.Join(args, " "), timeout)
+	}
+}
+
 // isCgroupPermErr checks if an error message contains cgroup.procs permission denied.
 func isCgroupPermErr(err error) bool {
 	msg := err.Error()

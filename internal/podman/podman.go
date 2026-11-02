@@ -1322,6 +1322,16 @@ func (m *Manager) DestroyWithData(cleanData bool) error {
 	m.run("stop", m.cfg.Podman.ContainerName)
 	m.run("rm", "-f", m.cfg.Podman.ContainerName)
 
+	// The Unix socket volume is runtime state, not data: remove it even when
+	// --clean-data is off. A still-running DocumentDB gateway holds the volume
+	// (read-only) — in that case removal fails, so warn instead of aborting.
+	sockVol := SocketVolumeName(m.cfg.Podman.ContainerName)
+	if _, err := m.run("volume", "rm", "-f", sockVol); err != nil {
+		fmt.Printf("  [!] warning: removing socket volume %s: %v\n", sockVol, err)
+	} else {
+		fmt.Printf("  [OK] socket volume removed: %s\n", sockVol)
+	}
+
 	// Remove the per-instance pgbackrest.conf written for the PG container.
 	// Config, not data — removed regardless of --clean-data.
 	instConf := filepath.Join(m.dataDir, fmt.Sprintf("pgbackrest-%s.conf", m.cfg.Podman.ContainerName))
@@ -2032,6 +2042,35 @@ func ParseDSN(dsn string) (host string, port int, user, password, database strin
 	return host, port, user, password, database, nil
 }
 
+// ExecStdin runs a command inside the container with input fed on stdin.
+// The 30s timeout matches Exec.
+func (m *Manager) ExecStdin(input string, args ...string) (string, error) {
+	podmanArgs := append([]string{"exec", "-i", m.cfg.Podman.ContainerName}, args...)
+	return execWithTimeoutStdin(m.podman, podmanArgs, input, 30*time.Second)
+}
+
+// SocketVolumeName returns the per-instance named volume that carries the
+// PostgreSQL Unix socket. PG containers mount it at /var/run/postgresql and
+// add-on containers (DocumentDB gateway) mount the same volume read-only.
+func SocketVolumeName(containerName string) string {
+	return "pgcli-pg-sock-" + containerName
+}
+
+// HasMount reports whether the container has a mount at dest (e.g.
+// "/var/run/postgresql"). Read-only; returns false on any error.
+func (m *Manager) HasMount(dest string) bool {
+	out, err := m.run("inspect", "--format", "{{range .Mounts}}{{.Destination}}\n{{end}}", m.cfg.Podman.ContainerName)
+	if err != nil {
+		return false
+	}
+	for line := range strings.SplitSeq(out, "\n") {
+		if strings.TrimSpace(line) == dest {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Manager) createContainer() error {
 	// Generate per-instance pgbackrest.conf
 	confPath, err := m.writeInstancePgbackrestConf()
@@ -2075,6 +2114,7 @@ func (m *Manager) createContainer() error {
 
 	args = append(args,
 		"-v", fmt.Sprintf("%s:/var/lib/postgresql:z", hostMountPath(m.cfg.Podman.DataDir)),
+		"-v", fmt.Sprintf("%s:/var/run/postgresql:z", SocketVolumeName(m.cfg.Podman.ContainerName)),
 		"-v", fmt.Sprintf("%s:/var/lib/pgbackrest:z", hostMountPath(backupVol)),
 		"-v", fmt.Sprintf("%s:/etc/pgbackrest/pgbackrest.conf:ro,z", hostMountPath(confPath)),
 		"-e", fmt.Sprintf("POSTGRES_DB=%s", m.cfg.Postgres.Database),

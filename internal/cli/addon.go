@@ -1166,7 +1166,9 @@ func init() {
 	addonInstallCmd.Flags().String("admin-dsn", "", "pgexporter only: an ADMIN-privileged connection string (postgres://...) naming a remote target to monitor — used ONCE to create a low-privilege pg_monitor role there (the CREATE ROLE/GRANT SQL runs with it), then DISCARDED: only its credential-free address (host/port/database) is stored in pg.yaml and the exporter connects as the monitor role thereafter. Mutually exclusive with --dsn and --pg-name; invalid with --pg-name (local admin credentials are derived automatically)")
 	addonInstallCmd.Flags().String("monitor-user", "", "pgexporter only: name of the low-privilege monitoring role pgcli creates on the target (default \"pgexporter\"; plain identifier only, granted pg_monitor)")
 	addonInstallCmd.Flags().String("config-file", "", "pgexporter: path to a custom pg_exporter collector YAML, mounted read-only at /etc/pg_exporter.yml (the binary's baked-in default collector set is used when unset; reload after edits with `pg addon pgexporter reload`)")
-	addonInstallCmd.Flags().String("pg-name", "", "name to identify a remote PgBouncer or PostgREST (required with --dsn) / influx2tsdb: resolve the target DSN from this locally-managed TimescaleDB instance (its admin DSN is re-derived on every start) / pgadmin: resolve the DSN from this locally-managed instance instead of passing --dsn (its own addon --name is unrelated to this) / pgexporter: monitor this locally-managed instance (its admin DSN is re-derived on every start and used once to create the monitor role; mutually exclusive with --dsn and --admin-dsn)")
+	addonInstallCmd.Flags().String("pg-name", "", "name to identify a remote PgBouncer or PostgREST (required with --dsn) / influx2tsdb: resolve the target DSN from this locally-managed TimescaleDB instance (its admin DSN is re-derived on every start) / pgadmin: resolve the DSN from this locally-managed instance instead of passing --dsn (its own addon --name is unrelated to this) / pgexporter: monitor this locally-managed instance (its admin DSN is re-derived on every start and used once to create the monitor role; mutually exclusive with --dsn and --admin-dsn) / documentdb: the local instance whose Unix socket and DocumentDB extension the gateway uses (REQUIRED; --dsn is not supported)")
+	addonInstallCmd.Flags().String("username", "", "documentdb only: MongoDB client user created through documentdb_api.create_user (default \"docdb_admin\"; reserved prefixes documentdb/citus/pg/internal_role are rejected)")
+	addonInstallCmd.Flags().String("tls-mode", "", "documentdb only: \"allow\" (default; plaintext and the auto-generated self-signed TLS cert) or \"require\" (TLS only)")
 	addonInstallCmd.Flags().Int("max-client-conn", 0, "maximum number of client connections allowed (default 100)")
 	addonInstallCmd.Flags().Int("default-pool-size", 0, "number of server connections per user/database pair (default 20)")
 
@@ -1283,7 +1285,7 @@ func init() {
 
 	// redis flags (top-level standalone KV store — the first version-selectable addon)
 	addonInstallCmd.Flags().String("version", "", "Redis major version to install: 7 or 8 (default \"8\"); each maps to a pinned upstream docker.io/library/redis tag. For juicefs/zerofs/duckdb it instead pins the host binary release to download (default: the version's pinned sha256); for influxdb it selects the pinned pgcli-influxdb image release (default \"1.13.1\"); for influx2tsdb it selects the pinned pgcli-influx2tsdb image release (default \"1.3.2\"); for clickhouse it selects the upstream ClickHouse LTS tag (default \"26.8.36.3\"); for kafka it selects the upstream apache/kafka tag (default \"4.4.0\"); for rabbitmq it selects the upstream rabbitmq tag (default \"4.4.0\", the -management image is derived automatically); for rocketmq it selects the upstream apache/rocketmq tag (default \"5.5.0\"; only 5.x releases are accepted). Ignored for every other addon")
-	addonInstallCmd.Flags().String("password", "", "Redis requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls) / Predixy proxy password (REQUIRED, never generated: it must be the proxied cluster's requirepass — read it with `pg addon password redis --name <member>`) / pgAdmin, Grafana or Gitea WEB login password (generated on first install if omitted — not a PostgreSQL password; retrieve it with `pg addon password pgadmin`/`grafana`/`gitea`. For Grafana it only takes effect while grafana.db is absent; for Gitea the stored password is the one pgcli CREATES the admin account with, so it is inert on a revived store whose admin already exists) / BeeGFS connection-auth secret (generated on first install ONLY on a host running mgmtd; REQUIRED on a cross-host join (--roles without mgmtd) and must equal the cluster's value — retrieve it with `pg addon password beegfs` or `pg addon beegfs join-hint`)")
+	addonInstallCmd.Flags().String("password", "", "Redis requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls) / Predixy proxy password (REQUIRED, never generated: it must be the proxied cluster's requirepass — read it with `pg addon password redis --name <member>`) / pgAdmin, Grafana or Gitea WEB login password (generated on first install if omitted — not a PostgreSQL password; retrieve it with `pg addon password pgadmin`/`grafana`/`gitea`. For Grafana it only takes effect while grafana.db is absent; for Gitea the stored password is the one pgcli CREATES the admin account with, so it is inert on a revived store whose admin already exists) / documentdb: the MongoDB client user's password (generated on first install if omitted; retrieve with `pg addon password documentdb`) / BeeGFS connection-auth secret (generated on first install ONLY on a host running mgmtd; REQUIRED on a cross-host join (--roles without mgmtd) and must equal the cluster's value — retrieve it with `pg addon password beegfs` or `pg addon beegfs join-hint`)")
 	addonInstallCmd.Flags().String("admin-user", "", "Grafana WEB login user (GF_SECURITY_ADMIN_USER; default \"admin\") / Gitea WEB login user (created via `gitea admin user create`; default \"gitea\" — deliberately NOT the container's OS user \"git\") / InfluxDB InfluxQL admin username (default \"admin\") — the privileged account the CLI authenticates as; / ClickHouse admin username (default \"admin\") — the account created by the image entrypoint and used by every pg addon clickhouse client command; / RabbitMQ admin username (default \"admin\") — seeded on first boot and reconciled with rabbitmqctl on every start; unrelated to any PostgreSQL role")
 	addonInstallCmd.Flags().Bool("allow-registration", false, "Gitea: open self-service signup (GITEA__service__DISABLE_REGISTRATION=false; the web UI shows a Register entry). Closed by default — it is one of the two guards on the default 0.0.0.0 listen. Signups always create NORMAL users: Gitea offers no way for the register form to produce an admin, so this opens account spam, not takeover. The toggle needs --force to reach the live container; close it again with --allow-registration=false --force")
 	addonInstallCmd.Flags().String("email", "", "pgAdmin WEB login email (PGADMIN_DEFAULT_EMAIL; default \"admin@pgcli.lan\") — the account you sign into the web UI with, unrelated to any PostgreSQL role; the image rejects reserved TLDs such as .local")
@@ -1364,6 +1366,8 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallNodeExporter(cmd)
 	case "pgexporter":
 		return runAddonInstallPGExporter(cmd)
+	case "documentdb":
+		return runAddonInstallDocumentDB(cmd)
 	case "vmcluster":
 		return runAddonInstallVMCluster(cmd)
 	case "vlcluster":
@@ -1401,7 +1405,7 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -5694,6 +5698,35 @@ func runAddonList(showPassword bool) error {
 		}
 	}
 
+	// documentdb (MongoDB wire-protocol gateway in front of the DocumentDB
+	// PostgreSQL extension; local-instance-only, password never printed here).
+	section("DocumentDB add-ons (documentdb):", len(cfg.Addons.DocumentDB) > 0)
+	if dm, err := podman.NewDocumentDBManager(cfg); err == nil {
+		for _, name := range sortedAddonNames(cfg.Addons.DocumentDB) {
+			dc := cfg.Addons.DocumentDB[name]
+			status := "stopped"
+			if running, err := dm.ContainerRunning(dc.ContainerName); err == nil && running {
+				status = "running"
+			}
+			fmt.Printf("  %s (name: %s)\n", "documentdb", name)
+			fmt.Printf("    Status:      %s\n", status)
+			fmt.Printf("    Endpoint:    %s\n", documentDBEndpoint(&dc, ""))
+			fmt.Printf("    Target:      instance %s (database %s)\n", dc.TargetInstance, dc.Database)
+			fmt.Printf("    TLS:         %s\n", dc.TLSMode)
+			fmt.Printf("    Image:       %s\n", dc.ImageTag)
+			fmt.Printf("    Container:   %s\n", dc.ContainerName)
+		}
+	} else if len(cfg.Addons.DocumentDB) > 0 {
+		for _, name := range sortedAddonNames(cfg.Addons.DocumentDB) {
+			dc := cfg.Addons.DocumentDB[name]
+			fmt.Printf("  %s (name: %s)\n", "documentdb", name)
+			fmt.Printf("    Status:      n/a (%v)\n", err)
+			fmt.Printf("    Endpoint:    %s\n", documentDBEndpoint(&dc, ""))
+			fmt.Printf("    Target:      instance %s (database %s)\n", dc.TargetInstance, dc.Database)
+			fmt.Printf("    Container:   %s\n", dc.ContainerName)
+		}
+	}
+
 	// vmcluster (VictoriaMetrics cluster — cross-host, horizontal scaling)
 	section("Cluster add-ons (vmcluster):", len(cfg.Addons.VMCluster) > 0)
 	if vmc, err := podman.NewVMClusterManager(cfg); err == nil {
@@ -6440,6 +6473,12 @@ func addonPasswords(cfg *config.Config) map[string]string {
 	for name, pc := range cfg.Addons.PGExporter {
 		out["pgexporter:"+name] = pc.MonitorPassword
 	}
+	// documentdb's credential is the MongoDB client user's password, created
+	// through documentdb_api.create_user; the gateway reads it from clients,
+	// not from pg.yaml, so `pg addon password documentdb` is the way back.
+	for name, dc := range cfg.Addons.DocumentDB {
+		out["documentdb:"+name] = dc.ClientPassword
+	}
 	return out
 }
 
@@ -6536,6 +6575,8 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemoveNodeExporter(cmd)
 	case "pgexporter":
 		return runAddonRemovePGExporter(cmd)
+	case "documentdb":
+		return runAddonRemoveDocumentDB(cmd)
 	case "vmcluster":
 		return runAddonRemoveVMCluster(cmd)
 	case "vlcluster":
@@ -6573,7 +6614,7 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -6886,6 +6927,8 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartNodeExporter(cmd)
 	case "pgexporter":
 		return runAddonStartPGExporter(cmd)
+	case "documentdb":
+		return runAddonStartDocumentDB(cmd)
 	case "vmcluster":
 		return runAddonStartVMCluster(cmd)
 	case "vlcluster":
@@ -6923,7 +6966,7 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 	case "rocketmq":
 		return runAddonStartRocketMQ(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
 	}
 }
 
@@ -6965,6 +7008,8 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopNodeExporter(cmd)
 	case "pgexporter":
 		return runAddonStopPGExporter(cmd)
+	case "documentdb":
+		return runAddonStopDocumentDB(cmd)
 	case "vmcluster":
 		return runAddonStopVMCluster(cmd)
 	case "vlcluster":
@@ -7001,7 +7046,7 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 	case "rocketmq":
 		return runAddonStopRocketMQ(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, kafka, rabbitmq, rocketmq)", addonName)
 	}
 }
 

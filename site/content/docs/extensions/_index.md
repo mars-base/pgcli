@@ -133,9 +133,13 @@ See [Extension Catalog](./catalog/) for the complete list of 45 built-in extensi
 
 See [Popular Extensions](./popular/) for usage examples of the most commonly used extensions.
 
+## DocumentDB
+
+[DocumentDB](./documentdb/) is Microsoft's document database layer for PostgreSQL, installed from the official vendor DEB instead of the Pigsty catalog. It is PostgreSQL 18 only and binds a MongoDB wire-protocol gateway ([`pg addon install documentdb`](../addon/documentdb/)) to the database over a shared Unix socket. Installing it also adds that socket volume to the instance container.
+
 ## Extensions Outside the Catalog
 
-Only extensions in the catalog (builtin + Pigsty) can be installed via `pg extension install`. Unknown extension names are rejected before the build starts:
+Only extensions in the catalog (builtin + Pigsty) can be installed via `pg extension install`; DocumentDB is the one exception, with a dedicated installer. Unknown extension names are rejected before the build starts:
 
 ```
   [X] Unknown extension(s): [nonexistent_ext]

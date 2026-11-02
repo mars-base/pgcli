@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -408,25 +410,48 @@ func runExtensionRemove(extNames []string) error {
 		removeSet[name] = true
 	}
 
-	// DROP EXTENSION (before removing from image, so we can still access the files)
-	for _, name := range extNames {
-		sqlName := podman.ResolveExtName(name)
-		sql := fmt.Sprintf("DROP EXTENSION IF EXISTS \"%s\"", sqlName)
-		fmt.Printf("-> Running: %s\n", sql)
-		out, err := pm.Exec("psql", "-U", cfg.Postgres.User, "-d", cfg.Postgres.Database, "-c", sql)
-		if err != nil {
-			fmt.Printf("  [!] Warning: DROP EXTENSION %s: %v\n", name, err)
-			if out != "" {
-				fmt.Printf("  Output: %s\n", out)
-			}
-		}
-	}
-
-	// Compute remaining extensions
+	// Compute remaining extensions before dropping: DocumentDB removal needs
+	// to know whether pg_cron is still required by something else.
 	var remaining []string
 	for _, e := range inst.Extensions {
 		if !removeSet[e] {
 			remaining = append(remaining, e)
+		}
+	}
+
+	// DROP EXTENSION (before saving config, so a failed DocumentDB drop leaves
+	// the managed list intact). DocumentDB object drops are fatal; other
+	// extensions keep the historical warning-only behavior.
+	for _, name := range extNames {
+		isDocDB := podman.ResolveExtName(name) == "documentdb"
+		allowCronDrop := false
+		if isDocDB {
+			cronJobs := int64(0)
+			if out, err := pm.Exec("psql", "-U", cfg.Postgres.User, "-d", cfg.Postgres.Database, "-t", "-A", "-c", "SELECT count(*) FROM cron.job"); err == nil {
+				cronJobs, _ = strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+			}
+			cronNeeded := podman.ExtensionsNeedCron(remaining)
+			allowCronDrop = !cronNeeded && cronJobs == 0
+			if !cronNeeded && cronJobs > 0 {
+				fmt.Printf("  [!] pg_cron has %d scheduled job(s); keeping the extension.\n", cronJobs)
+			}
+		}
+		for _, sql := range podman.ExtDropStatements(name, allowCronDrop) {
+			fmt.Printf("-> Running: %s\n", sql)
+			out, err := pm.Exec("psql", "-U", cfg.Postgres.User, "-d", cfg.Postgres.Database, "-c", sql)
+			if err == nil {
+				continue
+			}
+			if isDocDB {
+				if out != "" {
+					fmt.Printf("  Output: %s\n", out)
+				}
+				return fmt.Errorf("dropping DocumentDB extension: %w (drop dependent objects/collections first)", err)
+			}
+			fmt.Printf("  [!] Warning: DROP EXTENSION %s: %v\n", name, err)
+			if out != "" {
+				fmt.Printf("  Output: %s\n", out)
+			}
 		}
 	}
 

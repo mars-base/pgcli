@@ -59,6 +59,9 @@ embed/ca-certificates.crt
 # (Exact paths — embed/predixy.Containerfile stays tracked.)
 embed/predixy
 embed/predixy-conf
+# documentdb gateway: the .deb staged as embed/documentdb-gateway.deb by
+# `make container-build-documentdb-gateway`, deleted after the build.
+embed/documentdb-gateway.deb
 pg
 
 # Image export: `podman save` docker-archive tars written into images/ for

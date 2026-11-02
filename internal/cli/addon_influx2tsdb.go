@@ -416,6 +416,6 @@ func init() {
 	// influx2tsdb-specific install flags. --name/--pg-name/--dsn/--port/
 	// --version/--force/--clean-data are registered by the parent addon flags.
 	addonInstallCmd.Flags().Int("pool-size", 0, "influx2tsdb: PostgreSQL connection pool size (-pool; default 10)")
-	addonInstallCmd.Flags().String("database", "", "influx2tsdb: default InfluxDB database name (-db; default: the target's PostgreSQL database name)")
+	addonInstallCmd.Flags().String("database", "", "influx2tsdb: default InfluxDB database name (-db; default: the target's PostgreSQL database name) / documentdb: target database holding the DocumentDB extension (default: the instance's own database)")
 	addonInstallCmd.Flags().Bool("verbose", false, "influx2tsdb: log translated SQL and query details (-verbose)")
 }

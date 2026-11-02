@@ -1,5 +1,7 @@
 package podman
 
+import "fmt"
+
 // PigstyExt contains metadata for a non-builtin PostgreSQL extension
 // from the Pigsty DEB repository (https://pigsty.cc/ext/list/).
 // Source: pigsty.cc/ext/list/ (2026-08-31)
@@ -10,8 +12,9 @@ type PigstyExt struct {
 	Repo         string // source repo: PIGSTY, PGDG, MIXED
 }
 
-// PigstyExtMap contains 395 non-builtin extensions from the Pigsty catalog.
-// Keyed by SQL extension name (as used in CREATE EXTENSION).
+// PigstyExtMap contains non-builtin extensions from the Pigsty catalog,
+// plus a few official vendor packages that are not mirrored there (currently
+// documentdb). Keyed by SQL extension name (as used in CREATE EXTENSION).
 // The Package field is the apt package suffix: postgresql-18-<Package>.
 var PigstyExtMap = map[string]PigstyExt{
 	"acl":                            {Package: "acl", NeedsPreload: false, Repo: "PIGSTY"},
@@ -48,6 +51,7 @@ var PigstyExtMap = map[string]PigstyExt{
 	"ddlx":                           {Package: "ddlx", NeedsPreload: false, Repo: "MIXED"},
 	"ddsketch":                       {Package: "ddsketch", NeedsPreload: false, Repo: "PIGSTY"},
 	"debversion":                     {Package: "debversion", NeedsPreload: false, Repo: "PGDG"},
+	"documentdb":                     {Package: "documentdb", NeedsPreload: true, Repo: "DOCUMENTDB"},
 	"duckdb_fdw":                     {Package: "duckdb-fdw", NeedsPreload: false, Repo: "PIGSTY"},
 	"emailaddr":                      {Package: "pg-emailaddr", NeedsPreload: false, Repo: "PIGSTY"},
 	"emaj":                           {Package: "emaj", NeedsPreload: false, Repo: "PIGSTY"},
@@ -410,6 +414,68 @@ var PigstyExtMap = map[string]PigstyExt{
 	"xxhash":                         {Package: "pg-xxhash", NeedsPreload: false, Repo: "PIGSTY"},
 	"zhparser":                       {Package: "zhparser", NeedsPreload: false, Repo: "PIGSTY"},
 	"zstd":                           {Package: "zstd", NeedsPreload: false, Repo: "PIGSTY"},
+}
+
+// ---------------------------------------------------------------------------
+// DocumentDB — official vendor DEB (not in the Pigsty mirror)
+// ---------------------------------------------------------------------------
+
+const (
+	documentdbRelease = "v1.0-0"
+	documentdbDebBase = "https://github.com/documentdb/documentdb/releases/download/" + documentdbRelease
+
+	// Local filenames used in the extension image build context.
+	documentdbDebFileName    = "pgcli-documentdb.deb"
+	documentdbIcuDebFileName = "pgcli-libicu74.deb"
+)
+
+// Official PG18 extension package per GOARCH, including the sha256 published
+// in the release's checksum files.
+var (
+	documentdbExtDebFiles = map[string]string{
+		"amd64": "ubuntu24.04-postgresql-18-documentdb_1.0-0_amd64.deb",
+		"arm64": "ubuntu24.04-postgresql-18-documentdb_1.0-0_arm64.deb",
+	}
+	documentdbExtDebSHA = map[string]string{
+		"amd64": "cc26f8225af13233f901f86292d5a8373276654454c671316cd603d20378fdbf",
+		"arm64": "6afc91e21b72990d1d43421b79e4484d7cd55366c1d0436fa71f4cc2f119d6eb",
+	}
+)
+
+// documentdbExtDebURL returns the download URL and expected sha256 of the
+// DocumentDB extension DEB for the given GOARCH.
+func documentdbExtDebURL(goarch string) (url, sha string, err error) {
+	file, ok := documentdbExtDebFiles[goarch]
+	if !ok {
+		return "", "", fmt.Errorf("documentdb: unsupported architecture %q (have amd64, arm64)", goarch)
+	}
+	return documentdbDebBase + "/" + file, documentdbExtDebSHA[goarch], nil
+}
+
+// The official DocumentDB extension is built on Ubuntu 24.04 against ICU 74.
+// Its pg_documentdb_core.so has no DT_NEEDED for ICU: it expects the host
+// PostgreSQL process to provide ucol_*_74 / ucnv_*_74. Debian 13 ships ICU 76
+// (symbols suffixed _76), so the library fails to load with
+// "undefined symbol: ucol_getSortKey_74". Bundle the matching Ubuntu runtime
+// and add a DT_NEEDED entry to the extension library so ICU 74 is loaded only
+// for this extension.
+var (
+	documentdbIcuDebURLs = map[string]string{
+		"amd64": "https://archive.ubuntu.com/ubuntu/pool/main/i/icu/libicu74_74.2-1ubuntu3.1_amd64.deb",
+		"arm64": "https://ports.ubuntu.com/ubuntu-ports/pool/main/i/icu/libicu74_74.2-1ubuntu3.1_arm64.deb",
+	}
+	documentdbIcuDebSHA = map[string]string{
+		"amd64": "c9a70989678660eed9a1e904c74fa043da8bec8e2036856fc16e31ced79b04f8",
+		"arm64": "48f93acf50dcf237a8d58ce366730a28438ce52d3f06d7a2a88b51261dd791f7",
+	}
+)
+
+func documentdbIcuDebURL(goarch string) (url, sha string, err error) {
+	url, ok := documentdbIcuDebURLs[goarch]
+	if !ok {
+		return "", "", fmt.Errorf("documentdb: unsupported architecture %q (have amd64, arm64)", goarch)
+	}
+	return url, documentdbIcuDebSHA[goarch], nil
 }
 
 // BuiltinExt contains metadata for a contrib extension in the base image.

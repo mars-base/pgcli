@@ -184,7 +184,7 @@ Examples:
 			if err != nil {
 				return err
 			}
-		case "etcd", "pgdog", "haproxy", "minio", "silo", "rustfs", "garage", "seaweedfs", "redis", "predixy", "pgadmin", "grafana", "prometheus", "alertmanager", "nodeexporter", "pgexporter", "gitea", "beegfs", "nginx", "influxdb", "influx2tsdb", "clickhouse", "kafka", "rabbitmq", "rocketmq", "vmcluster", "vlcluster":
+		case "etcd", "pgdog", "haproxy", "minio", "silo", "rustfs", "garage", "seaweedfs", "redis", "predixy", "pgadmin", "grafana", "prometheus", "alertmanager", "nodeexporter", "pgexporter", "documentdb", "gitea", "beegfs", "nginx", "influxdb", "influx2tsdb", "clickhouse", "kafka", "rabbitmq", "rocketmq", "vmcluster", "vlcluster":
 			// (patroni is handled above; it shares --name but requires --scope.)
 			if pgName != "" {
 				return fmt.Errorf("--pg-name selects a remote PgBouncer or PostgREST; use --name for an %s", addonType)
@@ -345,6 +345,15 @@ Examples:
 					return fmt.Errorf("pgexporter instance %q not found (use 'pg addon list' to see available)", name)
 				}
 				containerName = pc.ContainerName
+			case "documentdb":
+				if cfg.Addons.DocumentDB == nil {
+					return fmt.Errorf("no documentdb addons configured")
+				}
+				dc, ok := cfg.Addons.DocumentDB[name]
+				if !ok {
+					return fmt.Errorf("documentdb gateway %q not found (use 'pg addon list' to see available)", name)
+				}
+				containerName = dc.ContainerName
 			case "gitea":
 				if cfg.Addons.Gitea == nil {
 					return fmt.Errorf("no gitea addons configured")

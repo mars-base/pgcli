@@ -51,6 +51,7 @@ type Config struct {
 	VictoriaMetricsStartPort int                       `yaml:"victoriametrics_start_port,omitempty"`         // starting VictoriaMetrics HTTP host port, default 8428
 	NodeExporterStartPort    int                       `yaml:"nodeexporter_start_port,omitempty"`            // starting node_exporter web host port, default 9100
 	PGExporterStartPort      int                       `yaml:"pgexporter_start_port,omitempty"`              // starting pg_exporter web host port, default 9630
+	DocumentDBStartPort      int                       `yaml:"documentdb_start_port,omitempty"`              // starting DocumentDB gateway MongoDB wire-protocol port, default 10260
 	VMClusterStartPort       int                       `yaml:"vmcluster_start_port,omitempty"`               // starting VMCluster port, default 8480 (5 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP, internal insert TCP, internal select TCP)
 	VictoriaLogsStartPort    int                       `yaml:"victorialogs_start_port,omitempty"`            // starting VictoriaLogs HTTP host port, default 9428
 	VlagentStartPort         int                       `yaml:"vlagent_start_port,omitempty"`                 // starting vlagent ingest HTTP host port, default 9429
@@ -162,6 +163,7 @@ type TopAddonsConfig struct {
 	VictoriaMetrics map[string]VictoriaMetricsConfig `yaml:"victoriametrics,omitempty"`
 	NodeExporter    map[string]NodeExporterConfig    `yaml:"nodeexporter,omitempty"`
 	PGExporter      map[string]PGExporterConfig      `yaml:"pgexporter,omitempty"`
+	DocumentDB      map[string]DocumentDBConfig      `yaml:"documentdb,omitempty"`
 	VMCluster       map[string]VMClusterConfig       `yaml:"vmcluster,omitempty"`
 	VLCluster       map[string]VLClusterConfig       `yaml:"vlcluster,omitempty"`
 	VictoriaLogs    map[string]VictoriaLogsConfig    `yaml:"victorialogs,omitempty"`
@@ -738,6 +740,16 @@ const DefaultPGExporterImageTag = "docker.io/pgsty/pg_exporter:1.5.0"
 // DefaultPGExporterPort is pg_exporter's conventional --web.listen-address port
 // (:9630), the base of its own pool (a second instance takes the next free port).
 const DefaultPGExporterPort = 9630
+
+// DefaultDocumentDBImageTag pins the pgcli-built DocumentDB gateway image.
+// The image wraps the official documentdb-gateway .deb (Ubuntu 24.04) on
+// debian:13-slim and runs the daemon directly, bypassing the upstream
+// wrapper's systemd/telemetry entrypoint.
+const DefaultDocumentDBImageTag = "ghcr.io/mars-base/pgcli/pgcli-documentdb-gateway:1.0.0"
+
+// DefaultDocumentDBPort is the MongoDB wire-protocol port of the first
+// DocumentDB gateway; additional instances take the next free port.
+const DefaultDocumentDBPort = 10260
 
 // DefaultGiteaImageTag pins the Gitea image. gitea/gitea is the official
 // multi-arch image on docker.io (pull-only — pgcli never builds it). Note the
@@ -1363,6 +1375,26 @@ type Influx2TSDBConfig struct {
 func ValidInflux2TSDBName(name string) bool {
 	ok, _ := regexp.MatchString(`^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$`, name)
 	return ok
+}
+
+// ValidDocumentDBClientUser reports whether name is usable as a DocumentDB
+// gateway client role. The gateway rejects roles whose name starts with one of
+// its blocked prefixes (documentdb/citus/pg/internal_role), so pgcli refuses
+// them before running install SQL.
+func ValidDocumentDBClientUser(name string) bool {
+	if name == "" || len(name) > 63 {
+		return false
+	}
+	if !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`).MatchString(name) {
+		return false
+	}
+	lower := strings.ToLower(name)
+	for _, prefix := range []string{"documentdb", "citus", "pg", "internal_role"} {
+		if strings.HasPrefix(lower, prefix) {
+			return false
+		}
+	}
+	return true
 }
 
 // DefaultClickHouseVersion pins the ClickHouse LTS release pulled from the
@@ -3263,6 +3295,37 @@ type PGExporterConfig struct {
 	Autostart bool `yaml:"autostart,omitempty"`
 }
 
+// DocumentDBConfig holds a DocumentDB gateway addon: the official Rust service
+// that speaks the MongoDB wire protocol and translates it into SQL through the
+// DocumentDB PostgreSQL extension. The gateway connects to a LOCAL pgcli
+// instance over a shared Unix socket (the official .deb refuses TCP password
+// authentication), so TargetInstance is required and there is no DSN mode.
+//
+// The gateway authenticates clients as DocumentDB API users (ClientUser) and
+// connects to PostgreSQL as a dedicated local role managed by the install
+// path. ClientPassword is A SECRET: generated at install time when absent,
+// never defaulted, and retrievable via `pg addon password documentdb`.
+//
+// TLSMode controls the listener: "allow" (default) accepts both plaintext and
+// TLS with an auto-generated self-signed certificate; "require" rejects
+// plaintext.
+type DocumentDBConfig struct {
+	ContainerName  string `yaml:"container_name"`      // pgcli-documentdb<ns>-<name>
+	Name           string `yaml:"name,omitempty"`      // addon key
+	ImageTag       string `yaml:"image_tag,omitempty"` // ghcr.io/mars-base/pgcli/pgcli-documentdb-gateway:1.0.0
+	HostPort       int    `yaml:"host_port,omitempty"` // MongoDB wire protocol port, 10260+ auto-assigned
+	Listen         string `yaml:"listen,omitempty"`    // bind address, default 0.0.0.0
+	TargetInstance string `yaml:"target_instance,omitempty"`
+	Database       string `yaml:"database,omitempty"`
+	ClientUser     string `yaml:"client_user,omitempty"`     // default docdb_admin
+	ClientPassword string `yaml:"client_password,omitempty"` // A SECRET — generated at install
+	TLSMode        string `yaml:"tls_mode,omitempty"`        // allow (default) | require
+	// Autostart brings this container up on host boot via the boot service
+	// (pg autostart enable --documentdb). Start-only: the target instance must
+	// already be running, so pg start --autostart starts the instance first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
 // VMClusterStorageNode is one vmstorage address that vminsert/vmselect dial.
 // Address is host:port for the insert protocol (e.g. "10.0.0.1:8483");
 // SelectPort is the select protocol port on the same host (e.g. 8484).
@@ -3935,6 +3998,7 @@ func Default() *Config {
 		VictoriaMetricsStartPort: 8428,
 		NodeExporterStartPort:    DefaultNodeExporterPort,
 		PGExporterStartPort:      DefaultPGExporterPort,
+		DocumentDBStartPort:      DefaultDocumentDBPort,
 		VMClusterStartPort:       8480,
 		VictoriaLogsStartPort:    9428,
 		VlagentStartPort:         9429,
@@ -4164,6 +4228,7 @@ type displayConfig struct {
 	VictoriaMetricsStartPort int                       `yaml:"victoriametrics_start_port,omitempty"`
 	NodeExporterStartPort    int                       `yaml:"nodeexporter_start_port,omitempty"`
 	PGExporterStartPort      int                       `yaml:"pgexporter_start_port,omitempty"`
+	DocumentDBStartPort      int                       `yaml:"documentdb_start_port,omitempty"`
 	VMClusterStartPort       int                       `yaml:"vmcluster_start_port,omitempty"`
 	VictoriaLogsStartPort    int                       `yaml:"victorialogs_start_port,omitempty"`
 	VlagentStartPort         int                       `yaml:"vlagent_start_port,omitempty"`
@@ -4218,6 +4283,7 @@ func (c *Config) Display() displayConfig {
 		VictoriaMetricsStartPort: c.VictoriaMetricsStartPort,
 		NodeExporterStartPort:    c.NodeExporterStartPort,
 		PGExporterStartPort:      c.PGExporterStartPort,
+		DocumentDBStartPort:      c.DocumentDBStartPort,
 		VMClusterStartPort:       c.VMClusterStartPort,
 		VictoriaLogsStartPort:    c.VictoriaLogsStartPort,
 		VlagentStartPort:         c.VlagentStartPort,
@@ -4533,6 +4599,42 @@ func (c *Config) Validate() error {
 			if err := pgExporterScheme("admin_dsn", ac.AdminDSN, name); err != nil {
 				return err
 			}
+		}
+	}
+	// DocumentDB gateways: a local target instance, a database, a unique
+	// wire-protocol port, a loopback-or-any bind, a known TLS mode, and a
+	// client role the gateway will accept. The gateway rejects roles starting
+	// with its blocked prefixes, so fail here with a clearer message.
+	documentDBPorts := make(map[int]string, len(c.Addons.DocumentDB))
+	for name, dc := range c.Addons.DocumentDB {
+		if dc.TargetInstance == "" {
+			return fmt.Errorf("addons.documentdb.%s.target_instance is required (the gateway only supports local pgcli instances)", name)
+		}
+		if _, ok := c.Instances[dc.TargetInstance]; !ok {
+			return fmt.Errorf("addons.documentdb.%s.target_instance %q not found in instances", name, dc.TargetInstance)
+		}
+		if dc.Database == "" {
+			return fmt.Errorf("addons.documentdb.%s.database is required", name)
+		}
+		if dc.HostPort < 1 || dc.HostPort > 65535 {
+			return fmt.Errorf("addons.documentdb.%s.host_port must be between 1 and 65535, got %d", name, dc.HostPort)
+		}
+		if prev, ok := documentDBPorts[dc.HostPort]; ok {
+			return fmt.Errorf("addons.documentdb.%s.host_port %d is already used by %s", name, dc.HostPort, prev)
+		}
+		documentDBPorts[dc.HostPort] = name
+		switch dc.Listen {
+		case "", "0.0.0.0", "127.0.0.1", "::1":
+		default:
+			return fmt.Errorf("addons.documentdb.%s.listen %q must be one of 0.0.0.0, 127.0.0.1, ::1", name, dc.Listen)
+		}
+		switch dc.TLSMode {
+		case "", "allow", "require":
+		default:
+			return fmt.Errorf("addons.documentdb.%s.tls_mode %q must be allow or require", name, dc.TLSMode)
+		}
+		if !ValidDocumentDBClientUser(dc.ClientUser) {
+			return fmt.Errorf("addons.documentdb.%s: client_user %q must be 1-63 chars of [A-Za-z0-9_-], start alphanumeric, and not start with documentdb/citus/pg/internal_role", name, dc.ClientUser)
 		}
 	}
 	// ClickHouse instances: names are directory keys, paths are absolute, the
@@ -5127,6 +5229,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.PGExporterStartPort == 0 {
 		c.PGExporterStartPort = d.PGExporterStartPort
+	}
+	if c.DocumentDBStartPort == 0 {
+		c.DocumentDBStartPort = d.DocumentDBStartPort
 	}
 	if c.VMClusterStartPort == 0 {
 		c.VMClusterStartPort = d.VMClusterStartPort
@@ -5836,6 +5941,32 @@ func (c *Config) ApplyDefaults() {
 			addon.MonitorUser = "pgexporter"
 		}
 		c.Addons.PGExporter[name] = addon
+	}
+
+	// Top-level addons defaults (DocumentDB gateway). Database and
+	// ClientPassword are NEVER defaulted here: the database is resolved from
+	// the target instance on the install path, and the password is a secret
+	// generated only on the install path.
+	for name, addon := range c.Addons.DocumentDB {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-documentdb" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultDocumentDBImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "0.0.0.0"
+		}
+		if addon.ClientUser == "" {
+			addon.ClientUser = "docdb_admin"
+		}
+		if addon.TLSMode == "" {
+			addon.TLSMode = "allow"
+		}
+		c.Addons.DocumentDB[name] = addon
 	}
 
 	// Top-level addons defaults (VictoriaLogs). Exact mirror of the
@@ -7657,6 +7788,42 @@ func (c *Config) autoAssignPorts() {
 				next = addon.HostPort + 1
 			}
 			c.Addons.PGExporter[name] = addon
+		}
+	}
+
+	// Allocate ports for DocumentDB gateways from their own pool
+	// (documentdb_start_port, default 10260). One MongoDB wire-protocol port
+	// per gateway, same shape as the pg_exporter block above.
+	{
+		ddbBase := c.DocumentDBStartPort
+		assignedDDB := map[int]bool{}
+		for _, addon := range c.Addons.DocumentDB {
+			if addon.HostPort != 0 {
+				assignedDDB[addon.HostPort] = true
+			}
+		}
+		next := ddbBase
+		nextFreeDDB := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedDDB[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.DocumentDB))
+		for name := range c.Addons.DocumentDB {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.DocumentDB[name]
+			if addon.HostPort == 0 && ddbBase > 0 {
+				addon.HostPort = nextFreeDDB()
+			} else if addon.HostPort >= next {
+				next = addon.HostPort + 1
+			}
+			c.Addons.DocumentDB[name] = addon
 		}
 	}
 

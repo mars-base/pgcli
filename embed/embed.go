@@ -31,6 +31,13 @@ var PatroniEntrypointShell string
 //go:embed init.sh
 var InitShell string
 
+// DocumentDBGatewaySetupConfigurationJSON is the default gateway configuration
+// mounted into the DocumentDB gateway container. Telemetry stays disabled; the
+// add-on manager flips EnforceTls for TLSMode=require.
+//
+//go:embed documentdb-gateway.SetupConfiguration.json
+var DocumentDBGatewaySetupConfigurationJSON string
+
 // PGEntrypointShell is the wrapper entrypoint that starts sshd then runs the
 // official postgres entrypoint.
 //
