@@ -5,6 +5,7 @@ package hostbin
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -42,6 +43,27 @@ func TestStartStopAlive(t *testing.T) {
 	}
 	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
 		t.Error("pid file should be removed by Stop")
+	}
+}
+
+func TestStopDeadProcess(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "dead.pid")
+	if err := StartDetached("/bin/true", nil, filepath.Join(dir, "dead.log"), pidFile); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for Alive(pidFile) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if Alive(pidFile) {
+		t.Fatal("/bin/true should have exited")
+	}
+	if err := Stop(pidFile, time.Second); err != nil {
+		t.Fatalf("Stop on an already-exited process: %v", err)
+	}
+	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+		t.Error("pid file should be removed")
 	}
 }
 
@@ -101,4 +123,63 @@ func TestStartDetachedEnvOverridesEnvironment(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("child produced no output")
+}
+
+func TestStartDetachedSpecDir(t *testing.T) {
+	dir := t.TempDir()
+	work := filepath.Join(dir, "work")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pidFile := filepath.Join(dir, "dir.pid")
+	logFile := filepath.Join(dir, "dir.log")
+
+	if err := StartDetachedSpec(Spec{
+		Bin:     "/bin/sh",
+		Args:    []string{"-c", "pwd"},
+		Dir:     work,
+		LogFile: logFile,
+		PIDFile: pidFile,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(logFile)
+		if err == nil && len(data) > 0 {
+			got := strings.TrimSpace(string(data))
+			want, _ := filepath.EvalSymlinks(work)
+			if got != work && got != want {
+				t.Fatalf("child cwd = %q, want %q", got, work)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("child produced no output")
+}
+
+func TestAliveShebangScript(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "daemon.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pidFile := filepath.Join(dir, "script.pid")
+	logFile := filepath.Join(dir, "script.log")
+
+	if err := StartDetached(script, nil, logFile, pidFile); err != nil {
+		t.Fatal(err)
+	}
+	if !Alive(pidFile) {
+		data, _ := os.ReadFile(pidFile)
+		t.Fatalf("shebang script not alive, pid file %q", data)
+	}
+	if err := Stop(pidFile, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if Alive(pidFile) {
+		t.Fatal("shebang script still alive after Stop")
+	}
 }

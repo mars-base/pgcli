@@ -177,6 +177,44 @@ uvicorn 控制台会按上面的 `logging.basicConfig` 格式输出：
 2026-11-02 08:28:08,123 WARNING CRITICAL PGDown: PostgreSQL instance is down
 ```
 
+### 用 `pg daemon` 托管接收端（Linux）
+
+在终端里挂着 `uv run` 适合测试，但真正的接收端应当脱离登录会话，并在主机重启后
+自动回来。Linux 上可以用 `pg daemon` 登记该命令（见
+[Daemon]({{< relref "../toolbox/daemon" >}})），由 pgcli 管理进程：
+
+```bash
+mkdir -p /opt/webhook
+python3 -m venv /opt/webhook/.venv
+/opt/webhook/.venv/bin/pip install fastapi uvicorn
+# 把上面的接收端保存为 /opt/webhook/webhook_app.py
+
+pg daemon add webhook --dir /opt/webhook -- \
+  /opt/webhook/.venv/bin/uvicorn webhook_app:app --host 0.0.0.0 --port 18801
+pg daemon start webhook
+```
+
+`add` 只登记命令，`start` 才真正启动。请使用 venv 里的绝对路径：开机时接收端拿
+不到你登录 shell 的 `PATH`，`uv run` 和裸的 `uvicorn` 都不可用。查看状态、跟踪
+日志：
+
+```bash
+pg daemon status webhook
+pg daemon logs webhook -f
+```
+
+要让它开机自启——在所有实例与 addon **之后**启动，因此接收端启动时其依赖已在
+运行：
+
+```bash
+pg autostart enable --daemon --name webhook
+```
+
+`pg daemon stop webhook` 与 `pg daemon restart webhook` 用于启停；
+`pg daemon remove webhook --clean-log` 会停止进程，并删除登记与托管日志。开机
+自启只启动一次，不负责监控：开机后崩溃的进程不会被重新拉起。让 Alertmanager
+指向它的方式不变：`--webhook-url http://127.0.0.1:18801/alertmanager`。
+
 ### 接收端在另一台主机
 
 当接收端与 Alertmanager 不在同一台主机时，接收端要绑定 `0.0.0.0`，并让
@@ -187,6 +225,9 @@ Alertmanager 使用接收端主机上可达的 IP 与端口；`127.0.0.1` 只在
 ```bash
 uv run --with fastapi --with uvicorn uvicorn webhook_app:app --host 0.0.0.0 --port 18801
 ```
+
+接收端也可以在这台主机上用 `pg daemon` 登记——命令相同、同样绑定 `0.0.0.0`——
+从而脱离登录会话并随主机重启自动恢复（见上文「用 `pg daemon` 托管接收端」）。
 
 先在 Alertmanager 主机上验证可达性：
 

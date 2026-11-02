@@ -186,6 +186,47 @@ The uvicorn console then shows, with the `logging.basicConfig` format above:
 2026-11-02 08:28:08,123 WARNING CRITICAL PGDown: PostgreSQL instance is down
 ```
 
+### Run the receiver as a managed daemon (Linux)
+
+Leaving `uv run` in a terminal works for testing, but a real receiver should
+survive logout and come back after a reboot. On Linux, register the command
+with `pg daemon` (see [Daemon]({{< relref "../toolbox/daemon" >}})) and let
+pgcli manage the process:
+
+```bash
+mkdir -p /opt/webhook
+python3 -m venv /opt/webhook/.venv
+/opt/webhook/.venv/bin/pip install fastapi uvicorn
+# save the receiver above as /opt/webhook/webhook_app.py
+
+pg daemon add webhook --dir /opt/webhook -- \
+  /opt/webhook/.venv/bin/uvicorn webhook_app:app --host 0.0.0.0 --port 18801
+pg daemon start webhook
+```
+
+`add` only records the command; `start` runs it. Use the venv's absolute
+paths: at boot the receiver does not get the `PATH` of your login shell, so
+`uv run` and a bare `uvicorn` are not available. Check it and follow its log
+with:
+
+```bash
+pg daemon status webhook
+pg daemon logs webhook -f
+```
+
+To start it automatically at boot — after every instance and addon, so the
+receiver can dial its dependencies while they are up:
+
+```bash
+pg autostart enable --daemon --name webhook
+```
+
+`pg daemon stop webhook` and `pg daemon restart webhook` manage it;
+`pg daemon remove webhook --clean-log` stops it and deletes the registration
+and the managed log. Autostart starts the process once and does not supervise
+it: a crash after boot is not restarted. Point Alertmanager at it exactly as
+before with `--webhook-url http://127.0.0.1:18801/alertmanager`.
+
 ### Receiver on another host
 
 When the receiver and Alertmanager run on different hosts, bind the receiver to
@@ -197,6 +238,10 @@ On the receiver host (example address `10.0.0.5`):
 ```bash
 uv run --with fastapi --with uvicorn uvicorn webhook_app:app --host 0.0.0.0 --port 18801
 ```
+
+The receiver can also be registered as a `pg daemon` on this host — same
+command, same `--host 0.0.0.0` — so it survives logout and restarts with the
+host (see [above](#run-the-receiver-as-a-managed-daemon-linux)).
 
 From the Alertmanager host, verify the route before wiring it up:
 

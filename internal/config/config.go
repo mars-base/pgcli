@@ -77,8 +77,17 @@ type Config struct {
 	Pigsty                   PigstyConfig              `yaml:"pigsty"`
 	Addons                   TopAddonsConfig           `yaml:"addons,omitempty"` // top-level addon configs (e.g. remote PgBouncer)
 	Instances                map[string]InstanceConfig `yaml:"instances"`
+	Daemons                  map[string]DaemonConfig   `yaml:"daemons,omitempty"` // host processes managed by `pg daemon`
 
 	Instance string `yaml:"-"` // current instance name (set at runtime, not persisted)
+}
+
+// DaemonConfig describes a long-running host process managed by `pg daemon`.
+type DaemonConfig struct {
+	Command   []string `yaml:"command"`
+	Dir       string   `yaml:"dir,omitempty"`
+	LogFile   string   `yaml:"log_file,omitempty"`
+	Autostart bool     `yaml:"autostart,omitempty"`
 }
 
 // InstanceConfig is the configuration for a single database instance.
@@ -1266,6 +1275,12 @@ type SQLiteS3Config struct {
 
 // ValidSQLiteName reports whether name is a safe SQLite database key.
 func ValidSQLiteName(name string) bool {
+	ok, _ := regexp.MatchString(`^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$`, name)
+	return ok
+}
+
+// ValidDaemonName reports whether name is a safe daemon key.
+func ValidDaemonName(name string) bool {
 	ok, _ := regexp.MatchString(`^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$`, name)
 	return ok
 }
@@ -4257,6 +4272,7 @@ type displayConfig struct {
 	Pigsty                   PigstyConfig              `yaml:"pigsty"`
 	Addons                   TopAddonsConfig           `yaml:"addons,omitempty"`
 	Instances                map[string]InstanceConfig `yaml:"instances"`
+	Daemons                  map[string]DaemonConfig   `yaml:"daemons,omitempty"`
 }
 
 // Display returns a view of the config suitable for display or saving.
@@ -4312,6 +4328,7 @@ func (c *Config) Display() displayConfig {
 		Pigsty:                   c.Pigsty,
 		Addons:                   c.Addons,
 		Instances:                c.Instances,
+		Daemons:                  c.Daemons,
 	}
 }
 

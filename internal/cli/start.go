@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mars-base/pgcli/internal/config"
+	"github.com/mars-base/pgcli/internal/daemon"
 	"github.com/mars-base/pgcli/internal/hostbin"
 	"github.com/mars-base/pgcli/internal/kafka"
 	"github.com/mars-base/pgcli/internal/pitr"
@@ -79,8 +80,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartNodeExporter(c) && !hasAutostartPGExporter(c) && !hasAutostartDocumentDB(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartRabbitMQ(c) && !hasAutostartRocketMQ(c) && !hasAutostartNginx(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --kafka / --rabbitmq / --nginx / --nodeexporter / --pgexporter / --documentdb)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartNodeExporter(c) && !hasAutostartPGExporter(c) && !hasAutostartDocumentDB(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartRabbitMQ(c) && !hasAutostartRocketMQ(c) && !hasAutostartNginx(c) && !hasAutostartDaemons(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --kafka / --rabbitmq / --nginx / --nodeexporter / --pgexporter / --documentdb / --daemon)")
 		return nil
 	}
 
@@ -364,6 +365,15 @@ func startAutostart() error {
 	// backends exist by the time the listener comes up (nginx tolerates
 	// backends being down anyway).
 	if err := startAutostartNginx(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// Host daemons (pg daemon). Strictly last: they are arbitrary long-running
+	// commands (typically a webhook receiver), so everything they might dial —
+	// databases, queues, reverse-proxy backends — is already up. Starting one
+	// must not delay the boot pass; an immediately-exiting daemon is reported
+	// with its log tail and the remaining ones still start.
+	if err := startAutostartDaemons(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -2093,6 +2103,53 @@ func startAutostartVlagents(c *config.Config) error {
 				firstErr = err
 			}
 		}
+	}
+	return firstErr
+}
+
+// hasAutostartDaemons reports whether any pg daemon is autostart-enabled.
+func hasAutostartDaemons(c *config.Config) bool {
+	for _, dc := range c.Daemons {
+		if dc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartDaemons starts each autostart-enabled host daemon. daemon.Start
+// is idempotent and catches a process that exits immediately (bad interpreter,
+// port in use), reporting its log tail. Sorted by name for deterministic boot
+// logs. Linux-only, matching the pg daemon command itself.
+func startAutostartDaemons(c *config.Config) error {
+	if platform.Detect() != platform.Linux {
+		return nil
+	}
+	var names []string
+	for name, dc := range c.Daemons {
+		if dc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	var firstErr error
+	for _, name := range names {
+		already, err := daemon.Start(c, name)
+		if err != nil {
+			fmt.Printf("  [X] daemon autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if already {
+			fmt.Printf("  [OK] daemon %q already running\n", name)
+			continue
+		}
+		fmt.Printf("  [OK] daemon %q started (pid %d)\n", name, daemon.PID(c, name))
 	}
 	return firstErr
 }

@@ -5,7 +5,7 @@ weight: 60
 icon: fa-solid fa-power-off
 ---
 
-pgcli can automatically start PostgreSQL instances, backup containers, PgBouncer services, etcd members, and the other supported addons after a host reboot. This feature uses system service managers:
+pgcli can automatically start PostgreSQL instances, backup containers, PgBouncer services, etcd members, the other supported addons, and host commands registered with `pg daemon` after a host reboot. This feature uses system service managers:
 - **Linux**: systemd user units
 - **macOS**: launchd LaunchAgents
 
@@ -113,6 +113,27 @@ the boot pass continues); restore the file or disable that target.
 `pg sqlite replication disable` also clears the database's autostart flag,
 because Litestream cannot run without replication configured.
 
+### For a Daemon
+
+Enable auto-start for a command registered with `pg daemon add` (Linux only):
+
+```bash
+pg daemon add webhook --dir /opt/webhook -- \
+  /opt/webhook/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 18801
+
+pg autostart enable --daemon --name webhook
+```
+
+`--name` is required — daemons have no default name. At boot,
+`pg start --autostart` starts the command **after** all instances and addons, so
+a webhook receiver or agent can dial its dependencies while they are already
+running. The start is idempotent; a daemon that exits immediately is reported
+with its log tail, and the rest of the boot pass continues.
+
+Autostart starts the process once and does not supervise it: a crash after boot
+is not restarted. Run the command under its own supervisor if you need crash
+recovery.
+
 ## Disable Auto-start
 
 ```bash
@@ -122,6 +143,7 @@ pg autostart disable --pgbouncer -i <instance-name>
 pg autostart disable --pgbouncer --pg-name <remote-name>
 pg autostart disable --etcd --name <member-name>
 pg autostart disable --sqlite --name <database>
+pg autostart disable --daemon --name <daemon>
 ```
 
 When all auto-start targets are disabled, the boot service is automatically removed.
@@ -258,6 +280,11 @@ addons:
     appdb:
       # ... other settings ...
       autostart: true
+
+daemons:
+  webhook:
+    # ... command, dir, log_file ...
+    autostart: true
 ```
 
 ## Boot Service Behavior
@@ -269,6 +296,7 @@ The boot service runs `pg start --autostart`, which:
 4. Starts etcd members with `autostart: true` (start-only; see above)
 5. Starts the other addons with `autostart: true`; SQLite databases restart
    their Litestream replication after the object-storage addons
+6. Starts daemons with `autostart: true` last, after every instance and addon
 
 If no auto-start targets are configured, the service exits successfully (no error).
 
@@ -329,6 +357,9 @@ pg autostart enable --etcd --name m2
 
 # Restart Litestream for a SQLite database (replication must be enabled first)
 pg autostart enable --sqlite --name appdb
+
+# Start a pg daemon (register it with `pg daemon add` first)
+pg autostart enable --daemon --name webhook
 
 # Check the status
 pg autostart status

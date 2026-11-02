@@ -5,7 +5,7 @@ weight: 60
 icon: fa-solid fa-power-off
 ---
 
-pgcli 可以在主机重启后自动启动 PostgreSQL 实例、备份容器、PgBouncer 服务、etcd 成员以及其他受支持的 addon。此功能使用系统服务管理器：
+pgcli 可以在主机重启后自动启动 PostgreSQL 实例、备份容器、PgBouncer 服务、etcd 成员、其他受支持的 addon 以及 `pg daemon` 登记的宿主机命令。此功能使用系统服务管理器：
 - **Linux**: systemd 用户单元
 - **macOS**: launchd LaunchAgents
 
@@ -108,6 +108,25 @@ MinIO/silo/rustfs/garage/SeaweedFS 已经先开始监听。如果数据库文件
 `pg sqlite replication disable` 会同时清除该数据库的 autostart 标志，因为
 没有复制配置时 Litestream 无法运行。
 
+### Daemon
+
+为通过 `pg daemon add` 登记的命令启用开机自启（仅 Linux）：
+
+```bash
+pg daemon add webhook --dir /opt/webhook -- \
+  /opt/webhook/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 18801
+
+pg autostart enable --daemon --name webhook
+```
+
+`--name` 必填——daemon 没有默认名称。开机时 `pg start --autostart` 会在所有
+实例与 addon **之后**启动该命令，因此 webhook 接收端或 agent 启动时，其依赖
+已经在运行。启动是幂等的；若某个 daemon 立刻退出，会打印其日志末尾，其余自启
+目标继续执行。
+
+开机自启只启动一次，不负责监控：开机后崩溃的进程不会被重新拉起。需要崩溃恢复
+时，请在命令内部使用自己的 supervisor。
+
 ## 禁用开机自启
 
 ```bash
@@ -117,6 +136,7 @@ pg autostart disable --pgbouncer -i <实例名>
 pg autostart disable --pgbouncer --pg-name <远程名称>
 pg autostart disable --etcd --name <成员名>
 pg autostart disable --sqlite --name <数据库名>
+pg autostart disable --daemon --name <daemon 名>
 ```
 
 当所有开机自启目标都被禁用后，开机服务会被自动移除。
@@ -253,6 +273,11 @@ addons:
     appdb:
       # ... 其他设置 ...
       autostart: true
+
+daemons:
+  webhook:
+    # ... command、dir、log_file ...
+    autostart: true
 ```
 
 ## 开机服务行为
@@ -264,6 +289,7 @@ addons:
 4. 启动 `autostart: true` 的 etcd 成员（只做启动；见上文）
 5. 启动其他 `autostart: true` 的 addon；SQLite 数据库在对象存储 addon 之后
    重启其 Litestream 复制
+6. 最后启动 `autostart: true` 的 daemon，在所有实例与 addon 之后
 
 如果没有配置任何开机自启目标，服务会正常退出（无错误）。
 
@@ -323,6 +349,9 @@ pg autostart enable --etcd --name m2
 
 # 为 SQLite 数据库重启 Litestream（需先启用复制）
 pg autostart enable --sqlite --name appdb
+
+# 启动 pg daemon（需先用 `pg daemon add` 登记）
+pg autostart enable --daemon --name webhook
 
 # 检查状态
 pg autostart status
