@@ -24,6 +24,8 @@ pgcli 使用的容器镜像及其默认 tag。
 | `ghcr.io/mars-base/pgcli/pgcli-mongosh` | `2.14.1` | mongosh 客户端（官方 2.14.1 单文件二进制 + `debian:13-slim`），不含 MongoDB server；由 `pg addon documentdb shell`/只读巡检按需拉取，pgcli 二进制不含 MongoDB driver；双架构 manifest list | `DefaultMongoshImageTag` |
 | `docker.io/clickhouse/clickhouse-server` | `26.8.36.3` | ClickHouse 单机列式 OLAP（26.8 LTS），纯上游官方镜像无 wrapper，多架构 manifest list；host 网络 | `DefaultClickHouseImageTag`（`ClickHouseImageTagForVersion`） |
 | `docker.io/apache/kafka` | `4.4.0` | Apache Kafka 4.x（KRaft-only，无需 ZooKeeper）broker+controller combined 节点，支持单机或跨主机静态 controller quorum，纯上游官方镜像无 wrapper，多架构 manifest list；host 网络，以 uid/gid 1000 运行 | `DefaultKafkaImageTag`（`KafkaImageTagForVersion`） |
+| `docker.io/library/rabbitmq` | `4.4.0-management` | RabbitMQ 消息代理（AMQP + management Web UI/API），单机或跨主机 etcd peer discovery 集群，纯上游官方镜像无 wrapper，多架构 manifest list；host 网络，以 uid/gid 999 运行 | `DefaultRabbitMQImageTag` |
+| `docker.io/apache/rocketmq` | `5.5.0` | Apache RocketMQ 5.x 消息队列（每个实例 NameServer + broker + proxy 三容器），单机或 DLedger controller-mode 集群，纯上游官方镜像无 wrapper；host 网络，以 uid/gid 3000 运行 | `DefaultRocketMQImageTag` |
 | `docker.io/edoburu/pgbouncer` | `v1.25.2-p0` | PostgreSQL 连接池 | `DefaultPgBouncerImageTag` |
 | `docker.io/postgrest/postgrest` | `v16.3` | PostgREST（REST API over PostgreSQL） | `DefaultPostgrestImageTag` |
 | `docker.io/library/haproxy` | `3.2.23-alpine` | HTTP/TCP 负载均衡 | `DefaultHAProxyImageTag` |
@@ -39,6 +41,8 @@ pgcli 使用的容器镜像及其默认 tag。
 | `docker.io/grafana/grafana` | `13.2.4` | Grafana（开源可观测性面板），纯上游官方镜像无 wrapper；自 12.4.0 起 `grafana-oss` 仓库冻结，OSS 构建就发在这个仓库里；默认 Alpine base，双架构 manifest list | `config.go:578`（`DefaultGrafanaImageTag`） |
 | `docker.io/prom/prometheus` | `v3.15.0` | Prometheus（指标采集后端，Grafana 的数据源），纯上游官方镜像无 wrapper；无后缀 tag 即 busybox 变体（带 shell），双架构 manifest list | `config.go:591`（`DefaultPrometheusImageTag`） |
 | `docker.io/prom/alertmanager` | `v0.34.1` | Alertmanager（Prometheus 下游的告警去重/分组/路由端），纯上游官方镜像无 wrapper；无后缀 tag 即 busybox 变体（带 `amtool`），多架构 manifest list | `config.go:603`（`DefaultAlertmanagerImageTag`） |
+| `docker.io/prom/node-exporter` | `v1.12.1` | node_exporter（Prometheus 官方主机指标导出器），纯上游官方镜像无 wrapper，多架构 manifest list；host 网络，只读挂载宿主 `/proc`、`/sys`、`/`，无数据目录 | `DefaultNodeExporterImageTag` |
+| `docker.io/pgsty/pg_exporter` | `1.5.0` | pg_exporter（Pigsty 的声明式 PostgreSQL 指标导出器，内置默认 collector set），纯上游官方镜像无 wrapper，多架构 manifest list；host 网络，目标可为 pgcli 实例或任意远程 PostgreSQL | `DefaultPGExporterImageTag` |
 | `docker.io/gitea/gitea` | `28.1.0` | Gitea（自托管 Git 服务），纯上游官方镜像无 wrapper；pin 的是 **rootful** 构建（`-rootless` 变体数据布局互不兼容，pgcli 永不选用）；多架构 manifest list（amd64 + arm64 + riscv64） | `config.go:619`（`DefaultGiteaImageTag`） |
 | `ghcr.io/thinkparq/beegfs-mgmtd` | `8.4.0` | BeeGFS 管理/注册服务（三容器之一），官方 ThinkParQ 镜像无 wrapper；root 运行、host 网络 | `BeeGFSImageRepo` + `DefaultBeeGFSVersion`（`config.go:629/635`） |
 | `ghcr.io/thinkparq/beegfs-meta` | `8.4.0` | BeeGFS 元数据服务（三容器之二），固定监听 8005 | 同上 |
@@ -129,6 +133,19 @@ podman pull --platform linux/amd64 docker.io/clickhouse/clickhouse-server:26.8.3
 podman save -o "$TARGET/clickhouse-server_26.8.36.3.tar" \
   docker.io/clickhouse/clickhouse-server:26.8.36.3
 
+# kafka 上游镜像是多架构 manifest list，先按 amd64 pull 再 save
+podman pull --platform linux/amd64 docker.io/apache/kafka:4.4.0
+podman save -o "$TARGET/kafka_4.4.0.tar" docker.io/apache/kafka:4.4.0
+
+# rabbitmq management 镜像同样是多架构 manifest list，先按 amd64 pull 再 save
+podman pull --platform linux/amd64 docker.io/library/rabbitmq:4.4.0-management
+podman save -o "$TARGET/rabbitmq_4.4.0-management.tar" \
+  docker.io/library/rabbitmq:4.4.0-management
+
+# rocketmq 上游镜像先按 amd64 pull 再 save
+podman pull --platform linux/amd64 docker.io/apache/rocketmq:5.5.0
+podman save -o "$TARGET/rocketmq_5.5.0.tar" docker.io/apache/rocketmq:5.5.0
+
 # pgAdmin 上游镜像与 redis 一样是双架构 manifest list，先按 amd64 pull 再 save
 podman pull --platform linux/amd64 docker.io/dpage/pgadmin4:9.18
 podman save -o "$TARGET/pgadmin4_9.18.tar" docker.io/dpage/pgadmin4:9.18
@@ -136,6 +153,15 @@ podman save -o "$TARGET/pgadmin4_9.18.tar" docker.io/dpage/pgadmin4:9.18
 # nginx 上游镜像与 redis 一样是双架构 manifest list，先按 amd64 pull 再 save
 podman pull --platform linux/amd64 docker.io/library/nginx:1.27-alpine
 podman save -o "$TARGET/nginx_1.27-alpine.tar" docker.io/library/nginx:1.27-alpine
+
+# garage 上游镜像（FROM scratch，多架构）先按 amd64 pull 再 save
+podman pull --platform linux/amd64 docker.io/dxflrs/garage:v2.4.1
+podman save -o "$TARGET/garage_v2.4.1.tar" docker.io/dxflrs/garage:v2.4.1
+
+# seaweedfs 上游镜像先按 amd64 pull 再 save
+podman pull --platform linux/amd64 docker.io/chrislusf/seaweedfs:4.48_large_disk
+podman save -o "$TARGET/seaweedfs_4.48_large_disk.tar" \
+  docker.io/chrislusf/seaweedfs:4.48_large_disk
 
 # grafana 上游镜像同样是双架构 manifest list，先按 amd64 pull 再 save
 podman pull --platform linux/amd64 docker.io/grafana/grafana:13.2.4
@@ -148,6 +174,16 @@ podman save -o "$TARGET/prometheus_v3.15.0.tar" docker.io/prom/prometheus:v3.15.
 # alertmanager 上游镜像同样是多架构 manifest list，先按 amd64 pull 再 save
 podman pull --platform linux/amd64 docker.io/prom/alertmanager:v0.34.1
 podman save -o "$TARGET/alertmanager_v0.34.1.tar" docker.io/prom/alertmanager:v0.34.1
+
+# node-exporter 上游镜像是多架构 manifest list，先按 amd64 pull 再 save
+podman pull --platform linux/amd64 docker.io/prom/node-exporter:v1.12.1
+podman save -o "$TARGET/node-exporter_v1.12.1.tar" \
+  docker.io/prom/node-exporter:v1.12.1
+
+# pg_exporter 上游镜像是多架构 manifest list，先按 amd64 pull 再 save
+podman pull --platform linux/amd64 docker.io/pgsty/pg_exporter:1.5.0
+podman save -o "$TARGET/pg_exporter_1.5.0.tar" \
+  docker.io/pgsty/pg_exporter:1.5.0
 
 # gitea 上游镜像同样是多架构 manifest list，先按 amd64 pull 再 save
 podman pull --platform linux/amd64 docker.io/gitea/gitea:28.1.0
@@ -276,6 +312,21 @@ done
   组成跨主机静态 controller quorum（每台主机各自安装，RF=`min(3, voters)`；
   CONTROLLER 与 broker 间流量保持 PLAINTEXT，集群客户端需拼接各节点 CA bundle）；
   以 **host 网络**运行
+- **rabbitmq**：纯上游官方 `docker.io/library/rabbitmq`，无 wrapper，pin 到
+  `4.4.0-management`（多架构 manifest list，amd64 + arm64）——management tag 自带
+  Web UI/API。镜像以 **uid/gid 999（rabbitmq）** 运行，entrypoint 在启动时修复
+  bind mount 数据目录属主，所以 pgcli 只预 chown TLS 私钥文件（rootless 下经
+  `podman unshare chown`，rootful+root 下直接 `chown`）。以 **host 网络**运行；
+  集群成员共用固定的 Erlang EPMD/dist 端口（4369 / 25672），因此**每个宿主只能跑
+  一个集群成员**。单机或跨主机 etcd peer discovery 集群，集群模式默认 quorum
+  queues；admin 密码生成/协调、可选 TLS（仅加密、不认证客户端）
+- **rocketmq**：纯上游官方 `docker.io/apache/rocketmq`，无 wrapper，pin 到
+  `5.5.0`。每个实例三容器（NameServer + broker + proxy），以 **host 网络**运行；
+  镜像用户为 **uid/gid 3000**，pgcli 在首次启动前把数据/配置目录 chown 过去。
+  单机跑一个 async master 无副本，或用 `--cluster`/`--controller-id`/
+  `--advertise-host`/`--peer` 组成嵌入式 DLedger controller-mode 集群（每台主机
+  一个成员，固定端口 9876/9877/10911/10912/8080/8081）。**无认证、无 TLS、
+  无 Web UI**；topic 管理与消息发送走 pgcli 命令
 - **pgadmin4**：纯上游 `docker.io/dpage/pgadmin4`，无 wrapper（镜像自己的
   entrypoint 把 `/var/lib/pgadmin` chown 给 uid 5050 后降权，所以 pgcli 不需要
   rustfs 那套属主机制）；pin 到发布时的 `latest`（当前 `9.18`，双架构 manifest
@@ -321,6 +372,19 @@ done
   **在镜像里关不掉**（不像 prometheus 的 `--web.enable-lifecycle` 可不设即隐去）——
   pgcli 走 SIGHUP、不依赖该端点，但路由照样敞开，故暴露面比 prometheus 更危险（可达即
   可创建 silence 静音 oncall）
+- **node-exporter**：纯上游官方 `docker.io/prom/node-exporter`，无 wrapper，pin 到
+  `v1.12.1`（多架构 manifest list）。镜像以非特权用户运行且**无数据目录/无需
+  chown**；以 **host 网络**运行，并强制只读挂载宿主 `/proc`、`/sys`、`/` 到
+  `/host/proc`、`/host/sys`、`/rootfs`，用 `--path.procfs`/`--path.sysfs`/
+  `--path.rootfs` 指过去——否则容器只会导出自己的指标。**无鉴权、无 TLS**，
+  `Listen` 默认 `0.0.0.0`，暴露面只靠网络边界
+- **pg_exporter**：纯上游官方 `docker.io/pgsty/pg_exporter`，无 wrapper，pin 到
+  `1.5.0`（tag 无 `v` 前缀，多架构 manifest list）。默认 collector set
+  （约 460 条查询）内置于二进制，**无需配置文件**即可采集；无数据目录、无 chown。
+  以 **host 网络**运行，连接目标用低权限 monitor role（`pg_monitor` 成员、
+  `CONNECTION LIMIT 5`），admin DSN 只在建角色时使用、不落盘。**无鉴权、无 TLS**，
+  且同端口还暴露 `/reload`、`/explain`、`/stat` 管理端点；`Listen` 默认
+  `0.0.0.0`，暴露面只靠网络边界
 - **gitea**：纯上游官方 `docker.io/gitea/gitea`，无 wrapper。注意版本线：Gitea 于
   2026 年底把历史 `1.` 前缀去掉，原 1.28.0 即 `28.0.0`，pin 的是当前 stable
   `28.1.0`（2026-10-15 在 Docker Hub 核实），多架构 manifest list（amd64 + arm64 +
@@ -384,7 +448,7 @@ done
 
 ---
 
-**最后更新**：2026-11-02（新增 pgcli-mongosh；同步补入 pgcli-documentdb-gateway；2026-10-28 新增 Kafka 4.4.0 镜像；2026-10-27 新增 clickhouse 与 influx2tsdb 镜像；2026-10-23 新增 vlagent 镜像；同日新增 victorialogs 镜像；此前新增 vmcluster 三镜像于 2026-10-22；
+**最后更新**：2026-11-02（补入 RabbitMQ、RocketMQ、node_exporter、pg_exporter 镜像并同步 Makefile IMAGES；同日新增 pgcli-mongosh；同步补入 pgcli-documentdb-gateway；2026-10-28 新增 Kafka 4.4.0 镜像；2026-10-27 新增 clickhouse 与 influx2tsdb 镜像；2026-10-23 新增 vlagent 镜像；同日新增 victorialogs 镜像；此前新增 vmcluster 三镜像于 2026-10-22；
 此前新增 victoriametrics 镜像；
 此前新增 beegfs 三镜像于 2026-10-19，gitea 于 2026-10-16
 合入时补录，alertmanager 于 2026-10-15
