@@ -26,6 +26,15 @@ curl -fsSL https://raw.githubusercontent.com/mars-base/pgcli/main/scripts/instal
 - 为你的平台下载最新的 pgcli 二进制文件
 - 安装到 `/usr/local/bin`（如果没有 sudo 则安装到 `~/.local/bin`）
 - 将 pgcli 添加到你的 PATH
+- 拉取 PostgreSQL、备份、Patroni 和 etcd 容器镜像
+
+如需跳过镜像拉取——例如离线主机，或镜像已预先加载——传入 `--skip-pull`：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mars-base/pgcli/main/scripts/install.sh | bash -s -- --skip-pull
+```
+
+缺少的镜像会在首次使用时由 podman 自动拉取。
 
 ## 初始化配置
 

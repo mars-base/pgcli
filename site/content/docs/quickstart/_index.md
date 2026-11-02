@@ -26,6 +26,16 @@ This script will:
 - Download the latest pgcli binary for your platform
 - Install it to `/usr/local/bin` (or `~/.local/bin` if no sudo)
 - Add pgcli to your PATH
+- Pull the PostgreSQL, backup, Patroni and etcd container images
+
+To skip the image pull — for example on an offline host or when the images are
+already preloaded — pass `--skip-pull`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mars-base/pgcli/main/scripts/install.sh | bash -s -- --skip-pull
+```
+
+A missing image is then pulled by podman on first use.
 
 ## Initialize Configuration
 
