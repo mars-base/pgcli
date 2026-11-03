@@ -27,7 +27,7 @@ func init() {
 		c.Flags().Bool("postgrest", false, "select the PostgREST addon (use with -i for a local one, --pg-name for a remote one)")
 		c.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST (top-level addons)")
 		c.Flags().Bool("etcd", false, "select an etcd member (top-level addons)")
-		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs or vlagent instance, gitea, beegfs, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, nginx, daemon or SQLite database, or Patroni member")
+		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs or vlagent or vmalert instance, gitea, beegfs, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, nginx, daemon or SQLite database, or Patroni member")
 		c.Flags().Bool("pgdog", false, "select a PgDog proxy (top-level addons)")
 		c.Flags().Bool("ha", false, "select Patroni HA members (top-level addons; requires --scope)")
 		c.Flags().Bool("haproxy", false, "select an HAProxy instance (top-level addons)")
@@ -50,6 +50,7 @@ func init() {
 		c.Flags().Bool("vlcluster", false, "select a VLCluster instance (top-level addons)")
 		c.Flags().Bool("victorialogs", false, "select a VictoriaLogs instance (top-level addons)")
 		c.Flags().Bool("vlagent", false, "select a vlagent instance (top-level addons)")
+		c.Flags().Bool("vmalert", false, "select a vmalert instance (top-level addons)")
 		c.Flags().Bool("gitea", false, "select a Gitea instance (top-level addons)")
 		c.Flags().Bool("beegfs", false, "select a BeeGFS filesystem (top-level addons; autostart starts the whole 3-container cluster)")
 		c.Flags().Bool("juicefs", false, "select a JuiceFS volume (top-level host-binary addons; autostart re-mounts it)")
@@ -81,7 +82,7 @@ Use 'pg autostart disable' to opt out.`,
 
 var autostartEnableCmd = &cobra.Command{
 	Use:   "enable",
-	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/victoriametrics/nodeexporter/pgexporter/documentdb/vmcluster/vlcluster/victorialogs/vlagent/gitea/beegfs/juicefs/zerofs/influxdb/influx2tsdb/clickhouse/clickhouse-keeper/kafka/rabbitmq/rocketmq/nginx instance, a pg daemon, a SQLite database, or a Patroni member",
+	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/victoriametrics/nodeexporter/pgexporter/documentdb/vmcluster/vlcluster/victorialogs/vlagent/vmalert/gitea/beegfs/juicefs/zerofs/influxdb/influx2tsdb/clickhouse/clickhouse-keeper/kafka/rabbitmq/rocketmq/nginx instance, a pg daemon, a SQLite database, or a Patroni member",
 	Long: `Enable auto-start on boot for exactly one target:
 
   pg autostart enable -i myinst          # instance
@@ -109,6 +110,7 @@ var autostartEnableCmd = &cobra.Command{
   pg autostart enable --vlcluster --name vlc         # VLCluster — starts this host's role containers (default name "vlc")
   pg autostart enable --victorialogs --name vl        # VictoriaLogs (default name "victorialogs")
   pg autostart enable --vlagent --name va             # vlagent (default name "vlagent")
+  pg autostart enable --vmalert --name vm             # vmalert (default name "vmalert")
   pg autostart enable --gitea --name git1            # Gitea (default name "gitea")
   pg autostart enable --beegfs --name fs1            # BeeGFS filesystem — starts the whole mgmtd+meta+storage cluster (default name "beegfs")
   pg autostart enable --juicefs --name vol1          # JuiceFS volume — remounts it (default name "juicefs")
@@ -190,6 +192,12 @@ vlagent autostart likewise only starts the existing container (pg addon install
 vlagent), reading the flags already in the config. It starts after VictoriaLogs
 in the boot sequence so its remote-write target is listening first; the file
 checkpoints and remote-write buffers persist in the data dir.
+vmalert autostart likewise only starts the existing container (pg addon install
+vmalert), reading the flags already in the config and re-seeding an empty
+rules/templates dir without touching your files. It starts after VictoriaLogs and
+Alertmanager in the boot sequence, so its datasource and notifier are listening
+first. The image runs as root; rules and templates are host directories and
+persist across reboots.
 Gitea autostart likewise only starts the existing container (pg addon install
 gitea), reading the app.ini already rendered into its /data volume. The data dir
 was pre-chowned to the image's git user uid/gid 1000 at install time (the image
@@ -328,6 +336,7 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	vlclusterSel, _ := cmd.Flags().GetBool("vlcluster")
 	victoriaLogsSel, _ := cmd.Flags().GetBool("victorialogs")
 	vlagentSel, _ := cmd.Flags().GetBool("vlagent")
+	vmalertSel, _ := cmd.Flags().GetBool("vmalert")
 	giteaSel, _ := cmd.Flags().GetBool("gitea")
 	beegfsSel, _ := cmd.Flags().GetBool("beegfs")
 	nginxSel, _ := cmd.Flags().GetBool("nginx")
@@ -430,6 +439,9 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	if vlagentSel {
 		sel++
 	}
+	if vmalertSel {
+		sel++
+	}
 	if giteaSel {
 		sel++
 	}
@@ -473,13 +485,13 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		sel++
 	}
 	if sel != 1 {
-		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --nodeexporter, --pgexporter, --documentdb, --vmcluster, --vlcluster, --victorialogs, --vlagent, --gitea, --beegfs, --juicefs, --zerofs, --influxdb, --influx2tsdb, --clickhouse, --clickhouse-keeper, --kafka, --rabbitmq, --rocketmq, --sqlite, --daemon, or --nginx")
+		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --nodeexporter, --pgexporter, --documentdb, --vmcluster, --vlcluster, --victorialogs, --vlagent, --vmalert, --gitea, --beegfs, --juicefs, --zerofs, --influxdb, --influx2tsdb, --clickhouse, --clickhouse-keeper, --kafka, --rabbitmq, --rocketmq, --sqlite, --daemon, or --nginx")
 	}
 	if pgName != "" && !pgbSel && !prSel {
 		return fmt.Errorf("--pg-name requires --pgbouncer or --postgrest")
 	}
-	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !garageSel && !seaweedfsSel && !redisSel && !predixySel && !pgadminSel && !grafanaSel && !prometheusSel && !alertmanagerSel && !victoriaMetricsSel && !nodeExporterSel && !pgExporterSel && !documentDBSel && !vmclusterSel && !vlclusterSel && !victoriaLogsSel && !vlagentSel && !giteaSel && !beegfsSel && !juicefsSel && !zerofsSel && !influxdbSel && !influx2tsdbSel && !clickhouseSel && !clickHouseKeeperSel && !kafkaSel && !rabbitmqSel && !rocketmqSel && !sqliteSel && !daemonSel && !nginxSel {
-		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --nodeexporter, --pgexporter, --documentdb, --vmcluster, --vlcluster, --victorialogs, --vlagent, --gitea, --beegfs, --juicefs, --zerofs, --influxdb, --influx2tsdb, --clickhouse, --clickhouse-keeper, --kafka, --rabbitmq, --rocketmq, --sqlite, --daemon, or --nginx")
+	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !garageSel && !seaweedfsSel && !redisSel && !predixySel && !pgadminSel && !grafanaSel && !prometheusSel && !alertmanagerSel && !victoriaMetricsSel && !nodeExporterSel && !pgExporterSel && !documentDBSel && !vmclusterSel && !vlclusterSel && !victoriaLogsSel && !vlagentSel && !vmalertSel && !giteaSel && !beegfsSel && !juicefsSel && !zerofsSel && !influxdbSel && !influx2tsdbSel && !clickhouseSel && !clickHouseKeeperSel && !kafkaSel && !rabbitmqSel && !rocketmqSel && !sqliteSel && !daemonSel && !nginxSel {
+		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --nodeexporter, --pgexporter, --documentdb, --vmcluster, --vlcluster, --victorialogs, --vlagent, --vmalert, --gitea, --beegfs, --juicefs, --zerofs, --influxdb, --influx2tsdb, --clickhouse, --clickhouse-keeper, --kafka, --rabbitmq, --rocketmq, --sqlite, --daemon, or --nginx")
 	}
 	if sqliteSel && addonName == "" {
 		return fmt.Errorf("--sqlite requires --name <database>")
@@ -739,6 +751,18 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		vc.Autostart = enable
 		cfg.Addons.Vlagent[proxyName] = vc
 		targetDesc = fmt.Sprintf("vlagent instance %q", proxyName)
+	case vmalertSel:
+		proxyName := addonName
+		if proxyName == "" {
+			proxyName = "vmalert"
+		}
+		vc, ok := cfg.Addons.Vmalert[proxyName]
+		if !ok {
+			return fmt.Errorf("vmalert instance %q not found in config", proxyName)
+		}
+		vc.Autostart = enable
+		cfg.Addons.Vmalert[proxyName] = vc
+		targetDesc = fmt.Sprintf("vmalert instance %q", proxyName)
 	case giteaSel:
 		proxyName := addonName
 		if proxyName == "" {
@@ -1166,6 +1190,11 @@ func countAutostartTargets(c *config.Config) int {
 			n++
 		}
 	}
+	for _, vc := range c.Addons.Vmalert {
+		if vc.Autostart {
+			n++
+		}
+	}
 	for _, gtc := range c.Addons.Gitea {
 		if gtc.Autostart {
 			n++
@@ -1289,6 +1318,9 @@ func runAutostartStatus(cmd *cobra.Command, args []string) error {
 	}
 	for name, vc := range cfg.Addons.Vlagent {
 		fmt.Printf("  vlagent %-10s %s\n", name, onOff(vc.Autostart))
+	}
+	for name, vc := range cfg.Addons.Vmalert {
+		fmt.Printf("  vmalert %-10s %s\n", name, onOff(vc.Autostart))
 	}
 	for name, gtc := range cfg.Addons.Gitea {
 		fmt.Printf("  gitea %-14s %s\n", name, onOff(gtc.Autostart))

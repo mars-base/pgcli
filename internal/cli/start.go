@@ -80,8 +80,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartNodeExporter(c) && !hasAutostartPGExporter(c) && !hasAutostartDocumentDB(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouseKeeper(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartRabbitMQ(c) && !hasAutostartRocketMQ(c) && !hasAutostartNginx(c) && !hasAutostartDaemons(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --kafka / --rabbitmq / --nginx / --nodeexporter / --pgexporter / --documentdb / --daemon)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartNodeExporter(c) && !hasAutostartPGExporter(c) && !hasAutostartDocumentDB(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartVmalert(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouseKeeper(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartRabbitMQ(c) && !hasAutostartRocketMQ(c) && !hasAutostartNginx(c) && !hasAutostartDaemons(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --vmalert / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --kafka / --rabbitmq / --nginx / --nodeexporter / --pgexporter / --documentdb / --daemon)")
 		return nil
 	}
 
@@ -292,6 +292,14 @@ func startAutostart() error {
 	// the agent warns about an unreachable remote-write target at startup
 	// (it buffers and replays, but boot order avoids the noise).
 	if err := startAutostartVlagents(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// vmalert instances (top-level rule-evaluation engine). Strictly after
+	// VictoriaLogs, VictoriaMetrics and Alertmanager above: the default
+	// datasource is the VictoriaLogs addon and the default notifier the
+	// Alertmanager addon, so both are listening before vmalert evaluates rules.
+	if err := startAutostartVmalerts(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -2155,6 +2163,51 @@ func startAutostartVlagents(c *config.Config) error {
 		vc := c.Addons.Vlagent[name]
 		if err := vm.StartContainer(&vc); err != nil {
 			fmt.Printf("  [X] vlagent autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartVmalert reports whether any vmalert instance is autostart-enabled.
+func hasAutostartVmalert(c *config.Config) bool {
+	for _, vc := range c.Addons.Vmalert {
+		if vc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartVmalerts starts each autostart-enabled vmalert instance.
+// Start-only like the other web addons: the container comes up with the flags
+// already in the config, recreating it if it was removed. Rules and templates
+// are host directories (seeded only when empty, never overwritten). The image
+// runs as root, so no ownership work is needed. Order is sorted by instance
+// name for deterministic boot logs.
+func startAutostartVmalerts(c *config.Config) error {
+	var names []string
+	for name, vc := range c.Addons.Vmalert {
+		if vc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	vm, err := podman.NewVmalertManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		vc := c.Addons.Vmalert[name]
+		if err := vm.StartContainer(&vc); err != nil {
+			fmt.Printf("  [X] vmalert autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}

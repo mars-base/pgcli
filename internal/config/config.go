@@ -55,6 +55,7 @@ type Config struct {
 	VMClusterStartPort       int                       `yaml:"vmcluster_start_port,omitempty"`               // starting VMCluster port, default 8480 (5 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP, internal insert TCP, internal select TCP)
 	VictoriaLogsStartPort    int                       `yaml:"victorialogs_start_port,omitempty"`            // starting VictoriaLogs HTTP host port, default 9428
 	VlagentStartPort         int                       `yaml:"vlagent_start_port,omitempty"`                 // starting vlagent ingest HTTP host port, default 9429
+	VmalertStartPort         int                       `yaml:"vmalert_start_port,omitempty"`                 // starting vmalert HTTP host port, default 8880
 	VLClusterStartPort       int                       `yaml:"vlcluster_start_port,omitempty"`               // starting VLCluster port, default 9430 (3 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP)
 	InfluxDBStartPort        int                       `yaml:"influxdb_start_port,omitempty"`                // starting InfluxDB HTTP API host port, default 8086
 	Influx2TSDBStartPort     int                       `yaml:"influx2tsdb_start_port,omitempty"`             // starting influx2tsdb-proxy HTTP API host port, default 8087
@@ -191,6 +192,7 @@ type TopAddonsConfig struct {
 	VLCluster        map[string]VLClusterConfig        `yaml:"vlcluster,omitempty"`
 	VictoriaLogs     map[string]VictoriaLogsConfig     `yaml:"victorialogs,omitempty"`
 	Vlagent          map[string]VlagentConfig          `yaml:"vlagent,omitempty"`
+	Vmalert          map[string]VmalertConfig          `yaml:"vmalert,omitempty"`
 	InfluxDB         map[string]InfluxDBConfig         `yaml:"influxdb,omitempty"`
 	Influx2TSDB      map[string]Influx2TSDBConfig      `yaml:"influx2tsdb,omitempty"`
 	ClickHouse       map[string]ClickHouseConfig       `yaml:"clickhouse,omitempty"`
@@ -740,6 +742,13 @@ const DefaultVictoriaLogsImageTag = "docker.io/victoriametrics/victoria-logs:v1.
 // HTTP port (9429 by default), and buffers to disk before forwarding to
 // VictoriaLogs via `-remoteWrite.url` (which must end in /insert/native).
 const DefaultVlagentImageTag = "docker.io/victoriametrics/vlagent:v1.53.0"
+
+// DefaultVmalertImageTag pins the vmalert image — the rule-evaluation engine
+// of the VictoriaMetrics family. It ships as its own binary/image
+// (victoriametrics/vmalert) on a release train independent of VictoriaMetrics
+// and VictoriaLogs. v1.133.0 matches the reference deployment this addon was
+// ported from; bump with --image when a newer release is validated.
+const DefaultVmalertImageTag = "docker.io/victoriametrics/vmalert:v1.133.0"
 
 // DefaultNodeExporterImageTag pins the node_exporter image. prom/node-exporter
 // is the official upstream image on docker.io, the same publisher as
@@ -1949,6 +1958,74 @@ func pathContains(dir, path string) bool {
 // pathsOverlap reports whether a and b are equal or one contains the other.
 func pathsOverlap(a, b string) bool {
 	return pathContains(a, b) || pathContains(b, a)
+}
+
+var vmalertLabelNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// ValidateVmalertConfig validates one vmalert addon entry. ApplyDefaults must
+// have run first, because DatasourceURL and NotifierURLs carry their defaults
+// by then. Empty notifier/remote lists are valid: vmalert can run recording
+// rules without any notifier.
+func ValidateVmalertConfig(name string, vc VmalertConfig) error {
+	if vc.HostPort < 0 || vc.HostPort > 65535 {
+		return fmt.Errorf("addons.vmalert.%s.host_port must be between 1 and 65535 (0 means auto), got %d", name, vc.HostPort)
+	}
+	if vc.DatasourceURL == "" {
+		return fmt.Errorf("addons.vmalert.%s.datasource_url must not be empty", name)
+	}
+	if err := validateVmalertURL(name, "datasource_url", vc.DatasourceURL); err != nil {
+		return err
+	}
+	if vc.ExternalURL != "" {
+		if err := validateVmalertURL(name, "external_url", vc.ExternalURL); err != nil {
+			return err
+		}
+	}
+	urlGroups := []struct {
+		field string
+		urls  []string
+	}{
+		{"notifier_urls", vc.NotifierURLs},
+		{"remote_write_urls", vc.RemoteWriteURLs},
+		{"remote_read_urls", vc.RemoteReadURLs},
+	}
+	for _, group := range urlGroups {
+		for i, raw := range group.urls {
+			if err := validateVmalertURL(name, fmt.Sprintf("%s[%d]", group.field, i), raw); err != nil {
+				return err
+			}
+		}
+	}
+	for i, label := range vc.ExternalLabels {
+		key, value, ok := strings.Cut(label, "=")
+		if !ok || !vmalertLabelNameRE.MatchString(key) || value == "" {
+			return fmt.Errorf("addons.vmalert.%s.external_labels[%d] %q must be NAME=VALUE with a non-empty value", name, i, label)
+		}
+	}
+	dirs := []struct {
+		field string
+		dir   string
+	}{
+		{"rules_dir", vc.RulesDir},
+		{"templates_dir", vc.TemplatesDir},
+	}
+	for _, entry := range dirs {
+		if entry.dir != "" && !filepath.IsAbs(entry.dir) {
+			return fmt.Errorf("addons.vmalert.%s.%s must be an absolute path, got %q", name, entry.field, entry.dir)
+		}
+	}
+	if vc.RulesDir != "" && vc.TemplatesDir != "" && filepath.Clean(vc.RulesDir) == filepath.Clean(vc.TemplatesDir) {
+		return fmt.Errorf("addons.vmalert.%s.rules_dir and templates_dir must be different directories", name)
+	}
+	return nil
+}
+
+func validateVmalertURL(name, field, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("addons.vmalert.%s.%s %q must be an absolute http(s) URL with a host", name, field, raw)
+	}
+	return nil
 }
 
 // clickHouseClusterManagedSettings are keys the cluster renderer owns. They
@@ -4137,8 +4214,44 @@ type VlagentConfig struct {
 	Autostart bool `yaml:"autostart,omitempty"`
 }
 
-// AlertmanagerConfig holds a standalone Alertmanager — the
-// dedup/grouping/routing frontend of the Prometheus stack
+// VmalertConfig holds a standalone vmalert addon — the rule-evaluation engine
+// of the VictoriaMetrics family (https://docs.victoriametrics.com/vmalert/).
+// It evaluates alerting/recording rules against ONE datasource and pushes
+// firing alerts to one or more notifiers (usually Alertmanager). Metrics and
+// logs cannot be mixed in one instance: -datasource.url accepts either a
+// VictoriaMetrics/Prometheus endpoint (8428) or a VictoriaLogs endpoint (9428),
+// and the rule `type` must match it.
+//
+// Rules and templates live in host directories bind-mounted read-only into the
+// container. pgcli seeds an empty rules file and a default template on install
+// but never overwrites them, so the operator edits YAML directly and calls
+// `pg addon vmalert reload` (GET /-/reload) to apply changes. The image runs as
+// root, so no pre-chown is needed.
+//
+// There is NO authentication or TLS on vmalert itself: the API and the reload
+// endpoint are unauthenticated. Listen defaults to 0.0.0.0 like the other web
+// addons; use --listen 127.0.0.1 when the UI/API must stay local.
+type VmalertConfig struct {
+	ContainerName   string   `yaml:"container_name"`              // pgcli-vmalert<ns>-<name>
+	Name            string   `yaml:"name,omitempty"`              // addon key
+	ImageTag        string   `yaml:"image_tag,omitempty"`         // docker.io/victoriametrics/vmalert:v1.133.0
+	HostPort        int      `yaml:"host_port,omitempty"`         // HTTP port, 8880+ auto-assigned
+	Listen          string   `yaml:"listen,omitempty"`            // -httpListenAddr bind, default 0.0.0.0
+	DatasourceURL   string   `yaml:"datasource_url,omitempty"`    // -datasource.url, default http://127.0.0.1:9428 (VictoriaLogs)
+	NotifierURLs    []string `yaml:"notifier_urls,omitempty"`     // -notifier.url (repeatable), default [http://127.0.0.1:9093]
+	RulesDir        string   `yaml:"rules_dir,omitempty"`         // host dir mounted read-only; default <base>/addon/vmalert/<name>/rules
+	TemplatesDir    string   `yaml:"templates_dir,omitempty"`     // host dir mounted read-only; default <base>/addon/vmalert/<name>/templates
+	RemoteWriteURLs []string `yaml:"remote_write_urls,omitempty"` // -remoteWrite.url (repeatable), recording-rule results
+	RemoteReadURLs  []string `yaml:"remote_read_urls,omitempty"`  // -remoteRead.url (repeatable), restore alert state on start
+	ExternalLabels  []string `yaml:"external_labels,omitempty"`   // -external.label (repeatable), NAME=VALUE
+	ExternalURL     string   `yaml:"external_url,omitempty"`      // -external.url, links in notifications
+	ExtraArgs       []string `yaml:"extra_args,omitempty"`        // additional CLI flags, last-wins
+	// Autostart brings this container up on host boot via the boot service.
+	// Start-only: it starts the existing container, so install first.
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// AlertmanagerConfig holds a standalone Alertmanager — the dedup/grouping/routing frontend of the Prometheus stack
 // (https://prometheus.io/docs/alerting/latest/alertmanager/). Shape mirrors
 // PrometheusConfig: a web UI on one host port, a persistent data dir outliving
 // the container, Listen defaulting to 0.0.0.0, and configuration by a RENDERED
@@ -4506,6 +4619,7 @@ func Default() *Config {
 		VMClusterStartPort:       8480,
 		VictoriaLogsStartPort:    9428,
 		VlagentStartPort:         9429,
+		VmalertStartPort:         8880,
 		VLClusterStartPort:       9430,
 		InfluxDBStartPort:        8086,
 		Influx2TSDBStartPort:     8087,
@@ -4757,6 +4871,7 @@ type displayConfig struct {
 	VMClusterStartPort       int                       `yaml:"vmcluster_start_port,omitempty"`
 	VictoriaLogsStartPort    int                       `yaml:"victorialogs_start_port,omitempty"`
 	VlagentStartPort         int                       `yaml:"vlagent_start_port,omitempty"`
+	VmalertStartPort         int                       `yaml:"vmalert_start_port,omitempty"`
 	VLClusterStartPort       int                       `yaml:"vlcluster_start_port,omitempty"`
 	InfluxDBStartPort        int                       `yaml:"influxdb_start_port,omitempty"`
 	Influx2TSDBStartPort     int                       `yaml:"influx2tsdb_start_port,omitempty"`
@@ -4813,6 +4928,7 @@ func (c *Config) Display() displayConfig {
 		VMClusterStartPort:       c.VMClusterStartPort,
 		VictoriaLogsStartPort:    c.VictoriaLogsStartPort,
 		VlagentStartPort:         c.VlagentStartPort,
+		VmalertStartPort:         c.VmalertStartPort,
 		VLClusterStartPort:       c.VLClusterStartPort,
 		InfluxDBStartPort:        c.InfluxDBStartPort,
 		Influx2TSDBStartPort:     c.Influx2TSDBStartPort,
@@ -4870,6 +4986,11 @@ func (c *Config) Validate() error {
 	}
 	if c.PITR.Enabled && c.PITR.PgBackRestStanza == "" {
 		return fmt.Errorf("pitr.pgbackrest_stanza must not be empty (PITR is enabled)")
+	}
+	for name, vc := range c.Addons.Vmalert {
+		if err := ValidateVmalertConfig(name, vc); err != nil {
+			return err
+		}
 	}
 	// BeeGFS v2 cross-host entries: a hand-edited pg.yaml can pin a role list
 	// the manager cannot build containers for, a node id that would collide
@@ -5926,6 +6047,9 @@ func (c *Config) ApplyDefaults() {
 	if c.VlagentStartPort == 0 {
 		c.VlagentStartPort = d.VlagentStartPort
 	}
+	if c.VmalertStartPort == 0 {
+		c.VmalertStartPort = d.VmalertStartPort
+	}
 	if c.VLClusterStartPort == 0 {
 		c.VLClusterStartPort = d.VLClusterStartPort
 	}
@@ -6717,6 +6841,33 @@ func (c *Config) ApplyDefaults() {
 			addon.Listen = "0.0.0.0"
 		}
 		c.Addons.Alertmanager[name] = addon
+	}
+
+	// Top-level addons defaults (vmalert). RulesDir/TemplatesDir are resolved by
+	// the podman manager from BaseDir, so they stay empty here (same as the data
+	// dirs of VictoriaMetrics/VictoriaLogs). Datasource and notifier default to
+	// the reference deployment: VictoriaLogs on 9428 and Alertmanager on 9093,
+	// both loopback because Linux containers use host networking.
+	for name, addon := range c.Addons.Vmalert {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-vmalert" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultVmalertImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "0.0.0.0"
+		}
+		if addon.DatasourceURL == "" {
+			addon.DatasourceURL = "http://127.0.0.1:9428"
+		}
+		if len(addon.NotifierURLs) == 0 {
+			addon.NotifierURLs = []string{"http://127.0.0.1:9093"}
+		}
+		c.Addons.Vmalert[name] = addon
 	}
 
 	// Top-level addons defaults (Gitea). Same shape as Grafana above: Listen
@@ -8639,6 +8790,44 @@ func (c *Config) autoAssignPorts() {
 				next = addon.HostPort + 1
 			}
 			c.Addons.Vlagent[name] = addon
+		}
+	}
+
+	// Allocate ports for vmalert addons from their own pool
+	// (vmalert_start_port, default 8880 — vmalert's own default HTTP port).
+	// One port per instance, same shape as the VictoriaLogs block above. 8880
+	// shares no base with VictoriaMetrics (8428), Prometheus (9090) or
+	// Alertmanager (9093).
+	{
+		vmalertBase := c.VmalertStartPort
+		assignedVmalert := map[int]bool{}
+		for _, addon := range c.Addons.Vmalert {
+			if addon.HostPort != 0 {
+				assignedVmalert[addon.HostPort] = true
+			}
+		}
+		next := vmalertBase
+		nextFreeVmalert := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedVmalert[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.Vmalert))
+		for name := range c.Addons.Vmalert {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.Vmalert[name]
+			if addon.HostPort == 0 && vmalertBase > 0 {
+				addon.HostPort = nextFreeVmalert()
+			} else if addon.HostPort >= next {
+				next = addon.HostPort + 1
+			}
+			c.Addons.Vmalert[name] = addon
 		}
 	}
 
