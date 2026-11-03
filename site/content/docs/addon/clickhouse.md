@@ -1,12 +1,14 @@
 ---
 title: "ClickHouse"
-description: "Run a single-node ClickHouse columnar OLAP database as a managed addon container, with authentication, SQL helpers, users/grants, config overrides and BACKUP/RESTORE"
+description: "Run ClickHouse as a managed addon container — single node or one member of a replicated multi-host cluster with ReplicatedMergeTree, Distributed tables and ON CLUSTER DDL; authentication, SQL helpers, users/grants, config overrides and BACKUP/RESTORE"
 weight: 64
 ---
 
-`pg addon install clickhouse` runs **ClickHouse 26.8 LTS** — a single-node columnar OLAP database — as a managed container from the official `docker.io/clickhouse/clickhouse-server` multi-arch image. Like VictoriaMetrics and InfluxDB, it is a **top-level addon**: it does not front a PostgreSQL instance.
+`pg addon install clickhouse` runs **ClickHouse 26.8 LTS** — a columnar OLAP database, standalone or as one member of a replicated multi-host cluster — as a managed container from the official `docker.io/clickhouse/clickhouse-server` multi-arch image. Like VictoriaMetrics and InfluxDB, it is a **top-level addon**: it does not front a PostgreSQL instance.
 
 ClickHouse speaks two protocols on two ports: **HTTP** (curl, JDBC/ODBC, many drivers) and the **native TCP protocol** (`clickhouse-client`). pgcli runs it with host networking, so both are plain host ports. **Authentication is always enabled** — the install creates an admin account and stores its password in `pg.yaml`.
+
+**Cluster mode** is opt-in with `--cluster`: pass the cluster name, this member's `--shard`/`--replica`, its `--advertise-host`, the other members as `--peer`, and the Keeper endpoints as `--keeper`. pgcli renders `remote_servers`, `macros` and `zookeeper`, enabling `ReplicatedMergeTree`, `Distributed` tables and `ON CLUSTER` DDL. Coordination comes from the separate [ClickHouse Keeper](./clickhouse-keeper/) addon. A step-by-step four-host walkthrough lives on the [ClickHouse cluster](./clickhouse-cluster/) page; the rest of this page documents the single-node behavior and the flags shared by both modes.
 
 > **The admin password is generated at install time and can be read back at any
 > time with `pg addon password clickhouse [--name NAME]`.** The HTTP and native
@@ -27,9 +29,16 @@ ClickHouse speaks two protocols on two ports: **HTTP** (curl, JDBC/ODBC, many dr
 | `--admin-user` | `admin` | Admin account created by the image entrypoint |
 | `--admin-password` | generated | Admin password. On `--force` the stored password is kept unless this is set |
 | `--config-option K=V` | — | Extra server setting as a dotted XML path (`logger.level=debug`, `max_server_memory_usage=2147483648`); repeatable; replaces the stored override map |
-| `--force` | false | Re-render the config and secret, then recreate the container; keeps data, the stored password and the stored overrides |
+| `--cluster NAME` | — | Switch on cluster mode: the `remote_servers`/`macros` cluster name; same on every member |
+| `--shard N` | — | Cluster mode: this member's 1-based shard number |
+| `--replica N` | — | Cluster mode: this member's 1-based replica number within the shard |
+| `--advertise-host IP` | — | Cluster mode: concrete non-loopback address peers dial |
+| `--peer S/R@HOST:PORT` | — | Cluster mode: another member; repeatable. List every **other** member; this host is added automatically |
+| `--keeper HOST[:PORT]` | — | Cluster mode: a Keeper client endpoint; repeatable. Pass the full shared list on every member; default port `9181` |
+| `--interserver-port N` | `9009` | Cluster mode: replica catch-up port; must match across the cluster |
+| `--force` | false | Re-render the config and secret, then recreate the container; keeps data, the stored password and the stored overrides. Cluster identity flags stay immutable |
 
-`--image` does not apply to ClickHouse — use `--version`.
+`--image` does not apply to ClickHouse — use `--version`. The cluster flags require `--cluster`; on a single-node install they are rejected. Cluster-mode validation is covered in [ClickHouse cluster](./clickhouse-cluster/).
 
 The generated config only pins listeners, ports, logging and the backup disk; every other server setting keeps the upstream default. Overrides are stored in `pg.yaml` under `addons.clickhouse.<name>.settings` and rendered into the generated XML, so they survive restarts and container recreation.
 
@@ -63,14 +72,19 @@ Re-running `install` without `--force` is a no-op that reports the current state
 
 The image is pulled directly from Docker Hub; no pgcli-built image is involved. `--version` accepts any safe upstream tag, but the tag must exist in the registry — the pull fails otherwise. pgcli pins the current LTS line (`26.8.36.3`) by default.
 
+For a replicated cluster, install [ClickHouse Keeper](./clickhouse-keeper/) first, then run the install on every member with `--cluster`, the local `--shard`/`--replica`/`--advertise-host`, the other members as `--peer`, the Keeper endpoints as `--keeper`, and the **same** explicit `--admin-password`. The complete four-host procedure, including the exact peer lists, is in [ClickHouse cluster](./clickhouse-cluster/).
+
 ## Ports
 
 | Endpoint | Default | Protocol | Pool |
 |---|---|---|---|
 | HTTP | `8123` | HTTP (queries, `/ping`, many drivers) | `clickhouse_http_start_port`, default `8123` |
 | Native | `9000` | ClickHouse native TCP (`clickhouse-client`) | `clickhouse_tcp_start_port`, default `9000`, **shared with the S3 API pool** |
+| Interserver | `9009` | Replica catch-up (`interserver_http_port`), cluster mode only | Fixed; no pool, reserved across all addons |
 
-Both pools share one "already assigned" set, so an explicit port in one pool cannot collide with an auto-assigned port in the other. `--http-port` and `--tcp-port` must differ, and every HTTP/TCP port must be unique across all ClickHouse instances. Ports already listening on the host are skipped during auto-assignment.
+Both HTTP/TCP pools share one "already assigned" set, so an explicit port in one pool cannot collide with an auto-assigned port in the other. `--http-port` and `--tcp-port` must differ, and every HTTP/TCP port must be unique across all ClickHouse instances. Ports already listening on the host are skipped during auto-assignment.
+
+In cluster mode the fixed `9009` interserver port and the Keeper ports (`9181` client, `9234` Raft) are reserved by pgcli's cross-addon port checks. `--interserver-port` and (in cluster mode) `--tcp-port` are immutable after install because other members embed them in their peer lists; `--http-port` can still move.
 
 When `--listen` is a wildcard (`0.0.0.0`, `::`), pgcli's own client commands dial `127.0.0.1`; the printed endpoints follow the same rule. A LAN `--listen` bind also keeps loopback enabled inside the container so the in-container `clickhouse-client` always works.
 
@@ -80,7 +94,7 @@ Everything for one instance lives under `<base_dir>/addon/clickhouse/<name>/`:
 
 | Host path | Container path | Notes |
 |---|---|---|
-| `config.d/` | `/etc/clickhouse-server/config.d` | Read-only; replaces the image's stock `config.d` (which would otherwise bind every interface). `zz-pgcli.xml` is the generated override |
+| `config.d/` | `/etc/clickhouse-server/config.d` | Read-only; replaces the image's stock `config.d` (which would otherwise bind every interface). `zz-pgcli.xml` is the generated override; `zz-pgcli-cluster.xml` is added only in cluster mode |
 | `data/` | `/var/lib/clickhouse` | Database data and system tables |
 | `logs/` | `/var/log/clickhouse-server` | `clickhouse-server.log` and `clickhouse-server.err.log` (also visible via `podman logs`) |
 | `backups/` | `/var/lib/clickhouse-backups` | The managed `backups` disk used by `backup`/`restore` |
@@ -93,6 +107,8 @@ The generated `zz-pgcli.xml` sets:
 - `logger.level`, `logger.log`, `logger.errorlog`, `logger.console`, rotation (`size`, `count`)
 - a local disk named `backups` at `/var/lib/clickhouse-backups`, allowed for `BACKUP`/`RESTORE`
 
+Cluster mode adds a second file, `config.d/zz-pgcli-cluster.xml`, holding `remote_servers`, `macros`, `zookeeper`, `distributed_ddl`, the interserver endpoint and the default replica path. It is rendered on every member and removed automatically if that instance is later reinstalled as a single node. See [ClickHouse cluster](./clickhouse-cluster/#what-cluster-mode-renders).
+
 The container runs with `--network host`, `--restart unless-stopped`, a 30-second stop timeout and `nofile=262144`. Data ownership inside the container is uid/gid 101 (the image drops privileges after its root entrypoint chowns the mounts).
 
 ## Credentials
@@ -104,7 +120,7 @@ pg addon list                             # shows the Analytics add-ons section
 
 The image entrypoint creates `admin` (or the name given with `--admin-user`) with full privileges and access management enabled (`CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1`), so `CREATE USER` / `GRANT` issued by this CLI work. The password is stored in `pg.yaml` (mode `0644` by default — protect that file) and duplicated into the `0600` secret file mounted into the container.
 
-Every pgcli command that talks to ClickHouse passes credentials as environment variables expanded inside the container; the password never appears on the `podman` command line or the host process list. SQL is supplied on stdin.
+Every pgcli command that talks to ClickHouse sends one-shot SQL over the server's loopback HTTP interface with HTTP basic auth; neither the password nor the statement appears on the `podman` command line or the host process list. Interactive shells still use `podman exec`.
 
 ## Connecting
 
@@ -131,7 +147,7 @@ pg addon clickhouse query --name ch1 --file schema.sql
 echo "SELECT 1" | pg addon clickhouse query --name ch1 -
 ```
 
-`query` runs `clickhouse-client` as the admin user and writes the result to stdout, so it can be piped or redirected. The statements are joined from the positional arguments; `--file` reads a file (mount-free: the file is read by the host and piped on stdin), and `-` reads from stdin. The client is invoked without `--multiquery`, so pass **one statement per call**.
+`query` runs one statement through the HTTP interface as the admin user and writes the result to stdout, so it can be piped or redirected. The statements are joined from the positional arguments; `--file` reads a file (mount-free: the host reads it and hands the contents to the server), and `-` reads from stdin. Multi-statement mode is not enabled, so pass **one statement per call**.
 
 The instance must be running for `query`, `database`, `user`, `grant`, `backup` and `restore`; `shell` opens regardless but prints a warning when the container is stopped.
 
@@ -235,6 +251,8 @@ pg addon clickhouse config show --name ch1        # full generated XML
 
 pgcli-managed keys are rejected, because overriding them would duplicate generated XML or silently contradict the stored paths/ports: `listen_host`, `listen_try`, `http_port`, `https_port`, `tcp_port`, `interserver_http_port`, `interserver_http_host`, `mysql_port`, `postgresql_port`, `path`, `tmp_path`, `user_files_path`, `format_schema_path`, `access_control_path`, `backups.*`, `user_directories`, `profiles`, `users`, `storage_configuration.disks`, `storage_configuration.policies`, and every `logger.*` key except `logger.level`. Keys containing spaces or values containing control characters are rejected too.
 
+In cluster mode the topology keys are additionally managed: `remote_servers`, `macros`, `zookeeper`, `distributed_ddl`, `default_replica_path` and `default_replica_name` cannot be set through `config set`. A single-node instance may still define its own `zookeeper`/`macros` block — useful when connecting to an external coordination service.
+
 Typical settings:
 
 ```bash
@@ -306,16 +324,16 @@ pg autostart status
 pg autostart disable --clickhouse --name ch1
 ```
 
-Boot start also re-renders the config and secret first, then starts the existing container. `pg start` starts every autostart-enabled ClickHouse instance before nginx, so an nginx backend pointing at ClickHouse's HTTP port is up when the proxy starts.
+Boot start also re-renders the config and secret first, then starts the existing container. `pg start` starts every autostart-enabled Keeper member first, then ClickHouse instances, then nginx, so both replication coordination and an nginx backend pointing at ClickHouse's HTTP port are up in dependency order. Enable Keeper boot start separately with `pg autostart enable --clickhouse-keeper --name keeper`.
 
 ## Production notes
 
-- **Single node only.** This addon has no replication, no sharding and no HA. ClickHouse ReplicatedMergeTree/Keeper topologies are out of scope; backups are the disaster-recovery path.
-- **No TLS listener.** The HTTP and native ports are plaintext. To expose ClickHouse over the network with TLS, put the [nginx addon](./nginx/) in front of the HTTP port (or use an external proxy); do not expose the native port directly to untrusted networks.
-- **Loopback by default.** `--listen` defaults to `127.0.0.1`. Authentication is always on, but a network bind still widens the attack surface; use `0.0.0.0` only on trusted networks.
-- **Password storage.** The admin password lives in `pg.yaml` (`0644` by default); protect that file and prefer `pg addon password clickhouse` over copying it around.
-- **Resource use.** The container has no CPU/memory limit from pgcli; ClickHouse's own memory budget and the recommended settings are covered in **Memory limits** below.
-- **Upgrades.** `--force --version <new>` pulls a new tag and recreates the container on the same data dir. ClickHouse supports forward upgrades only — never start an older server against data written by a newer version. Take a backup before upgrading.
+- **Single node or static cluster member.** Without `--cluster`, this addon has no replication or sharding; backups are the disaster-recovery path. With `--cluster`, it becomes one member of a 2×2 (or larger) replicated cluster coordinated by [ClickHouse Keeper](./clickhouse-keeper/); see [ClickHouse cluster](./clickhouse-cluster/) for topology, replicated tables, failure behavior and the warning that production Keeper belongs on dedicated servers.
+- **TLS terminates at a proxy.** The HTTP and native ports are plaintext, and cluster interserver traffic is plaintext too. To expose ClickHouse over the network with TLS, put the [nginx addon](./nginx/) in front of the HTTP port (or use an external proxy); do not expose the native, interserver or Keeper ports directly to untrusted networks.
+- **Loopback by default.** `--listen` defaults to `127.0.0.1`; cluster members require `0.0.0.0`. Authentication is always on, but a network bind still widens the attack surface; use `0.0.0.0` only on trusted networks.
+- **Password storage.** The admin password lives in `pg.yaml` (`0644` by default); protect that file and prefer `pg addon password clickhouse` over copying it around. In a cluster, every member must use the same admin password — pgcli cannot synchronize or verify it across hosts.
+- **Resource use.** The container has no CPU/memory limit from pgcli; ClickHouse's own memory budget and the recommended settings are covered in **Memory limits** below. Cluster members also compete with Keeper for RAM and I/O when co-located.
+- **Upgrades.** `--force --version <new>` pulls a new tag and recreates the container on the same data dir. ClickHouse supports forward upgrades only — never start an older server against data written by a newer version. In a cluster, upgrade one replica at a time and wait for catch-up. Take a backup before upgrading.
 - **Data ownership.** Data files are owned by uid 101. Use `--clean-data` rather than deleting the directory by hand; pgcli handles the permission fallback.
 - **Platform.** Linux only (host networking); the official image is multi-arch (amd64/arm64).
 
@@ -355,9 +373,26 @@ Values are bytes; `config set` restarts a running container unless `--no-restart
 | `--http-port N` | auto (base `8123`) | HTTP host port; `0` = auto-assign |
 | `--tcp-port N` | auto (base `9000`) | Native host port; `0` = auto-assign; must differ from `--http-port` |
 | `--admin-user USER` | `admin` | Admin account name; `[A-Za-z0-9_.-]{1,64}` |
-| `--admin-password PW` | generated | Admin password; on `--force` the stored value is kept unless supplied |
+| `--admin-password PW` | generated | Admin password; on `--force` the stored value is kept unless supplied. Required (and never generated) in cluster mode |
 | `--config-option K=V` | — | Dotted XML path setting; repeatable; replaces the stored override map |
-| `--force` | false | Re-render config/secret and recreate the container, keeping data, password and settings |
+| `--cluster NAME` | — | Cluster mode; the shared cluster name |
+| `--shard N` | — | Cluster mode; 1-based shard number |
+| `--replica N` | — | Cluster mode; 1-based replica number within the shard |
+| `--advertise-host IP` | — | Cluster mode; concrete non-loopback address for peers |
+| `--peer S/R@HOST:PORT` | — | Cluster mode; repeatable; every other member |
+| `--keeper HOST[:PORT]` | — | Cluster mode; repeatable; the full Keeper client list (default port `9181`) |
+| `--interserver-port N` | `9009` | Cluster mode; replica catch-up port |
+| `--force` | false | Re-render config/secret and recreate the container, keeping data, password and settings; cluster identity flags remain immutable |
+
+Cluster identity (`--cluster`, `--shard`, `--replica`, `--advertise-host`, `--peer`, `--keeper`, `--interserver-port`, and `--tcp-port` in cluster mode) cannot be changed with `--force`. Full workflow: [ClickHouse cluster](./clickhouse-cluster/).
+
+### `pg addon clickhouse cluster status`
+
+| Argument/flag | Default | Description |
+|---|---|---|
+| `--name NAME` | `clickhouse` | Cluster member to inspect; must be running |
+
+Reports `system.clusters`, `system.replicas` and Keeper endpoint reachability; exits non-zero when the topology does not match `pg.yaml` or a replica is read-only.
 
 ### `pg addon clickhouse status` / `shell` / `query [SQL...]`
 
@@ -437,6 +472,7 @@ Values are bytes; `config set` restarts a running container unless `--no-restart
 |---|---|---|
 | `pg addon start clickhouse` | `--name NAME` | Start (create if missing), wait for `/ping` |
 | `pg addon stop clickhouse` | `--name NAME` | Stop the container, keep data |
+| `pg addon clickhouse cluster status` | `--name NAME` | Cluster member only: topology, replica health and Keeper reachability |
 | `pg addon remove clickhouse` | `--name NAME`, `--clean-data` | Remove container and config entry; `--clean-data` also deletes the instance dir and a custom data dir |
 | `pg addon password clickhouse` | `--name NAME` | Print the admin password |
 | `pg logs addon clickhouse` | `--name NAME`, `-n N` (default 50), `-f` | Container logs |

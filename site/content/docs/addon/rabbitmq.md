@@ -1,7 +1,7 @@
 ---
 title: "RabbitMQ"
 description: "Run a RabbitMQ broker as a managed addon — single node or a multi-host cluster formed by etcd peer discovery, AMQP plus the management web UI/API, optional TLS (generated CA or bring your own certificate), and queue management (list/declare/inspect, publish/get, bind/unbind, purge/delete)"
-weight: 66
+weight: 68
 ---
 
 `pg addon install rabbitmq` runs **RabbitMQ 4.4.0** as a managed container from the official `docker.io/library/rabbitmq` image (the `-management` variant, which bundles the web UI and HTTP API). Like Kafka and ClickHouse, RabbitMQ is a **top-level addon**: pgcli renders `rabbitmq.conf`, owns the administrator account, bind-mounts the data directory and runs the container on the host network.

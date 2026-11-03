@@ -1,7 +1,7 @@
 ---
 title: "Kafka"
 description: "以托管插件方式运行 Apache Kafka 4.x（KRaft 模式，无需 ZooKeeper）——支持单机或跨主机静态 controller quorum，含 topic 管理、渲染 server.properties 与 host 网络"
-weight: 65
+weight: 67
 ---
 
 `pg addon install kafka` 以托管容器方式运行 **Apache Kafka 4.4.0**，直接使用官方

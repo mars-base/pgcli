@@ -1,7 +1,7 @@
 ---
 title: "RocketMQ"
 description: "Run Apache RocketMQ 5.x as a managed addon — three containers (NameServer + broker + proxy), standalone or a multi-host controller-mode cluster with automatic broker failover, topic and message helpers, rendered configs and host networking"
-weight: 67
+weight: 69
 ---
 
 `pg addon install rocketmq` runs **Apache RocketMQ 5.x** as a managed addon from the official `docker.io/apache/rocketmq` image. Like Kafka, ClickHouse and RabbitMQ it is a **top-level addon** that does not front a PostgreSQL instance.

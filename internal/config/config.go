@@ -159,44 +159,45 @@ type AddonsConfig struct {
 // (e.g. a PgBouncer fronting a remote database via --dsn), and for shared
 // infrastructure addons like etcd.
 type TopAddonsConfig struct {
-	PgBouncer       map[string]PgBouncerConfig       `yaml:"pgbouncer,omitempty"`
-	Postgrest       map[string]PostgrestConfig       `yaml:"postgrest,omitempty"`
-	Etcd            map[string]EtcdConfig            `yaml:"etcd,omitempty"`
-	PgDog           map[string]PgDogConfig           `yaml:"pgdog,omitempty"`
-	Patroni         map[string]PatroniClusterConfig  `yaml:"patroni,omitempty"`
-	HAProxy         map[string]HAProxyConfig         `yaml:"haproxy,omitempty"`
-	Minio           map[string]MinioConfig           `yaml:"minio,omitempty"`
-	Silo            map[string]SiloConfig            `yaml:"silo,omitempty"`
-	Rustfs          map[string]RustfsConfig          `yaml:"rustfs,omitempty"`
-	Garage          map[string]GarageConfig          `yaml:"garage,omitempty"`
-	Seaweedfs       map[string]SeaweedfsConfig       `yaml:"seaweedfs,omitempty"`
-	Redis           map[string]RedisConfig           `yaml:"redis,omitempty"`
-	Predixy         map[string]PredixyConfig         `yaml:"predixy,omitempty"`
-	PgAdmin         map[string]PgAdminConfig         `yaml:"pgadmin,omitempty"`
-	Grafana         map[string]GrafanaConfig         `yaml:"grafana,omitempty"`
-	Prometheus      map[string]PrometheusConfig      `yaml:"prometheus,omitempty"`
-	Alertmanager    map[string]AlertmanagerConfig    `yaml:"alertmanager,omitempty"`
-	Gitea           map[string]GiteaConfig           `yaml:"gitea,omitempty"`
-	Nginx           map[string]NginxConfig           `yaml:"nginx,omitempty"`
-	BeeGFS          map[string]BeeGFSConfig          `yaml:"beegfs,omitempty"`
-	Juicefs         map[string]JuicefsConfig         `yaml:"juicefs,omitempty"`
-	Zerofs          map[string]ZerofsConfig          `yaml:"zerofs,omitempty"`
-	Duckdb          map[string]DuckdbConfig          `yaml:"duckdb,omitempty"`
-	SQLite          map[string]SQLiteConfig          `yaml:"sqlite,omitempty"`
-	VictoriaMetrics map[string]VictoriaMetricsConfig `yaml:"victoriametrics,omitempty"`
-	NodeExporter    map[string]NodeExporterConfig    `yaml:"nodeexporter,omitempty"`
-	PGExporter      map[string]PGExporterConfig      `yaml:"pgexporter,omitempty"`
-	DocumentDB      map[string]DocumentDBConfig      `yaml:"documentdb,omitempty"`
-	VMCluster       map[string]VMClusterConfig       `yaml:"vmcluster,omitempty"`
-	VLCluster       map[string]VLClusterConfig       `yaml:"vlcluster,omitempty"`
-	VictoriaLogs    map[string]VictoriaLogsConfig    `yaml:"victorialogs,omitempty"`
-	Vlagent         map[string]VlagentConfig         `yaml:"vlagent,omitempty"`
-	InfluxDB        map[string]InfluxDBConfig        `yaml:"influxdb,omitempty"`
-	Influx2TSDB     map[string]Influx2TSDBConfig     `yaml:"influx2tsdb,omitempty"`
-	ClickHouse      map[string]ClickHouseConfig      `yaml:"clickhouse,omitempty"`
-	Kafka           map[string]KafkaConfig           `yaml:"kafka,omitempty"`
-	RabbitMQ        map[string]RabbitMQConfig        `yaml:"rabbitmq,omitempty"`
-	RocketMQ        map[string]RocketMQConfig        `yaml:"rocketmq,omitempty"`
+	PgBouncer        map[string]PgBouncerConfig        `yaml:"pgbouncer,omitempty"`
+	Postgrest        map[string]PostgrestConfig        `yaml:"postgrest,omitempty"`
+	Etcd             map[string]EtcdConfig             `yaml:"etcd,omitempty"`
+	PgDog            map[string]PgDogConfig            `yaml:"pgdog,omitempty"`
+	Patroni          map[string]PatroniClusterConfig   `yaml:"patroni,omitempty"`
+	HAProxy          map[string]HAProxyConfig          `yaml:"haproxy,omitempty"`
+	Minio            map[string]MinioConfig            `yaml:"minio,omitempty"`
+	Silo             map[string]SiloConfig             `yaml:"silo,omitempty"`
+	Rustfs           map[string]RustfsConfig           `yaml:"rustfs,omitempty"`
+	Garage           map[string]GarageConfig           `yaml:"garage,omitempty"`
+	Seaweedfs        map[string]SeaweedfsConfig        `yaml:"seaweedfs,omitempty"`
+	Redis            map[string]RedisConfig            `yaml:"redis,omitempty"`
+	Predixy          map[string]PredixyConfig          `yaml:"predixy,omitempty"`
+	PgAdmin          map[string]PgAdminConfig          `yaml:"pgadmin,omitempty"`
+	Grafana          map[string]GrafanaConfig          `yaml:"grafana,omitempty"`
+	Prometheus       map[string]PrometheusConfig       `yaml:"prometheus,omitempty"`
+	Alertmanager     map[string]AlertmanagerConfig     `yaml:"alertmanager,omitempty"`
+	Gitea            map[string]GiteaConfig            `yaml:"gitea,omitempty"`
+	Nginx            map[string]NginxConfig            `yaml:"nginx,omitempty"`
+	BeeGFS           map[string]BeeGFSConfig           `yaml:"beegfs,omitempty"`
+	Juicefs          map[string]JuicefsConfig          `yaml:"juicefs,omitempty"`
+	Zerofs           map[string]ZerofsConfig           `yaml:"zerofs,omitempty"`
+	Duckdb           map[string]DuckdbConfig           `yaml:"duckdb,omitempty"`
+	SQLite           map[string]SQLiteConfig           `yaml:"sqlite,omitempty"`
+	VictoriaMetrics  map[string]VictoriaMetricsConfig  `yaml:"victoriametrics,omitempty"`
+	NodeExporter     map[string]NodeExporterConfig     `yaml:"nodeexporter,omitempty"`
+	PGExporter       map[string]PGExporterConfig       `yaml:"pgexporter,omitempty"`
+	DocumentDB       map[string]DocumentDBConfig       `yaml:"documentdb,omitempty"`
+	VMCluster        map[string]VMClusterConfig        `yaml:"vmcluster,omitempty"`
+	VLCluster        map[string]VLClusterConfig        `yaml:"vlcluster,omitempty"`
+	VictoriaLogs     map[string]VictoriaLogsConfig     `yaml:"victorialogs,omitempty"`
+	Vlagent          map[string]VlagentConfig          `yaml:"vlagent,omitempty"`
+	InfluxDB         map[string]InfluxDBConfig         `yaml:"influxdb,omitempty"`
+	Influx2TSDB      map[string]Influx2TSDBConfig      `yaml:"influx2tsdb,omitempty"`
+	ClickHouse       map[string]ClickHouseConfig       `yaml:"clickhouse,omitempty"`
+	ClickHouseKeeper map[string]ClickHouseKeeperConfig `yaml:"clickhouse_keeper,omitempty"`
+	Kafka            map[string]KafkaConfig            `yaml:"kafka,omitempty"`
+	RabbitMQ         map[string]RabbitMQConfig         `yaml:"rabbitmq,omitempty"`
+	RocketMQ         map[string]RocketMQConfig         `yaml:"rocketmq,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -1440,9 +1441,11 @@ const DefaultClickHouseVersion = "26.8.36.3"
 // directly; ClickHouse is not wrapped in a pgcli-built image.
 const DefaultClickHouseImageTag = "docker.io/clickhouse/clickhouse-server:26.8.36.3"
 
-// ClickHouseConfig holds a managed single-node ClickHouse container. The
-// official image runs with host networking and its data, log, config and
-// backup directories bind-mounted from <base>/addon/clickhouse/<name>/.
+// ClickHouseConfig holds a managed ClickHouse container. The official image
+// runs with host networking and its data, log, config and backup directories
+// bind-mounted from <base>/addon/clickhouse/<name>/. Setting Cluster switches
+// the instance into multi-host cluster mode: the rendered config gains
+// remote_servers, macros, zookeeper, interserver and distributed DDL settings.
 // HTTP (native clients, curl) and TCP (clickhouse-client) each get a host
 // port; HTTPPort and TCPPort must be unique per instance and the TCP pool
 // shares its default range with the S3 API pool.
@@ -1469,6 +1472,19 @@ type ClickHouseConfig struct {
 	// TCPPort serves the native protocol (default pool base 9000).
 	TCPPort int `yaml:"tcp_port,omitempty"`
 
+	// Cluster mode (Cluster == "" means standalone). Shard and Replica are
+	// 1-based. Peers lists every OTHER member as SHARD/REPLICA@HOST:TCPPORT;
+	// this node is added automatically. Keepers lists ClickHouse Keeper
+	// endpoints as HOST[:CLIENTPORT]. InterserverPort must be identical on
+	// every member.
+	Cluster         string   `yaml:"cluster,omitempty"`
+	Shard           int      `yaml:"shard,omitempty"`
+	Replica         int      `yaml:"replica,omitempty"`
+	AdvertiseHost   string   `yaml:"advertise_host,omitempty"`
+	Peers           []string `yaml:"peers,omitempty"`
+	Keepers         []string `yaml:"keepers,omitempty"`
+	InterserverPort int      `yaml:"interserver_port,omitempty"`
+
 	AdminUser string `yaml:"admin_user,omitempty"` // default admin
 	// AdminPassword is stored in pg.yaml like other addon credentials;
 	// `pg addon password clickhouse` reads it back.
@@ -1484,6 +1500,28 @@ type ClickHouseConfig struct {
 	// Autostart starts the container on host boot (pg autostart enable --clickhouse).
 	Autostart bool `yaml:"autostart,omitempty"`
 }
+
+// Clustered reports whether this ClickHouse entry is a member of a multi-host
+// cluster rather than a standalone server.
+func (cc ClickHouseConfig) Clustered() bool { return cc.Cluster != "" }
+
+// DefaultClickHouseInterserverPort is the fixed replica-to-replica
+// replication port shared by every cluster member.
+const DefaultClickHouseInterserverPort = 9009
+
+// DefaultClickHouseKeeperClientPort is ClickHouse Keeper's ZooKeeper-
+// compatible client port.
+const DefaultClickHouseKeeperClientPort = 9181
+
+// DefaultClickHouseKeeperRaftPort is ClickHouse Keeper's Raft peer port.
+const DefaultClickHouseKeeperRaftPort = 9234
+
+// DefaultClickHouseKeeperVersion tracks the ClickHouse LTS release so Keeper
+// and ClickHouse speak the same protocol version.
+const DefaultClickHouseKeeperVersion = DefaultClickHouseVersion
+
+// DefaultClickHouseKeeperImageTag is the official upstream Keeper image.
+const DefaultClickHouseKeeperImageTag = "docker.io/clickhouse/clickhouse-keeper:" + DefaultClickHouseVersion
 
 // ValidClickHouseVersion reports whether version is safe to use as a Docker
 // image tag. ClickHouse is pulled directly from upstream, so any published
@@ -1513,6 +1551,437 @@ func ValidClickHouseName(name string) bool {
 func ValidClickHouseAdminUser(user string) bool {
 	ok, _ := regexp.MatchString(`^[A-Za-z0-9_.-]{1,64}$`, user)
 	return ok
+}
+
+// ClickHouseKeeperImageTagForVersion returns the upstream Keeper image
+// reference for a ClickHouse version tag.
+func ClickHouseKeeperImageTagForVersion(version string) (string, bool) {
+	if !ValidClickHouseVersion(version) {
+		return "", false
+	}
+	return "docker.io/clickhouse/clickhouse-keeper:" + version, true
+}
+
+// ValidClickHouseClusterName reports whether name is a safe cluster name. It
+// is used as an XML element and inside Keeper paths, so it must start with a
+// letter or underscore.
+func ValidClickHouseClusterName(name string) bool {
+	ok, _ := regexp.MatchString(`^[A-Za-z_][A-Za-z0-9_-]{0,47}$`, name)
+	return ok
+}
+
+// ClickHouseKeeperConfig holds an independent ClickHouse Keeper container
+// (the ZooKeeper-compatible coordination service used by replicated
+// ClickHouse tables and ON CLUSTER DDL). It is deliberately a separate
+// addon so its lifecycle, data path and failure domain do not depend on any
+// ClickHouse server instance.
+type ClickHouseKeeperConfig struct {
+	ContainerName string `yaml:"container_name,omitempty"` // pgcli-clickhouse-keeper[-ns]-<name>
+	Name          string `yaml:"name,omitempty"`
+	Version       string `yaml:"version,omitempty"`
+	ImageTag      string `yaml:"image_tag,omitempty"` // docker.io/clickhouse/clickhouse-keeper:<version>
+
+	InstanceDir string `yaml:"instance_dir,omitempty"` // state root, default <base>/addon/clickhouse-keeper/<name>
+	ConfigPath  string `yaml:"config_path,omitempty"`  // keeper_config.xml
+	DataDir     string `yaml:"data_dir,omitempty"`     // mounted at /var/lib/clickhouse-keeper
+	LogDir      string `yaml:"log_dir,omitempty"`      // mounted at /var/log/clickhouse-keeper
+
+	Listen        string   `yaml:"listen,omitempty"` // bind address, default 127.0.0.1
+	ServerID      int      `yaml:"server_id,omitempty"`
+	AdvertiseHost string   `yaml:"advertise_host,omitempty"`
+	Peers         []string `yaml:"peers,omitempty"` // OTHER members: <id>@<host>[:<raft_port>]
+	ClientPort    int      `yaml:"client_port,omitempty"`
+	RaftPort      int      `yaml:"raft_port,omitempty"`
+
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// ClickHousePeer is one member of a ClickHouse cluster topology.
+type ClickHousePeer struct {
+	Shard   int
+	Replica int
+	Host    string
+	Port    int
+}
+
+func (p ClickHousePeer) String() string {
+	return fmt.Sprintf("%d/%d@%s", p.Shard, p.Replica, net.JoinHostPort(p.Host, strconv.Itoa(p.Port)))
+}
+
+// concreteIP returns the parsed IP only when it is a specific, non-loopback
+// address suitable for cross-host peering.
+func concreteIP(raw string) net.IP {
+	ip := net.ParseIP(strings.TrimSpace(raw))
+	if ip == nil || ip.IsUnspecified() || ip.IsLoopback() {
+		return nil
+	}
+	return ip
+}
+
+// splitHostOptionalPort parses HOST or HOST:PORT (IPv6 addresses use the
+// usual bracket form when a port is present).
+func splitHostOptionalPort(raw string, defaultPort int) (string, int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", 0, fmt.Errorf("address must not be empty")
+	}
+	if ip := net.ParseIP(raw); ip != nil {
+		if defaultPort < 1 || defaultPort > 65535 {
+			return "", 0, fmt.Errorf("default port must be between 1 and 65535, got %d", defaultPort)
+		}
+		return raw, defaultPort, nil
+	}
+	if !strings.Contains(raw, ":") {
+		if defaultPort < 1 || defaultPort > 65535 {
+			return "", 0, fmt.Errorf("default port must be between 1 and 65535, got %d", defaultPort)
+		}
+		return raw, defaultPort, nil
+	}
+	host, portStr, err := net.SplitHostPort(raw)
+	if err != nil {
+		return "", 0, fmt.Errorf("must be HOST[:PORT]: %w", err)
+	}
+	if host == "" {
+		return "", 0, fmt.Errorf("host must not be empty")
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return "", 0, fmt.Errorf("port must be between 1 and 65535, got %q", portStr)
+	}
+	return host, port, nil
+}
+
+// ParseClickHousePeer parses SHARD/REPLICA@HOST:TCPPORT.
+func ParseClickHousePeer(raw string) (ClickHousePeer, error) {
+	raw = strings.TrimSpace(raw)
+	idPart, addr, ok := strings.Cut(raw, "@")
+	if !ok {
+		return ClickHousePeer{}, fmt.Errorf("peer %q must be SHARD/REPLICA@HOST:PORT", raw)
+	}
+	shardPart, replicaPart, ok := strings.Cut(idPart, "/")
+	if !ok {
+		return ClickHousePeer{}, fmt.Errorf("peer %q must be SHARD/REPLICA@HOST:PORT", raw)
+	}
+	shard, err := strconv.Atoi(shardPart)
+	if err != nil || shard < 1 {
+		return ClickHousePeer{}, fmt.Errorf("peer %q has an invalid shard number (shards are 1-based)", raw)
+	}
+	replica, err := strconv.Atoi(replicaPart)
+	if err != nil || replica < 1 {
+		return ClickHousePeer{}, fmt.Errorf("peer %q has an invalid replica number (replicas are 1-based)", raw)
+	}
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return ClickHousePeer{}, fmt.Errorf("peer %q must be SHARD/REPLICA@HOST:PORT: %w", raw, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return ClickHousePeer{}, fmt.Errorf("peer %q host must be an IP address", raw)
+	}
+	if ip.IsUnspecified() {
+		return ClickHousePeer{}, fmt.Errorf("peer %q host must not be a wildcard address", raw)
+	}
+	if ip.IsLoopback() {
+		return ClickHousePeer{}, fmt.Errorf("peer %q host must not be a loopback address", raw)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return ClickHousePeer{}, fmt.Errorf("peer %q has an invalid port", raw)
+	}
+	return ClickHousePeer{Shard: shard, Replica: replica, Host: host, Port: port}, nil
+}
+
+// ClickHouseTopology returns the complete, sorted member list (this node
+// included). v1 requires a uniform rectangular topology: shard ids start at
+// 1, every shard has the same replica count, and replicas are numbered
+// 1..N.
+func ClickHouseTopology(cc ClickHouseConfig) ([]ClickHousePeer, error) {
+	if !cc.Clustered() {
+		return nil, fmt.Errorf("topology requires cluster mode")
+	}
+	if cc.Shard < 1 || cc.Replica < 1 {
+		return nil, fmt.Errorf("shard and replica must be >= 1 (got %d/%d)", cc.Shard, cc.Replica)
+	}
+	if concreteIP(cc.AdvertiseHost) == nil {
+		return nil, fmt.Errorf("advertise_host must be a concrete non-loopback IP address, got %q", cc.AdvertiseHost)
+	}
+	if cc.TCPPort < 1 || cc.TCPPort > 65535 {
+		return nil, fmt.Errorf("tcp_port must be between 1 and 65535, got %d", cc.TCPPort)
+	}
+	if len(cc.Peers) == 0 {
+		return nil, fmt.Errorf("cluster mode requires at least one --peer listing the other members (this node is added automatically)")
+	}
+
+	byIdentity := map[string]ClickHousePeer{}
+	byEndpoint := map[string]ClickHousePeer{}
+	add := func(peer ClickHousePeer) error {
+		identity := fmt.Sprintf("%d/%d", peer.Shard, peer.Replica)
+		if prev, dup := byIdentity[identity]; dup {
+			return fmt.Errorf("shard/replica %s is used by both %s and %s", identity, prev, peer)
+		}
+		endpoint := net.JoinHostPort(peer.Host, strconv.Itoa(peer.Port))
+		if prev, dup := byEndpoint[endpoint]; dup {
+			return fmt.Errorf("members %s and %s share the endpoint %s; each member needs a distinct host:port", prev, peer, endpoint)
+		}
+		byIdentity[identity] = peer
+		byEndpoint[endpoint] = peer
+		return nil
+	}
+
+	local := ClickHousePeer{Shard: cc.Shard, Replica: cc.Replica, Host: cc.AdvertiseHost, Port: cc.TCPPort}
+	if err := add(local); err != nil {
+		return nil, err
+	}
+	for _, raw := range cc.Peers {
+		peer, err := ParseClickHousePeer(raw)
+		if err != nil {
+			return nil, err
+		}
+		if peer.Shard == cc.Shard && peer.Replica == cc.Replica {
+			return nil, fmt.Errorf("peer %q repeats this node (%d/%d); --peer lists only the OTHER members", raw, cc.Shard, cc.Replica)
+		}
+		if err := add(peer); err != nil {
+			return nil, err
+		}
+	}
+
+	topology := make([]ClickHousePeer, 0, len(byIdentity))
+	for _, peer := range byIdentity {
+		topology = append(topology, peer)
+	}
+	sort.Slice(topology, func(i, j int) bool {
+		if topology[i].Shard != topology[j].Shard {
+			return topology[i].Shard < topology[j].Shard
+		}
+		return topology[i].Replica < topology[j].Replica
+	})
+
+	byShard := map[int][]int{}
+	for _, peer := range topology {
+		byShard[peer.Shard] = append(byShard[peer.Shard], peer.Replica)
+	}
+	shards := make([]int, 0, len(byShard))
+	for shard := range byShard {
+		shards = append(shards, shard)
+	}
+	sort.Ints(shards)
+	replicasPerShard := 0
+	for _, shard := range shards {
+		replicas := byShard[shard]
+		sort.Ints(replicas)
+		for i, replica := range replicas {
+			if replica != i+1 {
+				return nil, fmt.Errorf("shard %d replicas must be numbered 1..N without gaps; got %v", shard, replicas)
+			}
+		}
+		if replicasPerShard == 0 {
+			replicasPerShard = len(replicas)
+		} else if len(replicas) != replicasPerShard {
+			return nil, fmt.Errorf("every shard must have the same number of replicas; shard %d has %d, expected %d", shard, len(replicas), replicasPerShard)
+		}
+	}
+	return topology, nil
+}
+
+// ClickHouseKeeperEndpoint is one ClickHouse Keeper client endpoint.
+type ClickHouseKeeperEndpoint struct {
+	Host string
+	Port int
+}
+
+func (e ClickHouseKeeperEndpoint) String() string {
+	return net.JoinHostPort(e.Host, strconv.Itoa(e.Port))
+}
+
+// ParseClickHouseKeeperEndpoint parses HOST[:PORT] and applies defaultPort
+// when the port is omitted.
+func ParseClickHouseKeeperEndpoint(raw string, defaultPort int) (ClickHouseKeeperEndpoint, error) {
+	host, port, err := splitHostOptionalPort(raw, defaultPort)
+	if err != nil {
+		return ClickHouseKeeperEndpoint{}, fmt.Errorf("keeper endpoint %q %w", raw, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return ClickHouseKeeperEndpoint{}, fmt.Errorf("keeper endpoint %q host must be an IP address", raw)
+	}
+	if ip.IsUnspecified() {
+		return ClickHouseKeeperEndpoint{}, fmt.Errorf("keeper endpoint %q host must not be a wildcard address", raw)
+	}
+	if ip.IsLoopback() {
+		return ClickHouseKeeperEndpoint{}, fmt.Errorf("keeper endpoint %q host must not be a loopback address", raw)
+	}
+	return ClickHouseKeeperEndpoint{Host: host, Port: port}, nil
+}
+
+// ClickHouseKeeperEndpoints returns the de-duplicated, sorted Keeper client
+// endpoints declared by a clustered ClickHouse instance.
+func ClickHouseKeeperEndpoints(cc ClickHouseConfig) ([]ClickHouseKeeperEndpoint, error) {
+	if !cc.Clustered() {
+		return nil, fmt.Errorf("keeper endpoints require cluster mode")
+	}
+	if len(cc.Keepers) == 0 {
+		return nil, fmt.Errorf("cluster mode requires at least one --keeper HOST[:PORT]")
+	}
+	byEndpoint := map[string]ClickHouseKeeperEndpoint{}
+	for _, raw := range cc.Keepers {
+		endpoint, err := ParseClickHouseKeeperEndpoint(raw, DefaultClickHouseKeeperClientPort)
+		if err != nil {
+			return nil, err
+		}
+		byEndpoint[endpoint.String()] = endpoint
+	}
+	endpoints := make([]ClickHouseKeeperEndpoint, 0, len(byEndpoint))
+	for _, endpoint := range byEndpoint {
+		endpoints = append(endpoints, endpoint)
+	}
+	sort.Slice(endpoints, func(i, j int) bool {
+		if endpoints[i].Host != endpoints[j].Host {
+			return endpoints[i].Host < endpoints[j].Host
+		}
+		return endpoints[i].Port < endpoints[j].Port
+	})
+	return endpoints, nil
+}
+
+// ClickHouseKeeperPeer is one Keeper Raft member.
+type ClickHouseKeeperPeer struct {
+	ID   int
+	Host string
+	Port int
+}
+
+func (p ClickHouseKeeperPeer) String() string {
+	return fmt.Sprintf("%d@%s", p.ID, net.JoinHostPort(p.Host, strconv.Itoa(p.Port)))
+}
+
+// ParseClickHouseKeeperPeer parses ID@HOST[:RAFT_PORT].
+func ParseClickHouseKeeperPeer(raw string, defaultRaftPort int) (ClickHouseKeeperPeer, error) {
+	raw = strings.TrimSpace(raw)
+	idPart, addr, ok := strings.Cut(raw, "@")
+	if !ok {
+		return ClickHouseKeeperPeer{}, fmt.Errorf("peer %q must be ID@HOST[:RAFT_PORT]", raw)
+	}
+	id, err := strconv.Atoi(idPart)
+	if err != nil || id < 1 {
+		return ClickHouseKeeperPeer{}, fmt.Errorf("peer %q has an invalid server id (ids are 1-based)", raw)
+	}
+	host, port, err := splitHostOptionalPort(addr, defaultRaftPort)
+	if err != nil {
+		return ClickHouseKeeperPeer{}, fmt.Errorf("peer %q %w", raw, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return ClickHouseKeeperPeer{}, fmt.Errorf("peer %q host must be an IP address", raw)
+	}
+	if ip.IsUnspecified() {
+		return ClickHouseKeeperPeer{}, fmt.Errorf("peer %q host must not be a wildcard address", raw)
+	}
+	if ip.IsLoopback() {
+		return ClickHouseKeeperPeer{}, fmt.Errorf("peer %q host must not be a loopback address", raw)
+	}
+	return ClickHouseKeeperPeer{ID: id, Host: host, Port: port}, nil
+}
+
+// ClickHouseKeeperVoters returns the complete, sorted Raft membership
+// (including this node). A Keeper without peers runs as a single-member
+// standalone server for development; a multi-member Keeper requires a
+// concrete non-loopback advertise_host.
+func ClickHouseKeeperVoters(kc ClickHouseKeeperConfig) ([]ClickHouseKeeperPeer, error) {
+	if kc.ServerID < 1 {
+		return nil, fmt.Errorf("server id must be >= 1 (got %d)", kc.ServerID)
+	}
+	if kc.RaftPort < 1 || kc.RaftPort > 65535 {
+		return nil, fmt.Errorf("raft_port must be between 1 and 65535, got %d", kc.RaftPort)
+	}
+	self := ClickHouseKeeperPeer{ID: kc.ServerID, Host: kc.AdvertiseHost, Port: kc.RaftPort}
+	if len(kc.Peers) == 0 {
+		if ip := net.ParseIP(kc.AdvertiseHost); ip == nil || ip.IsUnspecified() {
+			return nil, fmt.Errorf("advertise_host must be a concrete IP address, got %q", kc.AdvertiseHost)
+		}
+		return []ClickHouseKeeperPeer{self}, nil
+	}
+	if concreteIP(kc.AdvertiseHost) == nil {
+		return nil, fmt.Errorf("advertise_host must be a concrete non-loopback IP address, got %q", kc.AdvertiseHost)
+	}
+	byID := map[int]ClickHouseKeeperPeer{kc.ServerID: self}
+	selfEndpoint := net.JoinHostPort(kc.AdvertiseHost, strconv.Itoa(kc.RaftPort))
+	byEndpoint := map[string]int{selfEndpoint: kc.ServerID}
+	byHost := map[string]int{kc.AdvertiseHost: kc.ServerID}
+	for _, raw := range kc.Peers {
+		peer, err := ParseClickHouseKeeperPeer(raw, kc.RaftPort)
+		if err != nil {
+			return nil, err
+		}
+		if peer.ID == kc.ServerID {
+			return nil, fmt.Errorf("peer %q repeats this node's id %d; --peer lists only the OTHER members", raw, kc.ServerID)
+		}
+		if prev, dup := byID[peer.ID]; dup {
+			return nil, fmt.Errorf("server id %d is used by both %s and %s", peer.ID, prev, peer)
+		}
+		if prevID, dup := byHost[peer.Host]; dup {
+			return nil, fmt.Errorf("Keeper members %d and %d share host %s; run one Keeper per host", prevID, peer.ID, peer.Host)
+		}
+		endpoint := net.JoinHostPort(peer.Host, strconv.Itoa(peer.Port))
+		if prevID, dup := byEndpoint[endpoint]; dup {
+			return nil, fmt.Errorf("Keeper members %d and %d share the Raft endpoint %s; each member needs a distinct host:port", prevID, peer.ID, endpoint)
+		}
+		byID[peer.ID] = peer
+		byEndpoint[endpoint] = peer.ID
+		byHost[peer.Host] = peer.ID
+	}
+	voters := make([]ClickHouseKeeperPeer, 0, len(byID))
+	for _, peer := range byID {
+		voters = append(voters, peer)
+	}
+	sort.Slice(voters, func(i, j int) bool { return voters[i].ID < voters[j].ID })
+	return voters, nil
+}
+
+// pathContains reports whether path is dir itself or lives under dir.
+func pathContains(dir, path string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+// pathsOverlap reports whether a and b are equal or one contains the other.
+func pathsOverlap(a, b string) bool {
+	return pathContains(a, b) || pathContains(b, a)
+}
+
+// clickHouseClusterManagedSettings are keys the cluster renderer owns. They
+// are rejected only in cluster mode so standalone users may still point
+// ClickHouse at an external ZooKeeper or define their own macros.
+var clickHouseClusterManagedSettings = map[string]bool{
+	"remote_servers":       true,
+	"macros":               true,
+	"zookeeper":            true,
+	"distributed_ddl":      true,
+	"default_replica_path": true,
+	"default_replica_name": true,
+}
+
+// ValidateClickHouseClusterSettings rejects user overrides of config keys
+// emitted by the cluster renderer.
+func ValidateClickHouseClusterSettings(settings map[string]string) error {
+	keys := make([]string, 0, len(settings))
+	for key := range settings {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if clickHouseClusterManagedSettings[key] {
+			return fmt.Errorf("settings key %q is managed by pgcli in cluster mode and cannot be overridden", key)
+		}
+		for managed := range clickHouseClusterManagedSettings {
+			if strings.HasPrefix(key, managed+".") {
+				return fmt.Errorf("settings key %q is managed by pgcli in cluster mode and cannot be overridden", key)
+			}
+		}
+	}
+	return nil
 }
 
 // clickHouseManagedSettings are server configuration keys pgcli renders for
@@ -4094,6 +4563,27 @@ func nsSuffix(namespace string) string {
 	return "-" + namespace
 }
 
+// markClickHouseReservedPorts pre-marks every explicit ClickHouse and
+// ClickHouse Keeper host port so unrelated port pools cannot allocate them.
+// The interserver, Keeper client and Keeper Raft ports are fixed rather than
+// pool-allocated, but they still occupy the host.
+func markClickHouseReservedPorts(assigned map[int]bool, c *Config) {
+	for _, addon := range c.Addons.ClickHouse {
+		for _, p := range []int{addon.HTTPPort, addon.TCPPort, addon.InterserverPort} {
+			if p != 0 {
+				assigned[p] = true
+			}
+		}
+	}
+	for _, addon := range c.Addons.ClickHouseKeeper {
+		for _, p := range []int{addon.ClientPort, addon.RaftPort} {
+			if p != 0 {
+				assigned[p] = true
+			}
+		}
+	}
+}
+
 // PatroniScope is the scope a Patroni cluster uses in the shared DCS: the
 // config-level scope namespaced so two pgcli namespaces sharing one etcd do
 // not collide (Patroni's etcd prefix is the raw scope and has no namespace of
@@ -4676,8 +5166,9 @@ func (c *Config) Validate() error {
 	}
 	// ClickHouse instances: names are directory keys, paths are absolute, the
 	// admin account is usable for HTTP Basic auth and clickhouse-client, and
-	// HTTP/native TCP ports are unique per instance.
-	clickHousePorts := make(map[int]string, 2*len(c.Addons.ClickHouse))
+	// HTTP/native TCP/interserver ports are unique per host. Cluster mode
+	// additionally validates the static topology and Keeper endpoints.
+	clickHousePorts := make(map[int]string, 3*len(c.Addons.ClickHouse))
 	for name, cc := range c.Addons.ClickHouse {
 		if !ValidClickHouseName(cc.Name) {
 			return fmt.Errorf("addons.clickhouse.%s.name %q must match [A-Za-z0-9][A-Za-z0-9_-]{0,47}", name, cc.Name)
@@ -4719,21 +5210,63 @@ func (c *Config) Validate() error {
 		if err := ValidateClickHouseSettings(cc.Settings); err != nil {
 			return fmt.Errorf("addons.clickhouse.%s.settings: %w", name, err)
 		}
+		if cc.Clustered() {
+			if !ValidClickHouseClusterName(cc.Cluster) {
+				return fmt.Errorf("addons.clickhouse.%s.cluster %q must match [A-Za-z_][A-Za-z0-9_-]{0,47}", name, cc.Cluster)
+			}
+			if cc.Shard < 1 || cc.Replica < 1 {
+				return fmt.Errorf("addons.clickhouse.%s.shard and replica must be >= 1 in cluster mode", name)
+			}
+			if concreteIP(cc.AdvertiseHost) == nil {
+				return fmt.Errorf("addons.clickhouse.%s.advertise_host must be a concrete non-loopback IP address, got %q", name, cc.AdvertiseHost)
+			}
+			listenIP := net.ParseIP(cc.Listen)
+			if listenIP == nil || listenIP.IsLoopback() {
+				return fmt.Errorf("addons.clickhouse.%s.listen must not be loopback in cluster mode; bind 0.0.0.0 (or ::), or bind the advertised address", name)
+			}
+			if !listenIP.IsUnspecified() && !listenIP.Equal(net.ParseIP(cc.AdvertiseHost)) {
+				return fmt.Errorf("addons.clickhouse.%s.listen %s is not the advertised address %s; bind 0.0.0.0 (or ::), or bind the advertised address", name, cc.Listen, cc.AdvertiseHost)
+			}
+			if _, err := ClickHouseTopology(cc); err != nil {
+				return fmt.Errorf("addons.clickhouse.%s: %w", name, err)
+			}
+			if _, err := ClickHouseKeeperEndpoints(cc); err != nil {
+				return fmt.Errorf("addons.clickhouse.%s: %w", name, err)
+			}
+			if err := ValidateClickHouseClusterSettings(cc.Settings); err != nil {
+				return fmt.Errorf("addons.clickhouse.%s.settings: %w", name, err)
+			}
+			if cc.InterserverPort < 1 || cc.InterserverPort > 65535 {
+				return fmt.Errorf("addons.clickhouse.%s.interserver_port must be between 1 and 65535, got %d", name, cc.InterserverPort)
+			}
+		} else if cc.Shard != 0 || cc.Replica != 0 || cc.AdvertiseHost != "" || len(cc.Peers) > 0 || len(cc.Keepers) > 0 || cc.InterserverPort != 0 {
+			return fmt.Errorf("addons.clickhouse.%s: cluster fields (shard, replica, advertise_host, peers, keepers, interserver_port) require cluster mode", name)
+		}
 		if cc.HTTPPort == cc.TCPPort {
 			return fmt.Errorf("addons.clickhouse.%s.http_port and tcp_port must differ, got %d", name, cc.HTTPPort)
 		}
-		for _, field := range []struct {
+		if cc.Clustered() && (cc.InterserverPort == cc.HTTPPort || cc.InterserverPort == cc.TCPPort) {
+			return fmt.Errorf("addons.clickhouse.%s.interserver_port must differ from http_port and tcp_port, got %d", name, cc.InterserverPort)
+		}
+		portFields := []struct {
 			name  string
 			value int
 		}{
 			{"http_port", cc.HTTPPort},
 			{"tcp_port", cc.TCPPort},
-		} {
+		}
+		if cc.Clustered() {
+			portFields = append(portFields, struct {
+				name  string
+				value int
+			}{"interserver_port", cc.InterserverPort})
+		}
+		for _, field := range portFields {
 			if field.value < 1 || field.value > 65535 {
 				return fmt.Errorf("addons.clickhouse.%s.%s must be between 1 and 65535, got %d", name, field.name, field.value)
 			}
 			if prev, dup := clickHousePorts[field.value]; dup {
-				return fmt.Errorf("addons.clickhouse.%s.%s %d is already used by %s (HTTP and TCP ports must be unique)", name, field.name, field.value, prev)
+				return fmt.Errorf("addons.clickhouse.%s.%s %d is already used by %s (ClickHouse ports must be unique)", name, field.name, field.value, prev)
 			}
 			clickHousePorts[field.value] = name + "." + field.name
 		}
@@ -4851,6 +5384,120 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("addons.kafka.%s.%s %d is already used by %s (Kafka ports must be unique)", name, field.name, field.value, prev)
 			}
 			kafkaPorts[field.value] = name + "." + field.name
+		}
+	}
+	// ClickHouse Keeper instances are an independent addon. Their state must
+	// live in paths disjoint from every ClickHouse server (the whole point of
+	// the separate addon is an independent lifecycle and failure domain), and
+	// their fixed client/Raft ports may not collide with ClickHouse or Kafka.
+	keeperPorts := make(map[int]string, 2*len(c.Addons.ClickHouseKeeper))
+	for name, kc := range c.Addons.ClickHouseKeeper {
+		if !ValidClickHouseName(kc.Name) {
+			return fmt.Errorf("addons.clickhouse_keeper.%s.name %q must match [A-Za-z0-9][A-Za-z0-9_-]{0,47}", name, kc.Name)
+		}
+		if !ValidClickHouseVersion(kc.Version) {
+			return fmt.Errorf("addons.clickhouse_keeper.%s.version %q must be a safe Docker image tag", name, kc.Version)
+		}
+		if tag, ok := ClickHouseKeeperImageTagForVersion(kc.Version); !ok {
+			return fmt.Errorf("addons.clickhouse_keeper.%s.version %q is not supported", name, kc.Version)
+		} else if kc.ImageTag != tag {
+			return fmt.Errorf("addons.clickhouse_keeper.%s.image_tag %q does not match version %s (%s)", name, kc.ImageTag, kc.Version, tag)
+		}
+		for _, field := range []struct {
+			name  string
+			value string
+		}{
+			{"instance_dir", kc.InstanceDir},
+			{"config_path", kc.ConfigPath},
+			{"data_dir", kc.DataDir},
+			{"log_dir", kc.LogDir},
+		} {
+			if field.value == "" || !filepath.IsAbs(field.value) {
+				return fmt.Errorf("addons.clickhouse_keeper.%s.%s must be an absolute path, got %q", name, field.name, field.value)
+			}
+		}
+		if kc.Listen == "" || net.ParseIP(kc.Listen) == nil {
+			return fmt.Errorf("addons.clickhouse_keeper.%s.listen must be an IP address, got %q", name, kc.Listen)
+		}
+		if kc.ServerID < 1 {
+			return fmt.Errorf("addons.clickhouse_keeper.%s.server_id must be >= 1, got %d", name, kc.ServerID)
+		}
+		if len(kc.Peers) > 0 {
+			if concreteIP(kc.AdvertiseHost) == nil {
+				return fmt.Errorf("addons.clickhouse_keeper.%s.advertise_host must be a concrete non-loopback IP address, got %q", name, kc.AdvertiseHost)
+			}
+			if net.ParseIP(kc.Listen).IsLoopback() {
+				return fmt.Errorf("addons.clickhouse_keeper.%s.listen must not be loopback in multi-member mode; bind 0.0.0.0 (or ::)", name)
+			}
+		}
+		if _, err := ClickHouseKeeperVoters(kc); err != nil {
+			return fmt.Errorf("addons.clickhouse_keeper.%s: %w", name, err)
+		}
+		if kc.ClientPort == kc.RaftPort {
+			return fmt.Errorf("addons.clickhouse_keeper.%s.client_port and raft_port must differ, got %d", name, kc.ClientPort)
+		}
+		for _, field := range []struct {
+			name  string
+			value int
+		}{
+			{"client_port", kc.ClientPort},
+			{"raft_port", kc.RaftPort},
+		} {
+			if field.value < 1 || field.value > 65535 {
+				return fmt.Errorf("addons.clickhouse_keeper.%s.%s must be between 1 and 65535, got %d", name, field.name, field.value)
+			}
+			if prev, dup := keeperPorts[field.value]; dup {
+				return fmt.Errorf("addons.clickhouse_keeper.%s.%s %d is already used by %s (Keeper ports must be unique)", name, field.name, field.value, prev)
+			}
+			if prev, dup := clickHousePorts[field.value]; dup {
+				return fmt.Errorf("addons.clickhouse_keeper.%s.%s %d is already used by addons.clickhouse.%s", name, field.name, field.value, prev)
+			}
+			if prev, dup := kafkaPorts[field.value]; dup {
+				return fmt.Errorf("addons.clickhouse_keeper.%s.%s %d is already used by addons.kafka.%s", name, field.name, field.value, prev)
+			}
+			keeperPorts[field.value] = name + "." + field.name
+		}
+
+		configDir := filepath.Dir(kc.ConfigPath)
+		keeperDirs := []struct {
+			name string
+			path string
+		}{
+			{"data_dir", kc.DataDir},
+			{"log_dir", kc.LogDir},
+			{"config_dir", configDir},
+		}
+		for i := 0; i < len(keeperDirs); i++ {
+			for j := i + 1; j < len(keeperDirs); j++ {
+				if pathsOverlap(keeperDirs[i].path, keeperDirs[j].path) {
+					return fmt.Errorf("addons.clickhouse_keeper.%s.%s %s overlaps %s %s; Keeper data, log and config paths must be separate",
+						name, keeperDirs[i].name, keeperDirs[i].path, keeperDirs[j].name, keeperDirs[j].path)
+				}
+			}
+		}
+		keeperAllDirs := append([]struct {
+			name string
+			path string
+		}{{"instance_dir", kc.InstanceDir}}, keeperDirs...)
+		for chName, ch := range c.Addons.ClickHouse {
+			chPaths := []struct {
+				name string
+				path string
+			}{
+				{"config_path", ch.ConfigPath},
+				{"data_dir", ch.DataDir},
+				{"log_dir", ch.LogDir},
+				{"backup_dir", ch.BackupDir},
+				{"secret_path", ch.SecretPath},
+			}
+			for _, keeperDir := range keeperAllDirs {
+				for _, chPath := range chPaths {
+					if pathsOverlap(keeperDir.path, chPath.path) {
+						return fmt.Errorf("addons.clickhouse_keeper.%s.%s %s overlaps addons.clickhouse.%s.%s %s; Keeper state must live in paths disjoint from ClickHouse",
+							name, keeperDir.name, keeperDir.path, chName, chPath.name, chPath.path)
+					}
+				}
+			}
 		}
 	}
 	// RabbitMQ instances: names are directory keys, paths absolute, the listen
@@ -6448,6 +7095,9 @@ func (c *Config) ApplyDefaults() {
 		if addon.Listen == "" {
 			addon.Listen = "127.0.0.1"
 		}
+		if addon.Clustered() && addon.InterserverPort == 0 {
+			addon.InterserverPort = DefaultClickHouseInterserverPort
+		}
 		if addon.AdminUser == "" {
 			addon.AdminUser = "admin"
 		}
@@ -6468,6 +7118,57 @@ func (c *Config) ApplyDefaults() {
 			addon.SecretPath = filepath.Join(addonDir, "secrets", "admin_password")
 		}
 		c.Addons.ClickHouse[name] = addon
+	}
+
+	// Top-level ClickHouse Keeper instances. Keeper is deliberately its own
+	// addon with disjoint config/data/log paths; nothing is shared with the
+	// ClickHouse server under <base>/addon/clickhouse/.
+	clickHouseKeeperBaseDir := platform.DefaultConfigDir()
+	if c.BaseDir != "" {
+		clickHouseKeeperBaseDir = c.BaseDir
+	}
+	for name, addon := range c.Addons.ClickHouseKeeper {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.Version == "" {
+			addon.Version = DefaultClickHouseKeeperVersion
+		}
+		if addon.ImageTag == "" {
+			if tag, ok := ClickHouseKeeperImageTagForVersion(addon.Version); ok {
+				addon.ImageTag = tag
+			}
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-clickhouse-keeper" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.Listen == "" {
+			addon.Listen = "127.0.0.1"
+		}
+		if addon.AdvertiseHost == "" {
+			if ip := net.ParseIP(addon.Listen); ip != nil && !ip.IsUnspecified() {
+				addon.AdvertiseHost = addon.Listen
+			}
+		}
+		if addon.ClientPort == 0 {
+			addon.ClientPort = DefaultClickHouseKeeperClientPort
+		}
+		if addon.RaftPort == 0 {
+			addon.RaftPort = DefaultClickHouseKeeperRaftPort
+		}
+		if addon.InstanceDir == "" {
+			addon.InstanceDir = filepath.Join(clickHouseKeeperBaseDir, "addon", "clickhouse-keeper", name)
+		}
+		if addon.ConfigPath == "" {
+			addon.ConfigPath = filepath.Join(addon.InstanceDir, "config", "keeper_config.xml")
+		}
+		if addon.DataDir == "" {
+			addon.DataDir = filepath.Join(addon.InstanceDir, "data")
+		}
+		if addon.LogDir == "" {
+			addon.LogDir = filepath.Join(addon.InstanceDir, "logs")
+		}
+		c.Addons.ClickHouseKeeper[name] = addon
 	}
 
 	// Top-level Kafka instances. The official image runs as uid 1000; all
@@ -7060,13 +7761,7 @@ func (c *Config) autoAssignPorts() {
 				}
 			}
 		}
-		for _, addon := range c.Addons.ClickHouse {
-			for _, p := range []int{addon.HTTPPort, addon.TCPPort} {
-				if p != 0 {
-					assigned[p] = true
-				}
-			}
-		}
+		markClickHouseReservedPorts(assigned, c)
 		for _, addon := range c.Addons.Kafka {
 			for _, p := range []int{addon.BrokerPort, addon.ControllerPort, addon.TLSPort} {
 				if p != 0 {
@@ -7123,13 +7818,7 @@ func (c *Config) autoAssignPorts() {
 				}
 			}
 		}
-		for _, addon := range c.Addons.ClickHouse {
-			for _, p := range []int{addon.HTTPPort, addon.TCPPort} {
-				if p != 0 {
-					assigned[p] = true
-				}
-			}
-		}
+		markClickHouseReservedPorts(assigned, c)
 		for _, addon := range c.Addons.InfluxDB {
 			for _, p := range []int{addon.HostPort, addon.RPCPort} {
 				if p != 0 {
@@ -7434,13 +8123,7 @@ func (c *Config) autoAssignPorts() {
 			}
 		}
 	}
-	for _, addon := range c.Addons.ClickHouse {
-		for _, p := range []int{addon.HTTPPort, addon.TCPPort} {
-			if p != 0 {
-				assignedMinio[p] = true
-			}
-		}
-	}
+	markClickHouseReservedPorts(assignedMinio, c)
 	for _, addon := range c.Addons.Kafka {
 		for _, p := range []int{addon.BrokerPort, addon.ControllerPort, addon.TLSPort} {
 			if p != 0 {
@@ -7976,14 +8659,7 @@ func (c *Config) autoAssignPorts() {
 				assignedInflux[addon.RPCPort] = true
 			}
 		}
-		for _, addon := range c.Addons.ClickHouse {
-			if addon.HTTPPort != 0 {
-				assignedInflux[addon.HTTPPort] = true
-			}
-			if addon.TCPPort != 0 {
-				assignedInflux[addon.TCPPort] = true
-			}
-		}
+		markClickHouseReservedPorts(assignedInflux, c)
 		nextHTTP := httpBase
 		nextRPC := rpcBase
 		nextFree := func(next *int) int {
@@ -8036,14 +8712,7 @@ func (c *Config) autoAssignPorts() {
 				assigned[addon.Port] = true
 			}
 		}
-		for _, addon := range c.Addons.ClickHouse {
-			if addon.HTTPPort != 0 {
-				assigned[addon.HTTPPort] = true
-			}
-			if addon.TCPPort != 0 {
-				assigned[addon.TCPPort] = true
-			}
-		}
+		markClickHouseReservedPorts(assigned, c)
 		next := base
 		nextFree := func() int {
 			for (usedPorts != nil && usedPorts[next]) || assigned[next] {

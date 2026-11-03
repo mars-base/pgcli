@@ -80,7 +80,7 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartNodeExporter(c) && !hasAutostartPGExporter(c) && !hasAutostartDocumentDB(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartRabbitMQ(c) && !hasAutostartRocketMQ(c) && !hasAutostartNginx(c) && !hasAutostartDaemons(c) {
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartNodeExporter(c) && !hasAutostartPGExporter(c) && !hasAutostartDocumentDB(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouseKeeper(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartRabbitMQ(c) && !hasAutostartRocketMQ(c) && !hasAutostartNginx(c) && !hasAutostartDaemons(c) {
 		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --kafka / --rabbitmq / --nginx / --nodeexporter / --pgexporter / --documentdb / --daemon)")
 		return nil
 	}
@@ -332,6 +332,14 @@ func startAutostart() error {
 		firstErr = err
 	}
 	if err := startAutostartInflux2TSDB(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// clickhouse-keeper members. Must start before ClickHouse: replicated
+	// tables and ON CLUSTER DDL block on Keeper. StartContainer waits for the
+	// container to accept ruok but does not require a full quorum, so nodes can
+	// boot one at a time.
+	if err := startAutostartClickHouseKeeper(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -1414,6 +1422,54 @@ func startAutostartInflux2TSDB(c *config.Config) error {
 			continue
 		}
 		fmt.Printf("  [OK] influx2tsdb %q started (HTTP port %d)\n", name, ic.Port)
+	}
+	return firstErr
+}
+
+func hasAutostartClickHouseKeeper(c *config.Config) bool {
+	for _, kc := range c.Addons.ClickHouseKeeper {
+		if kc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartClickHouseKeeper starts each autostart-enabled Keeper
+// container. StartContainer re-renders keeper_config.xml, is idempotent, and
+// waits for ruok; missing quorum is reported by the manager but not fatal.
+func startAutostartClickHouseKeeper(c *config.Config) error {
+	var names []string
+	for name, kc := range c.Addons.ClickHouseKeeper {
+		if kc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	m, err := podman.NewClickHouseKeeperManager(c)
+	if err != nil {
+		fmt.Printf("  [X] clickhouse-keeper autostart: %v\n", err)
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		kc := c.Addons.ClickHouseKeeper[name]
+		already, err := m.StartContainer(&kc)
+		if err != nil {
+			fmt.Printf("  [X] clickhouse-keeper autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if already {
+			fmt.Printf("  [OK] clickhouse-keeper %q already running\n", name)
+			continue
+		}
+		fmt.Printf("  [OK] clickhouse-keeper %q started (client %s:%d)\n", name, kc.Listen, kc.ClientPort)
 	}
 	return firstErr
 }

@@ -1,7 +1,7 @@
 ---
 title: "RocketMQ"
 description: "以托管插件方式运行 Apache RocketMQ 5.x——三容器（NameServer + broker + proxy），支持单机或跨主机 controller 模式集群与 broker 自动主备切换，含 topic/消息命令、渲染配置与 host 网络"
-weight: 67
+weight: 69
 ---
 
 `pg addon install rocketmq` 以托管插件方式运行 **Apache RocketMQ 5.x**，使用官方

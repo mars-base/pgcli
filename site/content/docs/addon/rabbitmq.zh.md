@@ -1,7 +1,7 @@
 ---
 title: "RabbitMQ"
 description: "以托管插件方式运行 RabbitMQ broker——单节点，或通过 etcd 自动发现组建多机集群；AMQP 与 management Web UI/API、可选 TLS（自动生成 CA 或自带证书）、以及队列管理（list/declare/info、publish/get、bind/unbind、purge/delete）"
-weight: 66
+weight: 68
 ---
 
 `pg addon install rabbitmq` 以托管容器方式运行 **RabbitMQ 4.4.0**，直接使用官方

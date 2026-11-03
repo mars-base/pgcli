@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<clickhouse>
+    <listen_host>127.0.0.1</listen_host>
+    <listen_try>1</listen_try>
+    <backups>
+        <allowed_disk>backups</allowed_disk>
+        <allowed_path>/var/lib/clickhouse-backups/</allowed_path>
+    </backups>
+    <http_port>18123</http_port>
+    <logger>
+        <console>1</console>
+        <count>3</count>
+        <errorlog>/var/log/clickhouse-server/clickhouse-server.err.log</errorlog>
+        <level>information</level>
+        <log>/var/log/clickhouse-server/clickhouse-server.log</log>
+        <size>100M</size>
+    </logger>
+    <storage_configuration>
+        <disks>
+            <backups>
+                <path>/var/lib/clickhouse-backups/</path>
+                <type>local</type>
+            </backups>
+        </disks>
+    </storage_configuration>
+    <tcp_port>19000</tcp_port>
+</clickhouse>

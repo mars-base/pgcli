@@ -3,15 +3,19 @@ package cli
 import (
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/mars-base/pgcli/internal/clickhouse"
+	"github.com/mars-base/pgcli/internal/clickhousekeeper"
 	"github.com/mars-base/pgcli/internal/config"
 	"github.com/mars-base/pgcli/internal/podman"
 )
@@ -54,6 +58,405 @@ func clickHouseAdminPassword(secretPath string) (string, error) {
 	return generatePassword(20)
 }
 
+// clickHouseInstallOptions captures every install flag plus whether it was
+// explicitly set. Stored values are kept on --force unless the operator passes
+// the flag again; cluster identity flags are immutable after install.
+type clickHouseInstallOptions struct {
+	cluster          string
+	peers            []string
+	shard            int
+	replica          int
+	advertiseHost    string
+	keepers          []string
+	interserverPort  int
+	tcpPort          int
+	httpPort         int
+	listen           string
+	dataDir          string
+	adminUser        string
+	adminPassword    string
+	version          string
+	configOptions    []string
+	clusterSet       bool
+	peersSet         bool
+	shardSet         bool
+	replicaSet       bool
+	advertiseHostSet bool
+	keepersSet       bool
+	serverPortSet    bool
+	tcpPortSet       bool
+	httpPortSet      bool
+	listenSet        bool
+	dataDirSet       bool
+	adminUserSet     bool
+	adminPasswordSet bool
+	versionSet       bool
+	configOptionSet  bool
+}
+
+func readClickHouseInstallOptions(fs *pflag.FlagSet) clickHouseInstallOptions {
+	opts := clickHouseInstallOptions{
+		clusterSet:       fs.Changed("cluster"),
+		peersSet:         fs.Changed("peer"),
+		shardSet:         fs.Changed("shard"),
+		replicaSet:       fs.Changed("replica"),
+		advertiseHostSet: fs.Changed("advertise-host"),
+		keepersSet:       fs.Changed("keeper"),
+		serverPortSet:    fs.Changed("interserver-port"),
+		tcpPortSet:       fs.Changed("tcp-port"),
+		httpPortSet:      fs.Changed("http-port"),
+		listenSet:        fs.Changed("listen"),
+		dataDirSet:       fs.Changed("data-dir"),
+		adminUserSet:     fs.Changed("admin-user"),
+		versionSet:       fs.Changed("version"),
+		configOptionSet:  fs.Changed("config-option"),
+	}
+	opts.cluster, _ = fs.GetString("cluster")
+	opts.peers, _ = fs.GetStringArray("peer")
+	opts.shard, _ = fs.GetInt("shard")
+	opts.replica, _ = fs.GetInt("replica")
+	opts.advertiseHost, _ = fs.GetString("advertise-host")
+	opts.keepers, _ = fs.GetStringArray("keeper")
+	opts.interserverPort, _ = fs.GetInt("interserver-port")
+	opts.tcpPort, _ = fs.GetInt("tcp-port")
+	opts.httpPort, _ = fs.GetInt("http-port")
+	opts.listen, _ = fs.GetString("listen")
+	opts.dataDir, _ = fs.GetString("data-dir")
+	opts.adminUser, _ = fs.GetString("admin-user")
+	opts.version, _ = fs.GetString("version")
+	opts.configOptions, _ = fs.GetStringArray("config-option")
+	if v, _ := fs.GetString("admin-password"); fs.Changed("admin-password") && v != "" {
+		opts.adminPassword = v
+		opts.adminPasswordSet = true
+	}
+	return opts
+}
+
+func applyClickHouseInstallFlags(cc *config.ClickHouseConfig, opts clickHouseInstallOptions) error {
+	if opts.versionSet {
+		cc.Version = opts.version
+	}
+	if cc.Version == "" {
+		cc.Version = config.DefaultClickHouseVersion
+	}
+	imageTag, ok := config.ClickHouseImageTagForVersion(cc.Version)
+	if !ok {
+		return fmt.Errorf("ClickHouse %q is not available (supported: %s; pass the exact upstream tag)", cc.Version, config.DefaultClickHouseVersion)
+	}
+	cc.ImageTag = imageTag
+	if opts.adminPasswordSet {
+		cc.AdminPassword = opts.adminPassword
+	}
+	if opts.adminUserSet && opts.adminUser != "" {
+		cc.AdminUser = opts.adminUser
+	}
+	if opts.listenSet && opts.listen != "" {
+		cc.Listen = opts.listen
+	}
+	if opts.httpPortSet {
+		cc.HTTPPort = opts.httpPort
+	}
+	if opts.tcpPortSet {
+		cc.TCPPort = opts.tcpPort
+	}
+	if opts.dataDirSet && opts.dataDir != "" {
+		cc.DataDir = opts.dataDir
+	}
+	if opts.clusterSet {
+		cc.Cluster = opts.cluster
+	}
+	if opts.shardSet {
+		cc.Shard = opts.shard
+	}
+	if opts.replicaSet {
+		cc.Replica = opts.replica
+	}
+	if opts.advertiseHostSet {
+		cc.AdvertiseHost = opts.advertiseHost
+	}
+	if opts.peersSet {
+		cc.Peers = append([]string(nil), opts.peers...)
+	}
+	if opts.keepersSet {
+		cc.Keepers = append([]string(nil), opts.keepers...)
+	}
+	if opts.serverPortSet {
+		cc.InterserverPort = opts.interserverPort
+	}
+	if opts.configOptionSet {
+		settings := make(map[string]string, len(opts.configOptions))
+		for _, opt := range opts.configOptions {
+			key, value, ok := strings.Cut(opt, "=")
+			if !ok || strings.TrimSpace(key) == "" {
+				return fmt.Errorf("invalid --config-option %q: use KEY=VALUE with a dotted XML path, e.g. max_server_memory_usage=2147483648", opt)
+			}
+			settings[strings.TrimSpace(key)] = value
+		}
+		cc.Settings = settings
+	}
+	return nil
+}
+
+// checkClickHouseNoOpFlags rejects an explicit flag that would change an
+// installed instance when --force is absent. The old behavior silently ignored
+// every flag; surfacing the drift avoids "I passed --shard but nothing
+// changed" surprises.
+func checkClickHouseNoOpFlags(stored config.ClickHouseConfig, opts clickHouseInstallOptions) error {
+	type mismatch struct{ flag, stored, requested string }
+	var found []mismatch
+	check := func(set bool, flag, oldValue, newValue string) {
+		if set && oldValue != newValue {
+			found = append(found, mismatch{flag, oldValue, newValue})
+		}
+	}
+	check(opts.clusterSet, "--cluster", stored.Cluster, opts.cluster)
+	check(opts.shardSet, "--shard", fmt.Sprint(stored.Shard), fmt.Sprint(opts.shard))
+	check(opts.replicaSet, "--replica", fmt.Sprint(stored.Replica), fmt.Sprint(opts.replica))
+	check(opts.advertiseHostSet, "--advertise-host", stored.AdvertiseHost, opts.advertiseHost)
+	check(opts.serverPortSet, "--interserver-port", fmt.Sprint(stored.InterserverPort), fmt.Sprint(opts.interserverPort))
+	check(opts.tcpPortSet, "--tcp-port", fmt.Sprint(stored.TCPPort), fmt.Sprint(opts.tcpPort))
+	check(opts.httpPortSet, "--http-port", fmt.Sprint(stored.HTTPPort), fmt.Sprint(opts.httpPort))
+	check(opts.listenSet, "--listen", stored.Listen, opts.listen)
+	check(opts.dataDirSet, "--data-dir", stored.DataDir, opts.dataDir)
+	check(opts.adminUserSet, "--admin-user", stored.AdminUser, opts.adminUser)
+	if opts.adminPasswordSet && opts.adminPassword != stored.AdminPassword {
+		found = append(found, mismatch{"--admin-password", "(stored)", "(different)"})
+	}
+	check(opts.versionSet, "--version", stored.Version, opts.version)
+	if opts.peersSet && !clickHousePeerSetsEqual(opts.peers, stored.Peers) {
+		found = append(found, mismatch{"--peer", strings.Join(stored.Peers, ","), strings.Join(opts.peers, ",")})
+	}
+	if opts.keepersSet && !clickHouseKeeperSetsEqual(opts.keepers, stored.Keepers) {
+		found = append(found, mismatch{"--keeper", strings.Join(stored.Keepers, ","), strings.Join(opts.keepers, ",")})
+	}
+	if opts.configOptionSet {
+		requested, err := parseClickHouseConfigOptions(opts.configOptions)
+		if err != nil {
+			return err
+		}
+		if !clickHouseSettingsEqual(requested, stored.Settings) {
+			found = append(found, mismatch{"--config-option", "(stored)", "(different)"})
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "clickhouse %q is already installed; %s differs from the stored value (run with --force to apply)", stored.Name, found[0].flag)
+	for _, m := range found[1:] {
+		fmt.Fprintf(&b, ", %s differs", m.flag)
+	}
+	return fmt.Errorf("%s", b.String())
+}
+
+// checkClickHouseTopologyImmutable rejects changing cluster identity even with
+// --force: every other member has this node baked into its peer/keeper list.
+func checkClickHouseTopologyImmutable(stored, next config.ClickHouseConfig) error {
+	if next.Cluster != stored.Cluster {
+		if stored.Cluster == "" {
+			return fmt.Errorf("clickhouse %q is installed as a single node; cluster membership is not an in-place change (remove it first or use a new --name)", next.Name)
+		}
+		return fmt.Errorf("clickhouse %q is installed in cluster %q; changing --cluster is not supported", next.Name, stored.Cluster)
+	}
+	if !stored.Clustered() {
+		return nil
+	}
+	if next.Shard != stored.Shard {
+		return fmt.Errorf("clickhouse %q is installed as shard %d; changing --shard is not supported", next.Name, stored.Shard)
+	}
+	if next.Replica != stored.Replica {
+		return fmt.Errorf("clickhouse %q is installed as replica %d; changing --replica is not supported", next.Name, stored.Replica)
+	}
+	if next.AdvertiseHost != stored.AdvertiseHost {
+		return fmt.Errorf("clickhouse %q advertises %s; changing --advertise-host would invalidate every peer's --peer list", next.Name, stored.AdvertiseHost)
+	}
+	if next.TCPPort != stored.TCPPort {
+		return fmt.Errorf("clickhouse %q is installed with tcp_port %d; the cluster ports are immutable (other members use this endpoint in their --peer list)", next.Name, stored.TCPPort)
+	}
+	if next.InterserverPort != stored.InterserverPort {
+		return fmt.Errorf("clickhouse %q is installed with interserver port %d; changing --interserver-port is not supported", next.Name, stored.InterserverPort)
+	}
+	if !clickHousePeerSetsEqual(next.Peers, stored.Peers) {
+		return fmt.Errorf("clickhouse %q is installed with peers %s; changing --peer is not supported (static cluster membership cannot be edited in place)", next.Name, strings.Join(stored.Peers, ", "))
+	}
+	if !clickHouseKeeperSetsEqual(next.Keepers, stored.Keepers) {
+		return fmt.Errorf("clickhouse %q is installed with Keeper endpoints %s; changing --keeper is not supported (edit the rendered cluster config and recreate the other members instead)", next.Name, strings.Join(stored.Keepers, ", "))
+	}
+	return nil
+}
+
+func validateClickHouseClusterInstall(cc config.ClickHouseConfig, opts clickHouseInstallOptions, present bool) error {
+	if !cc.Clustered() {
+		switch {
+		case opts.peersSet || len(cc.Peers) > 0:
+			return fmt.Errorf("--peer requires --cluster (pass the same cluster name on every host)")
+		case opts.shardSet || opts.replicaSet || cc.Shard != 0 || cc.Replica != 0:
+			return fmt.Errorf("--shard/--replica require --cluster (pass the same cluster name on every host)")
+		case opts.keepersSet || len(cc.Keepers) > 0:
+			return fmt.Errorf("--keeper requires --cluster")
+		case opts.advertiseHostSet || cc.AdvertiseHost != "":
+			return fmt.Errorf("--advertise-host requires --cluster for ClickHouse")
+		case opts.serverPortSet || cc.InterserverPort != 0:
+			return fmt.Errorf("--interserver-port requires --cluster")
+		}
+		return nil
+	}
+	if len(cc.Peers) == 0 {
+		return fmt.Errorf("--cluster requires at least one --peer SHARD/REPLICA@HOST:PORT listing the other members (this node is added automatically)")
+	}
+	if len(cc.Keepers) == 0 {
+		return fmt.Errorf("--cluster requires at least one --keeper HOST[:PORT] (Keeper serves replicated table metadata and ON CLUSTER DDL)")
+	}
+	if !present {
+		var missing []string
+		for _, required := range []struct {
+			ok   bool
+			flag string
+		}{
+			{opts.clusterSet, "--cluster"},
+			{opts.shardSet, "--shard"},
+			{opts.replicaSet, "--replica"},
+			{opts.advertiseHostSet, "--advertise-host"},
+			{opts.peersSet, "--peer"},
+			{opts.keepersSet, "--keeper"},
+			{opts.listenSet, "--listen"},
+			{opts.adminPasswordSet, "--admin-password"},
+		} {
+			if !required.ok {
+				missing = append(missing, required.flag)
+			}
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("a fresh ClickHouse cluster install requires explicit %s (every member must share cluster/keeper/admin-password; the admin password cannot be generated because peers need the same one)", strings.Join(missing, ", "))
+		}
+	}
+	if !opts.adminPasswordSet && cc.AdminPassword == "" {
+		return fmt.Errorf("--cluster requires --admin-password; every member must use the same admin credential and pgcli cannot read it from another host")
+	}
+	listen := net.ParseIP(cc.Listen)
+	if listen == nil || listen.IsLoopback() || (!listen.IsUnspecified() && !listen.Equal(net.ParseIP(cc.AdvertiseHost))) {
+		return fmt.Errorf("--cluster requires --listen 0.0.0.0 (or this node's advertised address %s); %s is not reachable by peers or clients", cc.AdvertiseHost, cc.Listen)
+	}
+	return nil
+}
+
+// clickHousePeerSetsEqual compares parsed peers, ignoring list order.
+func clickHousePeerSetsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]bool, len(a))
+	for _, raw := range a {
+		peer, err := config.ParseClickHousePeer(raw)
+		if err != nil {
+			return false
+		}
+		seen[peer.String()] = true
+	}
+	if len(seen) != len(a) {
+		return false
+	}
+	for _, raw := range b {
+		peer, err := config.ParseClickHousePeer(raw)
+		if err != nil || !seen[peer.String()] {
+			return false
+		}
+		delete(seen, peer.String())
+	}
+	return len(seen) == 0
+}
+
+// clickHouseKeeperSetsEqual compares parsed Keeper endpoints, applying the
+// default client port to entries that omit it.
+func clickHouseKeeperSetsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]bool, len(a))
+	for _, raw := range a {
+		endpoint, err := config.ParseClickHouseKeeperEndpoint(raw, config.DefaultClickHouseKeeperClientPort)
+		if err != nil {
+			return false
+		}
+		seen[endpoint.String()] = true
+	}
+	if len(seen) != len(a) {
+		return false
+	}
+	for _, raw := range b {
+		endpoint, err := config.ParseClickHouseKeeperEndpoint(raw, config.DefaultClickHouseKeeperClientPort)
+		if err != nil || !seen[endpoint.String()] {
+			return false
+		}
+		delete(seen, endpoint.String())
+	}
+	return len(seen) == 0
+}
+
+func parseClickHouseConfigOptions(options []string) (map[string]string, error) {
+	settings := make(map[string]string, len(options))
+	for _, opt := range options {
+		key, value, ok := strings.Cut(opt, "=")
+		if !ok || strings.TrimSpace(key) == "" {
+			return nil, fmt.Errorf("invalid --config-option %q: use KEY=VALUE with a dotted XML path, e.g. max_server_memory_usage=2147483648", opt)
+		}
+		settings[strings.TrimSpace(key)] = value
+	}
+	return settings, nil
+}
+
+func clickHouseSettingsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key, value := range a {
+		if b[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeClickHouseClusterLists stores canonical peer/keeper strings so the
+// rendered XML, status output and later re-install comparisons are stable.
+func normalizeClickHouseClusterLists(cc *config.ClickHouseConfig) {
+	if !cc.Clustered() {
+		return
+	}
+	if len(cc.Peers) > 0 {
+		peers := make([]config.ClickHousePeer, 0, len(cc.Peers))
+		valid := true
+		for _, raw := range cc.Peers {
+			peer, err := config.ParseClickHousePeer(raw)
+			if err != nil {
+				valid = false
+				break
+			}
+			peers = append(peers, peer)
+		}
+		if valid {
+			sort.Slice(peers, func(i, j int) bool {
+				if peers[i].Shard != peers[j].Shard {
+					return peers[i].Shard < peers[j].Shard
+				}
+				return peers[i].Replica < peers[j].Replica
+			})
+			out := make([]string, 0, len(peers))
+			for _, peer := range peers {
+				out = append(out, peer.String())
+			}
+			cc.Peers = out
+		}
+	}
+	if endpoints, err := config.ClickHouseKeeperEndpoints(*cc); err == nil {
+		out := make([]string, 0, len(endpoints))
+		for _, endpoint := range endpoints {
+			out = append(out, endpoint.String())
+		}
+		cc.Keepers = out
+	}
+}
+
 // --- install / lifecycle ----------------------------------------------------
 
 func runAddonInstallClickHouse(cmd *cobra.Command) error {
@@ -70,73 +473,59 @@ func runAddonInstallClickHouse(cmd *cobra.Command) error {
 	if c.Addons.ClickHouse == nil {
 		c.Addons.ClickHouse = make(map[string]config.ClickHouseConfig)
 	}
-	cc, present := c.Addons.ClickHouse[name]
-	force, _ := cmd.Flags().GetBool("force")
+	fs := cmd.Flags()
+	opts := readClickHouseInstallOptions(fs)
+	force, _ := fs.GetBool("force")
+	c.ApplyDefaults()
+	stored, present := c.Addons.ClickHouse[name]
+
 	if present && !force {
-		c.ApplyDefaults()
-		cc = c.Addons.ClickHouse[name]
+		if err := checkClickHouseNoOpFlags(stored, opts); err != nil {
+			return err
+		}
 		state := "stopped"
 		if m, err := podman.NewClickHouseManager(c); err == nil {
-			if running, _ := m.ContainerRunning(cc.ContainerName); running {
+			if running, _ := m.ContainerRunning(stored.ContainerName); running {
 				state = "running"
 			}
 		}
 		fmt.Printf("✓ clickhouse %q already installed (%s, HTTP %s:%d, TCP %s:%d, admin %s) — re-install with --force to rewrite the config and recreate the container\n",
-			name, state, cc.Listen, cc.HTTPPort, cc.Listen, cc.TCPPort, cc.AdminUser)
+			name, state, stored.Listen, stored.HTTPPort, stored.Listen, stored.TCPPort, stored.AdminUser)
+		if stored.Clustered() {
+			fmt.Printf("  Cluster:   %s (shard %d / replica %d, advertise %s)\n", stored.Cluster, stored.Shard, stored.Replica, stored.AdvertiseHost)
+			fmt.Printf("  Peers:     %s\n", strings.Join(stored.Peers, ", "))
+			fmt.Printf("  Keepers:   %s\n", strings.Join(stored.Keepers, ", "))
+		}
 		fmt.Printf("  Password: pg addon password clickhouse --name %s\n", name)
 		return nil
 	}
-	if !present {
-		cc = config.ClickHouseConfig{Name: name}
+
+	cc := config.ClickHouseConfig{Name: name}
+	if present {
+		cc = stored
 	}
 	cc.Name = name
-
-	fs := cmd.Flags()
-	if fs.Changed("version") {
-		cc.Version, _ = fs.GetString("version")
+	if err := applyClickHouseInstallFlags(&cc, opts); err != nil {
+		return err
 	}
-	if cc.Version == "" {
-		cc.Version = config.DefaultClickHouseVersion
-	}
-	imageTag, ok := config.ClickHouseImageTagForVersion(cc.Version)
-	if !ok {
-		return fmt.Errorf("ClickHouse %q is not available (supported: %s; pass the exact upstream tag)", cc.Version, config.DefaultClickHouseVersion)
-	}
-	cc.ImageTag = imageTag
-	if v, _ := fs.GetString("admin-password"); v != "" {
-		cc.AdminPassword = v
-	}
-	if v, _ := fs.GetString("admin-user"); v != "" {
-		cc.AdminUser = v
-	}
-	if v, _ := fs.GetString("listen"); v != "" {
-		cc.Listen = v
-	}
-	if fs.Changed("http-port") {
-		cc.HTTPPort, _ = fs.GetInt("http-port")
-	}
-	if fs.Changed("tcp-port") {
-		cc.TCPPort, _ = fs.GetInt("tcp-port")
-	}
-	if v, _ := fs.GetString("data-dir"); v != "" {
-		cc.DataDir = v
-	}
-	if fs.Changed("config-option") {
-		options, _ := fs.GetStringArray("config-option")
-		settings := make(map[string]string, len(options))
-		for _, opt := range options {
-			key, value, ok := strings.Cut(opt, "=")
-			if !ok || strings.TrimSpace(key) == "" {
-				return fmt.Errorf("invalid --config-option %q: use KEY=VALUE with a dotted XML path, e.g. max_server_memory_usage=2147483648", opt)
-			}
-			settings[strings.TrimSpace(key)] = value
-		}
-		cc.Settings = settings
-	}
-
 	c.Addons.ClickHouse[name] = cc
 	c.ApplyDefaults()
 	cc = c.Addons.ClickHouse[name]
+
+	if present {
+		if err := checkClickHouseTopologyImmutable(stored, cc); err != nil {
+			return err
+		}
+	}
+	if err := validateClickHouseClusterInstall(cc, opts, present); err != nil {
+		return err
+	}
+	if cc.Clustered() && !opts.tcpPortSet {
+		fmt.Printf("  [!] --tcp-port not set; auto-assigned %d. Every other member's --peer entry must use this port, so pass --tcp-port explicitly when the per-host pool may differ.\n", cc.TCPPort)
+	}
+	normalizeClickHouseClusterLists(&cc)
+	c.Addons.ClickHouse[name] = cc
+
 	if cc.AdminPassword == "" {
 		pw, err := clickHouseAdminPassword(cc.SecretPath)
 		if err != nil {
@@ -157,13 +546,16 @@ func runAddonInstallClickHouse(cmd *cobra.Command) error {
 		return fmt.Errorf("  [X] %v", err)
 	}
 	fmt.Printf("  [OK] image: %s\n", cc.ImageTag)
-	if err := clickhouse.WriteConfig(cc); err != nil {
+	if err := clickhouse.WriteGeneratedConfig(cc); err != nil {
 		return fmt.Errorf("  [X] writing config: %w", err)
 	}
 	if err := clickhouse.WriteSecret(cc); err != nil {
 		return fmt.Errorf("  [X] writing password file: %w", err)
 	}
 	fmt.Printf("  [OK] config:  %s\n", cc.ConfigPath)
+	if cc.Clustered() {
+		fmt.Printf("  [OK] cluster: %s\n", clickhouse.ClusterConfigPath(cc))
+	}
 	fmt.Printf("  [OK] data:    %s\n", cc.DataDir)
 
 	// Persist before starting so a failed boot is still inspectable and the
@@ -184,6 +576,25 @@ func runAddonInstallClickHouse(cmd *cobra.Command) error {
 		m.LogsTail(cc.ContainerName, 20)
 		return fmt.Errorf("  [X] admin login failed: %w", err)
 	}
+	if cc.Clustered() {
+		endpoints, err := config.ClickHouseKeeperEndpoints(cc)
+		if err != nil {
+			return err
+		}
+		reachable := 0
+		for _, endpoint := range endpoints {
+			conn, err := net.DialTimeout("tcp", endpoint.String(), time.Second)
+			if err == nil {
+				reachable++
+				conn.Close()
+			}
+		}
+		if reachable < len(endpoints) {
+			fmt.Printf("  [!] Keeper endpoints reachable: %d/%d; replicated tables and ON CLUSTER DDL stay unavailable until quorum is reachable\n", reachable, len(endpoints))
+		} else {
+			fmt.Printf("  [OK] Keeper endpoints reachable: %d/%d\n", reachable, len(endpoints))
+		}
+	}
 
 	fmt.Println()
 	fmt.Printf("✓ ClickHouse %q installed\n", name)
@@ -192,12 +603,24 @@ func runAddonInstallClickHouse(cmd *cobra.Command) error {
 	fmt.Printf("  Container: %s\n", cc.ContainerName)
 	fmt.Printf("  HTTP:      %s\n", clickhouse.HTTPURL(cc))
 	fmt.Printf("  TCP:       %s\n", clickhouse.TCPAddr(cc))
+	if cc.Clustered() {
+		fmt.Printf("  Cluster:   %s\n", cc.Cluster)
+		fmt.Printf("  Node:      shard %d / replica %d (advertise %s:%d)\n", cc.Shard, cc.Replica, cc.AdvertiseHost, cc.TCPPort)
+		fmt.Printf("  Peers:     %s\n", strings.Join(cc.Peers, ", "))
+		fmt.Printf("  Keepers:   %s\n", strings.Join(cc.Keepers, ", "))
+		fmt.Printf("  Interserver: %s:%d\n", cc.AdvertiseHost, cc.InterserverPort)
+		fmt.Printf("  Cluster config: %s\n", clickhouse.ClusterConfigPath(cc))
+	}
 	fmt.Printf("  Admin:     %s\n", cc.AdminUser)
 	fmt.Printf("  Password:  %s\n", cc.AdminPassword)
 	fmt.Printf("  Data dir:  %s\n", cc.DataDir)
 	fmt.Printf("  Backups:   %s\n", cc.BackupDir)
 	fmt.Printf("  Config:    %s\n", cc.ConfigPath)
 	fmt.Println()
+	if cc.Clustered() {
+		fmt.Printf("  Cluster status: pg addon clickhouse cluster status --name %s\n", name)
+		fmt.Printf("  Repeat on every host with the same --cluster, --keeper and --admin-password, this host's --shard/--replica/--advertise-host, and --peer entries for the other members.\n")
+	}
 	fmt.Printf("  Password: pg addon password clickhouse --name %s\n", name)
 	fmt.Printf("  Status:   pg addon clickhouse status --name %s\n", name)
 	fmt.Printf("  Query:    pg addon clickhouse query --name %s 'SELECT 1'\n", name)
@@ -336,12 +759,194 @@ func runAddonClickHouseStatus(cmd *cobra.Command) error {
 	fmt.Printf("  TCP:        %s\n", clickhouse.TCPAddr(cc))
 	fmt.Printf("  Listen:     %s\n", cc.Listen)
 	fmt.Printf("  Admin user: %s\n", cc.AdminUser)
+	if cc.Clustered() {
+		fmt.Printf("  Cluster:    %s\n", cc.Cluster)
+		fmt.Printf("  Node:       shard %d / replica %d\n", cc.Shard, cc.Replica)
+		fmt.Printf("  Advertise:  %s (TCP %d, interserver %d)\n", cc.AdvertiseHost, cc.TCPPort, cc.InterserverPort)
+		fmt.Printf("  Peers:      %s\n", strings.Join(cc.Peers, ", "))
+		fmt.Printf("  Keepers:    %s\n", strings.Join(cc.Keepers, ", "))
+		fmt.Printf("  Cluster cfg:%s\n", clickhouse.ClusterConfigPath(cc))
+	}
 	fmt.Printf("  Data dir:   %s\n", cc.DataDir)
 	fmt.Printf("  Logs dir:   %s\n", cc.LogDir)
 	fmt.Printf("  Backups:    %s\n", cc.BackupDir)
 	fmt.Printf("  Config:     %s\n", cc.ConfigPath)
 	fmt.Printf("  Settings:   %d override(s)\n", len(cc.Settings))
 	fmt.Printf("  Logs:       pg logs addon clickhouse --name %s\n", name)
+	return nil
+}
+
+// clickHouseClusterMember is one row of system.clusters.
+type clickHouseClusterMember struct {
+	Shard   int
+	Replica int
+	Host    string
+	Port    int
+	Local   bool
+}
+
+func parseClickHouseClusterMembers(tsv string) ([]clickHouseClusterMember, error) {
+	var members []clickHouseClusterMember
+	for _, line := range strings.Split(strings.TrimSpace(tsv), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) != 5 {
+			return nil, fmt.Errorf("unexpected system.clusters row %q (want 5 tab-separated fields)", line)
+		}
+		shard, err := strconv.Atoi(fields[0])
+		if err != nil {
+			return nil, fmt.Errorf("invalid shard in system.clusters row %q: %w", line, err)
+		}
+		replica, err := strconv.Atoi(fields[1])
+		if err != nil {
+			return nil, fmt.Errorf("invalid replica in system.clusters row %q: %w", line, err)
+		}
+		port, err := strconv.Atoi(fields[3])
+		if err != nil {
+			return nil, fmt.Errorf("invalid port in system.clusters row %q: %w", line, err)
+		}
+		members = append(members, clickHouseClusterMember{
+			Shard: shard, Replica: replica, Host: fields[2], Port: port, Local: fields[4] == "1",
+		})
+	}
+	return members, nil
+}
+
+// clickHouseReplicaState is one row of system.replicas.
+type clickHouseReplicaState struct {
+	Database  string
+	Table     string
+	Replica   string
+	Readonly  bool
+	Delay     uint64
+	QueueSize uint64
+}
+
+func parseClickHouseReplicaStates(tsv string) ([]clickHouseReplicaState, error) {
+	var replicas []clickHouseReplicaState
+	for _, line := range strings.Split(strings.TrimSpace(tsv), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) != 6 {
+			return nil, fmt.Errorf("unexpected system.replicas row %q (want 6 tab-separated fields)", line)
+		}
+		delay, err := strconv.ParseUint(fields[4], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid absolute_delay in system.replicas row %q: %w", line, err)
+		}
+		queue, err := strconv.ParseUint(fields[5], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid queue_size in system.replicas row %q: %w", line, err)
+		}
+		replicas = append(replicas, clickHouseReplicaState{
+			Database: fields[0], Table: fields[1], Replica: fields[2],
+			Readonly: fields[3] == "1", Delay: delay, QueueSize: queue,
+		})
+	}
+	return replicas, nil
+}
+
+func runAddonClickHouseClusterStatus(cmd *cobra.Command) error {
+	m, cc, err := requireClickHouseRunning(cmd)
+	if err != nil {
+		return err
+	}
+	if !cc.Clustered() {
+		return fmt.Errorf("clickhouse %q is not a cluster member; install it with --cluster/--shard/--replica and the peer list", cc.Name)
+	}
+	topology, err := config.ClickHouseTopology(cc)
+	if err != nil {
+		return err
+	}
+
+	clusterSQL := fmt.Sprintf(
+		"SELECT shard_num, replica_num, host_name, port, is_local FROM system.clusters WHERE cluster = '%s' ORDER BY shard_num, replica_num FORMAT TSV",
+		cc.Cluster)
+	out, err := m.ExecClientOutput(&cc, clickhouse.ClientArgs(cc, ""), clusterSQL)
+	if err != nil {
+		return fmt.Errorf("querying system.clusters: %w", err)
+	}
+	members, err := parseClickHouseClusterMembers(string(out))
+	if err != nil {
+		return err
+	}
+
+	replicaSQL := "SELECT database, table, replica_name, is_readonly, absolute_delay, queue_size FROM system.replicas ORDER BY database, table, replica_name FORMAT TSV"
+	out, err = m.ExecClientOutput(&cc, clickhouse.ClientArgs(cc, ""), replicaSQL)
+	if err != nil {
+		return fmt.Errorf("querying system.replicas: %w", err)
+	}
+	replicas, err := parseClickHouseReplicaStates(string(out))
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("clickhouse %q — cluster %q, this node shard %d / replica %d\n", cc.Name, cc.Cluster, cc.Shard, cc.Replica)
+	fmt.Printf("  Cluster config: %s\n", clickhouse.ClusterConfigPath(cc))
+	fmt.Printf("  system.clusters: %d member(s), expected %d\n", len(members), len(topology))
+	for _, member := range members {
+		local := ""
+		if member.Local {
+			local = "  local"
+		}
+		fmt.Printf("    shard %d replica %d  %s:%d%s\n", member.Shard, member.Replica, member.Host, member.Port, local)
+	}
+
+	expected := map[string]bool{}
+	for _, peer := range topology {
+		expected[fmt.Sprintf("%d/%d@%s:%d", peer.Shard, peer.Replica, peer.Host, peer.Port)] = true
+	}
+	var missing []string
+	for _, member := range members {
+		delete(expected, fmt.Sprintf("%d/%d@%s:%d", member.Shard, member.Replica, member.Host, member.Port))
+	}
+	for member := range expected {
+		missing = append(missing, member)
+	}
+	sort.Strings(missing)
+	if len(missing) > 0 {
+		fmt.Printf("  [!] missing from system.clusters: %s\n", strings.Join(missing, ", "))
+	}
+
+	fmt.Printf("  system.replicas: %d replicated table(s)\n", len(replicas))
+	var unhealthy []string
+	for _, replica := range replicas {
+		state := "ok"
+		if replica.Readonly {
+			state = "READONLY"
+			unhealthy = append(unhealthy, replica.Database+"."+replica.Table+"@"+replica.Replica)
+		}
+		fmt.Printf("    %s.%s replica %s — %s, delay %ds, queue %d\n",
+			replica.Database, replica.Table, replica.Replica, state, replica.Delay, replica.QueueSize)
+	}
+
+	endpoints, err := config.ClickHouseKeeperEndpoints(cc)
+	if err != nil {
+		return err
+	}
+	reachable := 0
+	for _, endpoint := range endpoints {
+		if err := clickhousekeeper.Ruok(endpoint.Host, endpoint.Port, time.Second); err == nil {
+			reachable++
+		}
+	}
+	quorum := len(endpoints)/2 + 1
+	if reachable < quorum {
+		fmt.Printf("  [!] Keeper client endpoints reachable: %d/%d (quorum %d) — replicated tables and DDL cannot reach quorum\n", reachable, len(endpoints), quorum)
+	} else {
+		fmt.Printf("  [OK] Keeper client endpoints reachable: %d/%d (quorum %d; reachability is not a Raft quorum proof)\n", reachable, len(endpoints), quorum)
+	}
+
+	if len(members) != len(topology) {
+		return fmt.Errorf("system.clusters reports %d member(s), expected %d from the local topology", len(members), len(topology))
+	}
+	if len(unhealthy) > 0 {
+		return fmt.Errorf("replicas are read-only or detached: %s", strings.Join(unhealthy, ", "))
+	}
 	return nil
 }
 
@@ -755,6 +1360,27 @@ func clickHouseManagedSetting(cc config.ClickHouseConfig, key string) (string, b
 	case "backups.allowed_path":
 		return clickhouse.ContainerBackupDir + "/", true
 	}
+	if !cc.Clustered() {
+		return "", false
+	}
+	switch key {
+	case "interserver_http_host":
+		return cc.AdvertiseHost, true
+	case "interserver_http_port":
+		return fmt.Sprint(cc.InterserverPort), true
+	case "macros.cluster":
+		return cc.Cluster, true
+	case "macros.shard":
+		return fmt.Sprint(cc.Shard), true
+	case "macros.replica":
+		return fmt.Sprint(cc.Replica), true
+	case "distributed_ddl.path":
+		return "/clickhouse/" + cc.Cluster + "/task_queue/ddl", true
+	case "default_replica_path":
+		return "/clickhouse/" + cc.Cluster + "/tables/{uuid}/{shard}", true
+	case "default_replica_name":
+		return "{replica}", true
+	}
 	return "", false
 }
 
@@ -765,7 +1391,14 @@ func runAddonClickHouseConfigList(cmd *cobra.Command) error {
 		return err
 	}
 	fmt.Printf("clickhouse %q effective managed settings:\n", name)
-	for _, key := range []string{"listen_host", "http_port", "tcp_port", "logger.level", "logger.log", "logger.errorlog", "backups.allowed_disk", "backups.allowed_path"} {
+	managedKeys := []string{"listen_host", "http_port", "tcp_port", "logger.level", "logger.log", "logger.errorlog", "backups.allowed_disk", "backups.allowed_path"}
+	if cc.Clustered() {
+		managedKeys = append(managedKeys,
+			"interserver_http_host", "interserver_http_port",
+			"macros.cluster", "macros.shard", "macros.replica",
+			"distributed_ddl.path", "default_replica_path", "default_replica_name")
+	}
+	for _, key := range managedKeys {
 		if value, ok := clickHouseManagedSetting(cc, key); ok {
 			fmt.Printf("  %-24s %s\n", key, value)
 		}
@@ -811,7 +1444,12 @@ func persistClickHouseConfig(c *config.Config, path string, cc config.ClickHouse
 	if err := config.ValidateClickHouseSettings(cc.Settings); err != nil {
 		return err
 	}
-	if err := clickhouse.WriteConfig(cc); err != nil {
+	if cc.Clustered() {
+		if err := config.ValidateClickHouseClusterSettings(cc.Settings); err != nil {
+			return err
+		}
+	}
+	if err := clickhouse.WriteGeneratedConfig(cc); err != nil {
 		return err
 	}
 	c.Addons.ClickHouse[cc.Name] = cc
@@ -892,13 +1530,28 @@ func runAddonClickHouseConfigUnset(cmd *cobra.Command, args []string) error {
 	return persistClickHouseConfig(c, path, cc, !noRestart)
 }
 
+func clickHouseConfigShowContent(cc config.ClickHouseConfig) (string, error) {
+	base, err := clickhouse.RenderConfig(cc)
+	if err != nil {
+		return "", err
+	}
+	if !cc.Clustered() {
+		return base, nil
+	}
+	cluster, err := clickhouse.RenderClusterConfig(cc)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("== %s ==\n%s\n== %s ==\n%s", cc.ConfigPath, strings.TrimRight(base, "\n"), clickhouse.ClusterConfigPath(cc), cluster), nil
+}
+
 func runAddonClickHouseConfigShow(cmd *cobra.Command) error {
 	name := clickHouseFlagName(cmd)
 	_, _, cc, err := resolveClickHouseInstance(name)
 	if err != nil {
 		return err
 	}
-	content, err := clickhouse.RenderConfig(cc)
+	content, err := clickHouseConfigShowContent(cc)
 	if err != nil {
 		return err
 	}
@@ -921,6 +1574,7 @@ back.
 
 Subcommands:
   status    Show container state, endpoints, version and paths
+  cluster   Inspect a multi-host cluster (system.clusters/system.replicas)
   shell     Open a bash shell in the container
   query     Run SQL with clickhouse-client (args, --file or stdin)
   db        Create, list or drop databases
@@ -930,6 +1584,13 @@ Subcommands:
   restore   RESTORE DATABASE from a .zip in the backups disk
   backups   List local .zip backups
   config    Inspect, change and render server settings
+
+Cluster mode is opt-in with --cluster. Each host installs one member with a
+unique --shard/--replica, this host's --advertise-host, --peer entries for the
+OTHER members and the shared --keeper endpoints. Every member must use the same
+--admin-password; pgcli cannot synchronize it across hosts. Cluster identity
+(cluster/shard/replica/advertise/peer/keeper/interserver and the cluster TCP
+port) is immutable after install, even with --force.
 
 Config settings use dotted XML paths, e.g.
   max_server_memory_usage=2147483648
@@ -942,6 +1603,12 @@ takes effect immediately; pass --no-restart to defer it.
 Examples:
   pg addon install clickhouse --name ch1
   pg addon install clickhouse --listen 0.0.0.0 --http-port 8123 --tcp-port 9000
+  pg addon install clickhouse --name clickhouse --cluster chcluster --shard 1 --replica 1 \
+    --advertise-host 10.0.0.11 --listen 0.0.0.0 --tcp-port 9000 --interserver-port 9009 \
+    --admin-password "$CH_ADMIN_PASSWORD" \
+    --peer 1/2@10.0.0.12:9000 --peer 2/1@10.0.0.13:9000 --peer 2/2@10.0.0.14:9000 \
+    --keeper 10.0.0.11:9181 --keeper 10.0.0.12:9181 --keeper 10.0.0.13:9181
+  pg addon clickhouse cluster status --name clickhouse
   pg addon clickhouse query --name ch1 'SELECT version()'
   pg addon clickhouse db create demo --name ch1
   pg addon clickhouse user create app --password secret --default-database demo
@@ -959,6 +1626,24 @@ var addonClickHouseStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show ClickHouse container state, endpoints and paths",
 	RunE:  func(cmd *cobra.Command, _ []string) error { return runAddonClickHouseStatus(cmd) },
+}
+
+var addonClickHouseClusterCmd = &cobra.Command{
+	Use:   "cluster",
+	Short: "Inspect a multi-host ClickHouse cluster",
+}
+
+var addonClickHouseClusterStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show system.clusters, system.replicas and Keeper reachability",
+	Long: `Show this member's view of the configured cluster.
+
+The command queries system.clusters (all configured members), system.replicas
+(replication state of local ReplicatedMergeTree tables) and probes every
+--keeper client endpoint. Keeper endpoint reachability is reported separately
+from Raft quorum: a reachable client port does not prove that Keeper has a
+quorum.`,
+	RunE: func(cmd *cobra.Command, _ []string) error { return runAddonClickHouseClusterStatus(cmd) },
 }
 
 var addonClickHouseShellCmd = &cobra.Command{
@@ -1122,18 +1807,19 @@ var addonClickHouseConfigShowCmd = &cobra.Command{
 func init() {
 	addonCmd.AddCommand(addonClickHouseCmd)
 	addonClickHouseCmd.AddCommand(
-		addonClickHouseStatusCmd, addonClickHouseShellCmd, addonClickHouseQueryCmd,
+		addonClickHouseStatusCmd, addonClickHouseClusterCmd, addonClickHouseShellCmd, addonClickHouseQueryCmd,
 		addonClickHouseDatabaseCmd, addonClickHouseUserCmd, addonClickHouseGrantCmd,
 		addonClickHouseBackupCmd, addonClickHouseRestoreCmd, addonClickHouseBackupsCmd,
 		addonClickHouseConfigCmd,
 	)
+	addonClickHouseClusterCmd.AddCommand(addonClickHouseClusterStatusCmd)
 	addonClickHouseDatabaseCmd.AddCommand(addonClickHouseDatabaseCreateCmd, addonClickHouseDatabaseListCmd, addonClickHouseDatabaseDropCmd)
 	addonClickHouseUserCmd.AddCommand(addonClickHouseUserCreateCmd, addonClickHouseUserListCmd, addonClickHouseUserDropCmd)
 	addonClickHouseGrantCmd.AddCommand(addonClickHouseGrantListCmd)
 	addonClickHouseConfigCmd.AddCommand(addonClickHouseConfigListCmd, addonClickHouseConfigGetCmd, addonClickHouseConfigSetCmd, addonClickHouseConfigUnsetCmd, addonClickHouseConfigShowCmd)
 
 	for _, sub := range []*cobra.Command{
-		addonClickHouseStatusCmd, addonClickHouseShellCmd, addonClickHouseQueryCmd,
+		addonClickHouseStatusCmd, addonClickHouseClusterStatusCmd, addonClickHouseShellCmd, addonClickHouseQueryCmd,
 		addonClickHouseDatabaseCreateCmd, addonClickHouseDatabaseListCmd, addonClickHouseDatabaseDropCmd,
 		addonClickHouseUserCreateCmd, addonClickHouseUserListCmd, addonClickHouseUserDropCmd,
 		addonClickHouseGrantCmd, addonClickHouseGrantListCmd,
@@ -1184,6 +1870,10 @@ func init() {
 
 	// ClickHouse-specific install flags. --name/--data-dir/--listen/
 	// --http-port/--admin-user/--admin-password/--version/--force/
-	// --config-option are shared.
-	addonInstallCmd.Flags().Int("tcp-port", 0, "clickhouse native-protocol host port (0=auto-assign from clickhouse_tcp_start_port, default 9000; the S3 API pool shares this range)")
+	// --config-option/--cluster/--peer/--advertise-host are shared.
+	addonInstallCmd.Flags().Int("tcp-port", 0, "clickhouse native-protocol host port (0=auto-assign from clickhouse_tcp_start_port, default 9000; the S3 API pool shares this range). In cluster mode it is this member's native endpoint and is immutable after install")
+	addonInstallCmd.Flags().Int("shard", 0, "clickhouse cluster mode: this member's 1-based shard number (all shards must have the same replica count)")
+	addonInstallCmd.Flags().Int("replica", 0, "clickhouse cluster mode: this member's 1-based replica number within the shard")
+	addonInstallCmd.Flags().StringArray("keeper", nil, "clickhouse cluster mode: a ClickHouse Keeper client endpoint HOST[:PORT] (repeatable; pass the full shared list on every member, default port 9181)")
+	addonInstallCmd.Flags().Int("interserver-port", 0, "clickhouse cluster mode: interserver HTTP replication port (default 9009, fixed)")
 }

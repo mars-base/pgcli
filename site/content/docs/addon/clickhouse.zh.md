@@ -1,12 +1,14 @@
 ---
 title: "ClickHouse"
-description: "以受管容器方式运行单机 ClickHouse 列式 OLAP 数据库——内置认证、SQL 辅助命令、用户/授权、配置覆盖与 BACKUP/RESTORE"
+description: "以受管容器方式运行 ClickHouse——单机，或复制多机集群中的一个成员（ReplicatedMergeTree、Distributed 表与 ON CLUSTER DDL）；内置认证、SQL 辅助命令、用户/授权、配置覆盖与 BACKUP/RESTORE"
 weight: 64
 ---
 
-`pg addon install clickhouse` 以受管容器方式运行 **ClickHouse 26.8 LTS**——单机列式 OLAP 数据库——直接跑官方 `docker.io/clickhouse/clickhouse-server` 多架构镜像。与 VictoriaMetrics、InfluxDB 一样，它是**顶层插件**，不前置任何 PostgreSQL 实例。
+`pg addon install clickhouse` 以受管容器方式运行 **ClickHouse 26.8 LTS**——列式 OLAP 数据库，可单机运行，也可作为复制多机集群中的一个成员——直接跑官方 `docker.io/clickhouse/clickhouse-server` 多架构镜像。与 VictoriaMetrics、InfluxDB 一样，它是**顶层插件**，不前置任何 PostgreSQL 实例。
 
 ClickHouse 用两个端口承载两种协议：**HTTP**（curl、JDBC/ODBC 以及大量驱动）和**原生 TCP 协议**（`clickhouse-client`）。pgcli 以 host 网络运行它，因此两者都是直接的宿主端口。**认证始终开启**——安装时创建 admin 账号，密码存入 `pg.yaml`。
+
+**集群模式**通过 `--cluster` 显式开启：传入集群名、本成员的 `--shard`/`--replica`、本机 `--advertise-host`、其他成员 `--peer` 以及 Keeper 端点 `--keeper`。pgcli 会渲染 `remote_servers`、`macros` 与 `zookeeper`，从而支持 `ReplicatedMergeTree`、`Distributed` 表与 `ON CLUSTER` DDL。协调服务来自独立的 [ClickHouse Keeper](./clickhouse-keeper/) 插件。四台主机的完整步骤见 [ClickHouse 集群](./clickhouse-cluster/) 页面；本页其余部分说明单机行为与两种模式共享的 flag。
 
 > **admin 密码在安装时生成，可随时用
 > `pg addon password clickhouse [--name NAME]` 取回。** HTTP 与原生监听对每个请求
@@ -26,9 +28,16 @@ ClickHouse 用两个端口承载两种协议：**HTTP**（curl、JDBC/ODBC 以�
 | `--admin-user` | `admin` | 由镜像 entrypoint 创建的 admin 账号 |
 | `--admin-password` | 自动生成 | admin 密码。`--force` 时默认保留已存密码，除非显式指定 |
 | `--config-option K=V` | — | 额外服务端设置，点分 XML 路径（`logger.level=debug`、`max_server_memory_usage=2147483648`）；可重复；替换已存覆盖 map |
-| `--force` | false | 重新渲染配置与 secret 并重建容器；保留数据、已存密码与已存覆盖项 |
+| `--cluster NAME` | — | 开启集群模式：`remote_servers`/`macros` 的集群名；所有成员一致 |
+| `--shard N` | — | 集群模式：本成员的 1-based shard 编号 |
+| `--replica N` | — | 集群模式：本成员在 shard 内的 1-based replica 编号 |
+| `--advertise-host IP` | — | 集群模式：peer 访问本成员所用的具体非 loopback 地址 |
+| `--peer S/R@HOST:PORT` | — | 集群模式：另一个成员；可重复。只列**其他**成员；本机自动加入 |
+| `--keeper HOST[:PORT]` | — | 集群模式：Keeper 客户端端点；可重复。每个成员都传完整共享列表；默认端口 `9181` |
+| `--interserver-port N` | `9009` | 集群模式：副本追平端口；集群内必须一致 |
+| `--force` | false | 重新渲染配置与 secret 并重建容器；保留数据、已存密码与已存覆盖项。集群身份 flag 仍不可变 |
 
-ClickHouse 不适用 `--image`——请用 `--version`。
+ClickHouse 不适用 `--image`——请用 `--version`。集群 flag 必须配合 `--cluster`；单机安装会拒绝它们。集群模式的完整校验见 [ClickHouse 集群](./clickhouse-cluster/)。
 
 生成的配置只固定监听、端口、日志与备份盘；其余服务端设置全部沿用上游默认值。覆盖项存在 `pg.yaml` 的 `addons.clickhouse.<name>.settings` 下并渲染进生成的 XML，因此重启与容器重建都不会丢失。
 
@@ -62,14 +71,19 @@ pg addon install clickhouse --name analytics --data-dir /srv/clickhouse-data --l
 
 镜像直接从 Docker Hub 拉取，不涉及 pgcli 自建镜像。`--version` 接受任意合法的上游 tag，但该 tag 必须存在于 registry，否则拉取失败。pgcli 默认固定当前 LTS 线（`26.8.36.3`）。
 
+复制集群请先安装 [ClickHouse Keeper](./clickhouse-keeper/)，然后在每个成员上带 `--cluster`、本机 `--shard`/`--replica`/`--advertise-host`、其他成员 `--peer`、Keeper 端点 `--keeper`，并传入**相同**的显式 `--admin-password` 执行安装。四台主机的完整流程（含精确 peer 列表）见 [ClickHouse 集群](./clickhouse-cluster/)。
+
 ## 端口
 
 | 端点 | 默认 | 协议 | 端口池 |
 |---|---|---|---|
 | HTTP | `8123` | HTTP（查询、`/ping`、大量驱动） | `clickhouse_http_start_port`，默认 `8123` |
 | Native | `9000` | ClickHouse 原生 TCP（`clickhouse-client`） | `clickhouse_tcp_start_port`，默认 `9000`，**与 S3 API 池共享** |
+| Interserver | `9009` | 副本追平（`interserver_http_port`），仅集群模式 | 固定；无端口池，跨插件预留 |
 
-两个池共享同一个“已分配”集合，因此一个池中的显式端口不会与另一个池自动分配的端口相撞。`--http-port` 与 `--tcp-port` 必须不同，且所有 ClickHouse 实例的 HTTP/TCP 端口必须全局唯一。自动分配会跳过宿主上已在监听的端口。
+两个 HTTP/TCP 池共享同一个“已分配”集合，因此一个池中的显式端口不会与另一个池自动分配的端口相撞。`--http-port` 与 `--tcp-port` 必须不同，且所有 ClickHouse 实例的 HTTP/TCP 端口必须全局唯一。自动分配会跳过宿主上已在监听的端口。
+
+集群模式下，固定的 `9009` interserver 端口与 Keeper 端口（`9181` 客户端、`9234` Raft）会被 pgcli 的跨插件端口校验预留。`--interserver-port` 与集群模式下的 `--tcp-port` 安装后不可变，因为其他成员把它们写进了 peer 列表；`--http-port` 仍可移动。
 
 当 `--listen` 为通配地址（`0.0.0.0`、`::`）时，pgcli 自己的客户端命令会拨 `127.0.0.1`；打印的端点同样遵循此规则。LAN `--listen` 绑定在容器内仍会保留 loopback，保证容器内的 `clickhouse-client` 始终可用。
 
@@ -79,7 +93,7 @@ pg addon install clickhouse --name analytics --data-dir /srv/clickhouse-data --l
 
 | 宿主路径 | 容器路径 | 说明 |
 |---|---|---|
-| `config.d/` | `/etc/clickhouse-server/config.d` | 只读；替换镜像自带的 `config.d`（否则会监听所有网卡）。`zz-pgcli.xml` 是生成的覆盖文件 |
+| `config.d/` | `/etc/clickhouse-server/config.d` | 只读；替换镜像自带的 `config.d`（否则会监听所有网卡）。`zz-pgcli.xml` 是生成的覆盖文件；`zz-pgcli-cluster.xml` 仅在集群模式下出现 |
 | `data/` | `/var/lib/clickhouse` | 数据库数据与系统表 |
 | `logs/` | `/var/log/clickhouse-server` | `clickhouse-server.log` 与 `clickhouse-server.err.log`（也可经 `podman logs` 查看） |
 | `backups/` | `/var/lib/clickhouse-backups` | `backup`/`restore` 使用的受管 `backups` 盘 |
@@ -92,6 +106,8 @@ pg addon install clickhouse --name analytics --data-dir /srv/clickhouse-data --l
 - `logger.level`、`logger.log`、`logger.errorlog`、`logger.console`、日志轮转（`size`、`count`）
 - 位于 `/var/lib/clickhouse-backups` 的本地盘 `backups`，并允许其用于 `BACKUP`/`RESTORE`
 
+集群模式会额外生成 `config.d/zz-pgcli-cluster.xml`，包含 `remote_servers`、`macros`、`zookeeper`、`distributed_ddl`、interserver 端点与默认副本路径。每个成员都会渲染该文件；如果该实例之后被重装为单机，文件会被自动删除。详见 [ClickHouse 集群](./clickhouse-cluster/#集群模式渲染的内容)。
+
 容器以 `--network host`、`--restart unless-stopped`、30 秒停止超时和 `nofile=262144` 运行。数据在容器内的属主是 uid/gid 101（镜像 entrypoint 以 root 完成挂载目录 chown 后再降权）。
 
 ## 凭据
@@ -103,7 +119,7 @@ pg addon list                             # 查看 Analytics add-ons 区块
 
 镜像 entrypoint 会创建 `admin`（或 `--admin-user` 指定的名字）并赋予全部权限，同时开启访问管理（`CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1`），因此本 CLI 发出的 `CREATE USER` / `GRANT` 可以生效。密码存入 `pg.yaml`（默认权限 `0644`——请保护该文件），并同步写入挂载进容器的 `0600` secret 文件。
 
-所有与 ClickHouse 通信的 pgcli 命令都通过环境变量传递凭据、在容器内展开；密码绝不出现在 `podman` 命令行或宿主进程列表中。SQL 经 stdin 传入。
+所有与 ClickHouse 通信的 pgcli 命令都通过服务端的 loopback HTTP 接口执行一次性 SQL，并使用 HTTP basic auth；密码与语句绝不出现在 `podman` 命令行或宿主进程列表中。交互式 shell 仍走 `podman exec`。
 
 ## 连接
 
@@ -130,7 +146,7 @@ pg addon clickhouse query --name ch1 --file schema.sql
 echo "SELECT 1" | pg addon clickhouse query --name ch1 -
 ```
 
-`query` 以 admin 用户运行 `clickhouse-client`，结果写到 stdout，可直接管道或重定向。语句由位置参数拼接；`--file` 读取宿主文件（宿主读取后经 stdin 传入，无需挂载）；`-` 表示从 stdin 读取。客户端调用时未加 `--multiquery`，因此**每次调用只传一条语句**。
+`query` 以 admin 用户通过 HTTP 接口执行一条语句，结果写到 stdout，可直接管道或重定向。语句由位置参数拼接；`--file` 读取宿主文件（宿主读取后直接交给服务端，无需挂载）；`-` 表示从 stdin 读取。未启用多语句模式，因此**每次调用只传一条语句**。
 
 `query`、`database`、`user`、`grant`、`backup`、`restore` 都要求实例正在运行；`shell` 在容器停止时仍会尝试打开，但会打印警告。
 
@@ -234,6 +250,8 @@ pg addon clickhouse config show --name ch1        # 完整生成的 XML
 
 pgcli 受管的键会被拒绝，因为覆盖它们要么产生重复 XML，要么与已存路径/端口静默冲突：`listen_host`、`listen_try`、`http_port`、`https_port`、`tcp_port`、`interserver_http_port`、`interserver_http_host`、`mysql_port`、`postgresql_port`、`path`、`tmp_path`、`user_files_path`、`format_schema_path`、`access_control_path`、`backups.*`、`user_directories`、`profiles`、`users`、`storage_configuration.disks`、`storage_configuration.policies`，以及除 `logger.level` 外的所有 `logger.*` 键。含空格的键或含控制字符的值同样会被拒绝。
 
+集群模式下拓扑键也属于受管范围：`remote_servers`、`macros`、`zookeeper`、`distributed_ddl`、`default_replica_path`、`default_replica_name` 都不能通过 `config set` 设置。单机实例仍可自行定义 `zookeeper`/`macros` 块——这在连接外部协调服务时很有用。
+
 常用设置：
 
 ```bash
@@ -305,16 +323,16 @@ pg autostart status
 pg autostart disable --clickhouse --name ch1
 ```
 
-开机启动同样会先重渲染配置与 secret，再启动现有容器。`pg start` 会在 nginx 之前启动所有启用 autostart 的 ClickHouse 实例，因此指向 ClickHouse HTTP 端口的 nginx 后端在代理启动时已经就绪。
+开机启动同样会先重渲染配置与 secret，再启动现有容器。`pg start` 先启动所有启用 autostart 的 Keeper 成员，再启动 ClickHouse 实例，最后 nginx，因此复制协调与指向 ClickHouse HTTP 端口的 nginx 后端都按依赖顺序就绪。Keeper 的开机启动需单独开启：`pg autostart enable --clickhouse-keeper --name keeper`。
 
 ## 生产注意事项
 
-- **仅单机。** 本插件没有复制、分片与 HA。ReplicatedMergeTree/Keeper 拓扑不在范围内；备份是灾备路径。
-- **无 TLS 监听。** HTTP 与原生端口都是明文。需要带 TLS 在网络中暴露 ClickHouse 时，用 [nginx 插件](./nginx/) 前置 HTTP 端口（或使用外部代理）；不要把原生端口直接暴露给不可信网络。
-- **默认仅回环。** `--listen` 默认 `127.0.0.1`。认证虽然始终开启，但网络绑定仍会扩大攻击面；只在可信网络中使用 `0.0.0.0`。
-- **密码存储。** admin 密码位于 `pg.yaml`（默认 `0644`）；请保护该文件，并优先用 `pg addon password clickhouse` 取用，而不是四处复制。
-- **资源占用。** pgcli 不限制容器的 CPU/内存；ClickHouse 自身的内存预算与推荐设置见下文 **内存限制**。
-- **升级。** `--force --version <新版本>` 会拉取新 tag 并在同一数据目录上重建容器。ClickHouse 只支持向前升级——绝不要让旧版本服务端启动在新版本写过的数据上。升级前先备份。
+- **单机或静态集群成员。** 不带 `--cluster` 时，本插件没有复制与分片，备份是灾备路径。带 `--cluster` 时，它成为由 [ClickHouse Keeper](./clickhouse-keeper/) 协调的 2×2（或更大）复制集群中的一个成员；拓扑、复制表、故障行为以及“正式环境 Keeper 应独立部署”的警告见 [ClickHouse 集群](./clickhouse-cluster/)。
+- **TLS 在代理层终止。** HTTP 与原生端口都是明文，集群 interserver 流量同样是明文。需要带 TLS 在网络中暴露 ClickHouse 时，用 [nginx 插件](./nginx/) 前置 HTTP 端口（或使用外部代理）；不要把原生、interserver 或 Keeper 端口直接暴露给不可信网络。
+- **默认仅回环。** `--listen` 默认 `127.0.0.1`；集群成员要求 `0.0.0.0`。认证虽然始终开启，但网络绑定仍会扩大攻击面；只在可信网络中使用 `0.0.0.0`。
+- **密码存储。** admin 密码位于 `pg.yaml`（默认 `0644`）；请保护该文件，并优先用 `pg addon password clickhouse` 取用，而不是四处复制。集群中每个成员必须使用相同的 admin 密码——pgcli 无法跨主机同步或校验。
+- **资源占用。** pgcli 不限制容器的 CPU/内存；ClickHouse 自身的内存预算与推荐设置见下文 **内存限制**。混部时集群成员还会与 Keeper 争抢内存和 I/O。
+- **升级。** `--force --version <新版本>` 会拉取新 tag 并在同一数据目录上重建容器。ClickHouse 只支持向前升级——绝不要让旧版本服务端启动在新版本写过的数据上。集群中一次升级一个副本，并等待复制追平。升级前先备份。
 - **数据属主。** 数据文件属主为 uid 101。请用 `--clean-data` 而不是手工删目录；pgcli 会处理权限回退。
 - **平台。** 仅 Linux（host 网络）；官方镜像为多架构（amd64/arm64）。
 
@@ -354,9 +372,26 @@ pg addon clickhouse config set max_server_memory_usage=8589934592 max_concurrent
 | `--http-port N` | 自动（基址 `8123`） | HTTP 宿主端口；`0` = 自动分配 |
 | `--tcp-port N` | 自动（基址 `9000`） | 原生宿主端口；`0` = 自动分配；必须与 `--http-port` 不同 |
 | `--admin-user USER` | `admin` | admin 账号名；`[A-Za-z0-9_.-]{1,64}` |
-| `--admin-password PW` | 自动生成 | admin 密码；`--force` 时默认保留已存值，除非显式指定 |
+| `--admin-password PW` | 自动生成 | admin 密码；`--force` 时默认保留已存值，除非显式指定。集群模式下必需，且绝不自动生成 |
 | `--config-option K=V` | — | 点分 XML 路径设置；可重复；替换已存覆盖 map |
-| `--force` | false | 重渲染配置/secret 并重建容器，保留数据、密码与设置 |
+| `--cluster NAME` | — | 集群模式；共享集群名 |
+| `--shard N` | — | 集群模式；1-based shard 编号 |
+| `--replica N` | — | 集群模式；shard 内的 1-based replica 编号 |
+| `--advertise-host IP` | — | 集群模式；peer 访问本成员的具体非 loopback 地址 |
+| `--peer S/R@HOST:PORT` | — | 集群模式；可重复；列出其他所有成员 |
+| `--keeper HOST[:PORT]` | — | 集群模式；可重复；完整 Keeper 客户端列表（默认端口 `9181`） |
+| `--interserver-port N` | `9009` | 集群模式；副本追平端口 |
+| `--force` | false | 重渲染配置/secret 并重建容器，保留数据、密码与设置；集群身份 flag 仍不可变 |
+
+集群身份（`--cluster`、`--shard`、`--replica`、`--advertise-host`、`--peer`、`--keeper`、`--interserver-port`，以及集群模式下的 `--tcp-port`）不能通过 `--force` 修改。完整流程见 [ClickHouse 集群](./clickhouse-cluster/)。
+
+### `pg addon clickhouse cluster status`
+
+| 参数/flag | 默认值 | 说明 |
+|---|---|---|
+| `--name NAME` | `clickhouse` | 要检查的集群成员；必须正在运行 |
+
+报告 `system.clusters`、`system.replicas` 与 Keeper 端点可达性；拓扑与 `pg.yaml` 不一致或副本只读时以非零码退出。
 
 ### `pg addon clickhouse status` / `shell` / `query [SQL...]`
 
@@ -436,6 +471,7 @@ pg addon clickhouse config set max_server_memory_usage=8589934592 max_concurrent
 |---|---|---|
 | `pg addon start clickhouse` | `--name NAME` | 启动（不存在则创建），等待 `/ping` |
 | `pg addon stop clickhouse` | `--name NAME` | 停止容器，保留数据 |
+| `pg addon clickhouse cluster status` | `--name NAME` | 仅集群成员：拓扑、副本健康与 Keeper 可达性 |
 | `pg addon remove clickhouse` | `--name NAME`、`--clean-data` | 移除容器与配置条目；`--clean-data` 同时删除实例目录与自定义数据目录 |
 | `pg addon password clickhouse` | `--name NAME` | 打印 admin 密码 |
 | `pg logs addon clickhouse` | `--name NAME`、`-n N`（默认 50）、`-f` | 容器日志 |

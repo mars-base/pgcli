@@ -232,7 +232,7 @@ func TestClickHouseManagedSetting(t *testing.T) {
 
 func TestClickHouseCommandTree(t *testing.T) {
 	for _, name := range []string{
-		"status", "shell", "query",
+		"status", "cluster", "shell", "query",
 		"database", "user", "grant",
 		"backup", "restore", "backups", "config",
 	} {
@@ -259,6 +259,8 @@ func TestClickHouseCommandTree(t *testing.T) {
 	required := []string{
 		"name", "version", "data-dir", "listen", "http-port", "tcp-port",
 		"admin-user", "admin-password", "config-option", "force",
+		"cluster", "shard", "replica", "advertise-host", "peer", "keeper",
+		"interserver-port",
 	}
 	for _, name := range required {
 		if addonInstallCmd.Flags().Lookup(name) == nil {
@@ -279,5 +281,141 @@ func TestClickHouseConfigSetArgumentParsing(t *testing.T) {
 	}
 	if got := addonClickHouseQueryCmd.Flags().Lookup("database"); got == nil || !strings.Contains(got.Usage, "default database") {
 		t.Errorf("query --database flag = %v", got)
+	}
+}
+
+func TestValidateClickHouseClusterInstall(t *testing.T) {
+	opts := clickHouseInstallOptions{
+		cluster: "chcluster", clusterSet: true,
+		shard: 1, shardSet: true,
+		replica: 1, replicaSet: true,
+		advertiseHost: "10.0.0.11", advertiseHostSet: true,
+		peers: []string{"1/2@10.0.0.12:9000"}, peersSet: true,
+		keepers: []string{"10.0.0.11:9181"}, keepersSet: true,
+		listen: "0.0.0.0", listenSet: true,
+		adminPassword: "same-pass", adminPasswordSet: true,
+	}
+	cc := config.ClickHouseConfig{
+		Name: "ch1", Cluster: "chcluster", Shard: 1, Replica: 1,
+		AdvertiseHost: "10.0.0.11", Peers: opts.peers, Keepers: opts.keepers,
+		Listen: "0.0.0.0", AdminPassword: "same-pass",
+	}
+	if err := validateClickHouseClusterInstall(cc, opts, false); err != nil {
+		t.Fatalf("complete fresh cluster install should pass: %v", err)
+	}
+
+	standalone := config.ClickHouseConfig{Name: "ch1", Listen: "127.0.0.1"}
+	if err := validateClickHouseClusterInstall(standalone, clickHouseInstallOptions{peersSet: true}, false); err == nil {
+		t.Error("--peer without --cluster must fail")
+	}
+
+	noPass := opts
+	noPass.adminPasswordSet = false
+	noPass.adminPassword = ""
+	noPassCC := cc
+	noPassCC.AdminPassword = ""
+	if err := validateClickHouseClusterInstall(noPassCC, noPass, false); err == nil {
+		t.Error("fresh cluster install without an explicit --admin-password must fail")
+	}
+
+	loopback := cc
+	loopback.Listen = "127.0.0.1"
+	if err := validateClickHouseClusterInstall(loopback, opts, true); err == nil {
+		t.Error("cluster install with loopback listen must fail")
+	}
+
+	missing := opts
+	missing.keepersSet = false
+	missing.clusterSet = true
+	missing.keepers = nil
+	missingCC := cc
+	missingCC.Keepers = nil
+	if err := validateClickHouseClusterInstall(missingCC, missing, false); err == nil ||
+		!strings.Contains(err.Error(), "--keeper") {
+		t.Errorf("fresh cluster install must require --keeper, got %v", err)
+	}
+}
+
+func TestCheckClickHouseTopologyImmutable(t *testing.T) {
+	stored := config.ClickHouseConfig{
+		Name: "ch1", Cluster: "chcluster", Shard: 1, Replica: 1,
+		AdvertiseHost: "10.0.0.11", TCPPort: 9000, InterserverPort: 9009,
+		Peers: []string{"1/2@10.0.0.12:9000", "2/1@10.0.0.13:9000"}, Keepers: []string{"10.0.0.11:9181"},
+	}
+	if err := checkClickHouseTopologyImmutable(stored, stored); err != nil {
+		t.Fatalf("identical topology should be allowed: %v", err)
+	}
+	reordered := stored
+	reordered.Peers = []string{"2/1@10.0.0.13:9000", "1/2@10.0.0.12:9000"}
+	if err := checkClickHouseTopologyImmutable(stored, reordered); err != nil {
+		t.Errorf("normalized peers should compare equal: %v", err)
+	}
+	changes := map[string]func(*config.ClickHouseConfig){
+		"cluster":          func(c *config.ClickHouseConfig) { c.Cluster = "other" },
+		"shard":            func(c *config.ClickHouseConfig) { c.Shard = 2 },
+		"replica":          func(c *config.ClickHouseConfig) { c.Replica = 2 },
+		"advertise-host":   func(c *config.ClickHouseConfig) { c.AdvertiseHost = "10.0.0.99" },
+		"tcp-port":         func(c *config.ClickHouseConfig) { c.TCPPort = 19000 },
+		"interserver-port": func(c *config.ClickHouseConfig) { c.InterserverPort = 19009 },
+		"peer":             func(c *config.ClickHouseConfig) { c.Peers = []string{"1/2@10.0.0.13:9000"} },
+		"keeper":           func(c *config.ClickHouseConfig) { c.Keepers = []string{"10.0.0.12:9181"} },
+	}
+	for name, change := range changes {
+		next := stored
+		change(&next)
+		if err := checkClickHouseTopologyImmutable(stored, next); err == nil {
+			t.Errorf("changing %s must be rejected", name)
+		}
+	}
+}
+
+func TestCheckClickHouseNoOpFlags(t *testing.T) {
+	stored := config.ClickHouseConfig{
+		Name: "ch1", Cluster: "chcluster", Shard: 1, Replica: 1,
+		AdvertiseHost: "10.0.0.11",
+		Peers:         []string{"1/2@10.0.0.12:9000", "2/1@10.0.0.13:9000"},
+		Keepers:       []string{"10.0.0.11:9181", "10.0.0.12"},
+		Settings:      map[string]string{"logger.level": "warning"},
+	}
+	same := clickHouseInstallOptions{
+		cluster: "chcluster", clusterSet: true,
+		shard: 1, shardSet: true, replica: 1, replicaSet: true,
+		advertiseHost: "10.0.0.11", advertiseHostSet: true,
+		peers: []string{"2/1@10.0.0.13:9000", "1/2@10.0.0.12:9000"}, peersSet: true,
+		keepers: []string{"10.0.0.12:9181", "10.0.0.11:9181"}, keepersSet: true,
+		configOptions: []string{"logger.level=warning"}, configOptionSet: true,
+	}
+	if err := checkClickHouseNoOpFlags(stored, same); err != nil {
+		t.Fatalf("reordered peers/keepers should be a no-op: %v", err)
+	}
+	drift := same
+	drift.shard = 2
+	if err := checkClickHouseNoOpFlags(stored, drift); err == nil ||
+		!strings.Contains(err.Error(), "--shard") {
+		t.Errorf("changed --shard must be reported, got %v", err)
+	}
+}
+
+func TestClickHouseClusterStatusParsers(t *testing.T) {
+	members, err := parseClickHouseClusterMembers("1\t1\t10.0.0.11\t9000\t1\n1\t2\t10.0.0.12\t9000\t0\n")
+	if err != nil {
+		t.Fatalf("parse members: %v", err)
+	}
+	if len(members) != 2 || !members[0].Local || members[1].Local {
+		t.Errorf("unexpected members: %+v", members)
+	}
+	if _, err := parseClickHouseClusterMembers("1\t1\t10.0.0.11\n"); err == nil {
+		t.Error("short system.clusters rows must fail")
+	}
+
+	replicas, err := parseClickHouseReplicaStates("default\tevents\tch1-1\t0\t0\t0\ndefault\tevents\tch1-2\t1\t3\t7\n")
+	if err != nil {
+		t.Fatalf("parse replicas: %v", err)
+	}
+	if len(replicas) != 2 || replicas[1].Readonly != true || replicas[1].QueueSize != 7 {
+		t.Errorf("unexpected replicas: %+v", replicas)
+	}
+	if _, err := parseClickHouseReplicaStates("default\tevents\tch1-1\t0\tx\t0\n"); err == nil {
+		t.Error("invalid absolute_delay must fail")
 	}
 }

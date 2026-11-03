@@ -2,9 +2,13 @@ package podman
 
 import (
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/mars-base/pgcli/internal/clickhouse"
 	"github.com/mars-base/pgcli/internal/config"
@@ -134,7 +138,7 @@ func (m *ClickHouseManager) ensureFiles(cc *config.ClickHouseConfig) error {
 			return fmt.Errorf("creating %s: %w", dir, err)
 		}
 	}
-	if err := clickhouse.WriteConfig(*cc); err != nil {
+	if err := clickhouse.WriteGeneratedConfig(*cc); err != nil {
 		return err
 	}
 	return clickhouse.WriteSecret(*cc)
@@ -147,6 +151,14 @@ func (m *ClickHouseManager) createContainer(cc *config.ClickHouseConfig) error {
 	fmt.Printf("  [OK] ClickHouse container %s created\n", cc.ContainerName)
 	return nil
 }
+
+// clickHouseEntrypointWrapper exports the admin password from the mounted
+// secret before handing control to the stock entrypoint. remote_servers reads
+// it with `from_env`, so Distributed queries can authenticate without the
+// password ever appearing in a host file, the podman argv or the container
+// environment configuration.
+const clickHouseEntrypointWrapper = `export ` + clickhouse.AdminPasswordEnvVar +
+	`="$(cat ` + clickhouse.ContainerSecretPath + `)"; exec /entrypoint.sh`
 
 // clickHouseCreateArgs builds the `podman run` argv. Pure so tests can pin the
 // mounts, environment and host networking without podman. Migrations inside
@@ -161,6 +173,7 @@ func clickHouseCreateArgs(cc config.ClickHouseConfig) []string {
 		"--restart", "unless-stopped",
 		"--stop-timeout", "30",
 		"--ulimit", "nofile=262144:262144",
+		"--entrypoint", "/bin/sh",
 		"-v", fmt.Sprintf("%s:%s:z", hostMountPath(cc.DataDir), clickhouse.ContainerDataDir),
 		"-v", fmt.Sprintf("%s:%s:z", hostMountPath(cc.LogDir), clickhouse.ContainerLogDir),
 		"-v", fmt.Sprintf("%s:%s:ro,z", hostMountPath(filepath.Dir(cc.ConfigPath)), clickhouse.ContainerConfigDir),
@@ -170,6 +183,7 @@ func clickHouseCreateArgs(cc config.ClickHouseConfig) []string {
 		"-e", "CLICKHOUSE_PASSWORD_FILE=" + clickhouse.ContainerSecretPath,
 		"-e", "CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1",
 		cc.ImageTag,
+		"-c", clickHouseEntrypointWrapper,
 	}
 }
 
@@ -244,38 +258,47 @@ func (m *ClickHouseManager) ContainerExists(name string) (bool, error) {
 	return m.containerExists(name)
 }
 
-// Exec runs clickhouse-client (or a shell) inside the running container.
-// Credentials are passed by environment name and expanded by the in-container
-// shell, so they never appear in the podman argv or the host process list.
-// SQL is supplied on stdin.
+// ClickHouseExecSpec describes one in-container client invocation. One-shot
+// SQL does not use this path: podman-static on this platform can deadlock
+// inside `podman exec` (with or without -i), so statements go over the HTTP
+// interface instead.
 type ClickHouseExecSpec struct {
 	// Command selects "client" (default) or "shell".
 	Command     string
 	Env         []string // KEY=VALUE pairs
 	ClientArgs  []string // connection args from clickhouse.ClientArgs
-	SQL         string   // non-empty: piped to clickhouse-client stdin
 	Interactive bool     // allocate a TTY and share the host's stdin
 }
 
-// ExecClient runs a SQL statement (or the interactive REPL when SQL is empty)
-// via clickhouse-client.
+// ExecClient runs one statement through the HTTP interface. Interactive mode
+// (and an empty statement) falls back to clickhouse-client in the container.
 func (m *ClickHouseManager) ExecClient(cc *config.ClickHouseConfig, args []string, sql string, interactive bool) error {
+	if !interactive && sql != "" {
+		out, err := clickHouseHTTPQuery(cc, args, sql)
+		if err != nil {
+			return err
+		}
+		_, err = os.Stdout.Write(out)
+		return err
+	}
 	return m.exec(cc, ClickHouseExecSpec{
 		Command:     "client",
 		Env:         clickhouseClientEnv(cc),
 		ClientArgs:  args,
-		SQL:         sql,
 		Interactive: interactive,
 	})
 }
 
-// ExecClientOutput runs clickhouse-client and returns its combined output.
+// ExecClientOutput runs one statement through the HTTP interface and returns
+// its response body.
 func (m *ClickHouseManager) ExecClientOutput(cc *config.ClickHouseConfig, args []string, sql string) ([]byte, error) {
+	if sql != "" {
+		return clickHouseHTTPQuery(cc, args, sql)
+	}
 	return m.execOutput(cc, ClickHouseExecSpec{
 		Command:    "client",
 		Env:        clickhouseClientEnv(cc),
 		ClientArgs: args,
-		SQL:        sql,
 	})
 }
 
@@ -291,18 +314,62 @@ func clickhouseClientEnv(cc *config.ClickHouseConfig) []string {
 	}
 }
 
-// clickHouseExecArgs builds `podman exec` argv. The `sh -c` wrapper receives
-// "clickhouse-client" as $0 (never passed onward) and the client connection
-// args as "$@", so the password is read from the environment rather than the
-// argv. Pure for tests.
+// clickHouseHTTPQuery sends one statement to the server's HTTP interface. The
+// addon uses host networking, so the configured HTTP port is reachable on the
+// loopback address. ClickHouse reads the POST body as the statement itself
+// (form encoding is not parsed), so the SQL goes in the body and the optional
+// database in the URL query string. The password rides in an Authorization
+// header. None of them appear in the podman argv or the host process list.
+func clickHouseHTTPQuery(cc *config.ClickHouseConfig, clientArgs []string, sql string) ([]byte, error) {
+	database := ""
+	for i := 0; i+1 < len(clientArgs); i++ {
+		if clientArgs[i] == "--database" {
+			database = clientArgs[i+1]
+		}
+	}
+	endpoint := clickhouse.HTTPURL(*cc) + "/"
+	if database != "" {
+		params := url.Values{}
+		params.Set("database", database)
+		endpoint += "?" + params.Encode()
+	}
+	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(sql))
+	if err != nil {
+		return nil, fmt.Errorf("building ClickHouse HTTP request: %w", err)
+	}
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	req.SetBasicAuth(cc.AdminUser, cc.AdminPassword)
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: nil},
+		Timeout:   5 * time.Minute,
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("running ClickHouse query: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading ClickHouse response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = resp.Status
+		}
+		return nil, fmt.Errorf("ClickHouse query failed: %s", msg)
+	}
+	return body, nil
+}
+
+// clickHouseExecArgs builds `podman exec` argv for interactive clients and
+// shells. The `sh -c` wrapper receives "clickhouse-client" as $0 (never passed
+// onward) and the client connection args as "$@", so credentials are read from
+// the environment rather than the argv. Pure for tests.
 func clickHouseExecArgs(spec ClickHouseExecSpec, container string) []string {
 	args := []string{"exec"}
 	if spec.Interactive {
 		args = append(args, "-it")
-	} else {
-		// -i forwards stdin (SQL is piped to clickhouse-client); without it
-		// podman exec discards the piped statement.
-		args = append(args, "-i")
 	}
 	for _, kv := range spec.Env {
 		if name, _, ok := strings.Cut(kv, "="); ok && name != "" {
@@ -327,8 +394,6 @@ func (m *ClickHouseManager) exec(cc *config.ClickHouseConfig, spec ClickHouseExe
 	}
 	if spec.Interactive {
 		cmd.Stdin = os.Stdin
-	} else if spec.SQL != "" {
-		cmd.Stdin = strings.NewReader(spec.SQL + "\n")
 	} else {
 		// Never let an empty stdin swallow the caller's input.
 		cmd.Stdin = nil
@@ -348,9 +413,6 @@ func (m *ClickHouseManager) execOutput(cc *config.ClickHouseConfig, spec ClickHo
 			cmd.Env = os.Environ()
 		}
 		cmd.Env = append(cmd.Env, spec.Env...)
-	}
-	if spec.SQL != "" {
-		cmd.Stdin = strings.NewReader(spec.SQL + "\n")
 	}
 	return cmd.CombinedOutput()
 }

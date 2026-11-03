@@ -1,7 +1,7 @@
 ---
 title: "Kafka"
 description: "Run Apache Kafka 4.x brokers in KRaft mode (no ZooKeeper) as a managed addon — single-node or a multi-host static controller quorum, with topic management, rendered server.properties and host networking"
-weight: 65
+weight: 67
 ---
 
 `pg addon install kafka` runs **Apache Kafka 4.4.0** as a managed container from the official `docker.io/apache/kafka` multi-arch image. Kafka 4.x is **KRaft-only**: the metadata controller is built into the broker process (`process.roles=broker,controller`, combined mode) and **ZooKeeper is not installed or used**.

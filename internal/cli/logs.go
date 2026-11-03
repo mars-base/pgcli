@@ -70,17 +70,17 @@ var logsAddonCmd = &cobra.Command{
 	Short: "Show addon console output logs",
 	Long: `Show addon console output logs.
 
-Requires the addon type (pgbouncer, postgrest, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, kafka, rocketmq, patroni).
+Requires the addon type (pgbouncer, postgrest, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rocketmq, patroni).
 Use -i for local instance addons, --pg-name for remote addons,
 --name for an etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage,
-seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, kafka, rocketmq or Patroni member (default
-"etcd"/"pgdog"/"haproxy"/"minio"/"silo"/"rustfs"/"garage"/"seaweedfs"/"redis"/"predixy"/"pgadmin"/"grafana"/"prometheus"/"alertmanager"/"gitea"/"beegfs"/"vmc"/"vlc"/"juicefs"/"zerofs"/"influxdb"/"influx2tsdb"/"clickhouse"/"kafka"/"rocketmq"; Patroni members have
+seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rocketmq or Patroni member (default
+"etcd"/"pgdog"/"haproxy"/"minio"/"silo"/"rustfs"/"garage"/"seaweedfs"/"redis"/"predixy"/"pgadmin"/"grafana"/"prometheus"/"alertmanager"/"gitea"/"beegfs"/"vmc"/"vlc"/"juicefs"/"zerofs"/"influxdb"/"influx2tsdb"/"clickhouse"/"clickhouse-keeper"/"kafka"/"rocketmq"; Patroni members have
 no default and also require --scope).
 
 juicefs and zerofs are host-binary addons, so their logs are plain
 files, not containers: juicefs tails the mount daemon's log; zerofs tails the
 server log by default and the FUSE client's with --service mount. influxdb,
-influx2tsdb, clickhouse, kafka and rocketmq run as containers, so their logs come from the
+influx2tsdb, clickhouse, clickhouse-keeper, kafka and rocketmq run as containers, so their logs come from the
 container runtime and accept the same -n/-f flags as the other container addons.
 RocketMQ runs three containers per instance and defaults to the broker log;
 --service namesrv|broker|proxy picks another role.
@@ -137,6 +137,7 @@ Examples:
   pg logs addon influxdb --name metrics        # influxd daemon log
   pg logs addon influx2tsdb --name influx2tsdb # proxy container log
   pg logs addon clickhouse --name ch1         # clickhouse-server container log
+  pg logs addon clickhouse-keeper --name keeper # ClickHouse Keeper container log
   pg logs addon patroni --scope app --name node1
   pg logs addon patroni --scope app --name node1 -f`,
 	Args: cobra.ExactArgs(1),
@@ -184,7 +185,7 @@ Examples:
 			if err != nil {
 				return err
 			}
-		case "etcd", "pgdog", "haproxy", "minio", "silo", "rustfs", "garage", "seaweedfs", "redis", "predixy", "pgadmin", "grafana", "prometheus", "alertmanager", "nodeexporter", "pgexporter", "documentdb", "gitea", "beegfs", "nginx", "influxdb", "influx2tsdb", "clickhouse", "kafka", "rabbitmq", "rocketmq", "vmcluster", "vlcluster":
+		case "etcd", "pgdog", "haproxy", "minio", "silo", "rustfs", "garage", "seaweedfs", "redis", "predixy", "pgadmin", "grafana", "prometheus", "alertmanager", "nodeexporter", "pgexporter", "documentdb", "gitea", "beegfs", "nginx", "influxdb", "influx2tsdb", "clickhouse", "clickhouse-keeper", "kafka", "rabbitmq", "rocketmq", "vmcluster", "vlcluster":
 			// (patroni is handled above; it shares --name but requires --scope.)
 			if pgName != "" {
 				return fmt.Errorf("--pg-name selects a remote PgBouncer or PostgREST; use --name for an %s", addonType)
@@ -410,6 +411,15 @@ Examples:
 					return fmt.Errorf("clickhouse instance %q not found (use 'pg addon list' to see available)", name)
 				}
 				containerName = cc.ContainerName
+			case "clickhouse-keeper":
+				if cfg.Addons.ClickHouseKeeper == nil {
+					return fmt.Errorf("no clickhouse-keeper addons configured")
+				}
+				kc, ok := cfg.Addons.ClickHouseKeeper[name]
+				if !ok {
+					return fmt.Errorf("clickhouse-keeper instance %q not found (use 'pg addon list' to see available)", name)
+				}
+				containerName = kc.ContainerName
 			case "kafka":
 				if cfg.Addons.Kafka == nil {
 					return fmt.Errorf("no kafka addons configured")
@@ -566,7 +576,7 @@ Examples:
 			}
 			return tailHostLog(m, tail, follow)
 		default:
-			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, kafka, rocketmq, nginx, patroni)", addonType)
+			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rocketmq, nginx, patroni)", addonType)
 		}
 
 		return runPodmanLogs(containerName, tail, follow)
@@ -642,7 +652,7 @@ func init() {
 	logsAddonCmd.Flags().BoolP("follow", "f", false, "Stream logs continuously")
 	logsAddonCmd.Flags().IntP("tail", "n", 50, "Number of lines to show (0 = all)")
 	logsAddonCmd.Flags().String("pg-name", "", "Remote addon name (for remote PgBouncer or PostgREST)")
-	logsAddonCmd.Flags().String("name", "", "etcd member name, pgdog proxy name, haproxy instance name, minio/silo/rustfs/garage/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/influxdb/influx2tsdb/clickhouse/kafka/rocketmq/beegfs/vmcluster/vlcluster instance name, or Patroni member name")
+	logsAddonCmd.Flags().String("name", "", "etcd member name, pgdog proxy name, haproxy instance name, minio/silo/rustfs/garage/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/influxdb/influx2tsdb/clickhouse/clickhouse-keeper/kafka/rocketmq/beegfs/vmcluster/vlcluster instance name, or Patroni member name")
 	logsAddonCmd.Flags().String("scope", "", "Patroni cluster scope (required only with addon type patroni)")
 	logsAddonCmd.Flags().String("service", "", "beegfs: which container of the filesystem to read — mgmtd, meta or storage (default \"mgmtd\"); zerofs: server or mount (the FUSE client) (default \"server\"); vmcluster/vlcluster: storage, insert or select (default \"storage\"); rocketmq: namesrv, broker or proxy (default \"broker\")")
 
