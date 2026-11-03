@@ -279,9 +279,97 @@ Keeper 数据量小但关键：它保存复制日志与表元数据。整个 Kee
 - **身份不可变。** 安装后，`--force` 会拒绝修改 `--cluster`、`--shard`、`--replica`、`--advertise-host`、`--peer`、`--keeper`、`--interserver-port`，以及集群模式下的 `--tcp-port`。其他所有成员的配置里都写死了本节点，修改一个节点的身份需要协同重建。
 - **扩容是手动的。** 增加成员需要滚动重建，见[水平扩容](#水平扩容)。v1 不自动 rebalance 或拆分 shard。
 - **`backup` / `restore` 是单机操作。** 它们只操作本地实例的本地表。备份一个副本不等于备份其他 shard。把复制表恢复到集群时需要考虑其 Keeper 路径。
-- **`config set` 只影响本地成员。** 集群级修改必须在每台主机重复；CLI 不分发配置。
+- **`config set` 只影响本地成员，且默认会重启本机容器。** 集群级修改必须在每台主机重复；CLI 不分发配置。加 `--no-restart` 可只写配置、下次启动时才生效。滚动执行，一次一台，同一 shard 的两个 replica 不要同时重启。
 - **`user` / `grant` 默认也是单节点操作**，除非用 `ON CLUSTER` 下发。CLI 创建的用户与授权只作用于本地成员。
 - **Autostart 顺序。** `pg start` 先启动启用 autostart 的 Keeper 成员，再启动 ClickHouse 成员，最后 nginx。分别用 `pg autostart enable --clickhouse-keeper --name keeper` 与 `pg autostart enable --clickhouse --name clickhouse` 开启。
+
+## 设置内存
+
+ClickHouse 没有集群级统一内存上限，内存按每个 server 进程独立计算，所以每台成员都要单独配置——没有能把一个值下发到整个集群的命令。
+
+### 服务端内存
+
+安装时用 `--config-option` 直接写入 `max_server_memory_usage`：
+
+```bash
+pg addon install clickhouse --name clickhouse \
+  --cluster chcluster --shard 1 --replica 1 \
+  --advertise-host 192.0.2.11 --listen 0.0.0.0 \
+  --admin-password "$CH_ADMIN_PASSWORD" \
+  --peer 1/2@192.0.2.12:9000 \
+  --peer 2/1@192.0.2.13:9000 \
+  --peer 2/2@192.0.2.14:9000 \
+  --keeper 192.0.2.11:9181 \
+  --keeper 192.0.2.12:9181 \
+  --keeper 192.0.2.13:9181 \
+  --interserver-port 9009 \
+  --config-option max_server_memory_usage=2147483648
+```
+
+已安装的成员用 `config set`（默认重启本机容器立即生效；`--no-restart` 延迟到下次启动）：
+
+```bash
+# 每台成员分别执行
+pg addon clickhouse config set max_server_memory_usage=2147483648 --name clickhouse
+```
+
+滚动执行：等 `system.replicas` 显示 `is_readonly=0` 且队列排空后再处理下一台，同一 shard 的两个 replica 不要同时重启。
+
+默认值 `0` 保持 ClickHouse 的比例规则（`max_server_memory_usage_to_ram_ratio`，宿主 RAM 的 0.9）。共享主机上这样有风险——只要 Keeper 或其他服务同机，就应显式设置绝对值。
+
+### 查询级内存
+
+`max_memory_usage`、`max_bytes_before_external_group_by`、`max_bytes_before_external_sort` 是**用户/profile 设置**，不是 server XML，`config set` 不适用。用 `ON CLUSTER` 写到用户上，或按会话设置：
+
+```sql
+CREATE USER app IDENTIFIED WITH sha256_password BY '...'
+SETTINGS max_memory_usage = 5000000000,
+         max_bytes_before_external_group_by = 2000000000
+ON CLUSTER chcluster;
+```
+
+```sql
+SET max_memory_usage = 5000000000;
+```
+
+客户端也可以按请求传（HTTP query 参数，或驱动的 settings map）。查询级的值不能突破服务端的 `max_server_memory_usage`。
+
+### Distributed 查询的内存语义
+
+每个参与的 shard 各自执行本地部分，受本机 `max_server_memory_usage` 约束；发起节点还要额外占用内存做结果合并与聚合。集群没有共享内存池。容量按**单节点峰值 × 并发**规划，并为发起节点和 Keeper 留余量。通用 ClickHouse 内存说明见[内存限制](./clickhouse/#内存限制)。
+
+## 设置 CPU
+
+pgcli 不提供容器级 CPU 配额：不会向 podman 传 `--cpus` 或 `--cpuset-cpus`，容器默认可以使用宿主全部核心。ClickHouse 默认也会按可用核心数并行查询——**跑满宿主核心是默认行为**。
+
+### 查询线程数
+
+`max_threads`（默认 = 可用核心数）与 `max_insert_threads` 是用户/会话/请求级设置，不是 server XML，`config set` 不适用。用 `ON CLUSTER` 写到用户上，或按会话设置：
+
+```sql
+CREATE USER app IDENTIFIED WITH sha256_password BY '...'
+SETTINGS max_threads = 4, max_insert_threads = 2
+ON CLUSTER chcluster;
+```
+
+```sql
+SET max_threads = 4;
+```
+
+客户端也可以按请求传（HTTP query 参数，或驱动的 settings map）。
+
+### 服务端并发
+
+`max_concurrent_queries`、`background_pool_size` 是 server XML 设置，需在每台成员分别执行 `config set`（默认重启本机容器；`--no-restart` 延迟到下次启动）：
+
+```bash
+# 每台成员分别执行
+pg addon clickhouse config set max_concurrent_queries=20 background_pool_size=8 --name clickhouse
+```
+
+### 集群语义
+
+每个节点独立，没有集群统一 CPU 配额。Distributed 查询会在每个参与的 shard 上各自开线程，发起节点还要额外承担合并开销。容量按**单节点峰值 × 并发**规划，并与 `max_server_memory_usage` 一起调整。cgroup 级硬隔离不在 pgcli 支持范围内：手工给容器加的 `--cpus` 会在 pgcli 重建容器时丢失。
 
 ## 水平扩容
 
@@ -374,7 +462,7 @@ host06 使用 `--shard 3 --replica 2 --advertise-host 192.0.2.16`。随后按上
 - **无 TLS。** HTTP 与原生监听都是明文。远程客户端需要 TLS 时，用 [nginx 插件](./nginx/) 前置 HTTP 端口；绝不要把原生或 interserver 端口暴露给不可信网络。
 - **异步复制。** 一个副本确认的写入尚未落到兄弟副本。不要把一次成功插入当作已在两个节点持久化；用 `system.replicas` 看健康度，测试需要等待追平时用 `SYSTEM SYNC REPLICA`。
 - **共享 admin 密码。** 每个成员必须使用相同的 `--admin-password`；pgcli 无法跨主机强制校验。不一致表现为客户端访问结果不一致，而不是安装报错。
-- **内存。** 小内存 VM 需要在每个 ClickHouse 成员上显式设置 `max_server_memory_usage`，Keeper 也需要余量。2 GiB 测试 VM 上每个 ClickHouse 容器使用几百 MiB；见 [内存限制](./clickhouse/#内存限制)。
+- **内存。** 小内存 VM 需要在每个 ClickHouse 成员上显式设置 `max_server_memory_usage`，Keeper 也需要余量。可以在安装时直接带 `--config-option max_server_memory_usage=2147483648`，也可以之后用 `pg addon clickhouse config set` 设置；没有跨节点下发，每台成员都要分别执行。2 GiB 测试 VM 上每个 ClickHouse 容器使用几百 MiB；见 [内存限制](./clickhouse/#内存限制)。
 - **升级。** 一次升级一个副本（停止、`install --force --version <新版本>`、启动），等复制追平后再处理兄弟副本。绝不要让旧版本服务端运行新版本写过的磁盘格式。
 
 ## 限制

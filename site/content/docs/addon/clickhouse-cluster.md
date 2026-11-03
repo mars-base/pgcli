@@ -280,9 +280,97 @@ Keeper data is small but critical: it holds the replication log and table metada
 - **Identity is immutable.** After install, `--force` rejects changes to `--cluster`, `--shard`, `--replica`, `--advertise-host`, `--peer`, `--keeper`, `--interserver-port` and (in cluster mode) `--tcp-port`. Every other member has this node baked into its configuration, so changing one node's identity requires a coordinated rebuild.
 - **Growth is manual.** Adding members requires a rolling rebuild; see [Horizontal scaling](#horizontal-scaling). v1 does not automate rebalancing or shard splitting.
 - **`backup` / `restore` are per-node.** They operate on the local instance's local tables. Backing up one replica does not back up the other shards. Replicated tables restored into a cluster need their Keeper paths considered.
-- **`config set` affects only the local member.** A cluster-wide change must be repeated on every host; the CLI does not distribute configuration.
+- **`config set` affects only the local member and restarts it by default.** A cluster-wide change must be repeated on every host; the CLI does not distribute configuration. Pass `--no-restart` to write the value without restarting, so it applies on the next start. Roll members one at a time; never restart both replicas of a shard together.
 - **`user` / `grant` are per-node** unless issued with `ON CLUSTER`. Users and grants created by the CLI run against the local member only.
 - **Autostart order.** `pg start` starts autostart-enabled Keeper members first, then ClickHouse members, then nginx. Enable both with `pg autostart enable --clickhouse-keeper --name keeper` and `pg autostart enable --clickhouse --name clickhouse`.
+
+## Setting memory
+
+ClickHouse has no cluster-wide memory limit. Memory is enforced per server process, so every member needs its own configuration — there is no command that pushes a value to the whole cluster.
+
+### Server memory
+
+Set `max_server_memory_usage` at install time with `--config-option`:
+
+```bash
+pg addon install clickhouse --name clickhouse \
+  --cluster chcluster --shard 1 --replica 1 \
+  --advertise-host 192.0.2.11 --listen 0.0.0.0 \
+  --admin-password "$CH_ADMIN_PASSWORD" \
+  --peer 1/2@192.0.2.12:9000 \
+  --peer 2/1@192.0.2.13:9000 \
+  --peer 2/2@192.0.2.14:9000 \
+  --keeper 192.0.2.11:9181 \
+  --keeper 192.0.2.12:9181 \
+  --keeper 192.0.2.13:9181 \
+  --interserver-port 9009 \
+  --config-option max_server_memory_usage=2147483648
+```
+
+On an existing member, use `config set` (it restarts the local container by default; `--no-restart` defers the change to the next start):
+
+```bash
+# Run on every member separately
+pg addon clickhouse config set max_server_memory_usage=2147483648 --name clickhouse
+```
+
+Roll members one at a time: wait until `system.replicas` shows `is_readonly=0` with an empty queue before moving on, and never restart both replicas of a shard together.
+
+The default `0` keeps ClickHouse's ratio rule (`max_server_memory_usage_to_ram_ratio`, 0.9 of host RAM). That is risky on shared hosts — always set an absolute value explicitly when Keeper or other services share the machine.
+
+### Query memory
+
+`max_memory_usage`, `max_bytes_before_external_group_by` and `max_bytes_before_external_sort` are **user/profile settings**, not server XML, so `config set` does not apply them. Define them on a user with `ON CLUSTER`, or set them per session:
+
+```sql
+CREATE USER app IDENTIFIED WITH sha256_password BY '...'
+SETTINGS max_memory_usage = 5000000000,
+         max_bytes_before_external_group_by = 2000000000
+ON CLUSTER chcluster;
+```
+
+```sql
+SET max_memory_usage = 5000000000;
+```
+
+Clients can also pass them per request (HTTP query parameters, or the driver's settings map). A query-level value cannot exceed the server-wide `max_server_memory_usage`.
+
+### Memory across a Distributed query
+
+Each participating shard executes its local part and is bounded by its own `max_server_memory_usage`; the initiating node additionally holds memory for result merging and aggregation. There is no shared cluster memory pool. Size for **per-node peak × concurrency**, and leave headroom for the initiating node and for Keeper. See [Memory limits](./clickhouse/#memory-limits) for the general ClickHouse guidance.
+
+## Setting CPU
+
+pgcli applies no container-level CPU quota: it never passes `--cpus` or `--cpuset-cpus` to podman, so a container may use every host core. ClickHouse also parallelizes queries across the available cores by default — **saturating the host's cores is the default behavior**.
+
+### Query threads
+
+`max_threads` (default: available cores) and `max_insert_threads` are user/session/request settings, not server XML, so `config set` does not apply them. Define them on a user with `ON CLUSTER`, or set them per session:
+
+```sql
+CREATE USER app IDENTIFIED WITH sha256_password BY '...'
+SETTINGS max_threads = 4, max_insert_threads = 2
+ON CLUSTER chcluster;
+```
+
+```sql
+SET max_threads = 4;
+```
+
+Clients can also pass them per request (HTTP query parameters, or the driver's settings map).
+
+### Server concurrency
+
+`max_concurrent_queries` and `background_pool_size` are server XML settings. Run `config set` on every member separately (it restarts the local container by default; `--no-restart` defers the change):
+
+```bash
+# Run on every member separately
+pg addon clickhouse config set max_concurrent_queries=20 background_pool_size=8 --name clickhouse
+```
+
+### Cluster semantics
+
+Each node is independent — there is no cluster-wide CPU quota. A Distributed query starts threads on every participating shard, and the initiating node also pays the merge cost. Size for **per-node peak × concurrency**, and tune it together with `max_server_memory_usage`. Hard cgroup isolation is outside pgcli's scope: any `--cpus` you add to the container manually disappears when pgcli recreates it.
 
 ## Horizontal scaling
 
@@ -375,7 +463,7 @@ Historical rows are **not** redistributed: the Distributed table only routes new
 - **No TLS.** The HTTP and native listeners are plaintext. Front the HTTP port with the [nginx addon](./nginx/) when remote clients need TLS; never expose the native or interserver ports to untrusted networks.
 - **Asynchronous replication.** A write acknowledged by one replica is not yet on the sibling. Do not treat a successful insert as durable on two nodes; use `system.replicas` for health and `SYSTEM SYNC REPLICA` when a test must wait for catch-up.
 - **Shared admin password.** Every member must use the same `--admin-password`; pgcli cannot enforce this across hosts. A mismatch shows up as inconsistent client access, not as an install error.
-- **Memory.** Small VMs need an explicit `max_server_memory_usage` on each ClickHouse member, and Keeper needs headroom too. The 2 GiB test VMs use a few hundred MiB per ClickHouse container; see [Memory limits](./clickhouse/#memory-limits).
+- **Memory.** Small VMs need an explicit `max_server_memory_usage` on each ClickHouse member, and Keeper needs headroom too. Pass `--config-option max_server_memory_usage=2147483648` at install time, or set it later with `pg addon clickhouse config set`; there is no cluster-wide push, so repeat it on every member. The 2 GiB test VMs use a few hundred MiB per ClickHouse container; see [Memory limits](./clickhouse/#memory-limits).
 - **Upgrades.** Upgrade one replica at a time (stop, `install --force --version <new>`, start), wait for replication to catch up, then move to the sibling. Never run a newer on-disk format under an older server.
 
 ## Limits
