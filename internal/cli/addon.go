@@ -5368,6 +5368,11 @@ func runAddonList(showPassword bool) error {
 		fmt.Printf("    Cluster:     %s\n", ec.ClusterName)
 		fmt.Printf("    Client URL:  %s\n", ec.ClientURL())
 		fmt.Printf("    TLS:         %s\n", onOff(ec.TLS))
+		if ec.TLS && em != nil {
+			if ca, err := em.ClientCAFile(&ec); err == nil {
+				fmt.Printf("    CA:          %s\n", ca)
+			}
+		}
 		fmt.Printf("    Auth:        %s\n", onOff(ec.Auth))
 		fmt.Printf("    Client port: %d\n", ec.ClientPort)
 		fmt.Printf("    Peer port:   %d\n", ec.PeerPort)

@@ -262,6 +262,29 @@ then re-install every other member with `--auth` so each records the
 credentials (same-host peers inherit them; cross-host members must pass
 `--password`). Disabling auth again requires re-creating the cluster.
 
+### Inspecting authentication
+
+Authentication status and users/roles can be queried directly:
+
+```bash
+pg etcdctl auth status      # Authentication Status and AuthRevision
+pg etcdctl user list        # cluster users (--auth creates only root)
+pg etcdctl user get root    # roles of the root user
+pg etcdctl role list        # roles
+pg etcdctl role get root    # permissions of the root role
+```
+
+View the password (only present when `Auth: true`; it is stored in `pg.yaml`
+and can only be read on a host that has the member configured):
+
+```bash
+pg addon password etcd --name m1
+```
+
+`pg addon list` also shows `Auth: enabled` / `Auth: disabled` per member. This
+version has no multi-user/RBAC management commands; etcd's native commands can
+be passed through `pg etcdctl`.
+
 ## Commands
 
 ### Create the first member
@@ -404,6 +427,9 @@ Infra add-ons (etcd):
     Container:   pgcli-etcd-m1
 ```
 
+A TLS-enabled member also prints a `CA:` line with the cluster CA path used for
+client verification (ready to use with `pg etcdctl --ca` on a non-member host).
+
 ### Start and stop
 
 After a host reboot or a manual stop, bring a member back up without
@@ -508,37 +534,76 @@ shared root in place.
 ## Connecting
 
 Use `pg etcdctl`, which runs etcd's **v3** client from a short-lived container
-against a member's client URL — the target comes from `ETCDCTL_ENDPOINTS`,
-falling back to the first configured member. etcdctl's native flags go after
-`--`:
+against a member's client URL. No local member container or image is required
+(the image is pulled on demand). etcdctl's native flags go after `--`.
+
+### From a member host (bootstrap or joined node)
+
+Whenever the local `pg.yaml` configures any member of the cluster — whether it
+is the bootstrap member or one that joined later — `pg etcdctl` injects that
+member's CA (`ETCDCTL_CACERT`) and credentials (`ETCDCTL_USER`; the password
+stays out of `ps`) automatically, with no extra flags:
 
 ```bash
+pg etcdctl endpoint health
 pg etcdctl member list
+pg etcdctl put foo bar
 pg etcdctl endpoint status -- -w table
-pg etcdctl endpoint health
-pg etcdctl put foo bar
-pg etcdctl get foo -- --hex
 ```
 
-`pg etcdctl` always speaks the v3 API (`ETCDCTL_API=3`, etcdctl's default); v2
-is not supported.
-
-When the fallback member has TLS and/or authentication enabled, `pg etcdctl`
-injects them automatically: the member's CA through `ETCDCTL_CACERT` and its
-credentials through `ETCDCTL_USER` (so the password stays out of `ps`):
+Without `ETCDCTL_ENDPOINTS` the target falls back to the first locally
+configured member. To query another member of the same cluster, set it
+explicitly — the injected CA/credentials come from the local member, but every
+member shares the same cluster CA and auth user, so they work too:
 
 ```bash
-pg etcdctl endpoint health
-pg etcdctl put foo bar
+ETCDCTL_ENDPOINTS=https://10.0.0.2:2379 pg etcdctl member list
 ```
 
-If `ETCDCTL_ENDPOINTS` points at a different cluster, override the injected
-values after `--`:
+Retrieve the password with `pg addon password etcd --name m1` on any host that
+has the member configured.
+
+### From a non-member host
+
+On a host with no configured etcd member — for example a third machine used
+only as a client — `pg etcdctl` injects nothing. Provide the endpoint, CA and
+credentials explicitly:
+
+1. Look up the node's CA path in the `CA:` line of `pg addon list` on any member
+   host, then copy that file to the client host (generated mode:
+   `~/.pgcli/tls/etcd/<cluster>/ca.crt`; for manual/BYO setups use your own CA):
+
+   ```bash
+   # Show the node's CA path on a member host
+   ssh member-host 'pg addon list' | grep "CA:"
+
+   # Copy the path shown above (generated-mode example)
+   scp member-host:/root/.pgcli/tls/etcd/pgcli-etcd/ca.crt /tmp/etcd-ca.crt
+   ```
+
+2. Point at a member's client URL, pass the host CA with `--ca` (pg mounts it
+   into the etcdctl container), and the credentials via `--user` after `--`:
+
+   ```bash
+   ETCDCTL_ENDPOINTS=https://10.0.0.1:2379 pg etcdctl \
+     --ca /tmp/etcd-ca.crt endpoint health -- --user root:<password>
+   ```
+
+   The password is available from `pg addon password etcd --name m1` on a
+   member host.
+
+An etcdctl `--cacert` passed after `--` refers to a path *inside* the helper
+container, so a host path there does not work (use `--ca` instead). For a quick
+check without the CA, skip verification — etcdctl only honors skip-verify once
+it builds a TLS config, so disable its default plaintext transport too:
 
 ```bash
-ETCDCTL_ENDPOINTS=https://10.0.0.9:2379 pg etcdctl \
-  member list -- --cacert /path/to/other-ca.crt --user root:password
+ETCDCTL_ENDPOINTS=https://10.0.0.1:2379 pg etcdctl \
+  member list -- --insecure-transport=false --insecure-skip-tls-verify
 ```
+
+A non-member host must be able to reach a member's client port (allow it
+through the firewall, e.g. 2379/tcp).
 
 ## Topology & Quorum
 

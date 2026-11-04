@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 
 	"github.com/spf13/cobra"
@@ -12,6 +13,7 @@ import (
 )
 
 func init() {
+	etcdctlCmd.Flags().String("ca", "", "CA bundle on the host used to verify the etcd endpoints; mounted into the etcdctl container (overrides the member's CA)")
 	rootCmd.AddCommand(etcdctlCmd)
 }
 
@@ -37,7 +39,8 @@ Examples:
   pg etcdctl get foo
   pg etcdctl endpoint status -- -w table
   pg etcdctl get foo -- --hex
-  ETCDCTL_ENDPOINTS=http://127.0.0.1:2381 pg etcdctl member list`,
+  ETCDCTL_ENDPOINTS=http://127.0.0.1:2381 pg etcdctl member list
+  ETCDCTL_ENDPOINTS=https://10.0.0.9:2379 pg etcdctl --ca /path/to/ca.crt member list`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := loadConfigForDSN(); err != nil {
@@ -67,6 +70,16 @@ Examples:
 				opts.Username = ec.AuthUser
 				opts.Password = ec.AuthPassword
 			}
+		}
+		if caFlag, _ := cmd.Flags().GetString("ca"); caFlag != "" {
+			caPath, err := filepath.Abs(caFlag)
+			if err != nil {
+				return fmt.Errorf("--ca: %w", err)
+			}
+			if _, err := os.Stat(caPath); err != nil {
+				return fmt.Errorf("--ca: %w", err)
+			}
+			opts.CAFile = caPath
 		}
 
 		// Args after `--` (e.g. `-w table`, `--hex`) reach us stripped of the

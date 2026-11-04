@@ -231,6 +231,29 @@ pg addon remove etcd --name m1 --clean-data
 （同机成员自动继承，跨机成员必须传 `--password`）。一旦启用，停用认证同样需要
 重建集群。
 
+### 查看认证信息
+
+在任意本地配置有 etcd 成员的主机上，`pg etcdctl` 会自动注入凭据，可直接查询
+认证状态与用户 / 角色：
+
+```bash
+pg etcdctl auth status      # Authentication Status 与 AuthRevision
+pg etcdctl user list        # 集群用户（--auth 只创建 root）
+pg etcdctl user get root    # root 用户的角色
+pg etcdctl role list        # 角色列表
+pg etcdctl role get root    # root 角色的权限
+```
+
+查看密码（仅 `Auth: true` 时存在；密码保存在 `pg.yaml` 中，只能在配置有该成员
+的主机上读取）：
+
+```bash
+pg addon password etcd --name m1
+```
+
+`pg addon list` 也会显示每个成员的 `Auth: enabled` / `Auth: disabled`。当前版本
+不提供多用户 / RBAC 管理命令，etcd 的原生命令都可经 `pg etcdctl` 透传。
+
 ## 命令
 
 ### 创建第一个成员
@@ -358,6 +381,9 @@ Infra add-ons (etcd):
     Container:   pgcli-etcd-m1
 ```
 
+启用 TLS 的成员还会多显示一行 `CA:`，即客户端校验用的集群 CA 路径（可直接
+用于非成员主机的 `pg etcdctl --ca`）。
+
 ### 启动与停止
 
 宿主机重启或手动停掉后,无需重跑 install 即可把成员拉回来 —— 不会重新执行
@@ -453,34 +479,69 @@ pg addon install etcd --name d2 --data-dir /mnt/ssd/etcd
 ## 连接
 
 用 `pg etcdctl` —— 它在短生命周期容器里运行 etcd 的 **v3** 客户端，指向某个
-成员的 client URL。目标端点取自 `ETCDCTL_ENDPOINTS`，未设置时回退到配置中的
-第一个成员。etcdctl 的原生参数放在 `--` 之后：
+成员的 client URL。本机无需已有成员容器或镜像（镜像按需拉取）。etcdctl 的原生
+参数放在 `--` 之后。
+
+### 从成员主机连接（引导或加入节点）
+
+只要本机 `pg.yaml` 里配置有该集群的任一成员 —— 无论它是引导节点还是后来加入
+的节点 —— `pg etcdctl` 都会自动注入该成员的 CA（`ETCDCTL_CACERT`）与凭据
+（`ETCDCTL_USER`，密码不出现在 `ps` 中），无需额外参数：
 
 ```bash
+pg etcdctl endpoint health
 pg etcdctl member list
+pg etcdctl put foo bar
 pg etcdctl endpoint status -- -w table
-pg etcdctl endpoint health
-pg etcdctl put foo bar
-pg etcdctl get foo -- --hex
 ```
 
-`pg etcdctl` 始终使用 v3 API（`ETCDCTL_API=3`，etcdctl 的默认值）；不支持 v2。
-
-当回退成员启用了 TLS 和/或认证时，`pg etcdctl` 会自动注入：通过
-`ETCDCTL_CACERT` 传入该成员的 CA，通过 `ETCDCTL_USER` 传入凭据（密码不会出现在
-`ps` 里）：
+未设置 `ETCDCTL_ENDPOINTS` 时回退到本地配置的第一个成员。要访问同一集群的另
+一个成员，显式设置即可 —— 注入的 CA / 凭据来自本地成员，但同一集群共用同一
+CA 和认证用户，因此同样有效：
 
 ```bash
-pg etcdctl endpoint health
-pg etcdctl put foo bar
+ETCDCTL_ENDPOINTS=https://10.0.0.2:2379 pg etcdctl member list
 ```
 
-若 `ETCDCTL_ENDPOINTS` 指向另一个集群，可在 `--` 之后覆盖注入值：
+密码可在任意配置有该成员的主机上用 `pg addon password etcd --name m1` 取回。
+
+### 从非成员主机连接
+
+本机没有配置任何 etcd 成员（例如一台只作客户端的第三台机器）时，`pg etcdctl`
+不会注入任何内容，需要显式提供端点、CA 与凭据：
+
+1. 在任意成员主机上用 `pg addon list` 的 `CA:` 行查看该节点的 CA 路径，再把该
+   文件复制到客户端主机（自动生成模式下路径为
+   `~/.pgcli/tls/etcd/<cluster>/ca.crt`；手动分发 / BYO 模式使用你自有的 CA）：
+
+   ```bash
+   # 在成员主机上查看该节点的 CA 路径
+   ssh member-host 'pg addon list' | grep "CA:"
+
+   # 按上面显示的路径复制（示例为自动生成模式）
+   scp member-host:/root/.pgcli/tls/etcd/pgcli-etcd/ca.crt /tmp/etcd-ca.crt
+   ```
+
+2. 指向成员的 client URL，`--ca` 传宿主机 CA 路径（pg 会把它挂载进 etcdctl
+   容器），认证凭据通过 `--` 之后的 `--user` 传入：
+
+   ```bash
+   ETCDCTL_ENDPOINTS=https://10.0.0.1:2379 pg etcdctl \
+     --ca /tmp/etcd-ca.crt endpoint health -- --user root:<password>
+   ```
+
+   密码可在成员主机上 `pg addon password etcd --name m1` 取回。
+
+在 `--` 之后传给 etcdctl 的 `--cacert` 指的是**容器内**路径，宿主机路径不可用
+（用 `--ca` 代替）。若只想快速确认、不校验证书，可跳过校验 —— etcdctl 只有在
+构建了 TLS 配置后才理会 skip-verify，所以还要关掉它默认的明文传输：
 
 ```bash
-ETCDCTL_ENDPOINTS=https://10.0.0.9:2379 pg etcdctl \
-  member list -- --cacert /path/to/other-ca.crt --user root:password
+ETCDCTL_ENDPOINTS=https://10.0.0.1:2379 pg etcdctl \
+  member list -- --insecure-transport=false --insecure-skip-tls-verify
 ```
+
+非成员主机需要能访问成员的 client 端口（按实际端口放行防火墙，例如 2379/tcp）。
 
 ## 拓扑与 Quorum
 
