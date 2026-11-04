@@ -84,7 +84,7 @@
       {{- if $i}}<span class="sep">/</span>{{end -}}
       {{- if $c.Current}}<strong>{{$c.Name}}</strong>{{else}}<a href="{{$c.Href}}">{{$c.Name}}</a>{{end -}}
     {{- end -}}
-    {{- if .HasParent}}<span class="sep">·</span><a href="{{.ParentHref}}">..</a>{{end -}}
+    {{- if .HasParent}}<span class="sep">·</span><a href="{{.ParentHref}}">Up directory</a>{{end -}}
   </nav>
   <table>
     <thead>

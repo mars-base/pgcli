@@ -107,6 +107,21 @@ func TestHTTPURL(t *testing.T) {
 	}
 }
 
+func TestSelectHTTPTargets(t *testing.T) {
+	states := []httpServerState{{Name: "a"}, {Name: "b"}}
+
+	if got := selectHTTPTargets(states, nil, false); len(got) != 2 {
+		t.Errorf("no names = %+v, want every server", got)
+	}
+	if got := selectHTTPTargets(states, nil, true); len(got) != 2 {
+		t.Errorf("--all = %+v, want every server", got)
+	}
+	got := selectHTTPTargets(states, []string{"b", "missing"}, false)
+	if len(got) != 1 || got[0].Name != "b" {
+		t.Errorf("named = %+v, want only b", got)
+	}
+}
+
 func TestHTTPCertHostsWildcardCoverLoopback(t *testing.T) {
 	hosts := httpCertHosts("0.0.0.0")
 	joined := make(map[string]bool, len(hosts))

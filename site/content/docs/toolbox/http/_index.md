@@ -28,6 +28,7 @@ servers can run at once.
 ```bash
 pg http start
 pg http status
+pg http restart <NAME>
 pg http stop
 ```
 
@@ -104,7 +105,7 @@ To use a certificate from `pg cert` or another tool, pass `--tls-cert` and
 used in place (not copied). Include every address clients will use in the
 certificate's SANs.
 
-## Inspect and stop
+## Inspect, restart and stop
 
 ```bash
 pg http status
@@ -118,6 +119,19 @@ http-18081              412410   running   https://0.0.0.0:18081/               
 
 A state file whose process is gone is marked `stale`; the next `stop` removes
 it.
+
+Restart stops the server gracefully like `stop`, then starts it again from the
+name, listen address, directory, TLS certificate and port recorded in its state
+file — no need to repeat the `start` flags. If the original port has been taken
+in the meantime, the next free port is used; a generated certificate is
+re-signed when it is close to expiry or no longer covers the listen address:
+
+```bash
+pg http restart http-18080        # one server
+pg http restart http-18080 docs   # several
+pg http restart                   # no names = every server
+pg http restart --all
+```
 
 ```bash
 pg http stop http-18080           # one server

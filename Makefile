@@ -17,8 +17,22 @@ build:
 gencert:
 	go build -o bin/gencert ./tools/gencert
 
-install:
-	go build -ldflags "$(LDFLAGS)" -o $(GOPATH)/bin/$(BINARY) .
+# Same install-directory rule as scripts/install.sh: /usr/local/bin when it is
+# writable or passwordless sudo works, otherwise ~/.local/bin.
+INSTALL_DIR ?= $(shell \
+if [ -w /usr/local/bin ] 2>/dev/null; then echo /usr/local/bin; \
+elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then echo /usr/local/bin; \
+else echo "$$HOME/.local/bin"; fi)
+
+install: build
+	@mkdir -p "$(INSTALL_DIR)" 2>/dev/null || sudo mkdir -p "$(INSTALL_DIR)"
+	@if [ -w "$(INSTALL_DIR)" ]; then \
+		install -m 0755 bin/$(BINARY) "$(INSTALL_DIR)/$(BINARY)"; \
+	else \
+		sudo install -m 0755 bin/$(BINARY) "$(INSTALL_DIR)/$(BINARY)"; \
+	fi
+	@echo "  [OK] $(BINARY) installed to $(INSTALL_DIR)/$(BINARY)"
+	@case ":$$PATH:" in *":$(INSTALL_DIR):"*) ;; *) echo "  NOTE: add $(INSTALL_DIR) to your PATH";; esac
 
 build-all:
 	@for target in $(PLATFORMS); do \

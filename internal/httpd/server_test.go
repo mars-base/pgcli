@@ -135,6 +135,19 @@ func TestHeadRequest(t *testing.T) {
 	}
 }
 
+func TestSubdirectoryShowsParentLink(t *testing.T) {
+	h := Handler(testTree(t))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sub/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `<a href="/">Up directory</a>`) {
+		t.Errorf("subdirectory listing missing Up directory link:\n%s", body)
+	}
+}
+
 func TestCrumbsAndParent(t *testing.T) {
 	crumbs := crumbsFor("/a/b c")
 	if len(crumbs) != 3 {

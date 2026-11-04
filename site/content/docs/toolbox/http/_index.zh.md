@@ -26,6 +26,7 @@ cascade:
 ```bash
 pg http start
 pg http status
+pg http restart <NAME>
 pg http stop
 ```
 
@@ -98,7 +99,7 @@ curl --cacert ~/.pgcli/http/tls/http-18080/cert.pem \
 会校验证书与私钥匹配、处于有效期内，并直接引用（不复制）。请确保证书 SAN 包含
 客户端会使用的所有地址。
 
-## 查看与停止
+## 查看、重启与停止
 
 ```bash
 pg http status
@@ -111,6 +112,17 @@ http-18081              412410   running   https://0.0.0.0:18081/               
 ```
 
 进程已退出的状态文件会标记为 `stale`；下次 `stop` 时自动清理。
+
+重启会先按 `stop` 的方式优雅停止，再用状态文件里记录的名称、监听地址、目录、
+TLS 证书与端口重新拉起 —— 不需要重复传 `start` 的参数。原端口若已被占用，会
+自动尝试下一个空闲端口；自动生成的证书在临近过期或不再覆盖监听地址时重新签发：
+
+```bash
+pg http restart http-18080        # 重启一个
+pg http restart http-18080 docs   # 重启多个
+pg http restart                   # 不带名字 = 全部重启
+pg http restart --all
+```
 
 ```bash
 pg http stop http-18080           # 停止一个

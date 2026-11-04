@@ -41,6 +41,7 @@ func init() {
 	rootCmd.AddCommand(httpCmd)
 	httpCmd.AddCommand(httpStartCmd)
 	httpCmd.AddCommand(httpStopCmd)
+	httpCmd.AddCommand(httpRestartCmd)
 	httpCmd.AddCommand(httpStatusCmd)
 	httpCmd.AddCommand(httpServeCmd)
 
@@ -54,6 +55,9 @@ func init() {
 
 	httpStopCmd.Flags().Bool("all", false, "stop every pg http server")
 	httpStopCmd.Flags().Duration("timeout", httpStopGrace, "how long to wait for a graceful shutdown before SIGKILL")
+
+	httpRestartCmd.Flags().Bool("all", false, "restart every pg http server")
+	httpRestartCmd.Flags().Duration("timeout", httpStopGrace, "how long to wait for a graceful shutdown before SIGKILL")
 
 	httpServeCmd.Flags().String("name", "", "server name (for status/stop bookkeeping)")
 	httpServeCmd.Flags().Int("port", httpDefaultPort, "listen port")
@@ -87,6 +91,7 @@ Examples:
   pg http start --listen 0.0.0.0 --port 18080 --dir /srv/share
   pg http start --name docs --tls --dir ~/docs
   pg http status
+  pg http restart docs
   pg http stop docs
   pg http stop --all`,
 }
@@ -102,6 +107,18 @@ var httpStopCmd = &cobra.Command{
 	Use:   "stop [NAME...]",
 	Short: "Stop one or more pg http servers",
 	RunE:  runHTTPStop,
+}
+
+var httpRestartCmd = &cobra.Command{
+	Use:   "restart [NAME...]",
+	Short: "Restart one or more pg http servers with their recorded settings",
+	Long: `restart stops each server gracefully, then starts it again with the listen
+address, directory, TLS certificate and port recorded in its state file.
+
+If the original port was taken in the meantime, the next free port is used.
+Generated certificates are renewed when they are close to expiry or no longer
+cover the listen address.`,
+	RunE: runHTTPRestart,
 }
 
 var httpStatusCmd = &cobra.Command{
@@ -477,7 +494,6 @@ func runHTTPStop(cmd *cobra.Command, args []string) error {
 	if grace <= 0 {
 		grace = httpStopGrace
 	}
-	names := args
 	base := httpBaseDir()
 	serversDir := httpServersDir(base)
 	states := loadHTTPStates(serversDir)
@@ -486,50 +502,152 @@ func runHTTPStop(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	for _, st := range selectHTTPTargets(states, args, all) {
+		if err := stopHTTPServer(serversDir, &st, grace); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// selectHTTPTargets resolves names against the recorded servers; no names (or
+// --all) selects every server, mirroring stop.
+func selectHTTPTargets(states []httpServerState, names []string, all bool) []httpServerState {
 	byName := make(map[string]httpServerState, len(states))
 	for _, st := range states {
 		byName[st.Name] = st
 	}
-	var targets []httpServerState
 	if all || len(names) == 0 {
-		targets = states
-	} else {
-		for _, n := range names {
-			st, ok := byName[n]
-			if !ok {
-				fmt.Printf("  [!] no pg http server named %q\n", n)
-				continue
+		return states
+	}
+	var targets []httpServerState
+	for _, n := range names {
+		st, ok := byName[n]
+		if !ok {
+			fmt.Printf("  [!] no pg http server named %q\n", n)
+			continue
+		}
+		targets = append(targets, st)
+	}
+	return targets
+}
+
+func stopHTTPServer(serversDir string, st *httpServerState, grace time.Duration) error {
+	statePath := filepath.Join(serversDir, st.Name+".json")
+	readyPath := filepath.Join(serversDir, st.Name+".ready")
+	if !httpServerAlive(st) {
+		os.Remove(statePath)
+		os.Remove(readyPath)
+		fmt.Printf("  [!] %s (pid %d) was not running — cleaned up its state\n", st.Name, st.PID)
+		return nil
+	}
+	fmt.Printf("-> Stopping %s (pid %d)...\n", st.Name, st.PID)
+	if err := syscall.Kill(st.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("stopping %s: %w", st.Name, err)
+	}
+	deadline := time.Now().Add(grace)
+	for httpServerAlive(st) && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if httpServerAlive(st) {
+		_ = syscall.Kill(st.PID, syscall.SIGKILL)
+		time.Sleep(100 * time.Millisecond)
+	}
+	os.Remove(statePath)
+	os.Remove(readyPath)
+	fmt.Printf("✓ %s stopped\n", st.Name)
+	return nil
+}
+
+func runHTTPRestart(cmd *cobra.Command, args []string) error {
+	all, _ := cmd.Flags().GetBool("all")
+	grace, _ := cmd.Flags().GetDuration("timeout")
+	if grace <= 0 {
+		grace = httpStopGrace
+	}
+	base := httpBaseDir()
+	serversDir := httpServersDir(base)
+	states := loadHTTPStates(serversDir)
+	if len(states) == 0 {
+		fmt.Println("No pg http servers configured.")
+		return nil
+	}
+
+	for _, st := range selectHTTPTargets(states, args, all) {
+		if err := stopHTTPServer(serversDir, &st, grace); err != nil {
+			return err
+		}
+		newSt, certNotAfter, err := relaunchHTTPServer(base, st)
+		if err != nil {
+			return err
+		}
+		printHTTPStarted(newSt, certNotAfter)
+	}
+	return nil
+}
+
+// relaunchHTTPServer starts a stopped server from its recorded state. TLS
+// material is re-validated (generated certificates are renewed when needed)
+// before the child is launched.
+func relaunchHTTPServer(base string, st httpServerState) (*httpServerState, time.Time, error) {
+	info, err := os.Stat(st.Dir)
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("--dir %s: %w", st.Dir, err)
+	}
+	if !info.IsDir() {
+		return nil, time.Time{}, fmt.Errorf("--dir %s is not a directory", st.Dir)
+	}
+	listen := st.Listen
+	if listen == "" {
+		listen = httpDefaultListen
+	}
+	port := st.Port
+	if port <= 0 {
+		port = httpDefaultPort
+	}
+
+	serversDir := httpServersDir(base)
+	certPath, keyPath := st.CertFile, st.KeyFile
+	var certNotAfter time.Time
+	if st.TLS {
+		genDir := filepath.Join(base, "http", "tls", st.Name)
+		if certPath == "" || filepath.Clean(filepath.Dir(certPath)) == filepath.Clean(genDir) {
+			certPath, keyPath, certNotAfter, err = ensureHTTPCert(genDir, httpCertHosts(listen))
+			if err != nil {
+				return nil, time.Time{}, fmt.Errorf("preparing TLS certificate: %w", err)
 			}
-			targets = append(targets, st)
+		} else {
+			certNotAfter, err = validateHTTPCertPair(certPath, keyPath)
+			if err != nil {
+				return nil, time.Time{}, err
+			}
 		}
 	}
 
-	for _, st := range targets {
-		statePath := filepath.Join(serversDir, st.Name+".json")
-		readyPath := filepath.Join(serversDir, st.Name+".ready")
-		if !httpServerAlive(&st) {
-			os.Remove(statePath)
-			os.Remove(readyPath)
-			fmt.Printf("  [!] %s (pid %d) was not running — cleaned up its state\n", st.Name, st.PID)
-			continue
-		}
-		fmt.Printf("-> Stopping %s (pid %d)...\n", st.Name, st.PID)
-		if err := syscall.Kill(st.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-			return fmt.Errorf("stopping %s: %w", st.Name, err)
-		}
-		deadline := time.Now().Add(grace)
-		for httpServerAlive(&st) && time.Now().Before(deadline) {
-			time.Sleep(100 * time.Millisecond)
-		}
-		if httpServerAlive(&st) {
-			_ = syscall.Kill(st.PID, syscall.SIGKILL)
-			time.Sleep(100 * time.Millisecond)
-		}
-		os.Remove(statePath)
-		os.Remove(readyPath)
-		fmt.Printf("✓ %s stopped\n", st.Name)
+	self, err := os.Executable()
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("locating the pg executable: %w", err)
 	}
-	return nil
+	logPath := filepath.Join(serversDir, st.Name+".log")
+	readyFile := filepath.Join(serversDir, st.Name+".ready")
+	for p := port; p < port+httpPortTries; p++ {
+		newSt, err := launchHTTPServer(self, st.Name, listen, p, st.Dir, certPath, keyPath, st.TLS, logPath, readyFile)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		if newSt == nil {
+			continue // port busy; try the next one
+		}
+		if newSt.Port != port {
+			fmt.Printf("  [!] port %d is in use, using %d\n", port, newSt.Port)
+		}
+		if err := writeHTTPState(serversDir, *newSt); err != nil {
+			_ = syscall.Kill(newSt.PID, syscall.SIGTERM)
+			return nil, time.Time{}, fmt.Errorf("writing state file: %w", err)
+		}
+		return newSt, certNotAfter, nil
+	}
+	return nil, time.Time{}, fmt.Errorf("no free port in %d..%d", port, port+httpPortTries-1)
 }
 
 func runHTTPStatus(cmd *cobra.Command, _ []string) error {
