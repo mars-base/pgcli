@@ -52,13 +52,11 @@ pg restore --time "2026-08-26 15:30:00+00" --promote --force
 **rebuild every replica against the restored primary**. Promotion switches the
 primary to a new timeline, so any replica still streaming from the old one is on
 a diverged timeline and cannot follow: destroy it and recreate it
-(`pg destroy -i <replica>` then `pg replica create`, or `pg replica repoint`),
-which re-runs `pg_basebackup` from scratch. Also make sure the restored primary
-reaches a clean running state before deriving new replicas from it — a
-`pg_basebackup` taken while the `recovery_target_*` settings from the restore are
-still live in `postgresql.auto.conf` bakes them into the replica, and promoting
-that replica later fails with `recovery ended before configured recovery target
-was reached`.
+(`pg destroy -i <replica> --clean-data` then `pg replica create`, or
+`pg replica repoint`), which re-runs `pg_basebackup` from scratch. A `pg restore
+--promote` clears the `recovery_target_*` / `restore_command` settings that
+pgBackRest's restore leaves in `postgresql.auto.conf` before it finishes, so
+replicas derived from the restored primary never inherit them.
 
 ## Patroni cluster
 

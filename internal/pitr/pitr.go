@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -303,6 +304,7 @@ func (m *Manager) Restore(targetTime time.Time, promote, dryRun, tailLogs bool) 
 						return fmt.Errorf("promoting after recovery: %w\n%s", err, out)
 					}
 					fmt.Println("[OK] Instance promoted to read-write")
+					m.clearPostPromoteRecoveryConfig(os.Stdout)
 					return nil
 				}
 				fmt.Printf("  Paused at %s, target is %s — full restore required\n",
@@ -353,6 +355,10 @@ func (m *Manager) Restore(targetTime time.Time, promote, dryRun, tailLogs bool) 
 		fmt.Printf("  [!] backup infra refresh warning: %v\n", err)
 	}
 
+	if promote {
+		m.clearPostPromoteRecoveryConfig(os.Stdout)
+	}
+
 	fmt.Println("[OK] Restore complete")
 	return nil
 }
@@ -381,6 +387,7 @@ func (m *Manager) RestoreToWriter(w io.Writer, targetTime time.Time, promote boo
 						return fmt.Errorf("promoting after recovery: %w\n%s", err, out)
 					}
 					fmt.Fprintln(w, "[OK] Instance promoted to read-write")
+					m.clearPostPromoteRecoveryConfig(w)
 					return nil
 				}
 				fmt.Fprintf(w, "  Paused at %s, target is %s — full restore required\n",
@@ -419,10 +426,83 @@ func (m *Manager) RestoreToWriter(w io.Writer, targetTime time.Time, promote boo
 		fmt.Fprintf(w, "  [!] backup infra refresh warning: %v\n", err)
 	}
 
+	if promote {
+		m.clearPostPromoteRecoveryConfig(w)
+	}
+
 	fmt.Fprintln(w, "[OK] Restore complete")
 	return nil
 }
 
+// clearPostPromoteRecoveryConfig strips the recovery settings pgBackRest's
+// restore left in postgresql.auto.conf once the instance has been promoted:
+// recovery_target_time, recovery_target_action and restore_command. A
+// promoted instance no longer needs them, and a replica later created with
+// pg_basebackup would inherit them verbatim, replay up to the stale target
+// and then follow recovery_target_action — self-promoting out of replication.
+// These are postmaster-level settings, so ALTER SYSTEM RESET only takes
+// effect after a container restart (a reload leaves the live values in
+// place; verified against a running instance).
+//
+// Best-effort: by the time this runs the restore itself has succeeded, so a
+// failure here is reported with manual cleanup instructions rather than
+// failing the command.
+func (m *Manager) clearPostPromoteRecoveryConfig(w io.Writer) {
+	// Wait for recovery to end. On the full path the container has just
+	// started and may still be replaying WAL toward the target; resetting the
+	// recovery settings mid-replay would change the target itself (or abort
+	// the promote), so only touch them once pg_is_in_recovery() is false.
+	promoted := false
+	for i := 0; i < 60; i++ {
+		out, err := m.podman.Exec("psql", "-U", m.cfg.Postgres.User, "-d", m.cfg.Postgres.Database,
+			"-tAc", "SELECT pg_is_in_recovery()")
+		if err == nil && strings.TrimSpace(out) == "f" {
+			promoted = true
+			break
+		}
+		if i == 0 {
+			fmt.Fprintln(w, "  Waiting for promotion to complete...")
+		}
+		time.Sleep(5 * time.Second)
+	}
+	if !promoted {
+		fmt.Fprintln(w, "  [!] still in recovery after 5m — skipped recovery-config cleanup;")
+		fmt.Fprintln(w, "      after promotion, run: ALTER SYSTEM RESET recovery_target_time;")
+		fmt.Fprintln(w, "      ALTER SYSTEM RESET recovery_target_action; ALTER SYSTEM RESET restore_command;")
+		fmt.Fprintln(w, "      then restart the container (they are postmaster-level)")
+		return
+	}
+
+	for _, name := range []string{"recovery_target_time", "recovery_target_action", "restore_command"} {
+		if _, err := m.podman.Exec("psql", "-U", m.cfg.Postgres.User, "-d", m.cfg.Postgres.Database,
+			"-c", "ALTER SYSTEM RESET "+name); err != nil {
+			fmt.Fprintf(w, "  [!] could not reset %s: %v\n", name, err)
+			fmt.Fprintln(w, "      leftover recovery_target_* would be copied into future replicas — clean postgresql.auto.conf manually before creating one")
+			return
+		}
+	}
+
+	// The file is already clean (ALTER SYSTEM rewrites it immediately, so
+	// future pg_basebackups are safe), but the running postmaster keeps the
+	// old values until restart. Do the restart now while the instance is
+	// idle instead of leaving a stale SHOW for the next operator.
+	fmt.Fprintln(w, "  Restarting to apply the cleaned recovery settings...")
+	if err := m.podman.StopContainer(); err != nil {
+		fmt.Fprintf(w, "  [!] restart failed at stop: %v — run pg stop/start -i to apply\n", err)
+		return
+	}
+	if err := m.podman.StartContainer(); err != nil {
+		fmt.Fprintf(w, "  [!] restart failed at start: %v — run pg start -i\n", err)
+		return
+	}
+	for i := 0; i < 30; i++ {
+		if ready, _ := m.podman.PGIsReady(); ready {
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	fmt.Fprintln(w, "  [OK] Recovery settings cleared")
+}
 
 func (m *Manager) pgbackrest(tailLogs bool, args ...string) (string, error) {
 	slog.Debug("pgbackrest", "args", args)

@@ -43,12 +43,11 @@ pg restore --time "2026-08-26 15:30:00+00" --promote --force
 
 **注意：** `--promote` 之后，在进行进一步的 PITR 之前需要创建新的完整快照——并且
 **所有副本都要对着恢复后的主实例重建**。promote 会把主实例切到一条新时间线，仍从
-旧时间线流式传输的副本无法跟进：销毁并按 `pg destroy -i <replica>` +
-`pg replica create`（或 `pg replica repoint`）重建，`pg_basebackup` 会从头再做一次。
-另外，从恢复后的主实例派生新副本之前，先确认主实例已到干净运行态——恢复仍在进行
-时 `postgresql.auto.conf` 里还带着 `recovery_target_*` 设置，此时做的
-`pg_basebackup` 会把它们原样烤进副本，日后 promote 那个副本会以
-`recovery ended before configured recovery target was reached` 失败。
+旧时间线流式传输的副本已经发散、无法跟进：先销毁再重建（`pg destroy -i <replica>
+--clean-data` + `pg replica create`，或 `pg replica repoint`），`pg_basebackup`
+会从头再做一次。`pg restore --promote` 在收尾时会自动清掉 pgBackRest 恢复写进
+`postgresql.auto.conf` 的 `recovery_target_*` / `restore_command` 残留，因此从
+恢复后的主实例派生的新副本不会继承这些设置。
 
 ## Patroni 集群
 
