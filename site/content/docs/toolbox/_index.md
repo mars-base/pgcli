@@ -23,4 +23,5 @@ Tools and guides that extend pgcli beyond core instance management.
 - [SQLite + Litestream](./sqlite/) — Manage host-local SQLite databases with continuous S3 backups
 - [Daemon](./daemon/) — Run long-lived host commands such as webhook receivers in the background
 - [TimescaleDB](./timescaledb/) — Time-series hypertables and time_bucket analytics on PostgreSQL
+- [HTTP File Server](./http/) — Serve a directory over HTTP(S) with an autoindex listing and per-file copy buttons
 {.cards}

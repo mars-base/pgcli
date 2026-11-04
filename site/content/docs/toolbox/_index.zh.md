@@ -23,4 +23,5 @@ cascade:
 - [SQLite + Litestream](./sqlite/) — 管理宿主机 SQLite 数据库并持续备份到 S3
 - [Daemon](./daemon/) — 在宿主机后台运行 webhook 接收端等长期命令
 - [TimescaleDB](./timescaledb/) — 在 PostgreSQL 上使用时序 hypertable 和 time_bucket 分析
+- [HTTP 文件服务器](./http/) — 通过 HTTP(S) 共享目录，提供 autoindex 列表和每文件复制按钮
 {.cards}

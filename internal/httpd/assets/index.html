@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<style>
+  :root {
+    --fg: #1f2328;
+    --muted: #656d76;
+    --border: #d0d7de;
+    --bg: #ffffff;
+    --row: #f6f8fa;
+    --accent: #0969da;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #e6edf3;
+      --muted: #8d96a0;
+      --border: #30363d;
+      --bg: #0d1117;
+      --row: #161b22;
+      --accent: #4493f8;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 2rem 1rem;
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 1.1rem; font-weight: 600; margin: 0 0 .75rem; }
+  nav.crumbs { color: var(--muted); margin-bottom: 1rem; word-break: break-all; }
+  nav.crumbs a { color: var(--accent); text-decoration: none; }
+  nav.crumbs a:hover { text-decoration: underline; }
+  nav.crumbs span.sep { padding: 0 .35rem; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: .8rem; text-transform: uppercase; letter-spacing: .03em; }
+  tr:hover td { background: var(--row); }
+  td.name a { color: var(--accent); text-decoration: none; word-break: break-all; }
+  td.name a:hover { text-decoration: underline; }
+  td.name a.dir { font-weight: 600; }
+  td.size, td.mtime { color: var(--muted); white-space: nowrap; }
+  td.actions { width: 1%; white-space: nowrap; position: relative; }
+  button.copy {
+    font: inherit;
+    font-size: .75rem;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: .1rem .5rem;
+    cursor: pointer;
+  }
+  button.copy:hover { color: var(--accent); border-color: var(--accent); }
+  .copied-pop {
+    position: absolute;
+    right: 100%;
+    top: 50%;
+    transform: translate(-6px, -50%);
+    background: var(--fg);
+    color: var(--bg);
+    font-size: .72rem;
+    padding: .1rem .45rem;
+    border-radius: 5px;
+    white-space: nowrap;
+    pointer-events: none;
+    animation: fade .15s ease-out;
+  }
+  @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+  .empty { color: var(--muted); padding: 1rem .6rem; }
+  footer { margin-top: 1.5rem; color: var(--muted); font-size: .75rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Directory listing for {{.Path}}</h1>
+  <nav class="crumbs">
+    {{- range $i, $c := .Crumbs -}}
+      {{- if $i}}<span class="sep">/</span>{{end -}}
+      {{- if $c.Current}}<strong>{{$c.Name}}</strong>{{else}}<a href="{{$c.Href}}">{{$c.Name}}</a>{{end -}}
+    {{- end -}}
+    {{- if .HasParent}}<span class="sep">·</span><a href="{{.ParentHref}}">..</a>{{end -}}
+  </nav>
+  <table>
+    <thead>
+      <tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr>
+    </thead>
+    <tbody>
+      {{- range .Entries}}
+      <tr>
+        <td class="name"><a class="{{if .IsDir}}dir{{else}}file{{end}}" href="{{.Href}}">{{.Name}}{{if .IsDir}}/{{end}}</a></td>
+        <td class="size">{{.Size}}</td>
+        <td class="mtime">{{.ModTime}}</td>
+        <td class="actions">{{if not .IsDir}}<button class="copy" type="button" data-url="{{.Href}}" title="Copy link">copy</button>{{end}}</td>
+      </tr>
+      {{- else}}
+      <tr><td colspan="4" class="empty">This directory is empty.</td></tr>
+      {{- end}}
+    </tbody>
+  </table>
+  <footer>pg http</footer>
+</div>
+<script>
+(function () {
+  async function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (e) { /* fall through to execCommand */ }
+    }
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    document.body.removeChild(ta);
+    return ok;
+  }
+
+  function showPopup(btn, text) {
+    var old = btn.parentElement.querySelector('.copied-pop');
+    if (old) old.remove();
+    var pop = document.createElement('span');
+    pop.className = 'copied-pop';
+    pop.textContent = text;
+    btn.parentElement.appendChild(pop);
+    setTimeout(function () { pop.remove(); }, 1500);
+  }
+
+  document.querySelectorAll('button.copy').forEach(function (btn) {
+    btn.addEventListener('click', async function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      var url = location.origin + btn.getAttribute('data-url');
+      var ok = await copyText(url);
+      showPopup(btn, ok ? 'copyed' : 'copy failed');
+    });
+  });
+})();
+</script>
+</body>
+</html>
