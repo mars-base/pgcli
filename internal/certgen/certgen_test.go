@@ -101,6 +101,11 @@ func TestGenerateCA(t *testing.T) {
 	if crt.KeyUsage&x509.KeyUsageCertSign == 0 {
 		t.Error("CA missing CertSign usage")
 	}
+	// Go's verifier applies a CA's EKU to every chain below it; a restricted
+	// root could not sign client certs (etcd raft peer mTLS).
+	if len(crt.ExtKeyUsage) != 0 || len(crt.UnknownExtKeyUsage) != 0 {
+		t.Errorf("CA must not restrict extended key usage, got %v / unknown %v", crt.ExtKeyUsage, crt.UnknownExtKeyUsage)
+	}
 }
 
 func TestGenerateRSA(t *testing.T) {

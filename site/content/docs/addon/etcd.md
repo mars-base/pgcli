@@ -9,12 +9,13 @@ as a **standalone, top-level addon** — shared infrastructure rather than a
 per-instance sidecar. This is useful as the DCS (Distributed Concurrent Store)
 backing a PostgreSQL HA stack, or as a general config/lock service.
 
-> **Security caveat:** pgcli-managed etcd members currently run **without**
-> TLS/CA certificates and **without** authentication/RBAC — any client that can
-> reach a client port has full read/write access. Plan a deployment around
-> network isolation (loopback binds by default; keep advertised ports inside a
-> trusted network). CA/TLS and auth/RBAC support is on the roadmap for a later
-> release.
+> **Security:** pgcli-managed etcd members run **without TLS or authentication
+> by default** — any client that can reach a client port has full read/write
+> access, so loopback binds and a trusted network are the baseline. Pass
+> `--tls` to encrypt the client listener and mutually authenticate raft peers,
+> and `--auth` to require a username/password. There is still no multi-user or
+> RBAC management: `--auth` creates a single user with the `root` role. See
+> [TLS and Authentication](#tls-and-authentication).
 
 Members are managed one `pg addon install etcd` at a time: the first member
 bootstraps a cluster, and later members join the same named cluster on the fly
@@ -25,11 +26,15 @@ bootstraps a cluster, and later members join the same named cluster on the fly
 - **Shared infrastructure:** etcd lives in the top-level `addons.etcd` map in
   `pg.yaml`, keyed by member name — not under any single instance.
 - **Host network, configurable bind:** each member runs with `--network host`.
-  By default its client/peer URLs bind to `127.0.0.1` — etcd ships without
-  authentication, so loopback-only exposure is the intended posture for a
-  single-host cluster. For cross-host clusters each member advertises a
-  reachable address (`--advertise-host`) while **also** listening on loopback,
-  so local `etcdctl` and remote peers both work.
+  By default its client/peer URLs bind to `127.0.0.1` — without `--tls` and
+  `--auth`, any reachable client has full access, so loopback-only exposure is
+  the default posture for a single-host cluster. For cross-host clusters each
+  member advertises a reachable address (`--advertise-host`) while **also**
+  listening on loopback, so local `etcdctl` and remote peers both work.
+- **Optional TLS and authentication:** `--tls` covers both interfaces (client
+  HTTPS plus raft peer mTLS), `--auth` adds a root-role username/password. Both
+  are cluster-wide and fixed at bootstrap — see
+  [TLS and Authentication](#tls-and-authentication).
 - **Dynamic membership:** the first member starts with
   `--initial-cluster-state new`; each subsequent member is registered with
   `etcdctl member add` against a running peer, then started with
@@ -102,6 +107,160 @@ cluster only needs a majority of *machines*.
 | Ports | unique per member on one host | may repeat, one host each |
 | Firewall | none (loopback only) | open every member's client+peer ports, both ways |
 | Survives machine loss | no | yes (with quorum) |
+
+## TLS and Authentication
+
+`--tls` and `--auth` are independent, optional, and **cluster-wide properties
+decided at bootstrap**. Every member of a cluster must agree on each:
+
+- `--tls` turns the client listener into HTTPS and the raft peer listener into
+  mTLS. Every member presents a leaf signed by one per-cluster CA, and peers
+  verify each other's certificates against that CA.
+- `--auth` enables etcd's auth store with a single user (default `root`) that
+  holds the `root` role, then turns authentication on.
+
+Without `--tls`, `--auth` still works, but the password crosses the network in
+clear text (pgcli prints a warning). With `--tls`, client traffic is encrypted
+and the server is authenticated; clients authenticate with the
+username/password.
+
+### Single host
+
+```bash
+pg addon install etcd --name m1 --tls --auth
+```
+
+When `--password` is omitted on the first install, pgcli generates one and
+prints it once:
+
+```
+  TLS:          on
+  Cluster CA:   ~/.pgcli/tls/etcd/pgcli-etcd/ca.crt
+  Auth:         on
+  Auth user:    root
+  Auth password: ********  (generated once; stored in pg.yaml)
+  Retrieve later with: pg addon password etcd --name m1
+```
+
+Retrieve it later with `pg addon password etcd --name m1`. Additional members
+on the same host inherit both settings (and the credentials) from the local
+peer automatically:
+
+```bash
+pg addon install etcd --name m2
+```
+
+Pass `--password` (and optionally `--root-user`) to choose your own; either
+flag implies `--auth`. Re-running install with a new `--password` rotates the
+root user's password.
+
+### Cross-host cluster
+
+The first member generates the CA locally; joining hosts fetch it from the
+cluster automatically — no certificate files to copy:
+
+```bash
+# host A (10.0.0.1) — bootstrap
+pg addon install etcd --name m1 --cluster prod \
+  --advertise-host 10.0.0.1 --tls --auth --password '<password>'
+
+# host B (10.0.0.2) — join over HTTPS; the CA is fetched automatically
+pg addon install etcd --name m2 --cluster prod \
+  --advertise-host 10.0.0.2 --join https://10.0.0.1:2379 \
+  --tls --auth --password '<password>'
+```
+
+- The `--join` scheme must match: `https://` with `--tls`, `http://` without.
+- When the remote cluster has auth enabled, `--password` (plus `--root-user` if
+  not `root`) is required — the CA fetch itself authenticates with those
+  credentials. Without them the join fails with an explicit error.
+- The CA fetch is trust-on-first-use: verification is skipped for that single
+  exchange, then all subsequent traffic is verified against the fetched CA.
+
+`--join` works on hosts with no local CA only when the cluster CA was generated
+by pgcli. With a manually distributed CA or BYO certificates, copy the CA to
+every host yourself (below).
+
+### Manual CA distribution (`pg cert --ca`)
+
+Instead of letting the first member generate a CA, mint one with
+`pg cert --ca` and place it on every host **before** installing. The pair must
+live at `<base_dir>/tls/etcd/<cluster>/` (`<base_dir>` defaults to `~/.pgcli`):
+
+```bash
+# mint straight into the target directory (run this once, on any host)
+mkdir -p ~/.pgcli/tls/etcd/prod
+pg cert --ca --host localhost,127.0.0.1 \
+  --cert-file ~/.pgcli/tls/etcd/prod/ca.crt \
+  --key-file  ~/.pgcli/tls/etcd/prod/ca.key
+
+# copy the pair to the same path on every other host
+scp ~/.pgcli/tls/etcd/prod/ca.crt ~/.pgcli/tls/etcd/prod/ca.key \
+  hostB:~/.pgcli/tls/etcd/prod/
+```
+
+The pair is read from that directory (the key kept at 0600) and reused as-is;
+each member then gets its own leaf signed by that CA. Use the same pair on
+every host, **including the bootstrap host**. This mode does **not** publish
+the CA into etcd — distribute it yourself.
+
+A CA generated by a current `pg cert --ca` carries **no extended key usage
+restriction**, so it can sign both server and client certificates (raft peers
+present their certificate as a client cert). Older pgcli releases wrote a
+serverAuth-only CA; peer mTLS rejects those chains, and pgcli now refuses such
+a CA up front with a message to regenerate it.
+
+### Bring your own member certificate
+
+`--tls-cert` / `--tls-key` use an externally issued leaf for this member
+(implies `--tls`); the optional `--tls-ca` is the CA clients verify against,
+defaulting to the leaf itself for a self-signed certificate. The leaf must
+carry the `clientAuth` EKU (or no EKU at all) because raft peers verify it as a
+client certificate. BYO material is never copied into etcd and the CA is not
+published — distribute both yourself.
+
+### What gets published, and the risk
+
+In generated-certificate mode (plain `--tls`, no BYO pair) the first member
+writes the cluster CA pair into etcd itself, at `/_pgcli/pki/etcd/ca.crt` and
+`/_pgcli/pki/etcd/ca.key`, so other hosts can fetch it during `--join`:
+
+- Before `--auth` is enabled, anyone who can reach the client port can read the
+  CA **private key** (it is published before auth is turned on, since the
+  publish itself runs without credentials). With `--auth`, reading it requires
+  the credentials.
+- Anyone holding that key can mint certificates this cluster trusts. Keep
+  client ports on a private network and firewall 2379, or avoid publication
+  entirely by distributing a `pg cert --ca` CA or BYO certificates manually.
+
+The install summary prints this warning whenever a generated CA is published.
+
+### Consumers that are not compatible
+
+Patroni's DCS configuration and RabbitMQ's etcd peer discovery still dial
+**plain HTTP without credentials**. Enabling `--tls` or `--auth` on a cluster
+they consume disconnects them. When pgcli finds such a consumer in the local
+config (a Patroni cluster whose etcd members/endpoints match this member, or a
+RabbitMQ instance using it for discovery), the install prints a `[!]` warning.
+Keep such etcd clusters plaintext and network-isolated until those integrations
+support TLS/auth.
+
+### Changing TLS/auth later
+
+TLS is fixed for the life of a member: its advertised peer URL scheme is part
+of the cluster's membership record. Switching an initialized member, or mixing
+TLS and non-TLS members in one cluster, is rejected — destroy and re-create the
+cluster instead:
+
+```bash
+pg addon remove etcd --name m1 --clean-data
+```
+
+Authentication is also cluster-wide. To enable it on an existing plaintext
+cluster, re-install the bootstrap member with `--auth --password ...` first,
+then re-install every other member with `--auth` so each records the
+credentials (same-host peers inherit them; cross-host members must pass
+`--password`). Disabling auth again requires re-creating the cluster.
 
 ## Commands
 
@@ -237,6 +396,8 @@ Infra add-ons (etcd):
     Status:      running
     Cluster:     pgcli-etcd
     Client URL:  http://127.0.0.1:2379
+    TLS:         off
+    Auth:        off
     Client port: 2379
     Peer port:   2380
     Image:       quay.io/coreos/etcd:v3.5.30
@@ -307,7 +468,13 @@ Verify with `pg etcdctl member list` afterward: the removed name should be gone.
 | `--image` | etcd image tag | `quay.io/coreos/etcd:v3.5.30` |
 | `--data-dir` | Data dir **root** — absolute, or relative to `base_dir`; each member uses `<root>/<name>/data` | `<base_dir>/addon/etcd` |
 | `--advertise-host` | Host advertised in this member's peer/client URLs (empty = `127.0.0.1` for single-host; set a LAN IP or FQDN for cross-host) | `127.0.0.1` |
-| `--join` | Client endpoint of an existing member to join cross-host, e.g. `http://10.0.0.1:2379` (implies `--initial-cluster-state existing`; requires `--advertise-host` and `--cluster`) | — |
+| `--join` | Client endpoint of an existing member to join cross-host, e.g. `https://10.0.0.1:2379` (implies `--initial-cluster-state existing`; requires `--advertise-host` and `--cluster`; scheme must match `--tls`) | — |
+| `--tls` | TLS on both interfaces — client HTTPS and raft peer mTLS; certificates generated under `<base_dir>/tls/etcd/<cluster>/` | off |
+| `--tls-cert` / `--tls-key` | Bring-your-own member certificate and key (implies `--tls`; the leaf needs the `clientAuth` EKU or no EKU) | — |
+| `--tls-ca` | CA clients verify against with `--tls-cert`/`--tls-key` (defaults to the certificate itself) | — |
+| `--auth` | Enable username/password authentication with a single root-role user | off |
+| `--root-user` | Authentication user name (implies `--auth`) | `root` |
+| `--password` | Authentication password (implies `--auth`); generated on first install when omitted | generated |
 
 Container name follows the namespace convention:
 `pgcli-etcd-<namespace>-<name>` (namespace omitted when unset).
@@ -355,6 +522,23 @@ pg etcdctl get foo -- --hex
 
 `pg etcdctl` always speaks the v3 API (`ETCDCTL_API=3`, etcdctl's default); v2
 is not supported.
+
+When the fallback member has TLS and/or authentication enabled, `pg etcdctl`
+injects them automatically: the member's CA through `ETCDCTL_CACERT` and its
+credentials through `ETCDCTL_USER` (so the password stays out of `ps`):
+
+```bash
+pg etcdctl endpoint health
+pg etcdctl put foo bar
+```
+
+If `ETCDCTL_ENDPOINTS` points at a different cluster, override the injected
+values after `--`:
+
+```bash
+ETCDCTL_ENDPOINTS=https://10.0.0.9:2379 pg etcdctl \
+  member list -- --cacert /path/to/other-ca.crt --user root:password
+```
 
 ## Topology & Quorum
 
@@ -408,6 +592,29 @@ addons:
       peer_port: 2380
 ```
 
+A TLS/authenticated member records the cluster-wide settings too:
+
+```yaml
+addons:
+  etcd:
+    m1:
+      name: m1
+      cluster_name: prod
+      advertise_host: 10.0.0.1
+      client_port: 2379
+      peer_port: 2380
+      tls: true
+      auth: true
+      auth_user: root
+      auth_password: example-password
+```
+
+`auth_password` is stored in clear text (like other addon secrets) and is what
+`pg addon password etcd --name m1` reads back. A BYO member additionally
+records `tls_cert_file`, `tls_key_file` and `tls_ca_file`; in generated-
+certificate mode those stay empty and the paths are derived from the cluster
+name under `<base_dir>/tls/etcd/<cluster>/`.
+
 ## Auto-start on Boot
 
 Containers also carry a `--restart unless-stopped` policy, which a per-container
@@ -438,3 +645,9 @@ member(s). `pg autostart status` lists every member's state.
 - **Reinstall is idempotent:** re-running `pg addon install etcd --name <m>`
   on a running member recreates its container with updated flags; a member
   already registered in the cluster is not re-added.
+- **TLS/auth are bootstrap decisions:** start cross-host clusters with
+  `--tls --auth` from the first member; an initialized member cannot switch
+  schemes without being destroyed and re-created.
+- **Manual and BYO certificates stay out of etcd:** only a CA that pgcli
+  generated is published for `--join` to fetch — distribute manual or BYO
+  material yourself.

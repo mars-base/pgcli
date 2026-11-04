@@ -48,40 +48,55 @@ Examples:
 			return fmt.Errorf("etcd manager: %w", err)
 		}
 
-		imageTag, defaultEndpoint := etcdctlTargets(cfg)
+		imageTag, defaultEndpoint, ec := etcdctlTargets(cfg)
 		// Endpoint source: ETCDCTL_ENDPOINTS (etcdctl-native) or the config's
 		// first member. If neither is present there is nowhere to talk to.
 		if defaultEndpoint == "" && os.Getenv("ETCDCTL_ENDPOINTS") == "" {
 			return fmt.Errorf("no etcd addon configured and ETCDCTL_ENDPOINTS is unset — install one with `pg addon install etcd --name <m>`, or export ETCDCTL_ENDPOINTS=http://127.0.0.1:<client-port>")
 		}
+		var opts podman.EtcdctlOpts
+		if ec != nil {
+			if ec.TLS {
+				ca, err := em.ClientCAFile(ec)
+				if err != nil {
+					return err
+				}
+				opts.CAFile = ca
+			}
+			if ec.Auth {
+				opts.Username = ec.AuthUser
+				opts.Password = ec.AuthPassword
+			}
+		}
 
 		// Args after `--` (e.g. `-w table`, `--hex`) reach us stripped of the
 		// `--` separator itself and in original order, so `args` is already
 		// exactly what etcdctl should receive.
-		return em.Etcdctl(imageTag, defaultEndpoint, args)
+		return em.Etcdctl(imageTag, defaultEndpoint, opts, args)
 	},
 }
 
-// etcdctlTargets picks the image tag and default client endpoint for the
-// etcdctl helper: the first etcd member (by name) in the config. The default
-// etcd image is used when no member is configured.
-func etcdctlTargets(cfg *config.Config) (imageTag, defaultEndpoint string) {
+// etcdctlTargets picks the image tag, default client endpoint and member
+// config for the etcdctl helper: the first etcd member (by name) in the
+// config. The default etcd image is used when no member is configured; the
+// member config is nil then.
+func etcdctlTargets(cfg *config.Config) (imageTag, defaultEndpoint string, ec *config.EtcdConfig) {
 	const defaultImage = "quay.io/coreos/etcd:v3.5.30"
 	if len(cfg.Addons.Etcd) == 0 {
-		return defaultImage, ""
+		return defaultImage, "", nil
 	}
 	names := make([]string, 0, len(cfg.Addons.Etcd))
 	for name := range cfg.Addons.Etcd {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	ec := cfg.Addons.Etcd[names[0]]
-	imageTag = ec.ImageTag
+	member := cfg.Addons.Etcd[names[0]]
+	imageTag = member.ImageTag
 	if imageTag == "" {
 		imageTag = defaultImage
 	}
-	if ec.ClientPort != 0 {
-		defaultEndpoint = fmt.Sprintf("http://127.0.0.1:%d", ec.ClientPort)
+	if member.ClientPort != 0 {
+		defaultEndpoint = fmt.Sprintf("%s://127.0.0.1:%d", member.ClientScheme(), member.ClientPort)
 	}
-	return imageTag, defaultEndpoint
+	return imageTag, defaultEndpoint, &member
 }

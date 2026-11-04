@@ -1292,7 +1292,7 @@ func init() {
 	addonInstallCmd.Flags().Int("cluster-replicas", 0, "redis native-cluster only: per-master replica count for the --cluster create you will run (default 0 = masters-only). Only shapes the suggested assemble command and node-count guidance — which nodes become followers is decided by Redis at create time, not here; the whole group inherits the first member's value")
 	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs, garage, redis, pgAdmin, Grafana, Gitea, DuckDB, VMCluster or VLCluster instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; garage default <base_dir>/addon/garage/<name>/data (its metadata dir is a sibling .../meta); seaweedfs default <base_dir>/addon/seaweedfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data; pgadmin default <base_dir>/addon/pgadmin/<name>/data; grafana default <base_dir>/addon/grafana/<name>/data; prometheus default <base_dir>/addon/prometheus/<name>/data; vmcluster default <base_dir>/addon/vmcluster/<name>/data (vmstorage only); vlcluster default <base_dir>/addon/vlcluster/<name>/data (vlstorage only); alertmanager default <base_dir>/addon/alertmanager/<name>/data; gitea default <base_dir>/addon/gitea/<name>/data; beegfs — ONE dir for the whole filesystem, its three services use <dir>/mgmtd, <dir>/meta and <dir>/storage, default root <base_dir>/addon/beegfs/<name>; duckdb default <base_dir>/addon/duckdb/<name>; influxdb default <base_dir>/addon/influxdb/<name>/data; clickhouse default <base_dir>/addon/clickhouse/<name>/data; clickhouse-keeper default <base_dir>/addon/clickhouse-keeper/<name>/data (its config and logs live in sibling dirs and may be overridden separately); kafka default <base_dir>/addon/kafka/<name>/data; rabbitmq default <base_dir>/addon/rabbitmq/<name>/data; rocketmq default <base_dir>/addon/rocketmq/<name>/data (broker store; cluster controller store is beside it)")
 	addonInstallCmd.Flags().String("advertise-host", "", "peer-visible host: etcd member peer/client URLs, redis native-cluster --cluster-announce-ip, garage cluster rpc_public_addr, and seaweedfs cluster weed -ip that peers dial (empty=127.0.0.1 single-host; set a LAN IP or FQDN for cross-host clusters — required on every garage or seaweedfs --cluster member; Kafka advertises this broker host:port to clients and may not be 0.0.0.0; in Kafka --cluster mode it is also this node's controller voter address, must be a concrete non-loopback IP, and is required on every fresh cluster install. RabbitMQ does not use --advertise-host: its peer-visible identity is --node-name NAME@HOST. RocketMQ advertises this host to clients and peers; required on every fresh cluster install and must be a concrete non-loopback IPv4 in cluster mode (standalone defaults to 127.0.0.1). ClickHouse advertises this host to peers (interserver) and is required on every fresh --cluster install; clickhouse-keeper advertises this host to Raft peers and is required on every fresh install (both must be concrete non-loopback addresses)")
-	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.0.0.12:2379 (implies --initial-cluster-state existing; requires --advertise-host). RabbitMQ does not use --join: members discover each other through etcd")
+	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.0.0.12:2379 or https://10.0.0.12:2379 (implies --initial-cluster-state existing; requires --advertise-host). For etcd the scheme must match --tls, the member must use the same auth setting as the cluster, and with TLS the cluster CA is fetched automatically (credentials required when auth is enabled). RabbitMQ does not use --join: members discover each other through etcd")
 	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, vmcluster, vlcluster, alertmanager, vmalert, gitea, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, beegfs or rocketmq instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"vmc\"/\"vlc\"/\"alertmanager\"/\"vmalert\"/\"gitea\"/\"influx2tsdb\"/\"clickhouse\"/\"clickhouse-keeper\"/\"beegfs\"/\"rocketmq\")")
 	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/garage/seaweedfs/redis/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea/VMCluster/VLCluster data directory (object storage / backup repository / key-value data / pgAdmin config+sessions, Grafana dashboards sqlite DB, Prometheus TSDB, Alertmanager silences+notification state, or Gitea repos + app.ini + its default SQLite DB; VMCluster vmstorage TSDB; VLCluster vlstorage logs) and pgcli-rendered files beside it, or the juicefs/zerofs host per-instance dir (cache, logs, sqlite meta), or the influxdb per-instance dir (data, generated influxdb.conf, local backups), or the clickhouse per-instance dir (data, logs, rendered config, local backups); or the rocketmq per-instance dir (broker store, cluster controller store, logs, rendered config); for vmalert, only pgcli-managed rules/templates dirs (a user-supplied --rules-dir/--templates-dir is never deleted); never the S3 bucket or a PG metadata database. No-op for predixy and influx2tsdb, which are stateless. Never drops a seaweedfs filer metadata database or a Gitea --dsn PostgreSQL database")
 
@@ -1360,18 +1360,20 @@ func init() {
 	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo/rustfs S3 API host port (0=auto-assign from the shared minio_start_port pool); for garage, the S3 API port (0=auto from garage_start_port, default 3900 — garage takes four consecutive ports API/RPC/Web/Admin)")
 	addonInstallCmd.Flags().Int("console-port", 0, "MinIO/silo/rustfs web console host port (0=auto-assign, next free port)")
 	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo, rustfs, garage or seaweedfs server / PostgREST HTTP server / pgAdmin web server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network) — Redis, Predixy and Grafana default to \"0.0.0.0\" instead, since their password is always required (and a dashboard is meant to be viewed remotely); pass 127.0.0.1 to keep them loopback-only. Gitea also defaults to \"0.0.0.0\" — a Git host is pushed to from other machines, and its generated admin login plus closed self-registration are the gate. Prometheus and Alertmanager ALSO default to 0.0.0.0 but have NO auth at all — Alertmanager worse: anyone reaching its port can create silences (mute on-call). vmalert is the same: no auth, no TLS — its rule API and GET /-/reload are open to anyone who can reach the port, and it defaults to 0.0.0.0 to match Prometheus/Alertmanager; pass --listen 127.0.0.1 on an untrusted network. VMCluster and VLCluster are the same story: no auth at all, so 0.0.0.0 means anyone who reaches the port can ingest, query, or delete data; pass 127.0.0.1 to keep the cluster loopback-only. Both are guarded only by the network boundary, so pass 127.0.0.1 to keep them loopback-only. BeeGFS is a different shape again: its daemons always bind the fixed protocol ports on the host network, so --listen does NOT gate anything there — it only picks the address the cluster self-references and clients dial for mgmtd (sysMgmtdHost), defaulting to \"0.0.0.0\" because a parallel filesystem is mounted from other machines. InfluxDB defaults to \"0.0.0.0\" too: its HTTP API always requires authentication, while the unauthenticated backup/restore RPC endpoint is pinned to 127.0.0.1 regardless of --listen. ClickHouse defaults to \"127.0.0.1\": its HTTP and native listeners always require authentication, but loopback is the safer default — pass 0.0.0.0 to expose it on the network. Kafka defaults to \"127.0.0.1\": it has NO authentication, so expose it only on a trusted private network; Kafka --cluster mode requires 0.0.0.0 (or the advertised address) because peers and clients must reach it. RabbitMQ defaults to \"127.0.0.1\" and uses the same address for AMQP and the management UI; both require the admin login, but loopback is still the safer default — pass 0.0.0.0 to expose them on the network. In RabbitMQ --cluster mode --listen defaults to 0.0.0.0 (mandatory for cross-host distribution) and may not be loopback. RocketMQ does not use --listen: it always binds host networking (cluster ports are fixed), so restrict access with a firewall. ClickHouse --cluster requires 0.0.0.0 (or the advertised address) so peers and clients can reach it; ClickHouse Keeper defaults to 127.0.0.1 and requires a non-loopback bind whenever --peer is set")
-	addonInstallCmd.Flags().String("root-user", "", "MinIO/silo/rustfs root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config). For garage this is the seeded access key: omit it to auto-generate a GK-prefixed key (garage has no \"admin\" user). For seaweedfs it is the s3.json identity access key: omit it to auto-generate an SW-prefixed key on a SINGLE-NODE install only — under --cluster both it and --root-password are REQUIRED, since each node reads only its own s3.json and must present the identical identity")
+	addonInstallCmd.Flags().String("root-user", "", "MinIO/silo/rustfs root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config). For garage this is the seeded access key: omit it to auto-generate a GK-prefixed key (garage has no \"admin\" user). For seaweedfs it is the s3.json identity access key: omit it to auto-generate an SW-prefixed key on a SINGLE-NODE install only — under --cluster both it and --root-password are REQUIRED, since each node reads only its own s3.json and must present the identical identity. For etcd it is the authentication username (default \"root\"; only with --auth)")
 	addonInstallCmd.Flags().String("root-password", "", "MinIO/silo/rustfs root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand). For garage this is the seeded secret key; for seaweedfs the s3.json identity secret key — required (with --root-user) on every node of a --cluster install")
 	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO/silo/rustfs distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (MinIO/silo: path is the in-container export dir — /data with a plain --data-dir node, or /data1../dataN on a --drive node (MNMD); repeat for every node's every drive. rustfs: one endpoint per node — scheme://host:port, no path; it has no multi-node single-drive mode so --drive is required, and it derives the /data/rustfs0../rustfsN suffix itself. The list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
 	addonInstallCmd.Flags().StringSlice("drive", nil, "MinIO/silo/rustfs/seaweedfs/garage multi-drive host dir(s), each on its own disk — e.g. --drive /mnt/minio/disk1 --drive /mnt/minio/disk2 ... (repeat for each drive; for MinIO/silo alone this is single-node multi-drive (SNMD), combined with --endpoint it is one node of a multi-node multi-drive cluster (MNMD), and each endpoint addresses this node's drive slots (/data1../dataN for MinIO/silo, /data/rustfs0../rustfsN for rustfs). For seaweedfs it turns one node's volume server into a multi-disk one: each drive is bind-mounted at /data1../dataN and weed's -dir lists them all comma-joined (volumes spread across the disks, no erasure-coding between them); works on a single node and per-node in a --cluster. For garage it feeds the rendered garage.toml's data_dir array (Garage spreads blocks across the dirs, balancing by per-dir capacity; metadata_dir stays a single dir); works single-node and per-node in a --cluster. Mutually exclusive with --data-dir. MinIO/silo reject a drive sharing the root device; rustfs hard-requires every drive on its own physical device; seaweedfs and garage only warn)")
-	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo/rustfs/seaweedfs: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo|rustfs>/<name>/, or the addon dir for seaweedfs; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Seaweedfs serves TLS natively: the S3 port becomes HTTPS-only (cleartext listener off). For kafka it ADDS an SSL listener on --tls-port (cert from the same self-signed CA under the instance's config dir) while keeping the existing PLAINTEXT broker listener for compatibility; pass --tls-pem to supply your own combined certificate+key PEM instead (a cert from pg cert works — the docs show the merge command). Changing this needs --force to recreate. For rabbitmq it ADDS AMQPS and management HTTPS listeners (ports from the rabbitmq_tls_start_port and rabbitmq_management_tls_start_port pools) while keeping the plaintext AMQP/management listeners; pass --tls-cert/--tls-key for a bring-your-own pair. NOT for garage: it has no native TLS (rejects --tls); front it with the nginx addon")
-	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo/rustfs: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt for MinIO/silo, rustfs_cert.pem for rustfs, cert.pem for seaweedfs; copied into the instance config dir as public.crt for rabbitmq). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there")
-	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo/rustfs: private key for --tls-cert (PEM; mounted read-only as private.key for MinIO/silo, rustfs_key.pem for rustfs, key.pem for seaweedfs; copied into the instance config dir as private.key for rabbitmq). Must pair with the cert; both are required to enable BYO TLS")
+	addonInstallCmd.Flags().Bool("tls", false, "MinIO/silo/rustfs/seaweedfs: serve HTTPS via pgcli's self-signed CA (certs generated under <base_dir>/tls/<minio|silo|rustfs>/<name>/, or the addon dir for seaweedfs; hand ca.crt to pgBackRest as backup.repo.s3.ca_file). Required for a store used as a pgBackRest S3 repo — pgBackRest refuses plaintext HTTP. Seaweedfs serves TLS natively: the S3 port becomes HTTPS-only (cleartext listener off). For kafka it ADDS an SSL listener on --tls-port (cert from the same self-signed CA under the instance's config dir) while keeping the existing PLAINTEXT broker listener for compatibility; pass --tls-pem to supply your own combined certificate+key PEM instead (a cert from pg cert works — the docs show the merge command). Changing this needs --force to recreate. For rabbitmq it ADDS AMQPS and management HTTPS listeners (ports from the rabbitmq_tls_start_port and rabbitmq_management_tls_start_port pools) while keeping the plaintext AMQP/management listeners; pass --tls-cert/--tls-key for a bring-your-own pair. NOT for garage: it has no native TLS (rejects --tls); front it with the nginx addon. For etcd it enables TLS on BOTH the client listener and the raft peer listener (peers additionally use mTLS), with certificates generated under <base_dir>/tls/etcd/<cluster>/<member>/; TLS is a cluster-wide property decided at bootstrap — an existing cluster must be destroyed before switching, and http/https members may not mix")
+	addonInstallCmd.Flags().String("tls-cert", "", "MinIO/silo/rustfs: serve HTTPS with THIS certificate file instead of the generated self-signed one (PEM leaf + any intermediate chain; mounted read-only as public.crt for MinIO/silo, rustfs_cert.pem for rustfs, cert.pem for seaweedfs; copied into the instance config dir as public.crt for rabbitmq). Implies --tls. Renew by replacing the file then --force to recreate (a single-file mount pins the source inode). A public-CA cert needs no --s3-ca-file on clients; a private-CA one passes its chain/CA there. For etcd it is this member's bring-your-own certificate; it must also carry the ClientAuth EKU (or no EKU) because raft peers verify it as a client certificate")
+	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo/rustfs: private key for --tls-cert (PEM; mounted read-only as private.key for MinIO/silo, rustfs_key.pem for rustfs, key.pem for seaweedfs; copied into the instance config dir as private.key for rabbitmq). Must pair with the cert; both are required to enable BYO TLS. For etcd it is the bring-your-own key pairing with --tls-cert")
+	addonInstallCmd.Flags().String("tls-ca", "", "etcd only: CA file used to verify the cluster when using bring-your-own certificates (--tls-cert/--tls-key). Optional when the leaf is self-signed (it is then its own trust anchor). With generated certificates the CA is derived from <base_dir>/tls/etcd/<cluster>/ca.crt and this flag is not needed. Every member must share one CA")
+	addonInstallCmd.Flags().Bool("auth", false, "etcd only: enable username/password authentication (a single user with the root role; credentials are required for every client call). The password is generated on first install when --password is omitted and stored in pg.yaml (retrieve with `pg addon password etcd`). Without TLS the password travels in clear text. Patroni DCS and RabbitMQ etcd discovery are NOT wired for authenticated etcd — do not enable this on a cluster they consume")
 	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/PostgREST/pgAdmin/Grafana/Prometheus/Alertmanager/vmalert/Gitea container (or, for BeeGFS, the whole 3-container filesystem cluster) even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, a changed pgAdmin --email/--dsn/--pg-name, Grafana --admin-user or Gitea --admin-user/--ssh-port/--dsn seed/--allow-registration, a changed VMCluster/VLCluster port/roles/storage-node/image, or to force-recreate a Prometheus instance instead of hot-reloading its config). For juicefs it rebuilds the config entry from the flags (format is still skipped when the volume already exists in the metadata engine); for zerofs it re-renders config.toml and restarts the server/client, KEEPING the stored encryption password (a fresh one could not unwrap the bucket's existing data); for duckdb it rebuilds the config entry from the flags; for influxdb it rewrites the generated influxdb.conf and recreates the container, KEEPING the stored admin password — pass --config-option again to keep your overrides; for influx2tsdb it rewrites the target/port settings and recreates the stateless container; for clickhouse it rewrites the rendered config and secret, then recreates the container, KEEPING the stored admin password — pass --config-option again to keep your overrides; in ClickHouse cluster mode the identity fields (--cluster, --shard, --replica, --advertise-host, --peer, --keeper, --interserver-port and --tcp-port) are immutable after install, even with --force; for clickhouse-keeper it re-renders keeper_config.xml and recreates the container, keeping data — --server-id, --advertise-host, --peer, --client-port and --raft-port are immutable after install; for kafka it rewrites server.properties and recreates the container, KEEPING the stored cluster id and formatted data dir — pass --config-option again to keep your overrides; in Kafka cluster mode the identity fields (--cluster, --node-id, --cluster-id, --peer, --advertise-host, --controller-port) are immutable after install, even with --force; for rabbitmq it rewrites rabbitmq.conf and recreates the container, KEEPING the stored admin password — pass --config-option again to keep your overrides; in RabbitMQ cluster mode --cluster, --node-name and the Erlang cookie are immutable after install (etcd endpoints may be updated), even with --force; for rocketmq it re-renders the three configs and recreates the three containers, KEEPING broker data and the cluster controller store — pass --config-option again to keep your overrides; in RocketMQ cluster mode --cluster, --controller-id, --advertise-host, --peer and the fixed ports are immutable after install, even with --force)")
 
 	// redis flags (top-level standalone KV store — the first version-selectable addon)
 	addonInstallCmd.Flags().String("version", "", "Redis major version to install: 7 or 8 (default \"8\"); each maps to a pinned upstream docker.io/library/redis tag. For juicefs/zerofs/duckdb it instead pins the host binary release to download (default: the version's pinned sha256); for influxdb it selects the pinned pgcli-influxdb image release (default \"1.13.1\"); for influx2tsdb it selects the pinned pgcli-influx2tsdb image release (default \"1.3.2\"); for clickhouse it selects the upstream ClickHouse LTS tag (default \"26.8.36.3\"); for clickhouse-keeper it selects the upstream clickhouse-keeper tag (default \"26.8.36.3\"); for kafka it selects the upstream apache/kafka tag (default \"4.4.0\"); for rabbitmq it selects the upstream rabbitmq tag (default \"4.4.0\", the -management image is derived automatically); for rocketmq it selects the upstream apache/rocketmq tag (default \"5.5.0\"; only 5.x releases are accepted). Ignored for every other addon")
-	addonInstallCmd.Flags().String("password", "", "Redis requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls) / Predixy proxy password (REQUIRED, never generated: it must be the proxied cluster's requirepass — read it with `pg addon password redis --name <member>`) / pgAdmin, Grafana or Gitea WEB login password (generated on first install if omitted — not a PostgreSQL password; retrieve it with `pg addon password pgadmin`/`grafana`/`gitea`. For Grafana it only takes effect while grafana.db is absent; for Gitea the stored password is the one pgcli CREATES the admin account with, so it is inert on a revived store whose admin already exists) / documentdb: the MongoDB client user's password (generated on first install if omitted; retrieve with `pg addon password documentdb`) / BeeGFS connection-auth secret (generated on first install ONLY on a host running mgmtd; REQUIRED on a cross-host join (--roles without mgmtd) and must equal the cluster's value — retrieve it with `pg addon password beegfs` or `pg addon beegfs join-hint`)")
+	addonInstallCmd.Flags().String("password", "", "Redis requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls) / Predixy proxy password (REQUIRED, never generated: it must be the proxied cluster's requirepass — read it with `pg addon password redis --name <member>`) / pgAdmin, Grafana or Gitea WEB login password (generated on first install if omitted — not a PostgreSQL password; retrieve it with `pg addon password pgadmin`/`grafana`/`gitea`. For Grafana it only takes effect while grafana.db is absent; for Gitea the stored password is the one pgcli CREATES the admin account with, so it is inert on a revived store whose admin already exists) / documentdb: the MongoDB client user's password (generated on first install if omitted; retrieve with `pg addon password documentdb`) / BeeGFS connection-auth secret (generated on first install ONLY on a host running mgmtd; REQUIRED on a cross-host join (--roles without mgmtd) and must equal the cluster's value — retrieve it with `pg addon password beegfs` or `pg addon beegfs join-hint`) / etcd authentication password (with --auth; generated on first install if omitted and stored in pg.yaml — retrieve with `pg addon password etcd`. On a cross-host join the cluster's existing password is REQUIRED)")
 	addonInstallCmd.Flags().String("admin-user", "", "Grafana WEB login user (GF_SECURITY_ADMIN_USER; default \"admin\") / Gitea WEB login user (created via `gitea admin user create`; default \"gitea\" — deliberately NOT the container's OS user \"git\") / InfluxDB InfluxQL admin username (default \"admin\") — the privileged account the CLI authenticates as; / ClickHouse admin username (default \"admin\") — the account created by the image entrypoint and used by every pg addon clickhouse client command; / RabbitMQ admin username (default \"admin\") — seeded on first boot and reconciled with rabbitmqctl on every start; unrelated to any PostgreSQL role")
 	addonInstallCmd.Flags().Bool("allow-registration", false, "Gitea: open self-service signup (GITEA__service__DISABLE_REGISTRATION=false; the web UI shows a Register entry). Closed by default — it is one of the two guards on the default 0.0.0.0 listen. Signups always create NORMAL users: Gitea offers no way for the register form to produce an admin, so this opens account spam, not takeover. The toggle needs --force to reach the live container; close it again with --allow-registration=false --force")
 	addonInstallCmd.Flags().String("email", "", "pgAdmin WEB login email (PGADMIN_DEFAULT_EMAIL; default \"admin@pgcli.lan\") — the account you sign into the web UI with, unrelated to any PostgreSQL role; the image rejects reserved TLDs such as .local")
@@ -1391,8 +1393,8 @@ func init() {
 	addonStopCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to stop")
 
 	// list / password flags
-	addonListCmd.Flags().Bool("show-password", false, "also print stored credentials (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin/Grafana/Gitea web login password, BeeGFS conn-auth secret) — off by default so the listing stays paste-safe")
-	addonPasswordCmd.Flags().String("name", "", "instance to reveal (redis/predixy/minio/silo/rustfs/garage/seaweedfs/pgadmin/grafana/gitea/influxdb/beegfs; default \"redis\"/\"predixy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"pgadmin\"/\"grafana\"/\"gitea\"/\"influxdb\"/\"beegfs\")")
+	addonListCmd.Flags().Bool("show-password", false, "also print stored credentials (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin/Grafana/Gitea web login password, BeeGFS conn-auth secret, etcd auth password) — off by default so the listing stays paste-safe")
+	addonPasswordCmd.Flags().String("name", "", "instance to reveal (redis/predixy/minio/silo/rustfs/garage/seaweedfs/pgadmin/grafana/gitea/influxdb/beegfs/etcd; default \"redis\"/\"predixy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"pgadmin\"/\"grafana\"/\"gitea\"/\"influxdb\"/\"beegfs\"/\"etcd\")")
 	addonPasswordCmd.Flags().String("file", "", "write the password to this file (mode 0600) instead of stdout, keeping it out of shell history and scrollback")
 
 	// pgdog flags (top-level shared Postgres proxy addon)
@@ -1829,6 +1831,26 @@ func runAddonInstallEtcd(cmd *cobra.Command) error {
 	cluster, _ := cmd.Flags().GetString("cluster")
 	advertiseHost, _ := cmd.Flags().GetString("advertise-host")
 	joinEndpoint, _ := cmd.Flags().GetString("join")
+	tlsFlag, _ := cmd.Flags().GetBool("tls")
+	tlsCert, _ := cmd.Flags().GetString("tls-cert")
+	tlsKey, _ := cmd.Flags().GetString("tls-key")
+	tlsCA, _ := cmd.Flags().GetString("tls-ca")
+	authFlag, _ := cmd.Flags().GetBool("auth")
+	rootUser, _ := cmd.Flags().GetString("root-user")
+	password, _ := cmd.Flags().GetString("password")
+
+	useTLS := tlsFlag || tlsCert != "" || tlsKey != ""
+	if (tlsCert == "") != (tlsKey == "") {
+		return fmt.Errorf("--tls-cert and --tls-key must be set together")
+	}
+	if tlsCA != "" && tlsCert == "" {
+		return fmt.Errorf("--tls-ca requires --tls-cert/--tls-key: with generated certificates the CA is derived from <base_dir>/tls/etcd/<cluster>/ca.crt")
+	}
+	tlsSet := cmd.Flags().Changed("tls") || tlsCert != "" || tlsKey != "" || tlsCA != ""
+	authFlagSet := cmd.Flags().Changed("auth")
+	// --password/--root-user only make sense with authentication, so passing
+	// either implies --auth (an explicit --auth=false still wins).
+	authMentioned := authFlagSet || cmd.Flags().Changed("password") || cmd.Flags().Changed("root-user")
 
 	path := cfgPath
 	if path == "" {
@@ -1861,6 +1883,66 @@ func runAddonInstallEtcd(cmd *cobra.Command) error {
 			Name:          name,
 		}
 	}
+
+	// Cluster-wide settings (TLS/auth) survive a reinstall when the operator
+	// does not mention them again.
+	if ok {
+		if !tlsSet {
+			useTLS = existing.TLS
+		}
+		if !authMentioned {
+			authFlag = existing.Auth
+		}
+	}
+	if authMentioned && !authFlagSet {
+		authFlag = true
+	}
+	prevTLS := existing.TLS
+	prevAuthPassword := existing.AuthPassword
+
+	if cluster != "" {
+		existing.ClusterName = cluster
+	}
+	clusterName := existing.ClusterName
+	if clusterName == "" {
+		clusterName = "pgcli-etcd"
+	}
+	var peers []config.EtcdConfig
+	for k, v := range cfg.Addons.Etcd {
+		if k != name && v.ClusterName == clusterName {
+			peers = append(peers, v)
+		}
+	}
+
+	// Auth is cluster-wide. Inherit the credentials from a local peer so a
+	// same-host member never joins an authenticated cluster with a fresh
+	// password, and refuse to switch the cluster's auth mode from a join.
+	if authFlag {
+		for _, p := range peers {
+			if !p.Auth {
+				continue
+			}
+			if rootUser == "" {
+				rootUser = p.AuthUser
+			}
+			if password == "" && (rootUser == p.AuthUser) {
+				password = p.AuthPassword
+			}
+			if !authMentioned {
+				fmt.Printf("  [!] cluster %q has etcd authentication enabled — inheriting its credentials\n", clusterName)
+			}
+			break
+		}
+	}
+	for _, p := range peers {
+		if p.Auth != authFlag {
+			if p.Auth {
+				return fmt.Errorf("cluster %q has authentication enabled; auth is a cluster-wide property — install with --auth --password <password>", clusterName)
+			}
+			return fmt.Errorf("cluster %q has members without authentication; auth is decided when the cluster is bootstrapped — re-install the bootstrap member with --auth first", clusterName)
+		}
+	}
+
 	if imageTag != "" {
 		existing.ImageTag = imageTag
 	}
@@ -1880,11 +1962,48 @@ func runAddonInstallEtcd(cmd *cobra.Command) error {
 	if existing.Name == "" {
 		existing.Name = name
 	}
-	if cluster != "" {
-		existing.ClusterName = cluster
-	}
 	if advertiseHost != "" {
 		existing.AdvertiseHost = advertiseHost
+	}
+
+	existing.TLS = useTLS
+	if tlsSet {
+		existing.TLSCertFile = ""
+		existing.TLSKeyFile = ""
+		existing.TLSCAFile = ""
+		if useTLS && tlsCert != "" {
+			existing.TLSCertFile = podman.HostMountPath(tlsCert)
+			existing.TLSKeyFile = podman.HostMountPath(tlsKey)
+			if tlsCA != "" {
+				existing.TLSCAFile = podman.HostMountPath(tlsCA)
+			}
+		}
+	}
+
+	generatedPassword := false
+	existing.Auth = authFlag
+	if authFlag {
+		if rootUser != "" {
+			existing.AuthUser = rootUser
+		}
+		if existing.AuthUser == "" {
+			existing.AuthUser = "root"
+		}
+		if password == "" {
+			password = existing.AuthPassword
+		}
+		if password == "" {
+			pw, err := generatePassword(20)
+			if err != nil {
+				return fmt.Errorf("generating etcd password: %w", err)
+			}
+			password = pw
+			generatedPassword = true
+		}
+		existing.AuthPassword = password
+	} else {
+		existing.AuthUser = ""
+		existing.AuthPassword = ""
 	}
 	cfg.Addons.Etcd[name] = existing
 
@@ -1897,16 +2016,97 @@ func runAddonInstallEtcd(cmd *cobra.Command) error {
 		return fmt.Errorf("etcd manager: %w", err)
 	}
 
+	// TLS is a cluster-wide property: peers must agree and an initialized
+	// member cannot switch because its peer URL scheme is part of its
+	// membership record.
+	for _, p := range peers {
+		if p.TLS != useTLS {
+			return fmt.Errorf("cluster %q already has members with tls=%v but this install requests tls=%v — TLS is decided at bootstrap; destroy and re-create the cluster to switch", clusterName, p.TLS, useTLS)
+		}
+	}
+	if ok && prevTLS != useTLS {
+		if _, statErr := os.Stat(filepath.Join(em.DataDir(&ec), "member")); statErr == nil {
+			return fmt.Errorf("member %q was initialized with tls=%v; switching to tls=%v requires destroying it first (`pg addon remove etcd --name %s --clean-data`), because the advertised peer URL scheme is part of the membership record", name, prevTLS, useTLS, name)
+		}
+	}
+
+	if useTLS || authFlag {
+		for _, consumer := range etcdConsumerWarnings(cfg, ec) {
+			fmt.Printf("  [!] %s still speaks plaintext HTTP without credentials and will lose access once this cluster requires TLS/auth\n", consumer)
+		}
+	}
+	if authFlag && !useTLS {
+		fmt.Println("  [!] --auth without --tls sends the password to etcd in clear text; enable --tls on a network you do not fully trust")
+	}
+
+	joinEP := ""
+	if joinEndpoint != "" {
+		joinEP = joinEndpoint
+		if !strings.Contains(joinEP, "://") {
+			if useTLS {
+				joinEP = "https://" + joinEP
+			} else {
+				joinEP = "http://" + joinEP
+			}
+		}
+		if agentHTTPS := strings.HasPrefix(joinEP, "https://"); agentHTTPS != useTLS {
+			return fmt.Errorf("--join endpoint %q %s TLS but this install has tls=%v — every member of a cluster must use the same scheme (TLS is decided at bootstrap)", joinEndpoint, map[bool]string{true: "uses", false: "does not use"}[agentHTTPS], useTLS)
+		}
+	}
+
 	peerURL := ec.PeerURL()
 
 	switch {
 	case joinEndpoint != "":
-		// Cross-host join: no coordinator container on this machine. Use
-		// etcdctl from a short-lived container to register with the remote
-		// coordinator, then start with the authoritative initial-cluster it
-		// prints (already reflects every existing member's advertised URL,
-		// plus this new one).
-		initialCluster, err := joinViaEndpoint(em, ec, joinEndpoint, peerURL)
+		// Cross-host join: probe the remote cluster's auth state and pull its
+		// CA before registering, so this member can speak the cluster's
+		// protocol from its very first raft connection.
+		probeOpts := podman.EtcdClientOpts{}
+		if useTLS {
+			// No local CA yet in the common case; auth status reveals nothing
+			// secret and the CA is validated after it is fetched.
+			probeOpts.InsecureSkipVerify = true
+		}
+		remoteAuth, err := podman.EtcdAuthStatusWith([]string{joinEP}, probeOpts)
+		if err != nil {
+			if ec.AuthUser == "" {
+				return fmt.Errorf("cannot query the etcd cluster at %s (it may require authentication): %w\n  pass --auth --root-user <user> --password <password> if the cluster uses authentication", joinEP, err)
+			}
+			probeOpts.Username, probeOpts.Password = ec.AuthUser, ec.AuthPassword
+			remoteAuth, err = podman.EtcdAuthStatusWith([]string{joinEP}, probeOpts)
+			if err != nil {
+				return fmt.Errorf("querying etcd auth status at %s: %w", joinEP, err)
+			}
+		}
+		if remoteAuth && !authFlag {
+			return fmt.Errorf("the etcd cluster at %s has authentication enabled — pass --auth --root-user <user> --password <password>", joinEP)
+		}
+		if authFlag && !remoteAuth {
+			return fmt.Errorf("the etcd cluster at %s does not have authentication enabled — auth is decided when the cluster is bootstrapped; re-install the bootstrap member with --auth first", joinEP)
+		}
+		if useTLS {
+			caPath := filepath.Join(em.ClusterTLSDir(&ec), "ca.crt")
+			if _, statErr := os.Stat(caPath); statErr != nil {
+				fmt.Println("-> Fetching the cluster CA from the existing member...")
+				if err := em.FetchClusterCA(&ec, joinEP, ec.AuthUser, ec.AuthPassword); err != nil {
+					return err
+				}
+				fmt.Printf("  [OK] CA saved to %s\n", caPath)
+			}
+		}
+		var joinOpts podman.EtcdctlOpts
+		if useTLS {
+			ca, err := em.ClientCAFile(&ec)
+			if err != nil {
+				return err
+			}
+			joinOpts.CAFile = ca
+		}
+		if remoteAuth {
+			joinOpts.Username = ec.AuthUser
+			joinOpts.Password = ec.AuthPassword
+		}
+		initialCluster, err := joinViaEndpoint(em, ec, joinEP, peerURL, joinOpts)
 		if err != nil {
 			return err
 		}
@@ -1918,12 +2118,6 @@ func runAddonInstallEtcd(cmd *cobra.Command) error {
 		// Local-cluster path: peers are pgcli-managed members in the same
 		// config. First member bootstraps; later ones join via a running
 		// peer container.
-		var peers []config.EtcdConfig
-		for k, v := range cfg.Addons.Etcd {
-			if k != name && v.ClusterName == ec.ClusterName {
-				peers = append(peers, v)
-			}
-		}
 		sort.Slice(peers, func(i, j int) bool { return peers[i].Name < peers[j].Name })
 
 		initialCluster, state := bootstrapCluster(ec, peers)
@@ -1935,13 +2129,13 @@ func runAddonInstallEtcd(cmd *cobra.Command) error {
 			if !ok {
 				return fmt.Errorf("cluster %q has no running member to join; start one of the existing etcd members first", ec.ClusterName)
 			}
-			registered, err := em.MemberExists(coord.ContainerName, coord.ClientPort, ec.Name)
+			registered, err := em.MemberExists(&coord, ec.Name)
 			if err != nil {
 				return fmt.Errorf("querying etcd members: %w", err)
 			}
 			if !registered {
 				fmt.Println("-> Registering new member with the cluster...")
-				if err := em.MemberAdd(coord.ContainerName, coord.ClientPort, ec.Name, peerURL); err != nil {
+				if err := em.MemberAdd(&coord, ec.Name, peerURL); err != nil {
 					return err
 				}
 			}
@@ -1950,6 +2144,49 @@ func runAddonInstallEtcd(cmd *cobra.Command) error {
 
 		if err := em.EnsureContainer(&ec, initialCluster, state); err != nil {
 			return err
+		}
+
+		if state == "new" && (useTLS || authFlag) {
+			if err := em.WaitHealthy(&ec); err != nil {
+				return err
+			}
+			authOn, err := em.AuthEnabled(&ec)
+			if err != nil {
+				return fmt.Errorf("checking etcd auth status: %w", err)
+			}
+			// A new --password on an already-authenticated cluster rotates the
+			// stored user, using the previously recorded password to authorize.
+			if authFlag && authOn && prevAuthPassword != "" && prevAuthPassword != ec.AuthPassword {
+				fmt.Println("-> Rotating the etcd root user password...")
+				if err := em.ChangeAuthPassword(&ec, prevAuthPassword); err != nil {
+					return fmt.Errorf("rotating etcd password: %w", err)
+				}
+			}
+			if useTLS {
+				// Publish before auth is enabled: afterwards it needs
+				// credentials, and a fresh bootstrap has none yet.
+				if err := em.PublishClusterCA(&ec, authOn); err != nil {
+					return fmt.Errorf("publishing the cluster CA: %w\n  if authentication is already enabled, re-run with --auth --password", err)
+				}
+			}
+		}
+		if state == "new" && authFlag {
+			fmt.Println("-> Enabling etcd authentication...")
+			if err := em.EnableAuth(&ec); err != nil {
+				return err
+			}
+			fmt.Println("  [OK] etcd authentication enabled")
+		}
+		// A joining member can also carry a rotated password; auth users are
+		// cluster-wide, so the change takes effect for every member.
+		if state == "existing" && authFlag && prevAuthPassword != "" && prevAuthPassword != ec.AuthPassword {
+			if err := em.WaitHealthy(&ec); err != nil {
+				return err
+			}
+			fmt.Println("-> Rotating the etcd root user password...")
+			if err := em.ChangeAuthPassword(&ec, prevAuthPassword); err != nil {
+				return fmt.Errorf("rotating etcd password: %w", err)
+			}
 		}
 	}
 
@@ -1966,10 +2203,73 @@ func runAddonInstallEtcd(cmd *cobra.Command) error {
 	fmt.Printf("  Client port:  %d\n", ec.ClientPort)
 	fmt.Printf("  Peer port:    %d\n", ec.PeerPort)
 	fmt.Printf("  Advertise:    %s\n", ec.AdvertiseAddr())
+	fmt.Printf("  TLS:          %s\n", onOff(ec.TLS))
+	if ec.TLS && ec.TLSCertFile == "" {
+		fmt.Printf("  Cluster CA:   %s\n", filepath.Join(em.ClusterTLSDir(&ec), "ca.crt"))
+	}
+	fmt.Printf("  Auth:         %s\n", onOff(ec.Auth))
+	if ec.Auth {
+		fmt.Printf("  Auth user:    %s\n", ec.AuthUser)
+		if generatedPassword {
+			fmt.Printf("  Auth password: %s  (generated once; stored in pg.yaml)\n", ec.AuthPassword)
+			fmt.Printf("  Retrieve later with: pg addon password etcd --name %s\n", name)
+		}
+	}
 	fmt.Println()
 	fmt.Printf("  Client URL: %s\n", ec.ClientURL())
 	fmt.Printf("  Connect (etcdctl): ETCDCTL_ENDPOINTS=%s\n", ec.ClientURL())
+	if em.AutoPublishesCA(&ec) {
+		fmt.Println()
+		fmt.Println("  [!] The cluster CA private key is published into etcd at /_pgcli/pki/etcd/ca.key.")
+		fmt.Println("      Anyone who can read etcd can mint certificates this cluster trusts; keep the")
+		fmt.Println("      client port on a private network, or distribute the CA manually and use")
+		fmt.Println("      --tls-cert/--tls-key instead (nothing is then published).")
+	}
+	if ec.Auth && !ec.TLS {
+		fmt.Println()
+		fmt.Println("  [!] Authentication is enabled without TLS: passwords travel in clear text.")
+	}
 	return nil
+}
+
+// etcdConsumerWarnings lists addons in the config that still consume this etcd
+// member over plaintext HTTP without credentials (Patroni DCS, RabbitMQ etcd
+// discovery). Enabling TLS/auth silently cuts them off, so the installer warns.
+func etcdConsumerWarnings(cfg *config.Config, ec config.EtcdConfig) []string {
+	portSuffix := fmt.Sprintf(":%d", ec.ClientPort)
+	matches := func(endpoint string) bool {
+		ep := endpoint
+		if i := strings.Index(ep, "://"); i >= 0 {
+			ep = ep[i+3:]
+		}
+		return strings.HasSuffix(ep, portSuffix)
+	}
+	var out []string
+	for name, pc := range cfg.Addons.Patroni {
+		used := false
+		for _, m := range pc.EtcdMembers {
+			if m == ec.Name {
+				used = true
+			}
+		}
+		for _, ep := range pc.EtcdEndpoints {
+			if matches(ep) {
+				used = true
+			}
+		}
+		if used {
+			out = append(out, fmt.Sprintf("Patroni cluster %q (DCS)", name))
+		}
+	}
+	for name, rc := range cfg.Addons.RabbitMQ {
+		for _, ep := range rc.EtcdEndpoints {
+			if matches(ep) {
+				out = append(out, fmt.Sprintf("RabbitMQ %q (etcd discovery)", name))
+				break
+			}
+		}
+	}
+	return out
 }
 
 // joinViaEndpoint registers a new member with a coordinator reachable at
@@ -1978,8 +2278,8 @@ func runAddonInstallEtcd(cmd *cobra.Command) error {
 // the joining container. Idempotent in the other direction: it errors when the
 // member name is already registered, since re-adding would fail and the caller
 // should remove the stale member first.
-func joinViaEndpoint(em *podman.EtcdManager, ec config.EtcdConfig, coordinatorEndpoint, peerURL string) (string, error) {
-	registered, err := em.MemberExistsAt(ec.ImageTag, coordinatorEndpoint, ec.Name)
+func joinViaEndpoint(em *podman.EtcdManager, ec config.EtcdConfig, coordinatorEndpoint, peerURL string, opts podman.EtcdctlOpts) (string, error) {
+	registered, err := em.MemberExistsAt(ec.ImageTag, coordinatorEndpoint, ec.Name, opts)
 	if err != nil {
 		return "", err
 	}
@@ -1987,7 +2287,7 @@ func joinViaEndpoint(em *podman.EtcdManager, ec config.EtcdConfig, coordinatorEn
 		return "", fmt.Errorf("member %q is already registered with the cluster at %s — remove it first with `pg etcdctl member remove` against that endpoint", ec.Name, coordinatorEndpoint)
 	}
 	fmt.Printf("-> Registering member with the cluster at %s...\n", coordinatorEndpoint)
-	out, err := em.MemberAddAt(ec.ImageTag, coordinatorEndpoint, ec.Name, peerURL)
+	out, err := em.MemberAddAt(ec.ImageTag, coordinatorEndpoint, ec.Name, peerURL, opts)
 	if err != nil {
 		return "", err
 	}
@@ -5066,7 +5366,9 @@ func runAddonList(showPassword bool) error {
 		fmt.Printf("  %s (name: %s)\n", "etcd", name)
 		fmt.Printf("    Status:      %s\n", status)
 		fmt.Printf("    Cluster:     %s\n", ec.ClusterName)
-		fmt.Printf("    Client URL:  http://127.0.0.1:%d\n", ec.ClientPort)
+		fmt.Printf("    Client URL:  %s\n", ec.ClientURL())
+		fmt.Printf("    TLS:         %s\n", onOff(ec.TLS))
+		fmt.Printf("    Auth:        %s\n", onOff(ec.Auth))
 		fmt.Printf("    Client port: %d\n", ec.ClientPort)
 		fmt.Printf("    Peer port:   %d\n", ec.PeerPort)
 		fmt.Printf("    Image:       %s\n", ec.ImageTag)
@@ -6616,6 +6918,13 @@ func addonPasswords(cfg *config.Config) map[string]string {
 	for name, rc := range cfg.Addons.RabbitMQ {
 		out["rabbitmq:"+name] = rc.AdminPassword
 	}
+	// etcd only has a credential once authentication is enabled; without it
+	// there is nothing to print.
+	for name, ec := range cfg.Addons.Etcd {
+		if ec.Auth && ec.AuthPassword != "" {
+			out["etcd:"+name] = ec.AuthPassword
+		}
+	}
 	// juicefs's credential is the S3 secret-key it formatted the volume with
 	// (stored in the volume's metadata thereafter, but this is the one the
 	// reinstall must reproduce).
@@ -6977,7 +7286,7 @@ func runAddonRemoveEtcd(cmd *cobra.Command) error {
 		}
 		if running, err := em.ContainerRunning(p.ContainerName); err == nil && running {
 			fmt.Println("-> Deregistering member from the cluster...")
-			if err := em.MemberRemove(p.ContainerName, p.ClientPort, ec.Name); err != nil {
+			if err := em.MemberRemove(&p, ec.Name); err != nil {
 				return err
 			}
 			break

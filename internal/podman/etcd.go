@@ -89,7 +89,7 @@ func (m *EtcdManager) EnsureContainer(ec *config.EtcdConfig, initialCluster, sta
 		}
 	}
 
-	if err := m.createContainer(ec, initialCluster, state); err != nil {
+	if err := m.createContainer(ec, initialCluster, state, state == "new"); err != nil {
 		return err
 	}
 	fmt.Println("  [OK] etcd container started")
@@ -104,12 +104,10 @@ func (m *EtcdManager) EnsureContainer(ec *config.EtcdConfig, initialCluster, sta
 //
 // A just-joined cluster briefly reports "unhealthy cluster" while it elects a
 // leader, so the call is retried with a short backoff to absorb that transient.
-func (m *EtcdManager) MemberAdd(coordinatorContainer string, coordinatorClientPort int, newMemberName, peerURL string) error {
-	endpoint := fmt.Sprintf("http://127.0.0.1:%d", coordinatorClientPort)
+func (m *EtcdManager) MemberAdd(coordinator *config.EtcdConfig, newMemberName, peerURL string) error {
+	args := append(etcdExecCtlArgs(coordinator), "member", "add", newMemberName, "--peer-urls="+peerURL)
 	return m.retryMemberQuorum(func() error {
-		_, err := m.run("exec", coordinatorContainer, "etcdctl",
-			"--endpoints="+endpoint, "member", "add", newMemberName, "--peer-urls="+peerURL)
-		if err != nil {
+		if _, err := m.run(args...); err != nil {
 			return fmt.Errorf("registering etcd member %q with the cluster: %w", newMemberName, err)
 		}
 		return nil
@@ -120,18 +118,17 @@ func (m *EtcdManager) MemberAdd(coordinatorContainer string, coordinatorClientPo
 // its member ID first (etcd v3.5 `member remove` takes a hex ID, not a name).
 // No-op when the member is not currently registered. The remove itself is
 // retried for the same post-join quorum transient as MemberAdd.
-func (m *EtcdManager) MemberRemove(coordinatorContainer string, coordinatorClientPort int, name string) error {
-	id, found, err := m.memberIDByName(coordinatorContainer, coordinatorClientPort, name)
+func (m *EtcdManager) MemberRemove(coordinator *config.EtcdConfig, name string) error {
+	id, found, err := m.memberIDByName(coordinator, name)
 	if err != nil {
 		return err
 	}
 	if !found {
 		return nil
 	}
-	endpoint := fmt.Sprintf("http://127.0.0.1:%d", coordinatorClientPort)
+	args := append(etcdExecCtlArgs(coordinator), "member", "remove", id)
 	return m.retryMemberQuorum(func() error {
-		if _, err := m.run("exec", coordinatorContainer, "etcdctl",
-			"--endpoints="+endpoint, "member", "remove", id); err != nil {
+		if _, err := m.run(args...); err != nil {
 			return fmt.Errorf("deregistering etcd member %q from the cluster: %w", name, err)
 		}
 		return nil
@@ -141,8 +138,8 @@ func (m *EtcdManager) MemberRemove(coordinatorContainer string, coordinatorClien
 // MemberExists reports whether a member with the given name is already part of
 // the cluster, by listing members from the coordinator container. Used to keep
 // installs idempotent: a member already registered is not re-added.
-func (m *EtcdManager) MemberExists(coordinatorContainer string, coordinatorClientPort int, name string) (bool, error) {
-	_, found, err := m.memberIDByName(coordinatorContainer, coordinatorClientPort, name)
+func (m *EtcdManager) MemberExists(coordinator *config.EtcdConfig, name string) (bool, error) {
+	_, found, err := m.memberIDByName(coordinator, name)
 	return found, err
 }
 
@@ -152,12 +149,11 @@ func (m *EtcdManager) MemberExists(coordinatorContainer string, coordinatorClien
 // etcdctl -w simple lines are:
 //
 //	<id>, <status>, <name>, <peerURLs>, <clientURLs>, <isLearner>
-func (m *EtcdManager) memberIDByName(coordinatorContainer string, coordinatorClientPort int, name string) (string, bool, error) {
-	endpoint := fmt.Sprintf("http://127.0.0.1:%d", coordinatorClientPort)
+func (m *EtcdManager) memberIDByName(coordinator *config.EtcdConfig, name string) (string, bool, error) {
+	args := append(etcdExecCtlArgs(coordinator), "member", "list", "-w", "simple")
 	var out string
 	err := m.retryMemberQuorum(func() error {
-		o, err := m.run("exec", coordinatorContainer, "etcdctl",
-			"--endpoints="+endpoint, "member", "list", "-w", "simple")
+		o, err := m.run(args...)
 		if err != nil {
 			return err
 		}
@@ -212,27 +208,69 @@ func (m *EtcdManager) retryMemberQuorum(op func() error) error {
 // clientURL/peerURL helpers: a member advertises on its AdvertiseHost
 // (LAN address for cross-host clusters, loopback otherwise) but always also
 // listens on loopback, so local etcdctl and cross-host peers both work.
-func etcdListenURLs(host string, port int) string {
-	url := fmt.Sprintf("http://%s:%d", host, port)
+func etcdListenURLs(host string, port int, scheme string) string {
+	url := fmt.Sprintf("%s://%s:%d", scheme, host, port)
 	if host != "127.0.0.1" {
-		url = fmt.Sprintf("http://127.0.0.1:%d,%s", port, url)
+		url = fmt.Sprintf("%s://127.0.0.1:%d,%s", scheme, port, url)
 	}
 	return url
 }
 
+// etcdLocalClientURL is the loopback client endpoint used for etcdctl inside
+// the coordinator container.
+func etcdLocalClientURL(ec *config.EtcdConfig) string {
+	return fmt.Sprintf("%s://127.0.0.1:%d", ec.ClientScheme(), ec.ClientPort)
+}
+
+// etcdExecCtlArgs builds `podman exec ... etcdctl ...` for a local member,
+// carrying the CA and credentials when TLS/auth are enabled. Credentials go
+// through the environment rather than argv so they do not show up in `ps`.
+func etcdExecCtlArgs(ec *config.EtcdConfig) []string {
+	args := []string{"exec"}
+	if ec.Auth && ec.AuthUser != "" {
+		args = append(args, "-e", "ETCDCTL_USER="+ec.AuthUser+":"+ec.AuthPassword)
+	}
+	args = append(args, ec.ContainerName, "etcdctl", "--endpoints="+etcdLocalClientURL(ec))
+	if ec.TLS {
+		args = append(args, "--cacert="+etcdCertsDir+"/ca.crt")
+	}
+	return args
+}
+
 // createContainer runs an etcd member on host networking with the member's
 // client and peer ports, advertising on its AdvertiseHost.
-func (m *EtcdManager) createContainer(ec *config.EtcdConfig, initialCluster, state string) error {
+func (m *EtcdManager) createContainer(ec *config.EtcdConfig, initialCluster, state string, allowGenerateCA bool) error {
 	dataDir := m.resolveDataDir(ec)
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return fmt.Errorf("creating etcd data dir: %w", err)
 	}
 
-	clientURL := ec.ClientURL()
-	peerURL := ec.PeerURL()
-	listenClient := etcdListenURLs(ec.AdvertiseAddr(), ec.ClientPort)
-	listenPeer := etcdListenURLs(ec.AdvertiseAddr(), ec.PeerPort)
+	var tlsMaterial *EtcdTLS
+	if ec.TLS {
+		var err error
+		tlsMaterial, err = m.EnsureMemberTLS(ec, allowGenerateCA)
+		if err != nil {
+			return err
+		}
+	}
 
+	var mounts []string
+	if tlsMaterial != nil {
+		mounts = tlsMaterial.Mounts
+	}
+	args := etcdRunArgs(ec, dataDir, initialCluster, state, mounts)
+
+	if _, err := m.run(args...); err != nil {
+		return fmt.Errorf("creating etcd container: %w", err)
+	}
+	return nil
+}
+
+// etcdRunArgs builds the podman run argv for one member. Split out from
+// createContainer so TLS wiring (https URLs, peer mTLS flags) is unit-testable
+// without podman.
+func etcdRunArgs(ec *config.EtcdConfig, dataDir, initialCluster, state string, mounts []string) []string {
+	scheme := ec.ClientScheme()
 	// The etcd image ships no ENTRYPOINT — its CMD is the full path to the
 	// binary — so the executable must be passed explicitly before the flags.
 	// --http-proxy=false stops podman from injecting the host's HTTP(S)_PROXY
@@ -246,14 +284,18 @@ func (m *EtcdManager) createContainer(ec *config.EtcdConfig, initialCluster, sta
 		"--http-proxy=false",
 		"--restart", "unless-stopped",
 		"-v", fmt.Sprintf("%s:/etcd-data:z", hostMountPath(dataDir)),
+	}
+	// Mounts must precede the image: anything after it is argv for etcd.
+	args = append(args, mounts...)
+	args = append(args,
 		ec.ImageTag,
 		"/usr/local/bin/etcd",
 		"--name", ec.Name,
 		"--data-dir", "/etcd-data",
-		"--initial-advertise-peer-urls", peerURL,
-		"--listen-peer-urls", listenPeer,
-		"--advertise-client-urls", clientURL,
-		"--listen-client-urls", listenClient,
+		"--initial-advertise-peer-urls", ec.PeerURL(),
+		"--listen-peer-urls", etcdListenURLs(ec.AdvertiseAddr(), ec.PeerPort, scheme),
+		"--advertise-client-urls", ec.ClientURL(),
+		"--listen-client-urls", etcdListenURLs(ec.AdvertiseAddr(), ec.ClientPort, scheme),
 		"--initial-cluster", initialCluster,
 		"--initial-cluster-state", state,
 		"--initial-cluster-token", ec.ClusterName,
@@ -263,12 +305,11 @@ func (m *EtcdManager) createContainer(ec *config.EtcdConfig, initialCluster, sta
 		"--auto-compaction-mode", "periodic",
 		"--auto-compaction-retention", "24h",
 		"--quota-backend-bytes", "8589934592",
+	)
+	if ec.TLS {
+		args = append(args, etcdServerTLSFlags()...)
 	}
-
-	if _, err := m.run(args...); err != nil {
-		return fmt.Errorf("creating etcd container: %w", err)
-	}
-	return nil
+	return args
 }
 
 // Remove stops and removes the etcd container, then cleans up its data
@@ -307,10 +348,10 @@ func (m *EtcdManager) ContainerRunning(name string) (bool, error) {
 // does not have to be a local pgcli-managed container. Returns the raw
 // etcdctl output so callers can parse the authoritative ETCD_INITIAL_CLUSTER
 // it prints for the joining member's --initial-cluster value.
-func (m *EtcdManager) MemberAddAt(imageTag, coordinatorEndpoint, newMemberName, peerURL string) (string, error) {
+func (m *EtcdManager) MemberAddAt(imageTag, coordinatorEndpoint, newMemberName, peerURL string, opts EtcdctlOpts) (string, error) {
 	var out string
 	err := m.retryMemberQuorum(func() error {
-		o, err := m.runEtcdctl(imageTag, coordinatorEndpoint, false,
+		o, err := m.runEtcdctl(imageTag, coordinatorEndpoint, false, opts,
 			"member", "add", newMemberName, "--peer-urls="+peerURL)
 		if err != nil {
 			return fmt.Errorf("registering etcd member %q with the cluster at %s: %w", newMemberName, coordinatorEndpoint, err)
@@ -328,10 +369,10 @@ func (m *EtcdManager) MemberAddAt(imageTag, coordinatorEndpoint, newMemberName, 
 // against a coordinator endpoint. Same transport as MemberAddAt — usable to
 // discover an existing cluster's membership before starting a new cross-host
 // member.
-func (m *EtcdManager) ListMembersAt(imageTag, coordinatorEndpoint string) (string, error) {
+func (m *EtcdManager) ListMembersAt(imageTag, coordinatorEndpoint string, opts EtcdctlOpts) (string, error) {
 	var out string
 	err := m.retryMemberQuorum(func() error {
-		o, err := m.runEtcdctl(imageTag, coordinatorEndpoint, false, "member", "list", "-w", "simple")
+		o, err := m.runEtcdctl(imageTag, coordinatorEndpoint, false, opts, "member", "list", "-w", "simple")
 		if err != nil {
 			return fmt.Errorf("listing etcd members via %s: %w", coordinatorEndpoint, err)
 		}
@@ -347,8 +388,8 @@ func (m *EtcdManager) ListMembersAt(imageTag, coordinatorEndpoint string) (strin
 // MemberExistsAt reports whether a member named `name` is registered in the
 // cluster reachable at coordinatorEndpoint (cross-host capable). Parses the
 // same `<id>, <status>, <name>, ...` lines as memberIDByName.
-func (m *EtcdManager) MemberExistsAt(imageTag, coordinatorEndpoint, name string) (bool, error) {
-	out, err := m.ListMembersAt(imageTag, coordinatorEndpoint)
+func (m *EtcdManager) MemberExistsAt(imageTag, coordinatorEndpoint, name string, opts EtcdctlOpts) (bool, error) {
+	out, err := m.ListMembersAt(imageTag, coordinatorEndpoint, opts)
 	if err != nil {
 		return false, err
 	}
@@ -359,6 +400,118 @@ func (m *EtcdManager) MemberExistsAt(imageTag, coordinatorEndpoint, name string)
 		}
 	}
 	return false, nil
+}
+
+// etcdCtlNoAuth returns a copy of ec with authentication disabled, for calls
+// made before the cluster's auth is enabled (where sending credentials would
+// itself fail with "authentication is not enabled").
+func etcdCtlNoAuth(ec *config.EtcdConfig) *config.EtcdConfig {
+	cp := *ec
+	cp.Auth = false
+	return &cp
+}
+
+// WaitHealthy polls `etcdctl endpoint health` inside the member container until
+// it succeeds or the deadline passes. Used after a bootstrap/join start, when
+// the member is still electing a leader, before auth/CA publishing runs.
+func (m *EtcdManager) WaitHealthy(ec *config.EtcdConfig) error {
+	const attempts = 30
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		args := append(etcdExecCtlArgs(etcdCtlNoAuth(ec)), "endpoint", "health")
+		if _, err := m.run(args...); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		time.Sleep(time.Second)
+	}
+	return fmt.Errorf("etcd %s did not become healthy: %w", ec.Name, lastErr)
+}
+
+// AuthEnabled reports whether the member's cluster has authentication enabled.
+// It tries without credentials first (works while auth is off) and falls back
+// to the configured credentials for the already-enabled case.
+func (m *EtcdManager) AuthEnabled(ec *config.EtcdConfig) (bool, error) {
+	args := append(etcdExecCtlArgs(etcdCtlNoAuth(ec)), "auth", "status")
+	out, err := m.run(args...)
+	if err != nil && ec.AuthUser != "" {
+		args = append(etcdExecCtlArgs(ec), "auth", "status")
+		out, err = m.run(args...)
+	}
+	if err != nil {
+		return false, err
+	}
+	return strings.Contains(out, "Authentication Status: true") ||
+		strings.Contains(out, "Authorization Status: true"), nil
+}
+
+// EnableAuth makes sure the configured root-role user exists with the
+// configured password and auth is enabled. Idempotent; when auth is already on
+// it verifies the stored credentials instead of touching users.
+func (m *EtcdManager) EnableAuth(ec *config.EtcdConfig) error {
+	enabled, err := m.AuthEnabled(ec)
+	if err != nil {
+		return fmt.Errorf("checking etcd auth status: %w", err)
+	}
+	if enabled {
+		args := append(etcdExecCtlArgs(ec), "member", "list", "-w", "simple")
+		if _, err := m.run(args...); err != nil {
+			return fmt.Errorf("etcd authentication is already enabled on %s and the configured credentials for user %q do not work: %w", ec.Name, ec.AuthUser, err)
+		}
+		return nil
+	}
+
+	noauth := etcdCtlNoAuth(ec)
+	// A pre-existing user keeps its old password; replace it so the value in
+	// pg.yaml (and what the operator was told) is the one in effect. Auth is
+	// still disabled here, so removing the root-role user cannot lock anyone
+	// out.
+	getArgs := append(etcdExecCtlArgs(noauth), "user", "get", ec.AuthUser)
+	if _, err := m.run(getArgs...); err == nil {
+		fmt.Printf("  [!] etcd user %q already exists — replacing it with the configured password\n", ec.AuthUser)
+		delArgs := append(etcdExecCtlArgs(noauth), "user", "del", ec.AuthUser)
+		if _, err := m.run(delArgs...); err != nil {
+			return fmt.Errorf("replacing existing etcd user %q: %w", ec.AuthUser, err)
+		}
+	}
+	// Create the user through the v3 REST gateway so the password never appears
+	// in podman exec's argv (etcdctl only accepts it as an argument or via an
+	// interactive terminal prompt).
+	caFile, err := m.ClientCAFile(ec)
+	if err != nil {
+		return err
+	}
+	opts := EtcdClientOpts{CAFile: caFile}
+	localURL := fmt.Sprintf("%s://127.0.0.1:%d", ec.ClientScheme(), ec.ClientPort)
+	if err := EtcdUserAdd([]string{localURL}, ec.AuthUser, ec.AuthPassword, opts); err != nil {
+		return fmt.Errorf("creating etcd user %q: %w", ec.AuthUser, err)
+	}
+	grantArgs := append(etcdExecCtlArgs(noauth), "user", "grant-role", ec.AuthUser, "root")
+	if _, err := m.run(grantArgs...); err != nil {
+		return fmt.Errorf("granting root role to etcd user %q: %w", ec.AuthUser, err)
+	}
+	enableArgs := append(etcdExecCtlArgs(noauth), "auth", "enable")
+	if _, err := m.run(enableArgs...); err != nil {
+		return fmt.Errorf("enabling etcd authentication: %w", err)
+	}
+	return nil
+}
+
+// ChangeAuthPassword rotates the configured auth user's password, authorizing
+// with the previously recorded one. Called when an already-authenticated
+// member is re-installed with a new --password.
+func (m *EtcdManager) ChangeAuthPassword(ec *config.EtcdConfig, oldPassword string) error {
+	caFile, err := m.ClientCAFile(ec)
+	if err != nil {
+		return err
+	}
+	localURL := fmt.Sprintf("%s://127.0.0.1:%d", ec.ClientScheme(), ec.ClientPort)
+	return EtcdUserChangePassword([]string{localURL}, ec.AuthUser, ec.AuthPassword, EtcdClientOpts{
+		CAFile:   caFile,
+		Username: ec.AuthUser,
+		Password: oldPassword,
+	})
 }
 
 // EnsureImage pulls the etcd image if it is not present locally, so etcdctl
@@ -379,28 +532,49 @@ func (m *EtcdManager) EnsureImage(imageTag string) error {
 	return nil
 }
 
+// EtcdctlOpts carries TLS/auth material for a short-lived etcdctl container.
+// Zero value keeps the plaintext, unauthenticated behaviour.
+type EtcdctlOpts struct {
+	CAFile   string
+	Username string
+	Password string
+}
+
 // Etcdctl runs an etcdctl subcommand from a short-lived container. etcd
 // containers are per-member, so instead of exec'ing into one we launch
 // `podman run --rm` on the member's image over the host network and hand the
 // args to etcdctl. The client endpoint comes from ETCDCTL_ENDPOINTS (a native
 // etcdctl env var) — inherited from the caller's environment when set, or from
 // defaultEndpoint otherwise — so no member container needs to be picked. The
-// image is pulled first if the host does not already have it.
-func (m *EtcdManager) Etcdctl(imageTag, defaultEndpoint string, args []string) error {
+// image is pulled first if the host does not already have it. opts supplies
+// the CA and credentials unless the caller already passed equivalent flags.
+func (m *EtcdManager) Etcdctl(imageTag, defaultEndpoint string, opts EtcdctlOpts, args []string) error {
 	endpoint := os.Getenv("ETCDCTL_ENDPOINTS")
 	if endpoint == "" {
 		endpoint = defaultEndpoint
 	}
-	_, err := m.runEtcdctl(imageTag, endpoint, true, args...)
+	_, err := m.runEtcdctl(imageTag, endpoint, true, opts, args...)
 	return err
+}
+
+// hasLongFlag reports whether args already contain `name` in either
+// `--name=value` or `--name value` form.
+func hasLongFlag(args []string, name string) bool {
+	for _, a := range args {
+		if a == name || strings.HasPrefix(a, name+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 // runEtcdctl is the internal base for invoking etcdctl from a short-lived
 // container on the host network. It ensures the image, wires up
-// ETCDCTL_ENDPOINTS, and either attaches stdout for the user (`interactive`)
-// or captures it for parsing. Cross-host member-add/list flows use the
-// captured mode; the `pg etcdctl` command uses the attached mode.
-func (m *EtcdManager) runEtcdctl(imageTag, endpoint string, interactive bool, args ...string) (string, error) {
+// ETCDCTL_ENDPOINTS/ETCDCTL_CACERT/ETCDCTL_USER (all native etcdctl env vars,
+// so credentials never land in the container's argv), and either attaches
+// stdout for the user (`interactive`) or captures it for parsing. Cross-host
+// member-add/list flows use the captured mode; `pg etcdctl` uses attached mode.
+func (m *EtcdManager) runEtcdctl(imageTag, endpoint string, interactive bool, opts EtcdctlOpts, args ...string) (string, error) {
 	if err := m.EnsureImage(imageTag); err != nil {
 		return "", err
 	}
@@ -418,9 +592,19 @@ func (m *EtcdManager) runEtcdctl(imageTag, endpoint string, interactive bool, ar
 		// advertised (LAN) endpoints.
 		"--http-proxy=false",
 		"-e", "ETCDCTL_ENDPOINTS="+endpoint,
-		imageTag,
-		"etcdctl",
 	)
+	if opts.CAFile != "" && !hasLongFlag(args, "--cacert") && !hasLongFlag(args, "--insecure-skip-tls-verify") {
+		runArgs = append(runArgs,
+			"-v", fmt.Sprintf("%s:%s:ro,z", hostMountPath(opts.CAFile), etcdctlCAPath),
+			"-e", "ETCDCTL_CACERT="+etcdctlCAPath,
+		)
+	}
+	if opts.Username != "" && !hasLongFlag(args, "--user") {
+		// Credentials go through the environment rather than argv so they do
+		// not show up in `ps`.
+		runArgs = append(runArgs, "-e", "ETCDCTL_USER="+opts.Username+":"+opts.Password)
+	}
+	runArgs = append(runArgs, imageTag, "etcdctl")
 	runArgs = append(runArgs, args...)
 
 	slog.Debug("podman etcdctl", "endpoint", endpoint, "args", args)
@@ -480,7 +664,7 @@ func (m *EtcdManager) StartContainer(ec *config.EtcdConfig) error {
 			return fmt.Errorf("removing improper etcd container: %w", err)
 		}
 	}
-	if err := m.createContainer(ec, ec.Name+"="+ec.PeerURL(), "existing"); err != nil {
+	if err := m.createContainer(ec, ec.Name+"="+ec.PeerURL(), "existing", false); err != nil {
 		return err
 	}
 	fmt.Printf("  [OK] etcd %s started\n", containerName)

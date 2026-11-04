@@ -7,7 +7,8 @@
 // same PEM output, with an IP-address-aware SAN split so Hosts mixes DNS names
 // and IPs (e.g. "minio.test", "127.0.0.1", "::1"). The result is a single
 // self-signed LEAF (IsCA false, serverAuth EKU) that is its own trust anchor;
-// set CA:true only when a private root is wanted instead.
+// set CA:true only when a private root is wanted instead (CA certs carry no
+// EKU, so the root can sign both server and client certificates).
 package certgen
 
 import (
@@ -67,6 +68,13 @@ func Generate(opts Options) (*Result, error) {
 		return nil, fmt.Errorf("generating serial number: %w", err)
 	}
 
+	// No EKU on a CA: Go's verifier applies a CA's ExtendedKeyUsage to every
+	// chain built below it, so a serverAuth-only root could never sign client
+	// certs (etcd raft peer mTLS needs them).
+	var extKeyUsage []x509.ExtKeyUsage
+	if !opts.CA {
+		extKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+	}
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
@@ -75,7 +83,7 @@ func Generate(opts Options) (*Result, error) {
 		NotBefore:             time.Now().Add(-time.Hour), // absorb mild clock skew
 		NotAfter:              time.Now().Add(valid),
 		KeyUsage:              keyUsage(opts.CA),
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		ExtKeyUsage:           extKeyUsage,
 		BasicConstraintsValid: true,
 		IsCA:                  opts.CA,
 		IPAddresses:           ips,

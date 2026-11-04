@@ -278,6 +278,21 @@ type EtcdConfig struct {
 	ClientPort    int    `yaml:"client_port,omitempty"`    // 2379+ auto-assigned
 	PeerPort      int    `yaml:"peer_port,omitempty"`      // next free port after ClientPort
 	AdvertiseHost string `yaml:"advertise_host,omitempty"` // host in this member's peer/client URLs; empty = 127.0.0.1 (single-host); set a LAN IP or FQDN for cross-host
+	// TLS enables TLS on both the client and raft peer listeners. Peer traffic
+	// additionally requires client certificates (mTLS), so every member of a
+	// cluster must share the same CA. It is a cluster-wide property: TLS and
+	// non-TLS members cannot mix, and an existing cluster must be destroyed
+	// before switching.
+	TLS         bool   `yaml:"tls,omitempty"`
+	TLSCertFile string `yaml:"tls_cert_file,omitempty"` // BYO member cert; empty = generated under <base>/tls/etcd/<cluster>/<member>
+	TLSKeyFile  string `yaml:"tls_key_file,omitempty"`  // BYO member key
+	TLSCAFile   string `yaml:"tls_ca_file,omitempty"`   // client trust anchor; empty = derived from the cluster/member dir
+	// Auth enables etcd's username/password authentication. Only a single
+	// root-role user is created; passwords travel in the clear unless TLS is
+	// also enabled.
+	Auth         bool   `yaml:"auth,omitempty"`
+	AuthUser     string `yaml:"auth_user,omitempty"`     // default "root"
+	AuthPassword string `yaml:"auth_password,omitempty"` // generated on first install when empty
 	// Autostart brings this member's container up on host boot via the boot
 	// service (pg start --autostart). It only starts an existing container —
 	// etcd membership cannot be re-registered at boot — so install the member
@@ -294,14 +309,22 @@ func (e EtcdConfig) AdvertiseAddr() string {
 	return "127.0.0.1"
 }
 
+// ClientScheme is the URL scheme for client and peer endpoints.
+func (e EtcdConfig) ClientScheme() string {
+	if e.TLS {
+		return "https"
+	}
+	return "http"
+}
+
 // ClientURL is this member's advertised client endpoint.
 func (e EtcdConfig) ClientURL() string {
-	return fmt.Sprintf("http://%s:%d", e.AdvertiseAddr(), e.ClientPort)
+	return fmt.Sprintf("%s://%s:%d", e.ClientScheme(), e.AdvertiseAddr(), e.ClientPort)
 }
 
 // PeerURL is this member's advertised peer endpoint.
 func (e EtcdConfig) PeerURL() string {
-	return fmt.Sprintf("http://%s:%d", e.AdvertiseAddr(), e.PeerPort)
+	return fmt.Sprintf("%s://%s:%d", e.ClientScheme(), e.AdvertiseAddr(), e.PeerPort)
 }
 
 // PgDogBackend is one [[databases]] entry in pgdog.toml — a single PostgreSQL
@@ -5945,6 +5968,31 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	for name, ec := range c.Addons.Etcd {
+		if (ec.TLSCertFile == "") != (ec.TLSKeyFile == "") {
+			return fmt.Errorf("addons.etcd.%s.tls_cert_file and tls_key_file must be set together", name)
+		}
+		for field, path := range map[string]string{
+			"tls_cert_file": ec.TLSCertFile,
+			"tls_key_file":  ec.TLSKeyFile,
+			"tls_ca_file":   ec.TLSCAFile,
+		} {
+			if path == "" {
+				continue
+			}
+			if _, err := os.Stat(path); err != nil {
+				return fmt.Errorf("addons.etcd.%s.%s: %w", name, field, err)
+			}
+		}
+		if ec.Auth {
+			if ec.AuthUser == "" {
+				return fmt.Errorf("addons.etcd.%s.auth_user must not be empty when auth is enabled", name)
+			}
+			if ec.AuthPassword == "" {
+				return fmt.Errorf("addons.etcd.%s.auth_password must not be empty when auth is enabled", name)
+			}
+		}
+	}
 	return nil
 }
 
@@ -6332,6 +6380,9 @@ func (c *Config) ApplyDefaults() {
 		}
 		if addon.ImageTag == "" {
 			addon.ImageTag = "quay.io/coreos/etcd:v3.5.30"
+		}
+		if addon.Auth && addon.AuthUser == "" {
+			addon.AuthUser = "root"
 		}
 		c.Addons.Etcd[name] = addon
 	}

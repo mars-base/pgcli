@@ -1,11 +1,19 @@
 package tlsca
 
 import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -215,5 +223,132 @@ func TestLocalHostsDedup(t *testing.T) {
 		if !seen[want] {
 			t.Errorf("missing %q in %v", want, hosts)
 		}
+	}
+}
+
+func TestGenerateMutualLeafHasClientAuth(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := GenerateMutual(dir, []string{"localhost", "127.0.0.1"}, time.Hour); err != nil {
+		t.Fatalf("GenerateMutual: %v", err)
+	}
+	leaf := readLeaf(t, dir)
+	for _, want := range []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth} {
+		if !slices.Contains(leaf.ExtKeyUsage, want) {
+			t.Fatalf("leaf EKUs = %v, missing %v", leaf.ExtKeyUsage, want)
+		}
+	}
+
+	caPEM, _ := os.ReadFile(filepath.Join(dir, CACertFile))
+	blk, _ := pem.Decode(caPEM)
+	ca, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(ca)
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		Roots: pool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}); err != nil {
+		t.Fatalf("leaf does not verify as a client cert: %v", err)
+	}
+}
+
+// writeECDSAKeyCA plants a `pg cert --ca`-style CA pair (ECDSA P-256, PKCS#8
+// key) in dir, restricted to ekus when non-nil.
+func writeECDSAKeyCA(t *testing.T, dir string, ekus []x509.ExtKeyUsage) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(42),
+		Subject:               pkix.Name{CommonName: "pgcli cert", Organization: []string{"pgcli cert"}},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           ekus,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	if err := os.WriteFile(filepath.Join(dir, CACertFile), caCertPEM, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, CAKeyFile), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return caCertPEM
+}
+
+// `pg cert --ca` writes an ECDSA P-256 key in PKCS#8; GenerateMutual must
+// adopt such a CA pair in place instead of erroring or minting a new one.
+func TestGenerateMutualAdoptsECDSAKeyCA(t *testing.T) {
+	dir := t.TempDir()
+	caCertPEM := writeECDSAKeyCA(t, dir, nil)
+
+	if _, err := GenerateMutual(dir, []string{"localhost", "127.0.0.1"}, time.Hour); err != nil {
+		t.Fatalf("GenerateMutual with ECDSA CA: %v", err)
+	}
+	gotCA, _ := os.ReadFile(filepath.Join(dir, CACertFile))
+	if !bytes.Equal(gotCA, caCertPEM) {
+		t.Fatal("pre-placed ECDSA CA was replaced")
+	}
+	caBlk, _ := pem.Decode(caCertPEM)
+	caCert, err := x509.ParseCertificate(caBlk.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf := readLeaf(t, dir)
+	if err := leaf.CheckSignatureFrom(caCert); err != nil {
+		t.Fatalf("leaf not signed by the pre-placed CA: %v", err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(caCert)
+	for _, eku := range []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth} {
+		if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, KeyUsages: []x509.ExtKeyUsage{eku}}); err != nil {
+			t.Errorf("leaf does not verify for %v: %v", eku, err)
+		}
+	}
+}
+
+// CAs minted by older `pg cert --ca` releases carry ServerAuth EKU, which Go's
+// verifier applies to client-auth chains too. Fail with the fix instead of
+// signing a leaf that etcd peers will reject at handshake time.
+func TestGenerateMutualRejectsServerOnlyCA(t *testing.T) {
+	dir := t.TempDir()
+	writeECDSAKeyCA(t, dir, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
+	_, err := GenerateMutual(dir, []string{"localhost"}, time.Hour)
+	if err == nil || !strings.Contains(err.Error(), "restricts extended key usage") {
+		t.Fatalf("want EKU-restriction error, got %v", err)
+	}
+}
+
+func TestGenerateMutualRenewsServerOnlyLeaf(t *testing.T) {
+	dir := t.TempDir()
+	hosts := []string{"localhost", "127.0.0.1"}
+	if _, err := Generate(dir, hosts, time.Hour); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	caBefore, _ := os.ReadFile(filepath.Join(dir, CACertFile))
+
+	if _, err := GenerateMutual(dir, hosts, time.Hour); err != nil {
+		t.Fatalf("GenerateMutual: %v", err)
+	}
+	leaf := readLeaf(t, dir)
+	if !slices.Contains(leaf.ExtKeyUsage, x509.ExtKeyUsageClientAuth) {
+		t.Fatalf("server-only leaf was not renewed with ClientAuth: %v", leaf.ExtKeyUsage)
+	}
+	caAfter, _ := os.ReadFile(filepath.Join(dir, CACertFile))
+	if string(caBefore) != string(caAfter) {
+		t.Fatal("CA must be reused when upgrading the leaf EKU")
 	}
 }

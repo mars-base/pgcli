@@ -13,6 +13,7 @@ package tlsca
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -23,6 +24,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 )
 
@@ -51,18 +53,33 @@ const (
 	caValidity = 100 * 365 * 24 * time.Hour
 )
 
-// Generate creates a self-signed CA (when absent) and a leaf cert for the
-// given hosts (DNS names and/or IPs), writing them into dir. An existing leaf
-// is renewed only when missing, unparsable, within renewBefore of expiry, or
-// lacking a now-required SAN. Returns the CA cert path.
+// Generate creates a self-signed CA (when absent) and a server leaf cert for
+// the given hosts (DNS names and/or IPs), writing them into dir. An existing
+// leaf is renewed only when missing, unparsable, within renewBefore of expiry,
+// lacking a now-required SAN, or carrying the wrong extended key usages.
+// Returns the CA cert path.
 func Generate(dir string, hosts []string, renewBefore time.Duration) (string, error) {
+	return generate(dir, hosts, renewBefore, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
+}
+
+// GenerateMutual is Generate with a leaf usable for both server and client
+// authentication — etcd's raft peer mTLS verifies member certificates as
+// client certs, which requires the ClientAuth EKU.
+func GenerateMutual(dir string, hosts []string, renewBefore time.Duration) (string, error) {
+	return generate(dir, hosts, renewBefore, []x509.ExtKeyUsage{
+		x509.ExtKeyUsageServerAuth,
+		x509.ExtKeyUsageClientAuth,
+	})
+}
+
+func generate(dir string, hosts []string, renewBefore time.Duration, ekus []x509.ExtKeyUsage) (string, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", fmt.Errorf("creating cert dir: %w", err)
 	}
 	caCertPath := filepath.Join(dir, CACertFile)
 	leafPath := filepath.Join(dir, ServerCert)
 
-	need, err := leafNeedsRenewal(leafPath, hosts, renewBefore)
+	need, err := leafNeedsRenewal(leafPath, hosts, renewBefore, ekus)
 	if err != nil {
 		return "", err
 	}
@@ -80,21 +97,44 @@ func Generate(dir string, hosts []string, renewBefore time.Duration) (string, er
 	if err != nil {
 		return "", err
 	}
-	if err := writeLeaf(dir, caKey, caCert, hosts); err != nil {
+	if err := caPermitsEKUs(caCertPath, caCert, ekus); err != nil {
+		return "", err
+	}
+	if err := writeLeaf(dir, caKey, caCert, hosts, ekus); err != nil {
 		return "", err
 	}
 	return caCertPath, nil
+}
+
+// caPermitsEKUs rejects a CA whose own ExtendedKeyUsage excludes a wanted
+// usage. Go's x509 verifier applies the CA's EKU to every chain built below it,
+// so a serverAuth-only root can never validate client certs — older
+// `pg cert --ca` builds wrote exactly that, and etcd's raft peer mTLS is the
+// first consumer to need ClientAuth.
+func caPermitsEKUs(caPath string, ca *x509.Certificate, ekus []x509.ExtKeyUsage) error {
+	if len(ca.ExtKeyUsage) == 0 {
+		return nil
+	}
+	if slices.Contains(ca.ExtKeyUsage, x509.ExtKeyUsageAny) {
+		return nil
+	}
+	for _, want := range ekus {
+		if !slices.Contains(ca.ExtKeyUsage, want) {
+			return fmt.Errorf("CA %s restricts extended key usage to %v and cannot sign %v certificates — regenerate it with a current `pg cert --ca` (CA certs carry no EKU restriction)", caPath, ca.ExtKeyUsage, want)
+		}
+	}
+	return nil
 }
 
 // NeedsRenewal reports whether Generate would rewrite the leaf sitting in dir
 // for the given hosts. Callers that hand the private key to a container user
 // use it to unlink an unmovable key before regeneration.
 func NeedsRenewal(dir string, hosts []string, renewBefore time.Duration) (bool, error) {
-	return leafNeedsRenewal(filepath.Join(dir, ServerCert), hosts, renewBefore)
+	return leafNeedsRenewal(filepath.Join(dir, ServerCert), hosts, renewBefore, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
 }
 
 // leafNeedsRenewal reports whether the leaf at leafPath must be rewritten.
-func leafNeedsRenewal(leafPath string, hosts []string, renewBefore time.Duration) (bool, error) {
+func leafNeedsRenewal(leafPath string, hosts []string, renewBefore time.Duration, ekus []x509.ExtKeyUsage) (bool, error) {
 	data, err := os.ReadFile(leafPath)
 	if os.IsNotExist(err) {
 		return true, nil
@@ -112,7 +152,20 @@ func leafNeedsRenewal(leafPath string, hosts []string, renewBefore time.Duration
 	if time.Until(cert.NotAfter) < renewBefore {
 		return true, nil
 	}
-	return hostSANsMissing(cert, hosts), nil
+	if hostSANsMissing(cert, hosts) {
+		return true, nil
+	}
+	return ekusMissing(cert, ekus), nil
+}
+
+// ekusMissing reports whether any wanted extended key usage is absent.
+func ekusMissing(cert *x509.Certificate, ekus []x509.ExtKeyUsage) bool {
+	for _, want := range ekus {
+		if !slices.Contains(cert.ExtKeyUsage, want) {
+			return true
+		}
+	}
+	return false
 }
 
 // hostSANsMissing returns true when some requested host is absent from the
@@ -139,15 +192,17 @@ func hostSANsMissing(cert *x509.Certificate, hosts []string) bool {
 }
 
 // loadOrCreateCA reads the CA material from disk, generating and persisting a
-// fresh 4096-bit CA when either file is absent.
-func loadOrCreateCA(keyPath, certPath string) (*rsa.PrivateKey, *x509.Certificate, error) {
+// fresh 4096-bit RSA CA when either file is absent. An existing CA may use any
+// key type x509 supports (PKCS#1 RSA, PKCS#8 RSA/ECDSA, SEC 1 EC) — that is
+// what `pg cert --ca`, which defaults to ECDSA P-256, leaves behind.
+func loadOrCreateCA(keyPath, certPath string) (crypto.Signer, *x509.Certificate, error) {
 	keyPEM, kerr := os.ReadFile(keyPath)
 	certPEM, cerr := os.ReadFile(certPath)
 	if kerr == nil && cerr == nil {
 		kb, _ := pem.Decode(keyPEM)
 		cb, _ := pem.Decode(certPEM)
 		if kb != nil && cb != nil {
-			key, err := x509.ParsePKCS1PrivateKey(kb.Bytes)
+			key, err := parseCAKey(kb.Bytes)
 			if err == nil {
 				cert, err := x509.ParseCertificate(cb.Bytes)
 				if err == nil {
@@ -194,8 +249,26 @@ func loadOrCreateCA(keyPath, certPath string) (*rsa.PrivateKey, *x509.Certificat
 	return key, cert, nil
 }
 
-// writeLeaf issues a server cert for hosts signed by the CA into dir.
-func writeLeaf(dir string, caKey *rsa.PrivateKey, caCert *x509.Certificate, hosts []string) error {
+// parseCAKey accepts the PEM key encodings found in the wild: PKCS#1 RSA,
+// PKCS#8 (RSA or ECDSA — what `pg cert` writes), and SEC 1 EC.
+func parseCAKey(der []byte) (crypto.Signer, error) {
+	if key, err := x509.ParsePKCS1PrivateKey(der); err == nil {
+		return key, nil
+	}
+	if key, err := x509.ParsePKCS8PrivateKey(der); err == nil {
+		if signer, ok := key.(crypto.Signer); ok {
+			return signer, nil
+		}
+		return nil, fmt.Errorf("CA key: unsupported PKCS#8 key type %T", key)
+	}
+	if key, err := x509.ParseECPrivateKey(der); err == nil {
+		return key, nil
+	}
+	return nil, fmt.Errorf("CA key: unrecognized PEM key encoding")
+}
+
+// writeLeaf issues a cert for hosts signed by the CA into dir.
+func writeLeaf(dir string, caKey crypto.Signer, caCert *x509.Certificate, hosts []string, ekus []x509.ExtKeyUsage) error {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return fmt.Errorf("generating leaf key: %w", err)
@@ -206,7 +279,7 @@ func writeLeaf(dir string, caKey *rsa.PrivateKey, caCert *x509.Certificate, host
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(leafValidity),
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		ExtKeyUsage:  ekus,
 	}
 	for _, h := range hosts {
 		if ip := net.ParseIP(h); ip != nil {

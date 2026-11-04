@@ -9,10 +9,11 @@ addon** 运行 —— 它是共享基础设施，而非绑定某个实例的 sid
 PostgreSQL 高可用栈充当 DCS（Distributed Concurrent Store），或作为通用的配置 /
 锁服务。
 
-> **安全提示：** pgcli 管理的 etcd 成员目前**不提供** TLS/CA 证书，也**没有**
-> 认证 / RBAC —— 任何能连到 client 端口的客户端都拥有完整读写权限。部署时请依靠
-> 网络隔离（默认仅绑定回环；广播端口务必放在受信网络内）。CA/TLS 与认证/RBAC
-> 支持在后续版本中规划开发。
+> **安全提示：** pgcli 管理的 etcd 成员**默认不启用 TLS 与认证** —— 任何能连到
+> client 端口的客户端都拥有完整读写权限，因此默认仅绑定回环、并把端口限制在受信
+> 网络内。传入 `--tls` 可加密 client 监听器并对 raft peer 做双向认证，传入
+> `--auth` 则要求用户名/密码。目前仍没有多用户 / RBAC 管理：`--auth` 只创建一个
+> 拥有 `root` 角色的用户。详见 [TLS 与认证](#tls-与认证)。
 
 成员通过一次次 `pg addon install etcd` 管理：第一个成员引导（bootstrap）集群，
 后续成员动态加入同名的集群 —— 可以在同一台机器，也可以跨机器。
@@ -22,9 +23,13 @@ PostgreSQL 高可用栈充当 DCS（Distributed Concurrent Store），或作为�
 - **共享基础设施：** etcd 存放在 `pg.yaml` 顶层的 `addons.etcd` map 中，以成员名
   为 key，不隶属于任何单个实例。
 - **host 网络 + 可配置监听：** 每个成员以 `--network host` 运行。默认情况下
-  client/peer URL 绑定到 `127.0.0.1` —— etcd 本身不带认证，单机集群仅回环暴露是
-  预期的安全姿态。跨机集群中每个成员通过 `--advertise-host` 广播一个对端可达的
-  地址，同时**仍然**监听回环，本机 etcdctl 与远端 peer 都能访问。
+  client/peer URL 绑定到 `127.0.0.1` —— 未启用 `--tls`/`--auth` 时任何可达的
+  客户端都拥有完整权限，因此单机集群默认只回环暴露。跨机集群中每个成员通过
+  `--advertise-host` 广播一个对端可达的地址，同时**仍然**监听回环，本机 etcdctl
+  与远端 peer 都能访问。
+- **可选 TLS 与认证：** `--tls` 同时覆盖两个接口（client HTTPS + raft peer
+  mTLS），`--auth` 增加一个 root 角色的用户名/密码。两者都是集群级属性，在
+  bootstrap 时确定 —— 见 [TLS 与认证](#tls-与认证)。
 - **动态成员管理：** 第一个成员以 `--initial-cluster-state new` 启动；每个后续成员
   先对一个运行中的对等成员执行 `etcdctl member add` 注册，再以
   `--initial-cluster-state existing` 启动。pgcli 自动完成这些步骤 —— 同机走成员
@@ -91,6 +96,140 @@ pg addon install etcd --name m3 --cluster prod \
 | 端口 | 同主机内每个成员互不相同 | 可重复，各主机绑各自网卡 |
 | 防火墙 | 无需（仅回环） | 每个成员的 client+peer 端口，双向放行 |
 | 能否扛单机故障 | 否 | 能（quorum 成立时） |
+
+## TLS 与认证
+
+`--tls` 与 `--auth` 相互独立、均为可选，且都是**在 bootstrap 时确定的集群级
+属性**。同一集群的所有成员必须对两者取值一致：
+
+- `--tls` 把 client 监听器变成 HTTPS、raft peer 监听器变成 mTLS。每个成员都持有
+  由同一个集群 CA 签发的 leaf 证书，peer 之间用该 CA 互相校验证书。
+- `--auth` 启用 etcd 的认证存储，创建一个（默认名为 `root`）拥有 `root` 角色的
+  用户，然后打开认证开关。
+
+不启用 `--tls` 时 `--auth` 仍然可用，但密码会以明文经过网络（pgcli 会打印警告）。
+启用 `--tls` 后 client 流量被加密且服务端经过认证，客户端通过用户名/密码认证。
+
+### 单机
+
+```bash
+pg addon install etcd --name m1 --tls --auth
+```
+
+首次安装时若省略 `--password`，pgcli 会生成一个密码并只打印一次：
+
+```
+  TLS:          on
+  Cluster CA:   ~/.pgcli/tls/etcd/pgcli-etcd/ca.crt
+  Auth:         on
+  Auth user:    root
+  Auth password: ********  (generated once; stored in pg.yaml)
+  Retrieve later with: pg addon password etcd --name m1
+```
+
+之后可用 `pg addon password etcd --name m1` 取回。同一主机上的其它成员会自动
+继承这两个设置（以及凭据）：
+
+```bash
+pg addon install etcd --name m2
+```
+
+想自己指定密码可传 `--password`（用户名用 `--root-user`）；这两个参数任一出现都
+隐含 `--auth`。用新的 `--password` 重新 install 会轮换 root 用户的密码。
+
+### 跨主机集群
+
+第一个成员在本地生成 CA；加入的主机会自动从集群取回，无需手工复制证书文件：
+
+```bash
+# 主机 A (10.0.0.1) — 引导
+pg addon install etcd --name m1 --cluster prod \
+  --advertise-host 10.0.0.1 --tls --auth --password '<password>'
+
+# 主机 B (10.0.0.2) — 通过 HTTPS 加入；自动取回 CA
+pg addon install etcd --name m2 --cluster prod \
+  --advertise-host 10.0.0.2 --join https://10.0.0.1:2379 \
+  --tls --auth --password '<password>'
+```
+
+- `--join` 的 scheme 必须匹配：启用 `--tls` 用 `https://`，否则用 `http://`。
+- 远端集群已启用认证时**必须**传 `--password`（用户名不是 `root` 时还要传
+  `--root-user`）——取 CA 这一步本身就要用该凭据认证。缺少凭据会给出明确错误。
+- 取 CA 采用首次使用即信任（TOFU）：仅该次交互跳过证书校验，之后所有流量都用
+  取回的 CA 验证。
+
+`--join` 能在本地没有 CA 的主机上自动取回 CA，前提是集群 CA 由 pgcli 生成。若
+使用手动分发的 CA 或 BYO 证书，请自行把 CA 复制到每台主机（见下文）。
+
+### 手动分发 CA（`pg cert --ca`）
+
+也可以在安装前用 `pg cert --ca` 生成 CA，并分发到每台主机。CA 对必须落在
+`<base_dir>/tls/etcd/<cluster>/` 下（`<base_dir>` 默认为 `~/.pgcli`）：
+
+```bash
+# 直接生成到目标目录（在任一主机上执行一次）
+mkdir -p ~/.pgcli/tls/etcd/prod
+pg cert --ca --host localhost,127.0.0.1 \
+  --cert-file ~/.pgcli/tls/etcd/prod/ca.crt \
+  --key-file  ~/.pgcli/tls/etcd/prod/ca.key
+
+# 复制到其它主机的同一路径
+scp ~/.pgcli/tls/etcd/prod/ca.crt ~/.pgcli/tls/etcd/prod/ca.key \
+  hostB:~/.pgcli/tls/etcd/prod/
+```
+
+pgcli 从该目录读取 CA 对（私钥保持 0600）并原样复用；每个成员再获得由它签发的
+leaf。**包括 bootstrap 主机在内**，每台主机都要在安装前放好同一对文件。此模式
+**不会**把 CA 写入 etcd —— 由你自行分发。
+
+当前版本 `pg cert --ca` 生成的 CA **不带扩展密钥用途（EKU）限制**，因此既能签发
+服务端证书也能签发客户端证书（raft peer 会把成员证书作为客户端证书校验）。旧版
+pgcli 生成的是仅 serverAuth 的 CA，peer mTLS 会拒绝这类证书链；现在 pgcli 会在
+安装时提前拒绝并提示重新生成。
+
+### 自带成员证书（BYO）
+
+`--tls-cert` / `--tls-key` 使用外部签发的 leaf 证书（隐含 `--tls`）；可选的
+`--tls-ca` 指定客户端校验用的 CA，自签证书时默认就是该证书本身。leaf 必须带
+`clientAuth` EKU（或完全不设 EKU），因为 raft peer 会把它当客户端证书校验。BYO
+材料不会被写入 etcd，CA 也不会被发布 —— 请自行分发。
+
+### 哪些内容会被发布，以及风险
+
+在自动生成证书模式（只传 `--tls`、没有 BYO 证书对）下，第一个成员会把集群 CA
+对写入 etcd：`/_pgcli/pki/etcd/ca.crt` 与 `/_pgcli/pki/etcd/ca.key`，供其它主机
+`--join` 时取回：
+
+- 启用 `--auth` 之前，任何能连到 client 端口的人都能读到 CA **私钥**（发布发生在
+  打开认证之前，因为发布动作本身不需要凭据）。启用认证后读取需要凭据。
+- 拿到该私钥的人可以签发此集群信任的任意证书。请把 client 端口放在私有网络并
+  对 2379 做防火墙限制；或者改用手动分发 `pg cert --ca` 的 CA / BYO 证书，完全
+  避免写入 etcd。
+
+只要发布了自动生成的 CA，安装摘要就会打印上述警告。
+
+### 不兼容的消费方
+
+Patroni 的 DCS 配置与 RabbitMQ 的 etcd peer discovery 仍以**明文 HTTP 且不带
+凭据**访问。对它们使用的集群启用 `--tls` 或 `--auth` 会让它们失联。若 pgcli 在
+本地配置中发现这类消费方（Patroni 集群的 etcd members/endpoints 匹配该成员，或
+RabbitMQ 用它做 discovery），安装时会打印 `[!]` 警告。在这些集成支持 TLS/认证
+之前，请让此类 etcd 集群保持明文并依赖网络隔离。
+
+### 之后修改 TLS/认证
+
+TLS 在成员生命周期内不可更改：其广播的 peer URL scheme 是集群成员记录的一部分。
+切换已初始化成员的 TLS，或在同一集群混用 TLS/非 TLS 成员，都会被拒绝 —— 请销毁
+并重建集群：
+
+```bash
+pg addon remove etcd --name m1 --clean-data
+```
+
+认证同样是集群级属性。要在已有明文集群上启用认证，先用 `--auth --password ...`
+重新安装 bootstrapping 成员，再用 `--auth` 重新安装其余成员，让它们记录凭据
+（同机成员自动继承，跨机成员必须传 `--password`）。一旦启用，停用认证同样需要
+重建集群。
 
 ## 命令
 
@@ -211,6 +350,8 @@ Infra add-ons (etcd):
     Status:      running
     Cluster:     pgcli-etcd
     Client URL:  http://127.0.0.1:2379
+    TLS:         off
+    Auth:        off
     Client port: 2379
     Peer port:   2380
     Image:       quay.io/coreos/etcd:v3.5.30
@@ -275,7 +416,13 @@ pg etcdctl member remove <hex-id>                 # 如 5c7048c8f7521ec7
 | `--image` | etcd 镜像 tag | `quay.io/coreos/etcd:v3.5.30` |
 | `--data-dir` | 数据目录**根**——绝对路径，或相对 `base_dir`；每个成员用 `<root>/<name>/data` | `<base_dir>/addon/etcd` |
 | `--advertise-host` | 本成员 peer/client URL 中广播的主机（留空 = `127.0.0.1` 单机；跨机填 LAN IP 或 FQDN） | `127.0.0.1` |
-| `--join` | 要跨机加入的现有成员 client endpoint，如 `http://10.0.0.1:2379`（隐含 `--initial-cluster-state existing`；需搭配 `--advertise-host` 与 `--cluster`） | — |
+| `--join` | 要跨机加入的现有成员 client endpoint，如 `https://10.0.0.1:2379`（隐含 `--initial-cluster-state existing`；需搭配 `--advertise-host` 与 `--cluster`；scheme 必须与 `--tls` 一致） | — |
+| `--tls` | 两个接口都启用 TLS —— client HTTPS、raft peer mTLS；证书生成在 `<base_dir>/tls/etcd/<cluster>/` 下 | 关闭 |
+| `--tls-cert` / `--tls-key` | 自带成员证书与私钥（隐含 `--tls`；leaf 需带 `clientAuth` EKU 或不设 EKU） | — |
+| `--tls-ca` | 配合 `--tls-cert`/`--tls-key` 时客户端校验用的 CA（默认用证书本身） | — |
+| `--auth` | 启用用户名/密码认证，创建单个 root 角色用户 | 关闭 |
+| `--root-user` | 认证用户名（隐含 `--auth`） | `root` |
+| `--password` | 认证密码（隐含 `--auth`）；首次安装省略时自动生成 | 自动生成 |
 
 容器名遵循命名空间约定：`pgcli-etcd-<namespace>-<name>`（未设 namespace 时省略）。
 
@@ -319,6 +466,22 @@ pg etcdctl get foo -- --hex
 
 `pg etcdctl` 始终使用 v3 API（`ETCDCTL_API=3`，etcdctl 的默认值）；不支持 v2。
 
+当回退成员启用了 TLS 和/或认证时，`pg etcdctl` 会自动注入：通过
+`ETCDCTL_CACERT` 传入该成员的 CA，通过 `ETCDCTL_USER` 传入凭据（密码不会出现在
+`ps` 里）：
+
+```bash
+pg etcdctl endpoint health
+pg etcdctl put foo bar
+```
+
+若 `ETCDCTL_ENDPOINTS` 指向另一个集群，可在 `--` 之后覆盖注入值：
+
+```bash
+ETCDCTL_ENDPOINTS=https://10.0.0.9:2379 pg etcdctl \
+  member list -- --cacert /path/to/other-ca.crt --user root:password
+```
+
 ## 拓扑与 Quorum
 
 etcd 需要成员多数派（quorum）才能接受写入：
@@ -356,6 +519,28 @@ addons:
       peer_port: 2382
 ```
 
+启用 TLS/认证的成员还会记录集群级设置：
+
+```yaml
+addons:
+  etcd:
+    m1:
+      name: m1
+      cluster_name: prod
+      advertise_host: 10.0.0.1
+      client_port: 2379
+      peer_port: 2380
+      tls: true
+      auth: true
+      auth_user: root
+      auth_password: example-password
+```
+
+`auth_password` 以明文保存（与其它 addon secret 一致），`pg addon password etcd
+--name m1` 读回的就是它。BYO 成员还会记录 `tls_cert_file`、`tls_key_file` 与
+`tls_ca_file`；自动生成证书模式下这些字段留空，路径由集群名推导到
+`<base_dir>/tls/etcd/<cluster>/` 下。
+
 端口起始值可通过顶层 `etcd_start_port` 配置（默认 2379）。
 
 ## 开机自启
@@ -384,3 +569,7 @@ pg autostart enable --etcd --name m3
   「工作原理」），可直接用于生产环境的 DCS 场景。
 - **重复安装是幂等的：** 对运行中的成员再次执行 `pg addon install etcd --name <m>`
   会以更新后的参数重建其容器；已在集群中注册的成员不会被重复 add。
+- **TLS/认证在 bootstrap 时决定：** 跨机集群请从第一个成员起就带 `--tls
+  --auth`；已初始化成员只有销毁重建才能切换。
+- **手动 CA 与 BYO 证书不写入 etcd：** 只有 pgcli 自动生成的 CA 才会发布供
+  `--join` 取回 —— 手动分发或 BYO 材料请自行复制。
