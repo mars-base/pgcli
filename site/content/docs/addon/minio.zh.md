@@ -109,8 +109,10 @@ pg addon install minio --name store --tls-cert /etc/ssl/minio.test.crt --tls-key
 [备份 → S3 对象存储仓库](../../backup/#s3-对象存储仓库)。
 
 关于"store 与集群怎么配对"的一点说明：`backup.repo.s3` 是一份配置文件里唯一
-的全局仓库，所以最先接上的那台 TLS MinIO 会收到该环境里的**所有** stanza——
-再装一台 MinIO 并不会让集群们多出一个可按集群选择的 store。确需两个目的地
+的全局仓库，所以最先接上的那台 TLS MinIO 会收到该环境里**所有选了 S3 的**
+stanza——Patroni 集群自动选它，普通实例则在 `pg create --backup-target s3` 时
+选它（[使用 S3 的实例](../../s3-instance/)）；其余 stanza 仍留在本地仓库。再
+装一台 MinIO 并不会让大家多出一个可按集群选择的 store。确需两个目的地
 时，跑第二份配置（见[备份 → 共享备份容器](../../backup/#共享备份容器)，以及完
 整示例[示例：HA 集群 + 自签 CA 的 MinIO](../../ha-cluster/ha-example-minio/)）。
 

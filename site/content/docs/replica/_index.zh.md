@@ -148,7 +148,7 @@ SELECT pg_drop_replication_slot('pgcli_r_ro1');
 
 - **只读** — 副本拒绝所有写入（`cannot execute INSERT in a read-only transaction`）。要使其可写你需要提升它（`pg_ctl promote`），这尚未作为 pgcli 命令暴露
 - **相同数据，相同密码** — 物理复制是主实例的逐字节复制，包括 `pg_authid`。因此副本的管理员密码和数据库名称与主实例相同；只有容器名称、端口和数据目录不同。使用 `--dsn` 风格的连接时使用副本的端口
-- **副本上禁用 PITR** — 备用实例不归档任何内容，也不在 pgBackRest 备份容器中注册；备份在主实例上运行
+- **副本上禁用 PITR** — 备用实例不归档任何内容，也不在 pgBackRest 备份容器中注册；备份在主实例上运行。`pg replica promote` 随后决定新主实例的备份目标（本机配了完整的 `backup.repo.s3` 则用 S3），详见[使用 S3 的实例](../s3-instance/)
 - **主实例必须正在运行** — 初始创建（`pg_basebackup`）和持续流式传输都需要；如果主实例重启，副本会自动重新连接（槽显示为 `active`）
 - **延迟显示** — `replica list` 延迟（`now() - pg_last_xact_replay_timestamp()`）在主实例空闲时会增长；它会在下一个复制的事务时降回零。这是预期的空闲行为，不是漂移
 - **幂等启动** — 重复的 `pg start -i ro1` 在数据目录已初始化时跳过基础备份

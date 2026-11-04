@@ -552,13 +552,11 @@ func (m *BackupManager) ListStanzas() []StanzaInfo {
 	return out
 }
 
-// s3StanzaLines returns the repo1 S3 override block emitted *inside* each
-// Patroni stanza, or "" when no S3 repo is configured. Deliberately per-stanza
-// rather than in [global]: the shared [global] repo1-path stays local, so the
-// pgcli-managed regular-instance backups are completely unaffected by S3.
-// Only Patroni cluster stanzas push to the object store.
-func (m *BackupManager) s3StanzaLines() string {
-	s3 := m.cfg.Backup.Repo.S3
+// renderS3RepoLines returns the repo1 S3 override block for one stanza, or ""
+// when no S3 repo is configured. Deliberately per-stanza rather than in
+// [global]: the shared [global] repo1-path stays local, so stanzas that did
+// not opt in (regular instances with the default target) are unaffected.
+func renderS3RepoLines(s3 *config.BackupRepoS3) string {
 	if s3 == nil {
 		return ""
 	}
@@ -581,6 +579,12 @@ func (m *BackupManager) s3StanzaLines() string {
 		sb.WriteString("repo1-s3-ca-file=/etc/pgbackrest/ca.crt\n")
 	}
 	return sb.String()
+}
+
+// s3StanzaLines returns the S3 override block for Patroni stanzas. Patroni
+// clusters always use the shared S3 repo when one is configured.
+func (m *BackupManager) s3StanzaLines() string {
+	return renderS3RepoLines(m.cfg.Backup.Repo.S3)
 }
 
 // WritePgbackrestConf generates pgbackrest.conf with all instance stanzas.
@@ -610,7 +614,14 @@ func (m *BackupManager) WritePgbackrestConf() (string, error) {
 		sb.WriteString("]\n")
 		fmt.Fprintf(&sb, "pg1-host=%s\n", host)
 		fmt.Fprintf(&sb, "pg1-path=/var/lib/postgresql/data\n")
-		fmt.Fprintf(&sb, "pg1-user=postgres\n\n")
+		fmt.Fprintf(&sb, "pg1-user=postgres\n")
+		if inst.PITR.BackupTarget == config.BackupTargetS3 {
+			if err := config.ValidateBackupTarget(inst.PITR.BackupTarget, m.cfg.Backup.Repo.S3); err != nil {
+				return "", fmt.Errorf("instance %q: %w", name, err)
+			}
+			sb.WriteString(renderS3RepoLines(m.cfg.Backup.Repo.S3))
+		}
+		sb.WriteString("\n")
 		stanzaCount++
 	}
 
@@ -965,18 +976,33 @@ func (m *BackupManager) BackupExec(tailLogs bool, args ...string) (string, error
 // there is nothing to anchor the probe to, so it is skipped.
 func (m *BackupManager) VerifyRepoConnectivity() error {
 	stanza := ""
-	if ts := m.PatroniStanzaNames(); len(ts) > 0 {
-		stanza = ts[0].Stanza
-	} else {
-		for name, inst := range m.cfg.Instances {
-			if !inst.PITR.Enabled {
-				continue
+	// When an S3 repo is configured, probe a stanza that actually uses it —
+	// Patroni stanzas always do; regular instances do when they opted in.
+	// Probing a local stanza would exercise the wrong repository and could
+	// pass while the S3 settings stay untested until the first backup.
+	if m.cfg.Backup.Repo.S3 != nil {
+		if ts := m.PatroniStanzaNames(); len(ts) > 0 {
+			stanza = ts[0].Stanza
+		} else {
+			for name, inst := range m.cfg.Instances {
+				if inst.PITR.Enabled && inst.PITR.BackupTarget == config.BackupTargetS3 {
+					stanza = instanceStanzaName(name, inst)
+					break
+				}
 			}
-			stanza = inst.PITR.PgBackRestStanza
-			if stanza == "" {
-				stanza = "pgcli_" + name
+		}
+	}
+	if stanza == "" {
+		if ts := m.PatroniStanzaNames(); len(ts) > 0 {
+			stanza = ts[0].Stanza
+		} else {
+			for name, inst := range m.cfg.Instances {
+				if !inst.PITR.Enabled {
+					continue
+				}
+				stanza = instanceStanzaName(name, inst)
+				break
 			}
-			break
 		}
 	}
 	if stanza == "" {

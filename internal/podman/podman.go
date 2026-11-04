@@ -537,6 +537,21 @@ func (m *Manager) EnsureContainer() error {
 		return err
 	}
 
+	// A container created before this instance used S3 lacks the CA mount
+	// (mounts can only be added by recreating). All state lives in the data
+	// volume, so recreate rather than run archive-push against an untrusted
+	// endpoint.
+	if s3 := m.cfg.Backup.Repo.S3; m.cfg.PITR.Enabled && m.cfg.PITR.UsesS3() && s3 != nil && s3.CAFile != "" {
+		if !m.HasMount("/etc/pgbackrest/ca.crt") {
+			fmt.Println("-> PostgreSQL container is missing the S3 CA mount; recreating...")
+			_ = m.StopContainer() // may already be stopped
+			if _, err := m.run("rm", "-f", m.cfg.Podman.ContainerName); err != nil {
+				return fmt.Errorf("removing PostgreSQL container for S3 CA mount: %w", err)
+			}
+			return m.createContainer()
+		}
+	}
+
 	running, err := m.containerRunning(m.cfg.Podman.ContainerName)
 	if err != nil {
 		return err
@@ -1659,12 +1674,17 @@ func (m *Manager) RunRestoreContainer(stanza, target string, promote, tailLogs b
 		"-v", fmt.Sprintf("%s:/var/lib/postgresql:z", dataVol),
 		"-v", fmt.Sprintf("%s:/var/lib/pgbackrest:z", hostMountPath(m.cfg.Backup.DataDir)),
 		"-v", fmt.Sprintf("%s:/etc/pgbackrest/pgbackrest.conf:ro,z", hostMountPath(confPath)),
-		m.cfg.Podman.ImageTag,
-		"pgbackrest", "--stanza=" + stanza, "restore",
-		"--type=time", "--target=" + target,
-		"--target-action=" + targetAction,
-		"--log-level-console=info",
 	}
+	if s3 := m.cfg.Backup.Repo.S3; m.cfg.PITR.UsesS3() && s3 != nil && s3.CAFile != "" {
+		args = append(args, "-v", fmt.Sprintf("%s:/etc/pgbackrest/ca.crt:ro,z", hostMountPath(s3.CAFile)))
+	}
+	args = append(args,
+		m.cfg.Podman.ImageTag,
+		"pgbackrest", "--stanza="+stanza, "restore",
+		"--type=time", "--target="+target,
+		"--target-action="+targetAction,
+		"--log-level-console=info",
+	)
 
 	// Run without timeout -- restore can take a long time for large databases.
 	slog.Debug("podman", "args", args)
@@ -1749,12 +1769,17 @@ func (m *Manager) RunRestoreContainerToWriter(w io.Writer, stanza, target string
 		"-v", fmt.Sprintf("%s:/var/lib/postgresql:z", dataVol),
 		"-v", fmt.Sprintf("%s:/var/lib/pgbackrest:z", hostMountPath(m.cfg.Backup.DataDir)),
 		"-v", fmt.Sprintf("%s:/etc/pgbackrest/pgbackrest.conf:ro,z", hostMountPath(confPath)),
-		m.cfg.Podman.ImageTag,
-		"pgbackrest", "--stanza=" + stanza, "restore",
-		"--type=time", "--target=" + target,
-		"--target-action=" + targetAction,
-		"--log-level-console=info",
 	}
+	if s3 := m.cfg.Backup.Repo.S3; m.cfg.PITR.UsesS3() && s3 != nil && s3.CAFile != "" {
+		args = append(args, "-v", fmt.Sprintf("%s:/etc/pgbackrest/ca.crt:ro,z", hostMountPath(s3.CAFile)))
+	}
+	args = append(args,
+		m.cfg.Podman.ImageTag,
+		"pgbackrest", "--stanza="+stanza, "restore",
+		"--type=time", "--target="+target,
+		"--target-action="+targetAction,
+		"--log-level-console=info",
+	)
 
 	slog.Debug("podman", "args", args)
 	cmd := podmanCommand(m.podman, args...)
@@ -2141,6 +2166,12 @@ func (m *Manager) createContainer() error {
 		)
 	}
 
+	// archive-push runs in this container and needs the S3 CA at the path
+	// repo1-s3-ca-file names.
+	if s3 := m.cfg.Backup.Repo.S3; m.cfg.PITR.UsesS3() && s3 != nil && s3.CAFile != "" {
+		args = append(args, "-v", fmt.Sprintf("%s:/etc/pgbackrest/ca.crt:ro,z", hostMountPath(s3.CAFile)))
+	}
+
 	args = append(args, m.cfg.Podman.ImageTag)
 	if _, err := m.run(args...); err != nil {
 		return fmt.Errorf("creating container: %w", err)
@@ -2154,22 +2185,33 @@ func (m *Manager) createContainer() error {
 func (m *Manager) writeInstancePgbackrestConf() (string, error) {
 	stanza := m.cfg.PITR.PgBackRestStanza
 
+	s3Lines := ""
+	if m.cfg.PITR.UsesS3() {
+		if err := config.ValidateBackupTarget(m.cfg.PITR.BackupTarget, m.cfg.Backup.Repo.S3); err != nil {
+			return "", err
+		}
+		s3Lines = renderS3RepoLines(m.cfg.Backup.Repo.S3)
+	}
+
 	// All platforms use host networking now: each PG instance listens on a
 	// unique port (PGPORT env var / pg1-port below).  Without pg1-port, the
 	// remote pgbackrest process (over SSH) defaults to 5432 -- but sshd does
 	// not forward PGPORT, so instances with custom ports fail stanza-create.
-	content := fmt.Sprintf(`[%s]
-pg1-path=/var/lib/postgresql/data
-pg1-user=%s
-pg1-port=%d
-
-[global]
-repo1-path=/var/lib/pgbackrest
-repo1-retention-full=%d
-repo1-retention-archive-type=full
-repo1-retention-archive=%d
-log-level-console=info
-`, stanza, m.cfg.Postgres.User, m.cfg.Podman.HostPort, m.cfg.Backup.RetentionFull, m.cfg.Backup.RetentionFull)
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "[%s]\n", stanza)
+	sb.WriteString("pg1-path=/var/lib/postgresql/data\n")
+	fmt.Fprintf(&sb, "pg1-user=%s\n", m.cfg.Postgres.User)
+	fmt.Fprintf(&sb, "pg1-port=%d\n", m.cfg.Podman.HostPort)
+	// archive-push runs in this container; the S3 block must live in the
+	// stanza so it overrides [global]'s local repo1-path.
+	sb.WriteString(s3Lines)
+	sb.WriteString("\n[global]\n")
+	sb.WriteString("repo1-path=/var/lib/pgbackrest\n")
+	fmt.Fprintf(&sb, "repo1-retention-full=%d\n", m.cfg.Backup.RetentionFull)
+	sb.WriteString("repo1-retention-archive-type=full\n")
+	fmt.Fprintf(&sb, "repo1-retention-archive=%d\n", m.cfg.Backup.RetentionFull)
+	sb.WriteString("log-level-console=info\n")
+	content := sb.String()
 
 	confPath := filepath.Join(m.dataDir, fmt.Sprintf("pgbackrest-%s.conf", m.cfg.Podman.ContainerName))
 
@@ -2177,4 +2219,13 @@ log-level-console=info
 		return "", fmt.Errorf("writing %s: %w", confPath, err)
 	}
 	return confPath, nil
+}
+
+// RefreshInstanceBackupConf rewrites the per-instance pgbackrest.conf mounted
+// into the PG container. It is called before the container starts so
+// archive-push sees the current repo selection; the file is bind-mounted, so
+// an in-place rewrite is visible without recreating the container.
+func (m *Manager) RefreshInstanceBackupConf() error {
+	_, err := m.writeInstancePgbackrestConf()
+	return err
 }

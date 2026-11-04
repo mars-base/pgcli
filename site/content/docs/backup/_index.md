@@ -47,13 +47,17 @@ pg snapshot delete 20260826-073712F -i proj01
 
 All instances share a single pgbackrest container; each instance gets its own stanza in the repository.
 
-> **One repository per config file.** The container serves exactly **one**
-> repository — the local directory under `data_dir`, or the single
-> `backup.repo.s3` endpoint when configured — and every stanza in the
-> environment (regular instances and Patroni clusters alike) pushes to it.
-> There is no per-instance or per-cluster repo choice: one pgcli environment
-> therefore backs up to one store. To aim a second store (e.g. a second
-> `pg addon install minio`) at a subset of clusters, run a **second config**
+> **One `[global]` repository per config file.** The container's `[global]`
+> section names exactly **one** default repository — the local directory under
+> `data_dir` — and a stanza that opts into S3 overrides it per-stanza with its
+> own `repo1-type=s3` block. So one pgcli environment can hold local and S3
+> stanzas side by side: Patroni cluster stanzas take S3 automatically when
+> `backup.repo.s3` is configured, a regular instance takes it only when created
+> with `pg create --backup-target s3`
+> ([Instance with S3](../s3-instance/)), and everything else stays on local
+> disk. An opted-in stanza writes *only* to S3 — no dual-write, and no
+> migration of existing backups. To aim a second store (e.g. a second
+> `pg addon install minio`) at a subset of stanzas, run a **second config**
 > (`pg config init --namespace …`) with its own backup container — worked out
 > end to end in
 > [Example: HA Cluster with a Self-CA MinIO](../ha-cluster/ha-example-minio/).
@@ -96,9 +100,11 @@ Backup infrastructure (network, image, directories, config, container) is prepar
 
 ## S3 Object Storage Repository
 
-Patroni cluster backups and WAL archiving can push to any S3-compatible store
-(MinIO, silo, rustfs, garage, AWS S3, ...). Configure it under `backup.repo.s3`
-in `pg.yaml`:
+Backups and WAL archiving can push to any S3-compatible store (MinIO, silo,
+rustfs, garage, AWS S3, ...). Patroni clusters use it automatically once it is
+configured; a regular instance opts in per instance with
+`pg create --backup-target s3` ([Instance with S3](../s3-instance/)). Configure
+it under `backup.repo.s3` in `pg.yaml`:
 
 ```yaml
 backup:
@@ -151,14 +157,21 @@ pg backup setup
   needs), then resumes. Each member's patroni.yml gets the same
   `archive_command` — one stanza per cluster, members listed as `pg*-host` so
   pgBackRest finds the primary itself — and WAL streams to S3 from then on.
-- **Blast radius.** The S3 repo applies only to Patroni cluster stanzas;
-  `pg`-managed regular instances keep backing up to the local repo, unchanged.
+- **Blast radius.** The S3 repo is used automatically by Patroni cluster
+  stanzas; a regular instance pushes to it only when it was created with
+  `pg create --backup-target s3`. Every other stanza keeps backing up to the
+  local repo, unchanged — see
+  [Instance with S3](../s3-instance/) for the per-instance target, mixing
+  local and S3 stanzas, and how `pg replica promote` resolves the target.
 
-One-shot flag equivalent (`secret_key` is best edited into pg.yaml so it never
-lands in shell history):
+One-shot flag equivalent:
 
 ```bash
-pg backup setup --s3-endpoint 10.0.0.9:9000 --s3-bucket pgbackrest \
-    --s3-access-key admin --s3-ca-file ~/.pgcli/tls/minio/store/ca.crt
+pg backup setup --s3-endpoint 192.0.2.9:9000 --s3-bucket pgbackrest \
+    --s3-access-key admin --s3-secret-key '<secret>' \
+    --s3-ca-file ~/.pgcli/tls/minio/store/ca.crt
 ```
+
+(A passing shell with history expansion or shared logs may prefer editing
+`backup.repo.s3.secret_key` into `pg.yaml` instead of the flag.)
 

@@ -119,8 +119,11 @@ connects with full certificate verification — see
 
 One note on pairing stores with clusters: `backup.repo.s3` is a single, global
 repo per config file, so the *first* TLS MinIO you wire up receives every
-stanza in that environment — installing a second MinIO does not give clusters a
-per-cluster store to choose. If you truly need two destinations, run a second
+stanza that opts into S3 — Patroni clusters automatically, regular instances
+when created with `pg create --backup-target s3`
+([Instance with S3](../../s3-instance/)); everything else stays on the local
+repo. Installing a second MinIO does not give stanzas a per-cluster store to
+choose. If you truly need two destinations, run a second
 config (see [Backup → Shared Backup Container](../../backup/#shared-backup-container),
 and the worked
 [Example: HA Cluster with a Self-CA MinIO](../../ha-cluster/ha-example-minio/)).

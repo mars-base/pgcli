@@ -213,6 +213,69 @@ func TestPatroniArchiveParamsGatedOnS3Repo(t *testing.T) {
 	}
 }
 
+// A regular instance stanza carries the S3 override only when it opted in, so
+// local and S3 instances coexist in one backup container. [global] always keeps
+// the local repo1-path, which the opted-in stanza's repo1-path overrides.
+func TestWritePgbackrestConfMixedInstanceTargets(t *testing.T) {
+	cfg := &config.Config{
+		Instances: map[string]config.InstanceConfig{
+			"s3i": {
+				Podman: config.PodmanConfig{ContainerName: "pgcli-pg-s3i"},
+				PITR:   config.PITRConfig{Enabled: true, PgBackRestStanza: "pgcli_s3i", BackupTarget: config.BackupTargetS3},
+			},
+			"loc": {
+				Podman: config.PodmanConfig{ContainerName: "pgcli-pg-loc"},
+				PITR:   config.PITRConfig{Enabled: true, PgBackRestStanza: "pgcli_loc"},
+			},
+		},
+		Backup: config.BackupConfig{RetentionFull: 7, Repo: config.BackupRepo{S3: testS3Repo()}},
+	}
+	m := &BackupManager{cfg: cfg, dataDir: t.TempDir()}
+	confPath, err := m.WritePgbackrestConf()
+	if err != nil {
+		t.Fatalf("WritePgbackrestConf: %v", err)
+	}
+	raw, err := os.ReadFile(confPath)
+	if err != nil {
+		t.Fatalf("read conf: %v", err)
+	}
+	got := string(raw)
+
+	s3Stanza := got[strings.Index(got, "[pgcli_s3i]"):strings.Index(got, "[pgcli_loc]")]
+	locStanza := got[strings.Index(got, "[pgcli_loc]"):]
+	if !strings.Contains(s3Stanza, "repo1-type=s3") || !strings.Contains(s3Stanza, "repo1-s3-bucket=pgbackrest") {
+		t.Errorf("opted-in stanza missing the S3 block:\n%s", s3Stanza)
+	}
+	if strings.Contains(locStanza, "repo1-type=s3") {
+		t.Errorf("local stanza must carry no S3 block:\n%s", locStanza)
+	}
+	if !strings.Contains(got, "repo1-path=/var/lib/pgbackrest") {
+		t.Errorf("[global] must keep the local repo1-path:\n%s", got)
+	}
+	// Exactly one S3 block — the opted-in stanza — not once per stanza.
+	if n := strings.Count(got, "repo1-type=s3"); n != 1 {
+		t.Errorf("repo1-type=s3 count = %d, want 1", n)
+	}
+}
+
+// A target=s3 instance whose global S3 repo is incomplete must fail the render
+// rather than silently produce a stanza pointing at an unusable endpoint.
+func TestWritePgbackrestConfRejectsIncompleteS3(t *testing.T) {
+	cfg := &config.Config{
+		Instances: map[string]config.InstanceConfig{
+			"s3i": {
+				Podman: config.PodmanConfig{ContainerName: "pgcli-pg-s3i"},
+				PITR:   config.PITRConfig{Enabled: true, PgBackRestStanza: "pgcli_s3i", BackupTarget: config.BackupTargetS3},
+			},
+		},
+		Backup: config.BackupConfig{RetentionFull: 7, Repo: config.BackupRepo{S3: &config.BackupRepoS3{Endpoint: "10.0.0.9:9000"}}},
+	}
+	m := &BackupManager{cfg: cfg, dataDir: t.TempDir()}
+	if _, err := m.WritePgbackrestConf(); err == nil {
+		t.Fatal("expected an error for an s3-target instance with an incomplete repo")
+	}
+}
+
 func TestRepoProbeHint(t *testing.T) {
 	cases := []struct {
 		msg  string

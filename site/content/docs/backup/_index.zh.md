@@ -40,11 +40,14 @@ pg snapshot delete 20260826-073712F -i proj01
 
 所有实例共享单个 pgbackrest 容器；每个实例在存储库中都有自己的 stanza。
 
-> **一份配置一个仓库。** 这个容器只服务**一个**仓库——`data_dir` 下的本地目
-> 录，或配置了 `backup.repo.s3` 时那唯一的一个 S3 端点——环境里的每个 stanza
-> （普通实例与 Patroni 集群一视同仁）都推给它。不存在按实例或按集群选仓库：
-> 于是一个 pgcli 环境就只备份到一个 store。若想把第二个 store（比如再
-> `pg addon install minio` 一个）只喂给部分集群，就跑**第二份配置**
+> **一份配置文件一个 `[global]` 仓库。** 容器的 `[global]` 段只指定**一个**默认
+> 仓库——`data_dir` 下的本地目录；选择 S3 的 stanza 用自己段内的
+> `repo1-type=s3` 覆盖它。于是一个 pgcli 环境里 local 与 S3 的 stanza 可以并存：
+> 配置了 `backup.repo.s3` 时 Patroni 集群 stanza 自动使用它，普通实例则只在
+> `pg create --backup-target s3` 创建时才用
+> （[使用 S3 的实例](../s3-instance/)），其余一律留在本地磁盘。选了 S3 的
+> stanza **只**写 S3——不双写，也不迁移已有备份。若想把第二个 store（比如再
+> `pg addon install minio` 一个）只喂给部分 stanza，就跑**第二份配置**
 > （`pg config init --namespace …`）、配上它自己的备份容器——完整走法见
 > [示例：HA 集群 + 自签 CA 的 MinIO](../ha-cluster/ha-example-minio/)。
 
@@ -84,8 +87,10 @@ pg backup stanza-upgrade pgcli_default pgcli_app-default
 
 ## S3 对象存储仓库
 
-Patroni 集群的备份与 WAL 归档可以推送到任意 S3 兼容存储（MinIO、silo、rustfs、
-garage、AWS S3……）。配置写在 `pg.yaml` 的 `backup.repo.s3` 下：
+备份与 WAL 归档可以推送到任意 S3 兼容存储（MinIO、silo、rustfs、garage、
+AWS S3……）。Patroni 集群在配置后自动使用它；普通实例按实例用
+`pg create --backup-target s3` 选择（[使用 S3 的实例](../s3-instance/)）。
+配置写在 `pg.yaml` 的 `backup.repo.s3` 下：
 
 ```yaml
 backup:
@@ -128,13 +133,19 @@ pg backup setup
   postmaster 级参数）、resume。每个成员的 patroni.yml 会注入同一份
   `archive_command`（每个集群一个 stanza，成员互为 `pg*-host`，pgBackRest
   自动定位 primary），WAL 从此持续 push 到 S3。
-- **作用范围。** S3 仓库只作用于 Patroni 集群的 stanza；`pg` 直接管理的普通
-  实例备份仍走本地仓库，互不影响。
+- **作用范围。** 配置了 S3 仓库时，Patroni 集群的 stanza 自动使用它；普通实例
+  只在用 `pg create --backup-target s3` 创建时才推送到它。其余 stanza 备份仍走
+  本地仓库，互不影响——按实例的目标选择、local 与 S3 stanza 共存、以及
+  `pg replica promote` 如何定目标，见[使用 S3 的实例](../s3-instance/)。
 
-等价的一次性 flag 写法（`secret_key` 建议手编 pg.yaml，避免落入 shell 历史）：
+等价的一次性 flag 写法：
 
 ```bash
-pg backup setup --s3-endpoint 10.0.0.9:9000 --s3-bucket pgbackrest \
-    --s3-access-key admin --s3-ca-file ~/.pgcli/tls/minio/store/ca.crt
+pg backup setup --s3-endpoint 192.0.2.9:9000 --s3-bucket pgbackrest \
+    --s3-access-key admin --s3-secret-key '<密码>' \
+    --s3-ca-file ~/.pgcli/tls/minio/store/ca.crt
 ```
+
+（shell 历史会外泄或日志共享的环境，可改为把 `backup.repo.s3.secret_key` 手编
+进 `pg.yaml`，不用 flag。）
 

@@ -89,6 +89,8 @@ pg replica promote ro1
 
 **Idempotent:** If the replica is already promoted (e.g. from a manual `pg_ctl promote`), the command skips to config update.
 
+**Backup target:** promotion decides where the new primary's backups go, *before* calling `pg_promote()`. A complete `backup.repo.s3` on this host wins (target `s3`); otherwise — same-host or cross-host alike — the replica promotes to a `local`-backed primary and starts a fresh local backup chain. That new chain is unrelated to the old primary's repository, so you cannot PITR back through the failover point from the new host; to continue on S3 instead, configure `pg backup setup --s3-*` here before promoting. An S3 block that is present but incomplete aborts the promotion. See [Instance with S3](../s3-instance/).
+
 ### Step 2: `pg replica drop <name> -i <old-primary>`
 
 Run on the **old primary host** to clean up the replication slot. This step is only needed in specific scenarios.

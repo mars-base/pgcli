@@ -113,6 +113,9 @@ pg exec "SELECT version();"
 pg create -i proj01 --base-dir /data/pg
 pg create -i proj02 --base-dir /data/pg
 
+# Or send this instance's backups/WAL straight to the shared S3 repo
+pg create -i proj03 --base-dir /data/pg --backup-target s3
+
 # List all instances
 pg list
 

@@ -155,7 +155,7 @@ If a base backup fails (e.g. network hiccup), destroy the replica and re-run the
 
 - **Read-only** — the replica rejects all writes (`cannot execute INSERT in a read-only transaction`). To make it writable you would promote it (`pg_ctl promote`), which is not exposed as a pgcli command yet
 - **Same data, same password** — physical replication is a byte-for-byte copy of the primary, including `pg_authid`. The replica's admin password and database name are therefore identical to the primary's; only container name, port and data directory differ. With `--dsn`-style connections use the replica's port
-- **PITR disabled on replicas** — a standby archives nothing and is not registered with the pgBackRest backup container; backups run on the primary
+- **PITR disabled on replicas** — a standby archives nothing and is not registered with the pgBackRest backup container; backups run on the primary. `pg replica promote` then picks the new primary's backup target (S3 when this host has a complete `backup.repo.s3`) — see [Instance with S3](../s3-instance/)
 - **Primary must be running** — both for initial creation (`pg_basebackup`) and for continuous streaming; if the primary restarts, the replica reconnects automatically (slot shows `active`)
 - **Lag display** — `replica list` lag (`now() - pg_last_xact_replay_timestamp()`) grows while the primary is idle; it drops back to zero on the next replicated transaction. This is expected idle behavior, not drift
 - **Idempotent start** — repeated `pg start -i ro1` skips the base backup when the data directory is already initialized

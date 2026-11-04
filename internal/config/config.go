@@ -4528,11 +4528,22 @@ type PodmanConfig struct {
 	Network       string `yaml:"network"`        // podman network name, default pgcli-net
 }
 
+// Backup targets for an instance stanza. Empty and "local" are equivalent
+// (the historical local POSIX repo); "s3" selects the shared backup.repo.s3.
+const (
+	BackupTargetLocal = "local"
+	BackupTargetS3    = "s3"
+)
+
 // PITRConfig holds PITR backup/restore settings.
 type PITRConfig struct {
-	Enabled          bool   `yaml:"enabled"`           // whether PITR is enabled
-	PgBackRestStanza string `yaml:"pgbackrest_stanza"` // pgBackRest stanza name
+	Enabled          bool   `yaml:"enabled"`                 // whether PITR is enabled
+	PgBackRestStanza string `yaml:"pgbackrest_stanza"`       // pgBackRest stanza name
+	BackupTarget     string `yaml:"backup_target,omitempty"` // ""/local = local repo, s3 = backup.repo.s3
 }
+
+// UsesS3 reports whether this instance's stanza writes to the shared S3 repo.
+func (p PITRConfig) UsesS3() bool { return p.BackupTarget == BackupTargetS3 }
 
 // LoggingConfig holds logging settings.
 type LoggingConfig struct {
@@ -4579,6 +4590,25 @@ type BackupRepoS3 struct {
 	URIStyle  string `yaml:"uri_style,omitempty"`  // repo1-s3-uri-style, default path (MinIO needs path)
 	CAFile    string `yaml:"ca_file,omitempty"`    // host path to a PEM CA bundle; empty = image's system CAs
 	VerifyTLS *bool  `yaml:"verify_tls,omitempty"` // default true; false = repo*-s3-verify-tls=n escape hatch
+}
+
+// ValidateBackupTarget checks an instance's backup target. For "s3" the global
+// repository must already be complete: the instance stanza overrides repo1-path
+// with S3 options, and a missing endpoint/credential would otherwise fail only
+// at the first archive-push. Callers run this at create and start so there is
+// never a silent fallback to the local repo.
+func ValidateBackupTarget(target string, s3 *BackupRepoS3) error {
+	switch target {
+	case "", BackupTargetLocal:
+		return nil
+	case BackupTargetS3:
+		if s3 == nil || s3.Endpoint == "" || s3.Bucket == "" || s3.AccessKey == "" || s3.SecretKey == "" {
+			return fmt.Errorf("backup target s3 requires backup.repo.s3 (endpoint, bucket, access_key, secret_key) — configure it first with `pg backup setup --s3-endpoint ... --s3-bucket ... --s3-access-key ... --s3-secret-key ...`")
+		}
+		return nil
+	default:
+		return fmt.Errorf("invalid backup target %q (valid: local, s3)", target)
+	}
 }
 
 // PigstyConfig holds Pigsty extension repository settings.
@@ -4796,6 +4826,10 @@ func (c *Config) SetInstance(name string) error {
 	if inst.PITR.PgBackRestStanza != "" {
 		c.PITR.PgBackRestStanza = inst.PITR.PgBackRestStanza
 	}
+	// Unconditional: empty means local, so a previous instance's S3 value must
+	// not leak into this runtime config. Top-level PITR is not persisted
+	// (Display omits it), so this stays a per-invocation merge.
+	c.PITR.BackupTarget = inst.PITR.BackupTarget
 
 	return nil
 }
@@ -4986,6 +5020,13 @@ func (c *Config) Validate() error {
 	}
 	if c.PITR.Enabled && c.PITR.PgBackRestStanza == "" {
 		return fmt.Errorf("pitr.pgbackrest_stanza must not be empty (PITR is enabled)")
+	}
+	for name, inst := range c.Instances {
+		switch inst.PITR.BackupTarget {
+		case "", BackupTargetLocal, BackupTargetS3:
+		default:
+			return fmt.Errorf("instances.%s.pitr.backup_target: invalid %q (valid: local, s3)", name, inst.PITR.BackupTarget)
+		}
 	}
 	for name, vc := range c.Addons.Vmalert {
 		if err := ValidateVmalertConfig(name, vc); err != nil {

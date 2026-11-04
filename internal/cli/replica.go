@@ -99,6 +99,9 @@ read-write immediately.
 After promotion:
   - primary_conninfo is removed from postgresql.auto.conf
   - The instance config is updated (ReplicaOf/PrimaryDSN cleared, PITR re-enabled)
+  - The backup target is chosen automatically: the shared S3 repo when
+    backup.repo.s3 is configured (and complete) on this host, otherwise the
+    local repo. Same-host and cross-host replicas behave the same way.
 
 This is step 1 of a 3-step failover. After promoting, run the remaining
 steps on their respective hosts:
@@ -263,6 +266,7 @@ func runReplicaCreateSameHost(cfg *config.Config, path, newName, primary string)
 	inst.Podman.ImageTag = pc.Podman.ImageTag
 	inst.Extensions = append([]string(nil), pc.Instances[primary].Extensions...)
 	inst.PITR.Enabled = false
+	inst.PITR.BackupTarget = "" // replicas archive nothing; chosen at promote time
 	inst.ReplicaOf = primary
 	cfg.Instances[newName] = *inst
 	cfg.ApplyDefaults()
@@ -366,6 +370,7 @@ func runReplicaCreateRemote(cfg *config.Config, path, newName, primary, dsn stri
 	inst.Postgres.Database = database
 	inst.Postgres.Password = password
 	inst.PITR.Enabled = false
+	inst.PITR.BackupTarget = "" // replicas archive nothing; chosen at promote time
 	inst.ReplicaOf = primary
 	inst.PrimaryDSN = dsn
 
@@ -534,6 +539,21 @@ func runReplicaList() error {
 // This is step 1 of a 3-step failover — it only handles the promoted replica
 // itself. Slot cleanup on the old primary (step 2) and re-pointing other
 // replicas (step 3) are separate commands run on their respective hosts.
+// promotionBackupTarget picks the pgBackRest repository for a replica about to
+// become a primary. A complete backup.repo.s3 on this host wins; anything else
+// — no repo, or a same/cross-host replica alike — falls back to the historical
+// local repo. An S3 block that is present but incomplete is refused, because
+// silently starting local would ignore an obvious misconfiguration.
+func promotionBackupTarget(cfg *config.Config) (string, error) {
+	if cfg.Backup.Repo.S3 != nil {
+		if err := config.ValidateBackupTarget(config.BackupTargetS3, cfg.Backup.Repo.S3); err != nil {
+			return "", fmt.Errorf("backup.repo.s3 is configured but incomplete: %w", err)
+		}
+		return config.BackupTargetS3, nil
+	}
+	return "", nil
+}
+
 func runReplicaPromote(replicaName string) error {
 	path := cfgPath
 	if path == "" {
@@ -556,6 +576,14 @@ func runReplicaPromote(replicaName string) error {
 		return fmt.Errorf("instance %q is not a replica (no replica_of set)", replicaName)
 	}
 	oldPrimary := inst.ReplicaOf
+
+	// Resolve the repository BEFORE any promote work: an incomplete S3 block
+	// must surface while the instance is still a replica, not after a restart
+	// has already flipped it to a new timeline.
+	backupTarget, err := promotionBackupTarget(cfg)
+	if err != nil {
+		return err
+	}
 
 	rc := *cfg
 	if err := rc.SetInstance(replicaName); err != nil {
@@ -590,6 +618,7 @@ func runReplicaPromote(replicaName string) error {
 	inst.ReplicaOf = ""
 	inst.PrimaryDSN = ""
 	inst.PITR.Enabled = true
+	inst.PITR.BackupTarget = backupTarget
 	if inst.PITR.PgBackRestStanza == "" {
 		inst.PITR.PgBackRestStanza = "pgcli_" + replicaName
 	}

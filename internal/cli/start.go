@@ -2329,6 +2329,15 @@ func doStart(c *config.Config) error {
 	}
 	fmt.Println("  [OK] podman available")
 
+	// The per-instance backup target is validated before any container work:
+	// an instance configured for S3 must never silently fall back to the local
+	// repo when the global S3 settings are missing.
+	if c.PITR.Enabled {
+		if err := config.ValidateBackupTarget(c.PITR.BackupTarget, c.Backup.Repo.S3); err != nil {
+			return err
+		}
+	}
+
 	// 2. Initialize podman manager
 	pm, err := podman.New(c)
 	if err != nil {
@@ -2360,6 +2369,15 @@ func doStart(c *config.Config) error {
 	// subsequent starts.
 	if err := pm.EnsureReplica(); err != nil {
 		return err
+	}
+
+	// 7b. Refresh the per-instance pgbackrest.conf before the container starts
+	// so archive-push sees the current repo selection (local vs S3). The file
+	// is bind-mounted; an existing container picks up the rewrite as-is.
+	if c.PITR.Enabled {
+		if err := pm.RefreshInstanceBackupConf(); err != nil {
+			return fmt.Errorf("refreshing pgbackrest instance config: %w", err)
+		}
 	}
 
 	// 8. Create and start container

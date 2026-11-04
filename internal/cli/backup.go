@@ -97,10 +97,11 @@ var backupSetupCmd = &cobra.Command{
   6. stanza-create + check for every Patroni stanza
 
 The backup container is shared across all database instances. With
---s3-endpoint/--s3-bucket/... the Patroni stanzas back up to an S3 repository
+--s3-endpoint/--s3-bucket/... Patroni stanzas and regular instances created
+with ` + "`pg create --backup-target s3`" + ` back up to an S3 repository
 (pgBackRest requires HTTPS — pair with ` + "`pg addon install minio|silo|rustfs --tls`" + `,
-any TLS S3 endpoint, or a plaintext garage fronted by the nginx addon; regular
-instances' backups stay on the local repo).`,
+any TLS S3 endpoint, or a plaintext garage fronted by the nginx addon). Regular
+instances left on the default target keep using the local repo.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		path := cfgPath
 		if path == "" {
