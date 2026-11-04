@@ -204,6 +204,42 @@ CALL quack_serve(
 ( cat server.sql; tail -f /dev/null ) | duckdb
 ```
 
+#### 用 `pg daemon` 管理服务端
+
+长期运行的服务建议交给 `pg daemon`：它会脱离终端、把输出写入日志，并支持
+开机自启。DuckDB 仍然要求 stdin 保持打开，所以用一个包装脚本先喂 SQL、再阻塞：
+
+```bash
+cat > /srv/duckdb/quack-serve.sh <<'SH'
+#!/bin/bash
+{
+  cat /srv/duckdb/server.sql
+  exec tail -f /dev/null
+} | duckdb
+SH
+chmod +x /srv/duckdb/quack-serve.sh
+
+pg daemon add duckdb-serve --dir /srv/duckdb -- /bin/bash /srv/duckdb/quack-serve.sh
+pg daemon start duckdb-serve
+pg daemon status duckdb-serve
+pg daemon logs duckdb-serve
+pg daemon restart duckdb-serve
+pg daemon stop duckdb-serve
+```
+
+`pg daemon` 以独立会话/进程组启动包装脚本；`stop` 向整个进程组发信号，因此
+包装脚本、`tail` 和 `duckdb` 会一起退出。日志默认在
+`<base>/daemon/duckdb-serve/daemon.log`。
+
+开机自启：
+
+```bash
+pg autostart enable --daemon --name duckdb-serve
+```
+
+daemon 在实例和 addon 之后启动，因此同机的 MinIO/silo/rustfs 等对象存储已经
+先开始监听。启用自启时，`server.sql` 和包装脚本要放在持久目录（不要用 `/tmp`）。
+
 本地连接。使用 TLS（推荐）时客户端不需要 `DISABLE_SSL`：
 
 ```bash
@@ -358,7 +394,7 @@ HTTP 代理时，要在 import duckdb 之前设置 `NO_PROXY`。
 
 ### 注意事项
 
-- **stdin 必须保持打开**：服务端在 stdin 关闭后会退出（后台运行用 `< /dev/zero` 或 `tail -f /dev/null |`）
+- **stdin 必须保持打开**：服务端在 stdin 关闭后会退出（后台运行用 `< /dev/zero` 或 `tail -f /dev/null |`，或用 `pg daemon` 管理）
 - **默认仅限本地**：远程访问需绑定 `0.0.0.0` 并设置 `allow_other_hostname=true`；建议配合 TLS 反向代理或保持 `disable_ssl=false`
 - **Auth token**：自动生成，启动时打印，客户端连接时必须提供
 - **pgcli 不管理 Quack server**：`pg addon start/stop duckdb` 仍然是无操作——Quack server 是一个独立进程，需要自行管理

@@ -217,6 +217,45 @@ If the server is launched non-interactively, keep stdin open:
 ( cat server.sql; tail -f /dev/null ) | duckdb
 ```
 
+#### Managing the server with `pg daemon`
+
+For a long-running server, let `pg daemon` own the process: it detaches it from
+the terminal, redirects output to a log, and can start it at boot. DuckDB still
+needs stdin to stay open, so wrap it in a small script that feeds the SQL and
+then blocks:
+
+```bash
+cat > /srv/duckdb/quack-serve.sh <<'SH'
+#!/bin/bash
+{
+  cat /srv/duckdb/server.sql
+  exec tail -f /dev/null
+} | duckdb
+SH
+chmod +x /srv/duckdb/quack-serve.sh
+
+pg daemon add duckdb-serve --dir /srv/duckdb -- /bin/bash /srv/duckdb/quack-serve.sh
+pg daemon start duckdb-serve
+pg daemon status duckdb-serve
+pg daemon logs duckdb-serve
+pg daemon restart duckdb-serve
+pg daemon stop duckdb-serve
+```
+
+`pg daemon` runs the wrapper in its own session/process group; `stop` signals
+the whole group, so the wrapper, `tail` and `duckdb` terminate together. Logs
+default to `<base>/daemon/duckdb-serve/daemon.log`.
+
+To start the server at boot:
+
+```bash
+pg autostart enable --daemon --name duckdb-serve
+```
+
+Daemons start after instances and addons, so a same-host MinIO/silo/rustfs is
+already listening when Quack starts. Use persistent paths for `server.sql` and
+the wrapper (not `/tmp`) when enabling autostart.
+
 Connect from the local machine. With TLS (recommended) no `DISABLE_SSL` is
 needed:
 
@@ -383,7 +422,7 @@ an HTTP proxy configured.
 
 ### Key points
 
-- **stdin must stay open**: the server exits when stdin closes (use `< /dev/zero` or `tail -f /dev/null |` for background operation)
+- **stdin must stay open**: the server exits when stdin closes (use `< /dev/zero` or `tail -f /dev/null |` for background operation, or manage it with `pg daemon`)
 - **localhost by default**: bind to `0.0.0.0` with `allow_other_hostname=true` for remote access; prefer a TLS-terminating reverse proxy or `disable_ssl=false`
 - **Auth token**: auto-generated, printed at startup, required for client connections
 - **Not managed by pgcli**: `pg addon start/stop duckdb` remain no-ops — the Quack server is a standalone process you manage yourself
