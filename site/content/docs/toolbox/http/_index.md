@@ -30,6 +30,7 @@ pg http start
 pg http status
 pg http restart <NAME>
 pg http stop
+pg autostart enable --http --name <NAME>
 ```
 
 ## Start a server
@@ -146,7 +147,8 @@ pg http stop --all
 
 Stop sends `SIGTERM` and waits up to `--timeout` (default `5s`, matching the
 server's graceful-shutdown window) before `SIGKILL`. State files are removed;
-the log and certificate stay on disk.
+the log and certificate stay on disk. `restart` accepts the same `--timeout`
+and `--all` flags.
 
 ## Directory listings
 
@@ -180,8 +182,21 @@ platform default (usually `~/.pgcli`). `pg http` works without a config file.
 
 Servers are launched with `setsid`, so closing the terminal does not stop them.
 They are **not** started at boot by default; after a reboot, either run
-`pg http start` again or enable autostart (see below). `status` checks
-`/proc/<pid>/cmdline`, so a recycled PID is not mistaken for a server.
+`pg http start` again or enable autostart (see below).
+
+### How status is determined
+
+`pg http start` forks the hidden `pg http serve` child and waits for it to bind
+the socket. The child writes the actual `{listen, port}` to a short-lived
+`<name>.ready` file; the parent then records `<name>.json` (written to a temp
+file and renamed, so a crash cannot leave a half-written state).
+
+`pg http status` never connects to the server. It reads the `*.json` files,
+skips broken ones, and treats an entry as `running` only when the recorded PID
+still exists and — on Linux — its `/proc/<pid>/cmdline` still contains `http`,
+`serve` and the server name, so a recycled PID is not mistaken for a server.
+The URL and directory come from the state file; `AUTOSTART` comes from
+`pg.yaml`.
 
 ## Autostart
 

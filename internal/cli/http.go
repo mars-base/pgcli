@@ -77,8 +77,9 @@ render an nginx-style listing with a copy button for each file; files are served
 with Range/HEAD support.
 
 Servers are detached processes tracked under <base_dir>/http/servers/, so they
-survive the terminal that started them. They do not start at boot — after a
-reboot, run ` + "`pg http start`" + ` again.
+survive the terminal that started them. They do not start at boot unless you
+enable autostart for that server name (` + "`pg autostart enable --http --name <server>`" + `);
+otherwise run ` + "`pg http start`" + ` again after a reboot.
 
 The default is 127.0.0.1:18080 serving the current directory. If the requested
 port is busy the next free one is used automatically (up to 100 attempts), and
@@ -93,7 +94,9 @@ Examples:
   pg http status
   pg http restart docs
   pg http stop docs
-  pg http stop --all`,
+  pg http stop --all
+  pg autostart enable --http --name docs
+  pg autostart disable --http --name docs`,
 }
 
 var httpStartCmd = &cobra.Command{

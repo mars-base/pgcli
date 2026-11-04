@@ -28,6 +28,7 @@ pg http start
 pg http status
 pg http restart <NAME>
 pg http stop
+pg autostart enable --http --name <NAME>
 ```
 
 ## 启动服务器
@@ -136,6 +137,7 @@ pg http stop --all
 
 停止时先发 `SIGTERM`，最多等待 `--timeout`（默认 `5s`，与服务端优雅退出的窗口
 一致），仍未退出则 `SIGKILL`。状态文件会被删除；日志与证书保留在磁盘上。
+`restart` 同样接受 `--timeout` 与 `--all`。
 
 ## 目录列表
 
@@ -163,8 +165,18 @@ pg http stop --all
 为 `~/.pgcli`）。`pg http` 无需配置文件也能工作。
 
 服务器以 `setsid` 启动，关闭终端不会停止它们。默认**不会**开机自启；重启主机后
-需要再次执行 `pg http start`，或启用下面的自动启动。`status` 通过
-`/proc/<pid>/cmdline` 校验进程，因此被复用的 PID 不会被误认为运行中的服务器。
+需要再次执行 `pg http start`，或启用下面的自动启动。
+
+### 状态是如何得出的
+
+`pg http start` 会 fork 出隐藏子命令 `pg http serve` 并等待它完成端口绑定。子进程
+把实际的 `{listen, port}` 写入短生命周期的 `<name>.ready` 文件；父进程随后写
+`<name>.json`（先写临时文件再 rename，即使崩溃也不会留下半截状态）。
+
+`pg http status` 不会连接服务器，只读取这些 `*.json`，跳过损坏文件；只有当记录的
+PID 仍然存在、且（Linux 上）`/proc/<pid>/cmdline` 仍包含 `http`、`serve` 和服务器名
+时才判定为 `running`——因此被复用的 PID 不会被误认为存活。URL 与目录来自状态文件，
+`AUTOSTART` 来自 `pg.yaml`。
 
 ## 开机自启
 
