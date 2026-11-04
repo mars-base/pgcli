@@ -5,7 +5,7 @@ weight: 60
 icon: fa-solid fa-power-off
 ---
 
-pgcli can automatically start PostgreSQL instances, backup containers, PgBouncer services, etcd members, the other supported addons, and host commands registered with `pg daemon` after a host reboot. This feature uses system service managers:
+pgcli can automatically start PostgreSQL instances, backup containers, PgBouncer services, etcd members, the other supported addons, host commands registered with `pg daemon`, and `pg http` file servers after a host reboot. This feature uses system service managers:
 - **Linux**: systemd user units
 - **macOS**: launchd LaunchAgents
 
@@ -134,6 +134,29 @@ Autostart starts the process once and does not supervise it: a crash after boot
 is not restarted. Run the command under its own supervisor if you need crash
 recovery.
 
+### For an HTTP Server
+
+Enable auto-start for a `pg http` file server. Start the server once first —
+`pg autostart enable` snapshots its launch settings (directory, listen address,
+port, TLS material) into the top-level `http` section of the config:
+
+```bash
+pg http start --name docs --dir /srv/docs --port 18080
+pg autostart enable --http --name docs
+```
+
+`--name` is required — HTTP servers have no default name. At boot
+`pg start --autostart` relaunches the server from the recorded settings; a
+server that is already running is left alone. A later `pg http start` or
+`pg http restart` with the same name refreshes the snapshot (for example after
+`pg http restart` picked the next free port). If the recorded port is taken at
+boot, the next free port is used, exactly like an interactive start.
+
+The server's state directory is derived from `base_dir` in the config (or the
+platform default when it is unset), the same as the interactive command. A
+generated TLS certificate is re-signed at boot when it is close to expiry or no
+longer covers the listen address.
+
 ## Disable Auto-start
 
 ```bash
@@ -144,7 +167,11 @@ pg autostart disable --pgbouncer --pg-name <remote-name>
 pg autostart disable --etcd --name <member-name>
 pg autostart disable --sqlite --name <database>
 pg autostart disable --daemon --name <daemon>
+pg autostart disable --http --name <server>
 ```
+
+Disabling a `pg http` server removes its `http` config entry; it does not stop a
+currently running server (`pg http stop` does that).
 
 When all auto-start targets are disabled, the boot service is automatically removed.
 
@@ -285,6 +312,13 @@ daemons:
   webhook:
     # ... command, dir, log_file ...
     autostart: true
+
+http:
+  docs:
+    dir: /srv/docs
+    listen: 127.0.0.1
+    port: 18080
+    autostart: true
 ```
 
 ## Boot Service Behavior
@@ -296,7 +330,9 @@ The boot service runs `pg start --autostart`, which:
 4. Starts etcd members with `autostart: true` (start-only; see above)
 5. Starts the other addons with `autostart: true`; SQLite databases restart
    their Litestream replication after the object-storage addons
-6. Starts daemons with `autostart: true` last, after every instance and addon
+6. Relaunches `pg http` servers with `autostart: true` from their recorded
+   settings
+7. Starts daemons with `autostart: true` last, after every instance and addon
 
 If no auto-start targets are configured, the service exits successfully (no error).
 

@@ -162,7 +162,16 @@ func httpBaseDir() string {
 	if path == "" {
 		path = platform.DefaultConfigPath()
 	}
-	if c, err := config.Load(path); err == nil && c.BaseDir != "" {
+	if c, err := config.Load(path); err == nil {
+		return httpBaseDirFrom(c)
+	}
+	return platform.DefaultConfigDir()
+}
+
+// httpBaseDirFrom resolves the base dir from an already loaded config, for
+// callers that must not depend on the global cfgPath (the boot service).
+func httpBaseDirFrom(c *config.Config) string {
+	if c != nil && c.BaseDir != "" {
 		return c.BaseDir
 	}
 	return platform.DefaultConfigDir()
@@ -170,6 +179,27 @@ func httpBaseDir() string {
 
 func httpServersDir(base string) string {
 	return filepath.Join(base, "http", "servers")
+}
+
+// httpAutostartNames returns the pg http servers marked autostart in the
+// config. A missing config (or one without an http section) yields an empty
+// set: pg http keeps working without pg.yaml.
+func httpAutostartNames() map[string]bool {
+	out := map[string]bool{}
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	c, err := config.Load(path)
+	if err != nil {
+		return out
+	}
+	for name, hc := range c.HTTP {
+		if hc.Autostart {
+			out[name] = true
+		}
+	}
+	return out
 }
 
 func validHTTPName(name string) bool {
@@ -374,6 +404,7 @@ func runHTTPStart(cmd *cobra.Command, _ []string) error {
 			_ = syscall.Kill(st.PID, syscall.SIGTERM)
 			return fmt.Errorf("writing state file: %w", err)
 		}
+		syncHTTPAutostartEntry(st)
 		printHTTPStarted(st, certNotAfter)
 		return nil
 	}
@@ -502,9 +533,14 @@ func runHTTPStop(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	autos := httpAutostartNames()
 	for _, st := range selectHTTPTargets(states, args, all) {
 		if err := stopHTTPServer(serversDir, &st, grace); err != nil {
 			return err
+		}
+		if autos[st.Name] {
+			fmt.Printf("  [!] %q is marked autostart: it will start again at the next boot\n", st.Name)
+			fmt.Printf("      Opt out with: pg autostart disable --http --name %s\n", st.Name)
 		}
 	}
 	return nil
@@ -581,6 +617,7 @@ func runHTTPRestart(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
+		syncHTTPAutostartEntry(newSt)
 		printHTTPStarted(newSt, certNotAfter)
 	}
 	return nil
@@ -650,6 +687,87 @@ func relaunchHTTPServer(base string, st httpServerState) (*httpServerState, time
 	return nil, time.Time{}, fmt.Errorf("no free port in %d..%d", port, port+httpPortTries-1)
 }
 
+// syncHTTPAutostartEntry refreshes the pg.yaml snapshot used by the boot
+// service when this server has an autostart entry. Servers without an entry
+// are left alone; pg http keeps working without a config file.
+func syncHTTPAutostartEntry(st *httpServerState) {
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); err != nil {
+		return
+	}
+	c, err := config.Load(path)
+	if err != nil {
+		fmt.Printf("  [!] could not refresh autostart settings for %s: %v\n", st.Name, err)
+		return
+	}
+	hc, ok := c.HTTP[st.Name]
+	if !ok {
+		return
+	}
+	hc.Dir, hc.Listen, hc.Port = st.Dir, st.Listen, st.Port
+	hc.TLS, hc.CertFile, hc.KeyFile = st.TLS, st.CertFile, st.KeyFile
+	c.HTTP[st.Name] = hc
+	if err := c.Save(path); err != nil {
+		fmt.Printf("  [!] could not refresh autostart settings for %s: %v\n", st.Name, err)
+	}
+}
+
+// startAutostartHTTPServers relaunches pg http servers whose pg.yaml entry has
+// autostart enabled. Invoked by the boot service via `pg start --autostart`.
+func startAutostartHTTPServers(c *config.Config) error {
+	var names []string
+	for name, hc := range c.HTTP {
+		if hc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	base := httpBaseDirFrom(c)
+	serversDir := httpServersDir(base)
+	running := map[string]bool{}
+	for _, st := range loadHTTPStates(serversDir) {
+		if httpServerAlive(&st) {
+			running[st.Name] = true
+		}
+	}
+
+	var firstErr error
+	for _, name := range names {
+		hc := c.HTTP[name]
+		if running[name] {
+			fmt.Printf("  [OK] http server %q already running (autostart)\n", name)
+			continue
+		}
+		st := httpServerState{
+			Name:     name,
+			Listen:   hc.Listen,
+			Port:     hc.Port,
+			Dir:      hc.Dir,
+			TLS:      hc.TLS,
+			CertFile: hc.CertFile,
+			KeyFile:  hc.KeyFile,
+		}
+		fmt.Printf("-> Starting http server %q (autostart)...\n", name)
+		newSt, _, err := relaunchHTTPServer(base, st)
+		if err != nil {
+			fmt.Printf("  [X] http server %q: %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		fmt.Printf("  [OK] http server %q running at %s\n", name, httpURL(newSt))
+	}
+	return firstErr
+}
+
 func runHTTPStatus(cmd *cobra.Command, _ []string) error {
 	base := httpBaseDir()
 	states := loadHTTPStates(httpServersDir(base))
@@ -657,13 +775,18 @@ func runHTTPStatus(cmd *cobra.Command, _ []string) error {
 		fmt.Println("No pg http servers configured.")
 		return nil
 	}
-	fmt.Printf("%-24s %-8s %-9s %-40s %s\n", "NAME", "PID", "STATUS", "URL", "DIR")
+	autos := httpAutostartNames()
+	fmt.Printf("%-24s %-8s %-9s %-9s %-40s %s\n", "NAME", "PID", "STATUS", "AUTOSTART", "URL", "DIR")
 	for _, st := range states {
 		status := "running"
 		if !httpServerAlive(&st) {
 			status = "stale"
 		}
-		fmt.Printf("%-24s %-8d %-9s %-40s %s\n", st.Name, st.PID, status, httpURL(&st), st.Dir)
+		auto := "-"
+		if autos[st.Name] {
+			auto = "enabled"
+		}
+		fmt.Printf("%-24s %-8d %-9s %-9s %-40s %s\n", st.Name, st.PID, status, auto, httpURL(&st), st.Dir)
 	}
 	return nil
 }

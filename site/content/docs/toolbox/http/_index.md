@@ -112,10 +112,14 @@ pg http status
 ```
 
 ```
-NAME                    PID      STATUS    URL                                      DIR
-http-18080              412345   running   http://127.0.0.1:18080/                  /srv/share
-http-18081              412410   running   https://0.0.0.0:18081/                   /srv/docs
+NAME                    PID      STATUS    AUTOSTART  URL                                      DIR
+http-18080              412345   running   -          http://127.0.0.1:18080/                  /srv/share
+http-18081              412410   running   enabled    https://0.0.0.0:18081/                   /srv/docs
 ```
+
+`AUTOSTART` shows whether the server is recorded in `pg.yaml` for boot
+autostart (see below); `stop` prints a reminder for such servers, since they
+come back at the next boot.
 
 A state file whose process is gone is marked `stale`; the next `stop` removes
 it.
@@ -175,9 +179,34 @@ execCommand.
 platform default (usually `~/.pgcli`). `pg http` works without a config file.
 
 Servers are launched with `setsid`, so closing the terminal does not stop them.
-They are **not** started at boot; after a reboot, run `pg http start` again.
-`status` checks `/proc/<pid>/cmdline`, so a recycled PID is not mistaken for a
-server.
+They are **not** started at boot by default; after a reboot, either run
+`pg http start` again or enable autostart (see below). `status` checks
+`/proc/<pid>/cmdline`, so a recycled PID is not mistaken for a server.
+
+## Autostart
+
+A server can be relaunched automatically at boot. Start it once first, then
+enable autostart for its name:
+
+```bash
+pg http start --name docs --dir /srv/docs --port 18080
+pg autostart enable --http --name docs
+```
+
+The enable step snapshots the server's directory, listen address, port and TLS
+material into the top-level `http` section of `pg.yaml`; the boot service then
+re-creates the server from those settings. If the recorded port is taken at
+boot, the next free port is used. A later `pg http start`/`pg http restart` of
+the same name refreshes the snapshot.
+
+```bash
+pg autostart status                        # shows "http docs   enabled"
+pg autostart disable --http --name docs    # removes the snapshot; does not stop the server
+```
+
+See [Auto-start on Boot](/docs/autostart/) for the boot service itself. Without
+an `http` entry in the config, `pg http` behaves exactly as described above:
+servers survive the terminal but not a reboot.
 
 ## Security and limits
 

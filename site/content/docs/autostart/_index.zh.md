@@ -5,7 +5,7 @@ weight: 60
 icon: fa-solid fa-power-off
 ---
 
-pgcli 可以在主机重启后自动启动 PostgreSQL 实例、备份容器、PgBouncer 服务、etcd 成员、其他受支持的 addon 以及 `pg daemon` 登记的宿主机命令。此功能使用系统服务管理器：
+pgcli 可以在主机重启后自动启动 PostgreSQL 实例、备份容器、PgBouncer 服务、etcd 成员、其他受支持的 addon、`pg daemon` 登记的宿主机命令以及 `pg http` 文件服务器。此功能使用系统服务管理器：
 - **Linux**: systemd 用户单元
 - **macOS**: launchd LaunchAgents
 
@@ -127,6 +127,26 @@ pg autostart enable --daemon --name webhook
 开机自启只启动一次，不负责监控：开机后崩溃的进程不会被重新拉起。需要崩溃恢复
 时，请在命令内部使用自己的 supervisor。
 
+### HTTP 文件服务器
+
+为 `pg http` 文件服务器启用开机自启。先启动一次服务器——`pg autostart enable`
+会把它的启动参数（目录、监听地址、端口、TLS 材料）快照到配置顶层的 `http`
+段：
+
+```bash
+pg http start --name docs --dir /srv/docs --port 18080
+pg autostart enable --http --name docs
+```
+
+`--name` 必填——HTTP 服务器没有默认名称。开机时 `pg start --autostart` 会按
+记录的参数重新拉起服务器；已经在运行的服务器不会被重复启动。之后用同名
+`pg http start` 或 `pg http restart` 会刷新这份快照（例如 `pg http restart`
+改用下一个空闲端口后）。若开机时记录的端口已被占用，会自动尝试下一个空闲端口，
+与交互式启动一致。
+
+服务器的状态目录由配置里的 `base_dir` 推导（未设置时用平台默认目录），与交互式
+命令相同。自动生成的 TLS 证书若临近过期或不再覆盖监听地址，会在开机时重签。
+
 ## 禁用开机自启
 
 ```bash
@@ -137,7 +157,11 @@ pg autostart disable --pgbouncer --pg-name <远程名称>
 pg autostart disable --etcd --name <成员名>
 pg autostart disable --sqlite --name <数据库名>
 pg autostart disable --daemon --name <daemon 名>
+pg autostart disable --http --name <服务器名>
 ```
+
+禁用 `pg http` 服务器会删除它在配置里的 `http` 条目；不会停止正在运行的
+服务器（那由 `pg http stop` 负责）。
 
 当所有开机自启目标都被禁用后，开机服务会被自动移除。
 
@@ -278,6 +302,13 @@ daemons:
   webhook:
     # ... command、dir、log_file ...
     autostart: true
+
+http:
+  docs:
+    dir: /srv/docs
+    listen: 127.0.0.1
+    port: 18080
+    autostart: true
 ```
 
 ## 开机服务行为
@@ -289,7 +320,8 @@ daemons:
 4. 启动 `autostart: true` 的 etcd 成员（只做启动；见上文）
 5. 启动其他 `autostart: true` 的 addon；SQLite 数据库在对象存储 addon 之后
    重启其 Litestream 复制
-6. 最后启动 `autostart: true` 的 daemon，在所有实例与 addon 之后
+6. 按记录的参数重新拉起 `autostart: true` 的 `pg http` 服务器
+7. 最后启动 `autostart: true` 的 daemon，在所有实例与 addon 之后
 
 如果没有配置任何开机自启目标，服务会正常退出（无错误）。
 

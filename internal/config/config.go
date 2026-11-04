@@ -23,64 +23,77 @@ import (
 
 // Config is the complete pgcli configuration.
 type Config struct {
-	BaseDir                  string                    `yaml:"base_dir,omitempty"`
-	Network                  string                    `yaml:"network,omitempty"`                            // shared podman network name, persisted at top level
-	Namespace                string                    `yaml:"namespace,omitempty"`                          // container name namespace, empty = disabled (default)
-	PGStartPort              int                       `yaml:"pg_start_port,omitempty"`                      // starting PG host port, default 35432
-	PGSSHPort                int                       `yaml:"pg_ssh_port,omitempty"`                        // starting SSH host port, default 42201
-	PgBouncerStartPort       int                       `yaml:"pgbouncer_start_port,omitempty"`               // starting PgBouncer host port, default 56432
-	EtcdStartPort            int                       `yaml:"etcd_start_port,omitempty"`                    // starting etcd client host port, default 2379 (peer gets the next free port)
-	PgDogStartPort           int                       `yaml:"pgdog_start_port,omitempty"`                   // starting PgDog host port, default 7432 (openmetrics gets the next free port)
-	PatroniStartPort         int                       `yaml:"patroni_start_port,omitempty"`                 // starting Patroni member PG host port, default 35532
-	PatroniRestapiStartPort  int                       `yaml:"patroni_restapi_start_port,omitempty"`         // starting Patroni REST API host port, default 8008
-	PatroniSSHStartPort      int                       `yaml:"patroni_ssh_start_port,omitempty"`             // starting Patroni SSH host port, default 42301 (separate from PG instance SSH pool at 42201)
-	HaProxyStartPort         int                       `yaml:"haproxy_start_port,omitempty"`                 // starting HAProxy listener host port, default 5000 (read port and stats take the next free ports)
-	MinioStartPort           int                       `yaml:"minio_start_port,omitempty"`                   // starting MinIO API host port, default 9000 (console takes the next free port)
-	PostgrestStartPort       int                       `yaml:"postgrest_start_port,omitempty"`               // starting PostgREST HTTP host port, default 3500
-	RedisStartPort           int                       `yaml:"redis_start_port,omitempty"`                   // starting Redis host port, default 6379
-	PredixyStartPort         int                       `yaml:"predixy_start_port,omitempty"`                 // starting Predixy proxy listener host port, default 7617
-	PgAdminStartPort         int                       `yaml:"pgadmin_start_port,omitempty"`                 // starting pgAdmin 4 web host port, default 5050
-	GrafanaStartPort         int                       `yaml:"grafana_start_port,omitempty"`                 // starting Grafana web host port, default 3000
-	PrometheusStartPort      int                       `yaml:"prometheus_start_port,omitempty"`              // starting Prometheus web host port, default 9090
-	AlertmanagerStartPort    int                       `yaml:"alertmanager_start_port,omitempty"`            // starting Alertmanager web host port, default 9093
-	GiteaStartPort           int                       `yaml:"gitea_start_port,omitempty"`                   // starting Gitea web host port, default 3080 (Gitea's own default 3000 belongs to the Grafana pool here)
-	GiteaSSHStartPort        int                       `yaml:"gitea_ssh_start_port,omitempty"`               // starting Gitea OpenSSH host port, default 2222 (allocated for every gitea instance — the image's sshd always runs, so even SSH-off needs a port to park it on, off 22)
-	NginxStartPort           int                       `yaml:"nginx_start_port,omitempty"`                   // starting nginx HTTP host port, default 8080 (HTTPS takes the next free port)
-	GarageStartPort          int                       `yaml:"garage_start_port,omitempty"`                  // starting Garage S3 API host port, default 3900 (RPC, web, admin take the next three free ports)
-	SeaweedfsStartPort       int                       `yaml:"seaweedfs_start_port,omitempty"`               // starting SeaweedFS master host port, default 8400 (volume, filer, s3 take the next three free ports; gRPC twins at +10000 are reserved)
-	VictoriaMetricsStartPort int                       `yaml:"victoriametrics_start_port,omitempty"`         // starting VictoriaMetrics HTTP host port, default 8428
-	NodeExporterStartPort    int                       `yaml:"nodeexporter_start_port,omitempty"`            // starting node_exporter web host port, default 9100
-	PGExporterStartPort      int                       `yaml:"pgexporter_start_port,omitempty"`              // starting pg_exporter web host port, default 9630
-	DocumentDBStartPort      int                       `yaml:"documentdb_start_port,omitempty"`              // starting DocumentDB gateway MongoDB wire-protocol port, default 10260
-	VMClusterStartPort       int                       `yaml:"vmcluster_start_port,omitempty"`               // starting VMCluster port, default 8480 (5 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP, internal insert TCP, internal select TCP)
-	VictoriaLogsStartPort    int                       `yaml:"victorialogs_start_port,omitempty"`            // starting VictoriaLogs HTTP host port, default 9428
-	VlagentStartPort         int                       `yaml:"vlagent_start_port,omitempty"`                 // starting vlagent ingest HTTP host port, default 9429
-	VmalertStartPort         int                       `yaml:"vmalert_start_port,omitempty"`                 // starting vmalert HTTP host port, default 8880
-	VLClusterStartPort       int                       `yaml:"vlcluster_start_port,omitempty"`               // starting VLCluster port, default 9430 (3 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP)
-	InfluxDBStartPort        int                       `yaml:"influxdb_start_port,omitempty"`                // starting InfluxDB HTTP API host port, default 8086
-	Influx2TSDBStartPort     int                       `yaml:"influx2tsdb_start_port,omitempty"`             // starting influx2tsdb-proxy HTTP API host port, default 8087
-	ClickHouseHTTPStartPort  int                       `yaml:"clickhouse_http_start_port,omitempty"`         // starting ClickHouse HTTP host port, default 8123
-	ClickHouseTCPStartPort   int                       `yaml:"clickhouse_tcp_start_port,omitempty"`          // starting ClickHouse native TCP host port, default 9000 (shared with the S3 API pool)
-	KafkaBrokerStartPort     int                       `yaml:"kafka_broker_start_port,omitempty"`            // starting Kafka broker host port, default 9092
-	KafkaControllerStartPort int                       `yaml:"kafka_controller_start_port,omitempty"`        // starting Kafka controller host port, default 19093 (9093 belongs to the Alertmanager pool)
-	KafkaTLSStartPort        int                       `yaml:"kafka_tls_start_port,omitempty"`               // starting Kafka SSL listener host port, default 9093
-	RabbitMQStartPort        int                       `yaml:"rabbitmq_start_port,omitempty"`                // starting RabbitMQ AMQP host port, default 5672
-	RabbitMQTLSStartPort     int                       `yaml:"rabbitmq_tls_start_port,omitempty"`            // starting RabbitMQ AMQPS host port, default 5671
-	RabbitMQMgmtStartPort    int                       `yaml:"rabbitmq_management_start_port,omitempty"`     // starting RabbitMQ management HTTP host port, default 15672
-	RabbitMQMgmtTLSStartPort int                       `yaml:"rabbitmq_management_tls_start_port,omitempty"` // starting RabbitMQ management HTTPS host port, default 15671
-	RabbitMQEPMDStartPort    int                       `yaml:"rabbitmq_epmd_start_port,omitempty"`           // starting RabbitMQ epmd host port, default 4369
-	RabbitMQDistStartPort    int                       `yaml:"rabbitmq_dist_start_port,omitempty"`           // starting RabbitMQ Erlang distribution host port, default 25672
-	Postgres                 PostgresConfig            `yaml:"postgres"`
-	Podman                   PodmanConfig              `yaml:"podman"`
-	PITR                     PITRConfig                `yaml:"pitr"`
-	Logging                  LoggingConfig             `yaml:"logging"`
-	Backup                   BackupConfig              `yaml:"backup"`
-	Pigsty                   PigstyConfig              `yaml:"pigsty"`
-	Addons                   TopAddonsConfig           `yaml:"addons,omitempty"` // top-level addon configs (e.g. remote PgBouncer)
-	Instances                map[string]InstanceConfig `yaml:"instances"`
-	Daemons                  map[string]DaemonConfig   `yaml:"daemons,omitempty"` // host processes managed by `pg daemon`
+	BaseDir                  string                      `yaml:"base_dir,omitempty"`
+	Network                  string                      `yaml:"network,omitempty"`                            // shared podman network name, persisted at top level
+	Namespace                string                      `yaml:"namespace,omitempty"`                          // container name namespace, empty = disabled (default)
+	PGStartPort              int                         `yaml:"pg_start_port,omitempty"`                      // starting PG host port, default 35432
+	PGSSHPort                int                         `yaml:"pg_ssh_port,omitempty"`                        // starting SSH host port, default 42201
+	PgBouncerStartPort       int                         `yaml:"pgbouncer_start_port,omitempty"`               // starting PgBouncer host port, default 56432
+	EtcdStartPort            int                         `yaml:"etcd_start_port,omitempty"`                    // starting etcd client host port, default 2379 (peer gets the next free port)
+	PgDogStartPort           int                         `yaml:"pgdog_start_port,omitempty"`                   // starting PgDog host port, default 7432 (openmetrics gets the next free port)
+	PatroniStartPort         int                         `yaml:"patroni_start_port,omitempty"`                 // starting Patroni member PG host port, default 35532
+	PatroniRestapiStartPort  int                         `yaml:"patroni_restapi_start_port,omitempty"`         // starting Patroni REST API host port, default 8008
+	PatroniSSHStartPort      int                         `yaml:"patroni_ssh_start_port,omitempty"`             // starting Patroni SSH host port, default 42301 (separate from PG instance SSH pool at 42201)
+	HaProxyStartPort         int                         `yaml:"haproxy_start_port,omitempty"`                 // starting HAProxy listener host port, default 5000 (read port and stats take the next free ports)
+	MinioStartPort           int                         `yaml:"minio_start_port,omitempty"`                   // starting MinIO API host port, default 9000 (console takes the next free port)
+	PostgrestStartPort       int                         `yaml:"postgrest_start_port,omitempty"`               // starting PostgREST HTTP host port, default 3500
+	RedisStartPort           int                         `yaml:"redis_start_port,omitempty"`                   // starting Redis host port, default 6379
+	PredixyStartPort         int                         `yaml:"predixy_start_port,omitempty"`                 // starting Predixy proxy listener host port, default 7617
+	PgAdminStartPort         int                         `yaml:"pgadmin_start_port,omitempty"`                 // starting pgAdmin 4 web host port, default 5050
+	GrafanaStartPort         int                         `yaml:"grafana_start_port,omitempty"`                 // starting Grafana web host port, default 3000
+	PrometheusStartPort      int                         `yaml:"prometheus_start_port,omitempty"`              // starting Prometheus web host port, default 9090
+	AlertmanagerStartPort    int                         `yaml:"alertmanager_start_port,omitempty"`            // starting Alertmanager web host port, default 9093
+	GiteaStartPort           int                         `yaml:"gitea_start_port,omitempty"`                   // starting Gitea web host port, default 3080 (Gitea's own default 3000 belongs to the Grafana pool here)
+	GiteaSSHStartPort        int                         `yaml:"gitea_ssh_start_port,omitempty"`               // starting Gitea OpenSSH host port, default 2222 (allocated for every gitea instance — the image's sshd always runs, so even SSH-off needs a port to park it on, off 22)
+	NginxStartPort           int                         `yaml:"nginx_start_port,omitempty"`                   // starting nginx HTTP host port, default 8080 (HTTPS takes the next free port)
+	GarageStartPort          int                         `yaml:"garage_start_port,omitempty"`                  // starting Garage S3 API host port, default 3900 (RPC, web, admin take the next three free ports)
+	SeaweedfsStartPort       int                         `yaml:"seaweedfs_start_port,omitempty"`               // starting SeaweedFS master host port, default 8400 (volume, filer, s3 take the next three free ports; gRPC twins at +10000 are reserved)
+	VictoriaMetricsStartPort int                         `yaml:"victoriametrics_start_port,omitempty"`         // starting VictoriaMetrics HTTP host port, default 8428
+	NodeExporterStartPort    int                         `yaml:"nodeexporter_start_port,omitempty"`            // starting node_exporter web host port, default 9100
+	PGExporterStartPort      int                         `yaml:"pgexporter_start_port,omitempty"`              // starting pg_exporter web host port, default 9630
+	DocumentDBStartPort      int                         `yaml:"documentdb_start_port,omitempty"`              // starting DocumentDB gateway MongoDB wire-protocol port, default 10260
+	VMClusterStartPort       int                         `yaml:"vmcluster_start_port,omitempty"`               // starting VMCluster port, default 8480 (5 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP, internal insert TCP, internal select TCP)
+	VictoriaLogsStartPort    int                         `yaml:"victorialogs_start_port,omitempty"`            // starting VictoriaLogs HTTP host port, default 9428
+	VlagentStartPort         int                         `yaml:"vlagent_start_port,omitempty"`                 // starting vlagent ingest HTTP host port, default 9429
+	VmalertStartPort         int                         `yaml:"vmalert_start_port,omitempty"`                 // starting vmalert HTTP host port, default 8880
+	VLClusterStartPort       int                         `yaml:"vlcluster_start_port,omitempty"`               // starting VLCluster port, default 9430 (3 consecutive ports per instance: insert HTTP, select HTTP, storage HTTP)
+	InfluxDBStartPort        int                         `yaml:"influxdb_start_port,omitempty"`                // starting InfluxDB HTTP API host port, default 8086
+	Influx2TSDBStartPort     int                         `yaml:"influx2tsdb_start_port,omitempty"`             // starting influx2tsdb-proxy HTTP API host port, default 8087
+	ClickHouseHTTPStartPort  int                         `yaml:"clickhouse_http_start_port,omitempty"`         // starting ClickHouse HTTP host port, default 8123
+	ClickHouseTCPStartPort   int                         `yaml:"clickhouse_tcp_start_port,omitempty"`          // starting ClickHouse native TCP host port, default 9000 (shared with the S3 API pool)
+	KafkaBrokerStartPort     int                         `yaml:"kafka_broker_start_port,omitempty"`            // starting Kafka broker host port, default 9092
+	KafkaControllerStartPort int                         `yaml:"kafka_controller_start_port,omitempty"`        // starting Kafka controller host port, default 19093 (9093 belongs to the Alertmanager pool)
+	KafkaTLSStartPort        int                         `yaml:"kafka_tls_start_port,omitempty"`               // starting Kafka SSL listener host port, default 9093
+	RabbitMQStartPort        int                         `yaml:"rabbitmq_start_port,omitempty"`                // starting RabbitMQ AMQP host port, default 5672
+	RabbitMQTLSStartPort     int                         `yaml:"rabbitmq_tls_start_port,omitempty"`            // starting RabbitMQ AMQPS host port, default 5671
+	RabbitMQMgmtStartPort    int                         `yaml:"rabbitmq_management_start_port,omitempty"`     // starting RabbitMQ management HTTP host port, default 15672
+	RabbitMQMgmtTLSStartPort int                         `yaml:"rabbitmq_management_tls_start_port,omitempty"` // starting RabbitMQ management HTTPS host port, default 15671
+	RabbitMQEPMDStartPort    int                         `yaml:"rabbitmq_epmd_start_port,omitempty"`           // starting RabbitMQ epmd host port, default 4369
+	RabbitMQDistStartPort    int                         `yaml:"rabbitmq_dist_start_port,omitempty"`           // starting RabbitMQ Erlang distribution host port, default 25672
+	Postgres                 PostgresConfig              `yaml:"postgres"`
+	Podman                   PodmanConfig                `yaml:"podman"`
+	PITR                     PITRConfig                  `yaml:"pitr"`
+	Logging                  LoggingConfig               `yaml:"logging"`
+	Backup                   BackupConfig                `yaml:"backup"`
+	Pigsty                   PigstyConfig                `yaml:"pigsty"`
+	Addons                   TopAddonsConfig             `yaml:"addons,omitempty"` // top-level addon configs (e.g. remote PgBouncer)
+	Instances                map[string]InstanceConfig   `yaml:"instances"`
+	Daemons                  map[string]DaemonConfig     `yaml:"daemons,omitempty"` // host processes managed by `pg daemon`
+	HTTP                     map[string]HTTPServerConfig `yaml:"http,omitempty"`    // `pg http` servers declared for boot autostart
 
 	Instance string `yaml:"-"` // current instance name (set at runtime, not persisted)
+}
+
+// HTTPServerConfig records a `pg http` server's launch settings so the boot
+// service can start it after a host reboot.
+type HTTPServerConfig struct {
+	Dir       string `yaml:"dir"`
+	Listen    string `yaml:"listen,omitempty"`
+	Port      int    `yaml:"port,omitempty"`
+	TLS       bool   `yaml:"tls,omitempty"`
+	CertFile  string `yaml:"cert_file,omitempty"`
+	KeyFile   string `yaml:"key_file,omitempty"`
+	Autostart bool   `yaml:"autostart,omitempty"`
 }
 
 // DaemonConfig describes a long-running host process managed by `pg daemon`.
@@ -4897,58 +4910,59 @@ func Load(path string) (*Config, error) {
 // displayConfig is the serializable subset of Config for save/display.
 // Global postgres/podman/pitr are excluded -- they are in-memory defaults only.
 type displayConfig struct {
-	BaseDir                  string                    `yaml:"base_dir,omitempty"`
-	Network                  string                    `yaml:"network,omitempty"`
-	Namespace                string                    `yaml:"namespace,omitempty"`
-	PGStartPort              int                       `yaml:"pg_start_port,omitempty"`
-	PGSSHPort                int                       `yaml:"pg_ssh_port,omitempty"`
-	PgBouncerStartPort       int                       `yaml:"pgbouncer_start_port,omitempty"`
-	EtcdStartPort            int                       `yaml:"etcd_start_port,omitempty"`
-	PgDogStartPort           int                       `yaml:"pgdog_start_port,omitempty"`
-	PatroniStartPort         int                       `yaml:"patroni_start_port,omitempty"`
-	PatroniRestapiStartPort  int                       `yaml:"patroni_restapi_start_port,omitempty"`
-	HaProxyStartPort         int                       `yaml:"haproxy_start_port,omitempty"`
-	MinioStartPort           int                       `yaml:"minio_start_port,omitempty"`
-	PostgrestStartPort       int                       `yaml:"postgrest_start_port,omitempty"`
-	RedisStartPort           int                       `yaml:"redis_start_port,omitempty"`
-	PredixyStartPort         int                       `yaml:"predixy_start_port,omitempty"`
-	PgAdminStartPort         int                       `yaml:"pgadmin_start_port,omitempty"`
-	GrafanaStartPort         int                       `yaml:"grafana_start_port,omitempty"`
-	PrometheusStartPort      int                       `yaml:"prometheus_start_port,omitempty"`
-	AlertmanagerStartPort    int                       `yaml:"alertmanager_start_port,omitempty"`
-	GiteaStartPort           int                       `yaml:"gitea_start_port,omitempty"`
-	GiteaSSHStartPort        int                       `yaml:"gitea_ssh_start_port,omitempty"`
-	NginxStartPort           int                       `yaml:"nginx_start_port,omitempty"`
-	GarageStartPort          int                       `yaml:"garage_start_port,omitempty"`
-	SeaweedfsStartPort       int                       `yaml:"seaweedfs_start_port,omitempty"`
-	VictoriaMetricsStartPort int                       `yaml:"victoriametrics_start_port,omitempty"`
-	NodeExporterStartPort    int                       `yaml:"nodeexporter_start_port,omitempty"`
-	PGExporterStartPort      int                       `yaml:"pgexporter_start_port,omitempty"`
-	DocumentDBStartPort      int                       `yaml:"documentdb_start_port,omitempty"`
-	VMClusterStartPort       int                       `yaml:"vmcluster_start_port,omitempty"`
-	VictoriaLogsStartPort    int                       `yaml:"victorialogs_start_port,omitempty"`
-	VlagentStartPort         int                       `yaml:"vlagent_start_port,omitempty"`
-	VmalertStartPort         int                       `yaml:"vmalert_start_port,omitempty"`
-	VLClusterStartPort       int                       `yaml:"vlcluster_start_port,omitempty"`
-	InfluxDBStartPort        int                       `yaml:"influxdb_start_port,omitempty"`
-	Influx2TSDBStartPort     int                       `yaml:"influx2tsdb_start_port,omitempty"`
-	ClickHouseHTTPStartPort  int                       `yaml:"clickhouse_http_start_port,omitempty"`
-	ClickHouseTCPStartPort   int                       `yaml:"clickhouse_tcp_start_port,omitempty"`
-	KafkaBrokerStartPort     int                       `yaml:"kafka_broker_start_port,omitempty"`
-	KafkaControllerStartPort int                       `yaml:"kafka_controller_start_port,omitempty"`
-	KafkaTLSStartPort        int                       `yaml:"kafka_tls_start_port,omitempty"`
-	RabbitMQStartPort        int                       `yaml:"rabbitmq_start_port,omitempty"`
-	RabbitMQTLSStartPort     int                       `yaml:"rabbitmq_tls_start_port,omitempty"`
-	RabbitMQMgmtStartPort    int                       `yaml:"rabbitmq_management_start_port,omitempty"`
-	RabbitMQMgmtTLSStartPort int                       `yaml:"rabbitmq_management_tls_start_port,omitempty"`
-	RabbitMQEPMDStartPort    int                       `yaml:"rabbitmq_epmd_start_port,omitempty"`
-	RabbitMQDistStartPort    int                       `yaml:"rabbitmq_dist_start_port,omitempty"`
-	Logging                  LoggingConfig             `yaml:"logging"`
-	Backup                   BackupConfig              `yaml:"backup"`
-	Pigsty                   PigstyConfig              `yaml:"pigsty"`
-	Addons                   TopAddonsConfig           `yaml:"addons,omitempty"`
-	Instances                map[string]InstanceConfig `yaml:"instances"`
-	Daemons                  map[string]DaemonConfig   `yaml:"daemons,omitempty"`
+	BaseDir                  string                      `yaml:"base_dir,omitempty"`
+	Network                  string                      `yaml:"network,omitempty"`
+	Namespace                string                      `yaml:"namespace,omitempty"`
+	PGStartPort              int                         `yaml:"pg_start_port,omitempty"`
+	PGSSHPort                int                         `yaml:"pg_ssh_port,omitempty"`
+	PgBouncerStartPort       int                         `yaml:"pgbouncer_start_port,omitempty"`
+	EtcdStartPort            int                         `yaml:"etcd_start_port,omitempty"`
+	PgDogStartPort           int                         `yaml:"pgdog_start_port,omitempty"`
+	PatroniStartPort         int                         `yaml:"patroni_start_port,omitempty"`
+	PatroniRestapiStartPort  int                         `yaml:"patroni_restapi_start_port,omitempty"`
+	HaProxyStartPort         int                         `yaml:"haproxy_start_port,omitempty"`
+	MinioStartPort           int                         `yaml:"minio_start_port,omitempty"`
+	PostgrestStartPort       int                         `yaml:"postgrest_start_port,omitempty"`
+	RedisStartPort           int                         `yaml:"redis_start_port,omitempty"`
+	PredixyStartPort         int                         `yaml:"predixy_start_port,omitempty"`
+	PgAdminStartPort         int                         `yaml:"pgadmin_start_port,omitempty"`
+	GrafanaStartPort         int                         `yaml:"grafana_start_port,omitempty"`
+	PrometheusStartPort      int                         `yaml:"prometheus_start_port,omitempty"`
+	AlertmanagerStartPort    int                         `yaml:"alertmanager_start_port,omitempty"`
+	GiteaStartPort           int                         `yaml:"gitea_start_port,omitempty"`
+	GiteaSSHStartPort        int                         `yaml:"gitea_ssh_start_port,omitempty"`
+	NginxStartPort           int                         `yaml:"nginx_start_port,omitempty"`
+	GarageStartPort          int                         `yaml:"garage_start_port,omitempty"`
+	SeaweedfsStartPort       int                         `yaml:"seaweedfs_start_port,omitempty"`
+	VictoriaMetricsStartPort int                         `yaml:"victoriametrics_start_port,omitempty"`
+	NodeExporterStartPort    int                         `yaml:"nodeexporter_start_port,omitempty"`
+	PGExporterStartPort      int                         `yaml:"pgexporter_start_port,omitempty"`
+	DocumentDBStartPort      int                         `yaml:"documentdb_start_port,omitempty"`
+	VMClusterStartPort       int                         `yaml:"vmcluster_start_port,omitempty"`
+	VictoriaLogsStartPort    int                         `yaml:"victorialogs_start_port,omitempty"`
+	VlagentStartPort         int                         `yaml:"vlagent_start_port,omitempty"`
+	VmalertStartPort         int                         `yaml:"vmalert_start_port,omitempty"`
+	VLClusterStartPort       int                         `yaml:"vlcluster_start_port,omitempty"`
+	InfluxDBStartPort        int                         `yaml:"influxdb_start_port,omitempty"`
+	Influx2TSDBStartPort     int                         `yaml:"influx2tsdb_start_port,omitempty"`
+	ClickHouseHTTPStartPort  int                         `yaml:"clickhouse_http_start_port,omitempty"`
+	ClickHouseTCPStartPort   int                         `yaml:"clickhouse_tcp_start_port,omitempty"`
+	KafkaBrokerStartPort     int                         `yaml:"kafka_broker_start_port,omitempty"`
+	KafkaControllerStartPort int                         `yaml:"kafka_controller_start_port,omitempty"`
+	KafkaTLSStartPort        int                         `yaml:"kafka_tls_start_port,omitempty"`
+	RabbitMQStartPort        int                         `yaml:"rabbitmq_start_port,omitempty"`
+	RabbitMQTLSStartPort     int                         `yaml:"rabbitmq_tls_start_port,omitempty"`
+	RabbitMQMgmtStartPort    int                         `yaml:"rabbitmq_management_start_port,omitempty"`
+	RabbitMQMgmtTLSStartPort int                         `yaml:"rabbitmq_management_tls_start_port,omitempty"`
+	RabbitMQEPMDStartPort    int                         `yaml:"rabbitmq_epmd_start_port,omitempty"`
+	RabbitMQDistStartPort    int                         `yaml:"rabbitmq_dist_start_port,omitempty"`
+	Logging                  LoggingConfig               `yaml:"logging"`
+	Backup                   BackupConfig                `yaml:"backup"`
+	Pigsty                   PigstyConfig                `yaml:"pigsty"`
+	Addons                   TopAddonsConfig             `yaml:"addons,omitempty"`
+	Instances                map[string]InstanceConfig   `yaml:"instances"`
+	Daemons                  map[string]DaemonConfig     `yaml:"daemons,omitempty"`
+	HTTP                     map[string]HTTPServerConfig `yaml:"http,omitempty"`
 }
 
 // Display returns a view of the config suitable for display or saving.
@@ -5006,6 +5020,7 @@ func (c *Config) Display() displayConfig {
 		Addons:                   c.Addons,
 		Instances:                c.Instances,
 		Daemons:                  c.Daemons,
+		HTTP:                     c.HTTP,
 	}
 }
 

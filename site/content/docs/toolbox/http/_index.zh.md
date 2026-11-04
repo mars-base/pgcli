@@ -106,10 +106,13 @@ pg http status
 ```
 
 ```
-NAME                    PID      STATUS    URL                                      DIR
-http-18080              412345   running   http://127.0.0.1:18080/                  /srv/share
-http-18081              412410   running   https://0.0.0.0:18081/                   /srv/docs
+NAME                    PID      STATUS    AUTOSTART  URL                                      DIR
+http-18080              412345   running   -          http://127.0.0.1:18080/                  /srv/share
+http-18081              412410   running   enabled    https://0.0.0.0:18081/                   /srv/docs
 ```
+
+`AUTOSTART` 表示该服务器是否已记录到 `pg.yaml` 用于开机自启（见下文）；`stop`
+这类服务器时会额外打印提示，因为它们会在下次开机时重新启动。
 
 进程已退出的状态文件会标记为 `stale`；下次 `stop` 时自动清理。
 
@@ -159,9 +162,30 @@ pg http stop --all
 `<base>` 取 `pg.yaml` 中的 `base_dir`（配置存在时），否则用平台默认目录（通常
 为 `~/.pgcli`）。`pg http` 无需配置文件也能工作。
 
-服务器以 `setsid` 启动，关闭终端不会停止它们。它们**不会**开机自启；重启主机后
-需要再次执行 `pg http start`。`status` 通过 `/proc/<pid>/cmdline` 校验进程，
-因此被复用的 PID 不会被误认为运行中的服务器。
+服务器以 `setsid` 启动，关闭终端不会停止它们。默认**不会**开机自启；重启主机后
+需要再次执行 `pg http start`，或启用下面的自动启动。`status` 通过
+`/proc/<pid>/cmdline` 校验进程，因此被复用的 PID 不会被误认为运行中的服务器。
+
+## 开机自启
+
+服务器可以随主机启动自动拉起。先启动一次，再按名称启用自启：
+
+```bash
+pg http start --name docs --dir /srv/docs --port 18080
+pg autostart enable --http --name docs
+```
+
+启用时会把服务器的目录、监听地址、端口和 TLS 材料快照到 `pg.yaml` 顶层的
+`http` 段；开机服务据此重新创建服务器。若记录的端口在开机时已被占用，会尝试
+下一个空闲端口。之后用同名 `pg http start`/`pg http restart` 会刷新这份快照。
+
+```bash
+pg autostart status                        # 显示 "http docs   enabled"
+pg autostart disable --http --name docs    # 删除快照；不会停止正在运行的服务器
+```
+
+开机服务本身的说明见[开机自启](/docs/autostart/)。配置中没有 `http` 条目时，
+`pg http` 的行为与上文完全一致：服务器只脱离终端，不跨重启存活。
 
 ## 安全与限制
 

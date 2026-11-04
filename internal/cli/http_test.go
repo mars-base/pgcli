@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/mars-base/pgcli/internal/config"
 )
 
 func TestValidHTTPName(t *testing.T) {
@@ -119,6 +121,39 @@ func TestSelectHTTPTargets(t *testing.T) {
 	got := selectHTTPTargets(states, []string{"b", "missing"}, false)
 	if len(got) != 1 || got[0].Name != "b" {
 		t.Errorf("named = %+v, want only b", got)
+	}
+}
+
+func TestHTTPAutostartCounting(t *testing.T) {
+	c := &config.Config{}
+	if hasAutostartHTTP(c) || countAutostartTargets(c) != 0 {
+		t.Fatal("empty config should have no autostart targets")
+	}
+	c.HTTP = map[string]config.HTTPServerConfig{
+		"docs":  {Dir: "/srv/docs", Autostart: true},
+		"other": {Dir: "/srv/other"},
+	}
+	if !hasAutostartHTTP(c) {
+		t.Error("hasAutostartHTTP = false, want true")
+	}
+	if n := countAutostartTargets(c); n != 1 {
+		t.Errorf("countAutostartTargets = %d, want 1", n)
+	}
+}
+
+func TestHTTPAutostartNames(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pg.yaml")
+	data := "http:\n  docs:\n    dir: /srv/docs\n    autostart: true\n  other:\n    dir: /srv/other\n"
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+	old := cfgPath
+	cfgPath = path
+	defer func() { cfgPath = old }()
+
+	autos := httpAutostartNames()
+	if len(autos) != 1 || !autos["docs"] {
+		t.Errorf("httpAutostartNames = %v, want only docs", autos)
 	}
 }
 
