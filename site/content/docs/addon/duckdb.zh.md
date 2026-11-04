@@ -133,8 +133,12 @@ CALL quack_serve(
 
 ```bash
 # 客户端连接远程服务端
-duckdb -c "ATTACH 'quack:192.0.2.10:9494' AS qk (TOKEN 'mytoken'); CONNECT qk; SELECT * FROM t"
+duckdb -c "ATTACH 'quack:192.0.2.10:9494' AS qk (TOKEN 'mytoken', DISABLE_SSL true); CONNECT qk; SELECT * FROM t"
 ```
+
+客户端只对 `localhost`、`127.0.0.1` 和 `::1` 自动使用 HTTP，其它地址默认走
+HTTPS。服务端以 `disable_ssl=true` 启动时，客户端也必须传 `DISABLE_SSL true`
+（如上例），否则会报 SSL 连接错误。
 
 > **安全警告**：绑定 `0.0.0.0` 并使用 `disable_ssl=true` 会将数据库以明文形式暴露到网络。
 > 仅在可信网络或防火墙后面使用。生产环境请使用带 TLS 的反向代理。
@@ -150,17 +154,217 @@ duckdb -c "ATTACH 'quack:localhost' AS qk (TOKEN 'BAED...'); CONNECT qk; SELECT 
 
 # 显式 ip:port 形式（远程连接或非默认端口时使用）
 duckdb -c "ATTACH 'quack:127.0.0.1:9494' AS qk (TOKEN 'BAED...'); CONNECT qk; SELECT * FROM t"
+
+# 明文 HTTP 远程服务端
+duckdb -c "ATTACH 'quack:192.0.2.10:9494' AS qk (TOKEN 'BAED...', DISABLE_SSL true); CONNECT qk; SELECT * FROM t"
 ```
 
 `-connect` 参数会自动发现服务端输出的 token。手动连接时，从服务端启动
 信息中复制 token 即可。
 
+`CONNECT` 激活期间，未限定的 SQL——包括使用本地路径的 `read_csv` /
+`read_parquet`——都在服务端执行，客户端本地文件不可见。要回到本地数据库执行，
+先 `DISCONNECT`；或者不使用 `CONNECT`，用 `qk.<table>` 限定名在同一个会话里
+混合本地与远端查询。
+
+### S3/OSS 数据 + 远端客户端
+
+常见部署方式是把数据文件放在对象存储（AWS S3、阿里云 OSS、MinIO 等），
+ECS 上只运行 Quack server。服务端通过 `httpfs` 读取文件，远端客户端既不需要
+S3 凭据，也不需要能访问桶——只查询服务端即可。
+
+在服务端配置 S3 secret、创建视图，并在同一个会话里启动 Quack（视图在查询时
+解析）：
+
+```sql
+CREATE SECRET (
+  TYPE S3,
+  ENDPOINT 'oss-cn-hangzhou.aliyuncs.com',  -- AWS S3 省略此项，改用 REGION
+  KEY_ID '...',
+  SECRET '...',
+  USE_SSL true,
+  URL_STYLE 'vhost'                         -- MinIO/silo/rustfs 用 'path'
+);
+
+CREATE VIEW events AS
+  SELECT * FROM read_parquet('s3://my-bucket/events/*.parquet');
+
+CALL quack_serve(
+  listen_uri = 'quack:0.0.0.0:9494',
+  allow_other_hostname = true,
+  token = 'my_token',
+  ssl_cert_file = '/etc/duckdb/server.crt',  -- 省略则自动生成证书
+  ssl_key_file  = '/etc/duckdb/server.key'
+);
+```
+
+非交互方式启动时，需要保持 stdin 打开：
+
+```bash
+( cat server.sql; tail -f /dev/null ) | duckdb
+```
+
+本地连接。使用 TLS（推荐）时客户端不需要 `DISABLE_SSL`：
+
+```bash
+duckdb -c "ATTACH 'quack:ecs.example.com:9494' AS qk (TOKEN 'my_token'); CONNECT qk; SELECT count(*) FROM events"
+```
+
+不加 `CONNECT` 时要写限定名 `qk.events`；未限定的表名会在客户端本地目录解析，
+找不到服务端视图。`read_parquet` 本身始终在服务端执行，S3 凭据只需放在服务端。
+
+明文 HTTP 的测试服务端要在客户端加 `DISABLE_SSL true`（见上一节）；客户端
+若使用 HTTP 代理，记得把服务端主机加入 `NO_PROXY`。
+
+该模式已用 MinIO 模拟对象存储做过端到端验证：`s3://ducktest/events/events.parquet`
+中的 10 万行 Parquet 被服务端暴露为视图，远端客户端通过 `ATTACH … CONNECT`
+和 `quack_query()` 都得到相同的行数与求和结果。
+
+- S3 凭据只保留在服务端会话（或 `~/.duckdbrc`）中，客户端不需要。
+- token 授予的是服务端完整 SQL 执行能力，而不只是访问暴露的视图：客户端可以
+  查询服务端凭据能访问的任意 S3 对象，以及服务端进程能读取的任意本地文件。
+  请使用最小权限的专用 S3 key，并限制 Quack 端口的网络访问。
+- Quack 端口应限制在安全组/防火墙内；token 认证不能替代网络隔离。
+
+#### 分析服务端的其他文件
+
+视图只是入口之一。服务端执行的任意 SQL 都能用服务端的 S3 凭据读取其他对象，
+也能读取服务端本地文件。一次性分析可用 `quack_query`，无需 attach：
+
+```sql
+-- 聚合一个不在任何视图中的 S3 CSV
+FROM quack_query(
+  'quack:ecs.example.com:9494',
+  'SELECT count(*) AS n, round(avg(score), 1) AS avg_score
+     FROM read_csv_auto(''s3://my-bucket/csv/users.csv'', header = true)',
+  token = 'my_token'
+);
+
+-- 两个对象前缀在服务端完成 join
+FROM quack_query(
+  'quack:ecs.example.com:9494',
+  'SELECT count(*) FROM read_parquet(''s3://my-bucket/a/*.parquet'') a
+     JOIN read_parquet(''s3://my-bucket/b/*.parquet'') b USING (id)',
+  token = 'my_token'
+);
+```
+
+使用 attach 时，可以 `CONNECT` 后直接写普通 SQL，或保持本地会话用 attach 的
+`query` 宏：
+
+```sql
+ATTACH 'quack:ecs.example.com:9494' AS qk (TOKEN 'my_token');
+
+CONNECT qk;
+SELECT count(*) FROM read_parquet('s3://my-bucket/other/*.parquet');
+
+-- 不 CONNECT 的等价写法：SQL 字符串在服务端执行
+SELECT * FROM qk.query(
+  'SELECT count(*) FROM read_parquet(''s3://my-bucket/other/*.parquet'')'
+);
+```
+
+以上示例默认使用 HTTPS。明文 HTTP 服务端需给 `quack_query` 加
+`disable_ssl = true`，或给 `ATTACH` 加 `DISABLE_SSL true`。在本地执行的语句
+使用客户端自己的凭据——本地直接 `read_parquet('s3://...')` 在没有客户端
+S3 secret 时会失败。
+
+### 通过 HTTP API 调用
+
+Quack 是 HTTP RPC 协议：客户端向 `/quack` 发送 `POST`，请求头带
+`Authorization: Bearer <token>` 和 `Content-Type: application/vnd.duckdb`。
+请求与响应用 DuckDB 内部二进制序列化（与 WAL 相同的格式），不是 JSON，
+因此手写 HTTP 请求只适合探活，不适合直接执行 SQL。
+
+```bash
+# 协议提示 / 探活
+curl http://192.0.2.10:9494/
+
+# CORS 预检
+curl -i -X OPTIONS http://192.0.2.10:9494/quack    # 204
+```
+
+没有 JSON/REST 接口：向 `/quack` POST 一个 JSON body 会被当成二进制协议帧，
+反序列化失败。要从其他语言通过 HTTP 执行 SQL，应使用 DuckDB 客户端库调用
+`quack_query`（或在已 attach 的 catalog 上用 `quack_query_by_name`），或者自己
+在 DuckDB 前面包一层 JSON 服务。
+
+需要 API 风格的无状态调用时，用 `quack_query`——每次查询一个请求/响应，
+不需要 `ATTACH`：
+
+```sql
+FROM quack_query(
+  'quack:192.0.2.10:9494',
+  'SELECT count(*) AS rows FROM events',
+  token = 'mytoken',
+  disable_ssl = true          -- HTTPS 服务端省略
+);
+```
+
+任何 DuckDB 客户端（CLI、Python 等）都能执行这段 SQL。`quack_query` 是实用的
+HTTP API 入口；需要长会话时用 `ATTACH` + `CONNECT`。
+
+#### Python 示例
+
+Python 客户端使用同一套 SQL；`duckdb` 必须是 v2.0.0 或更高，1.x 不支持
+Quack。用 `uv` 安装：
+
+```bash
+# 推荐：项目虚拟环境
+uv venv .venv
+source .venv/bin/activate
+uv pip install 'duckdb>=2.0.0'
+
+# 隔离到临时目录（不影响当前环境）
+uv pip install --target /tmp/duckpkg 'duckdb==2.0.0'
+PYTHONPATH=/tmp/duckpkg python3 quack_demo.py
+
+# 一次性运行，不持久安装
+uv run --with 'duckdb>=2.0.0' python3 quack_demo.py
+```
+
+```python
+import os
+os.environ["NO_PROXY"] = "ecs.example.com"   # 明文 HTTP + 本机有代理时
+
+import duckdb
+
+con = duckdb.connect()
+
+rows = con.execute("""
+    FROM quack_query(
+        'quack:ecs.example.com:9494',
+        'SELECT count(*) AS rows, sum(amount)::BIGINT AS total FROM events',
+        token = 'my_token',
+        disable_ssl = true
+    )
+""").fetchall()
+print(rows)
+
+# attach 一次，用限定名查询视图
+con.execute("ATTACH 'quack:ecs.example.com:9494' AS qk (TOKEN 'my_token', DISABLE_SSL true)")
+print(con.execute("SELECT count(*) FROM qk.events").fetchall())
+
+# 保持本地会话，通过 query 宏在服务端执行任意 SQL
+print(con.execute("""
+    SELECT * FROM qk.query(
+        'SELECT count(*) FROM read_parquet(''s3://my-bucket/other/*.parquet'')'
+    )
+""").fetchall())
+```
+
+`fetchdf()` 需要 pandas；`fetchall()` 不需要。服务端是明文 HTTP 且环境配置了
+HTTP 代理时，要在 import duckdb 之前设置 `NO_PROXY`。
+
 ### 注意事项
 
 - **stdin 必须保持打开**：服务端在 stdin 关闭后会退出（后台运行用 `< /dev/zero` 或 `tail -f /dev/null |`）
-- **仅限本地**：远程访问需要带 TLS 终止的反向代理
+- **默认仅限本地**：远程访问需绑定 `0.0.0.0` 并设置 `allow_other_hostname=true`；建议配合 TLS 反向代理或保持 `disable_ssl=false`
 - **Auth token**：自动生成，启动时打印，客户端连接时必须提供
 - **pgcli 不管理 Quack server**：`pg addon start/stop duckdb` 仍然是无操作——Quack server 是一个独立进程，需要自行管理
+- **HTTP 代理**：客户端遵循 `HTTP_PROXY`/`HTTPS_PROXY`。连接内网主机的明文 HTTP
+  服务时，请求可能被代理截走并报 `Unauthorized`；把该主机加入 `NO_PROXY`
+  （如 `NO_PROXY=192.0.2.10`）即可
 
 ## 扩展
 

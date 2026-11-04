@@ -142,8 +142,13 @@ Clients connect using the server's IP address:
 
 ```bash
 # Client connecting to remote server
-duckdb -c "ATTACH 'quack:192.0.2.10:9494' AS qk (TOKEN 'mytoken'); CONNECT qk; SELECT * FROM t"
+duckdb -c "ATTACH 'quack:192.0.2.10:9494' AS qk (TOKEN 'mytoken', DISABLE_SSL true); CONNECT qk; SELECT * FROM t"
 ```
+
+The client uses HTTP automatically only for `localhost`, `127.0.0.1` and `::1`;
+any other host defaults to HTTPS. When the server was started with
+`disable_ssl=true`, the client must pass `DISABLE_SSL true` as well (as above),
+otherwise it fails with an SSL error.
 
 > **Security warning**: Binding to `0.0.0.0` with `disable_ssl=true` exposes the
 > database to the network without encryption. Use only on trusted networks or
@@ -160,17 +165,231 @@ duckdb -c "ATTACH 'quack:localhost' AS qk (TOKEN 'BAED...'); CONNECT qk; SELECT 
 
 # Explicit ip:port form (for remote or non-default port)
 duckdb -c "ATTACH 'quack:127.0.0.1:9494' AS qk (TOKEN 'BAED...'); CONNECT qk; SELECT * FROM t"
+
+# Plain-HTTP remote server
+duckdb -c "ATTACH 'quack:192.0.2.10:9494' AS qk (TOKEN 'BAED...', DISABLE_SSL true); CONNECT qk; SELECT * FROM t"
 ```
 
 The `-connect` flag auto-discovers the token from the server's output. For
 manual connections, copy the token from the server's startup message.
 
+While a `CONNECT` is active, unqualified SQL — including `read_csv` /
+`read_parquet` with local paths — executes on the server, so files on the
+client are not visible. Run `DISCONNECT` to return to the local database, or
+skip `CONNECT` and use `qk.<table>` qualified names to mix local and remote
+queries in one session.
+
+### Serving S3/OSS data to remote clients
+
+A common deployment keeps the data files in object storage (AWS S3, Alibaba
+Cloud OSS, MinIO, …) and runs only the Quack server on the ECS instance. The
+server reads the files through `httpfs`, so remote clients need neither S3
+credentials nor a route to the bucket — they only query the server.
+
+On the server, configure the S3 secret and expose a view, then start Quack in
+the same session (the view resolves at query time):
+
+```sql
+CREATE SECRET (
+  TYPE S3,
+  ENDPOINT 'oss-cn-hangzhou.aliyuncs.com',  -- omit for AWS S3; use REGION instead
+  KEY_ID '...',
+  SECRET '...',
+  USE_SSL true,
+  URL_STYLE 'vhost'                         -- MinIO/silo/rustfs need 'path'
+);
+
+CREATE VIEW events AS
+  SELECT * FROM read_parquet('s3://my-bucket/events/*.parquet');
+
+CALL quack_serve(
+  listen_uri = 'quack:0.0.0.0:9494',
+  allow_other_hostname = true,
+  token = 'my_token',
+  ssl_cert_file = '/etc/duckdb/server.crt',  -- omit to use a generated cert
+  ssl_key_file  = '/etc/duckdb/server.key'
+);
+```
+
+If the server is launched non-interactively, keep stdin open:
+
+```bash
+( cat server.sql; tail -f /dev/null ) | duckdb
+```
+
+Connect from the local machine. With TLS (recommended) no `DISABLE_SSL` is
+needed:
+
+```bash
+duckdb -c "ATTACH 'quack:ecs.example.com:9494' AS qk (TOKEN 'my_token'); CONNECT qk; SELECT count(*) FROM events"
+```
+
+Without `CONNECT`, qualify the view (`SELECT count(*) FROM qk.events`); an
+unqualified name is resolved in the local catalog and will not find the
+server-side view. The `read_parquet` itself always runs on the server, and only
+the server needs the S3 secret.
+
+For a plain-HTTP test server add `DISABLE_SSL true` on the client, as shown
+above, and add the server host to `NO_PROXY` when the client uses an HTTP
+proxy.
+
+The same pattern was tested end to end with MinIO as the object store: a
+100,000-row Parquet file at `s3://ducktest/events/events.parquet` was exposed as
+a server-side view, and a remote client returned the same row count and sum via
+both `ATTACH … CONNECT` and `quack_query()`.
+
+- The S3 secret stays in the serving session (or `~/.duckdbrc`); clients never
+  need it.
+- The token grants server-side SQL execution, not just access to the exposed
+  view: a client can query any S3 object reachable with the server's
+  credentials, and any local file the server process can read. Use a dedicated,
+  least-privilege S3 key and keep the Quack port private.
+- Keep the Quack port private (security group/firewall). Token auth does not
+  replace network isolation.
+
+#### Analyzing other files on the server
+
+The view is only one entry point. Any SQL executed on the server can read other
+objects with the server's S3 credentials, or files on the server's filesystem.
+Use `quack_query` for one-off analysis without attaching:
+
+```sql
+-- Aggregate a CSV that is not part of any view
+FROM quack_query(
+  'quack:ecs.example.com:9494',
+  'SELECT count(*) AS n, round(avg(score), 1) AS avg_score
+     FROM read_csv_auto(''s3://my-bucket/csv/users.csv'', header = true)',
+  token = 'my_token'
+);
+
+-- Join two object prefixes entirely on the server
+FROM quack_query(
+  'quack:ecs.example.com:9494',
+  'SELECT count(*) FROM read_parquet(''s3://my-bucket/a/*.parquet'') a
+     JOIN read_parquet(''s3://my-bucket/b/*.parquet'') b USING (id)',
+  token = 'my_token'
+);
+```
+
+With an attachment, route the session with `CONNECT` and run plain SQL, or stay
+local and use the attached `query` macro:
+
+```sql
+ATTACH 'quack:ecs.example.com:9494' AS qk (TOKEN 'my_token');
+
+CONNECT qk;
+SELECT count(*) FROM read_parquet('s3://my-bucket/other/*.parquet');
+
+-- Equivalent without CONNECT: the SQL string runs on the server
+SELECT * FROM qk.query(
+  'SELECT count(*) FROM read_parquet(''s3://my-bucket/other/*.parquet'')'
+);
+```
+
+These examples assume HTTPS. For a plain-HTTP server add
+`disable_ssl = true` to `quack_query` or `DISABLE_SSL true` to `ATTACH`.
+Statements that execute locally use the client's own credentials — a local
+`read_parquet` on `s3://...` fails without a client-side S3 secret.
+
+### Calling over the HTTP API
+
+Quack is an HTTP RPC protocol: clients `POST` to `/quack` with
+`Authorization: Bearer <token>` and `Content-Type: application/vnd.duckdb`.
+Request and response bodies use DuckDB's internal binary serialization (the
+same format as the WAL), not JSON, so hand-written HTTP requests can check the
+service but cannot easily run SQL.
+
+```bash
+# Protocol hint / liveness
+curl http://192.0.2.10:9494/
+
+# CORS preflight
+curl -i -X OPTIONS http://192.0.2.10:9494/quack    # 204
+```
+
+There is no JSON/REST endpoint: a JSON body posted to `/quack` is treated as a
+binary protocol frame and fails to deserialize. To run SQL over HTTP from
+another language, use a DuckDB client library and `quack_query` (or
+`quack_query_by_name` on an attached catalog), or put your own JSON service in
+front of DuckDB.
+
+For an API-style call without `ATTACH`, use the stateless `quack_query`
+function — one request/response per query:
+
+```sql
+FROM quack_query(
+  'quack:192.0.2.10:9494',
+  'SELECT count(*) AS rows FROM events',
+  token = 'mytoken',
+  disable_ssl = true          -- omit for HTTPS servers
+);
+```
+
+Any DuckDB client (CLI, Python, …) can execute this SQL. `quack_query` is the
+practical HTTP API surface; for a long-lived session use `ATTACH` + `CONNECT`.
+
+#### Python example
+
+The Python client uses the same SQL surface; `duckdb` must be v2.0.0 or newer.
+A 1.x package does not speak Quack. Install it with `uv`:
+
+```bash
+# Recommended: project virtualenv
+uv venv .venv
+source .venv/bin/activate
+uv pip install 'duckdb>=2.0.0'
+
+# Isolated target dir (does not touch the current environment)
+uv pip install --target /tmp/duckpkg 'duckdb==2.0.0'
+PYTHONPATH=/tmp/duckpkg python3 quack_demo.py
+
+# One-off run without a persistent install
+uv run --with 'duckdb>=2.0.0' python3 quack_demo.py
+```
+
+```python
+import os
+os.environ["NO_PROXY"] = "ecs.example.com"   # plain-HTTP server behind a proxy
+
+import duckdb
+
+con = duckdb.connect()
+
+rows = con.execute("""
+    FROM quack_query(
+        'quack:ecs.example.com:9494',
+        'SELECT count(*) AS rows, sum(amount)::BIGINT AS total FROM events',
+        token = 'my_token',
+        disable_ssl = true
+    )
+""").fetchall()
+print(rows)
+
+# Attach once, query the exposed view with a qualified name
+con.execute("ATTACH 'quack:ecs.example.com:9494' AS qk (TOKEN 'my_token', DISABLE_SSL true)")
+print(con.execute("SELECT count(*) FROM qk.events").fetchall())
+
+# Stay local and run arbitrary SQL on the server via the query macro
+print(con.execute("""
+    SELECT * FROM qk.query(
+        'SELECT count(*) FROM read_parquet(''s3://my-bucket/other/*.parquet'')'
+    )
+""").fetchall())
+```
+
+`fetchdf()` requires pandas; `fetchall()` works without it. Set `NO_PROXY`
+before importing DuckDB when the server is plain HTTP and the environment has
+an HTTP proxy configured.
+
 ### Key points
 
 - **stdin must stay open**: the server exits when stdin closes (use `< /dev/zero` or `tail -f /dev/null |` for background operation)
-- **localhost only**: remote access requires a reverse proxy with TLS termination
+- **localhost by default**: bind to `0.0.0.0` with `allow_other_hostname=true` for remote access; prefer a TLS-terminating reverse proxy or `disable_ssl=false`
 - **Auth token**: auto-generated, printed at startup, required for client connections
 - **Not managed by pgcli**: `pg addon start/stop duckdb` remain no-ops — the Quack server is a standalone process you manage yourself
+- **HTTP proxies**: the client honors `HTTP_PROXY`/`HTTPS_PROXY`. A plain-HTTP
+  connection to a private host can be swallowed by a proxy and reported as
+  `Unauthorized`; add the host to `NO_PROXY` (e.g. `NO_PROXY=192.0.2.10`)
 
 ## Extensions
 
