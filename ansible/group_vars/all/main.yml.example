@@ -41,18 +41,97 @@ pgcli_images_cache_dir: /var/cache/pgcli/images
 # tag already exists in podman. Use after replacing an archive on the server.
 pgcli_images_force_load: false
 
-# Core images pulled by scripts/install.sh. `archive` matches the tar name
-# produced by `make container-images-export` (`<repo>_<tag>.tar`). Add addon
-# images here as well when they must be available offline.
+# Complete image manifest, mirroring IMAGES in the repo Makefile. `archive`
+# matches the tar name produced by `make container-images-export`
+# (`<repo>_<tag>.tar`). Trim entries that are not needed to reduce transfer
+# time; add any custom image tags here as well.
 pgcli_images:
   - image: ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0
     archive: pgcli-pg_18-2.58.0.tar
-  - image: ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0
-    archive: pgcli-backup_2.58.0.tar
   - image: ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5
     archive: pgcli-patroni_18-4.1.5.tar
+  - image: ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0
+    archive: pgcli-backup_2.58.0.tar
+  - image: ghcr.io/mars-base/pgcli/pgcli-minio:20250422221226
+    archive: pgcli-minio_20250422221226.tar
+  - image: ghcr.io/mars-base/pgcli/pgcli-mc:20250813083541
+    archive: pgcli-mc_20250813083541.tar
+  - image: ghcr.io/mars-base/pgcli/pgcli-rustfs:1.0.0
+    archive: pgcli-rustfs_1.0.0.tar
+  - image: ghcr.io/mars-base/pgcli/pgcli-influxdb:1.13.1
+    archive: pgcli-influxdb_1.13.1.tar
+  - image: ghcr.io/mars-base/pgcli/pgcli-influx2tsdb:1.3.2
+    archive: pgcli-influx2tsdb_1.3.2.tar
+  - image: ghcr.io/mars-base/pgcli/pgcli-documentdb-gateway:1.0.0
+    archive: pgcli-documentdb-gateway_1.0.0.tar
+  - image: ghcr.io/mars-base/pgcli/pgcli-mongosh:2.14.1
+    archive: pgcli-mongosh_2.14.1.tar
+  - image: ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine
+    archive: predixy_7.0.1-alpine.tar
+  - image: docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z
+    archive: silo_RELEASE.2026-09-16T00-00-00Z.tar
+  - image: docker.io/postgrest/postgrest:v16.3
+    archive: postgrest_v16.3.tar
+  - image: docker.io/edoburu/pgbouncer:v1.25.2-p0
+    archive: pgbouncer_v1.25.2-p0.tar
+  - image: docker.io/library/haproxy:3.2.23-alpine
+    archive: haproxy_3.2.23-alpine.tar
   - image: quay.io/coreos/etcd:v3.5.30
     archive: etcd_v3.5.30.tar
+  - image: ghcr.io/pgdogdev/pgdog:v0.1.57
+    archive: pgdog_v0.1.57.tar
+  - image: docker.io/library/redis:7.4.11
+    archive: redis_7.4.11.tar
+  - image: docker.io/library/redis:8.10.2
+    archive: redis_8.10.2.tar
+  - image: docker.io/dpage/pgadmin4:9.18
+    archive: pgadmin4_9.18.tar
+  - image: docker.io/library/nginx:1.27-alpine
+    archive: nginx_1.27-alpine.tar
+  - image: docker.io/dxflrs/garage:v2.4.1
+    archive: garage_v2.4.1.tar
+  - image: docker.io/chrislusf/seaweedfs:4.48_large_disk
+    archive: seaweedfs_4.48_large_disk.tar
+  - image: docker.io/grafana/grafana:13.2.4
+    archive: grafana_13.2.4.tar
+  - image: docker.io/prom/prometheus:v3.15.0
+    archive: prometheus_v3.15.0.tar
+  - image: docker.io/prom/alertmanager:v0.34.1
+    archive: alertmanager_v0.34.1.tar
+  - image: docker.io/gitea/gitea:28.1.0
+    archive: gitea_28.1.0.tar
+  - image: ghcr.io/thinkparq/beegfs-mgmtd:8.4.0
+    archive: beegfs-mgmtd_8.4.0.tar
+  - image: ghcr.io/thinkparq/beegfs-meta:8.4.0
+    archive: beegfs-meta_8.4.0.tar
+  - image: ghcr.io/thinkparq/beegfs-storage:8.4.0
+    archive: beegfs-storage_8.4.0.tar
+  - image: docker.io/victoriametrics/victoria-metrics:v1.154.1
+    archive: victoria-metrics_v1.154.1.tar
+  - image: docker.io/victoriametrics/vminsert:v1.154.1-cluster
+    archive: vminsert_v1.154.1-cluster.tar
+  - image: docker.io/victoriametrics/vmselect:v1.154.1-cluster
+    archive: vmselect_v1.154.1-cluster.tar
+  - image: docker.io/victoriametrics/vmstorage:v1.154.1-cluster
+    archive: vmstorage_v1.154.1-cluster.tar
+  - image: docker.io/victoriametrics/victoria-logs:v1.53.0
+    archive: victoria-logs_v1.53.0.tar
+  - image: docker.io/victoriametrics/vlagent:v1.53.0
+    archive: vlagent_v1.53.0.tar
+  - image: docker.io/victoriametrics/vmalert:v1.133.0
+    archive: vmalert_v1.133.0.tar
+  - image: docker.io/clickhouse/clickhouse-server:26.8.36.3
+    archive: clickhouse-server_26.8.36.3.tar
+  - image: docker.io/apache/kafka:4.4.0
+    archive: kafka_4.4.0.tar
+  - image: docker.io/library/rabbitmq:4.4.0-management
+    archive: rabbitmq_4.4.0-management.tar
+  - image: docker.io/apache/rocketmq:5.5.0
+    archive: rocketmq_5.5.0.tar
+  - image: docker.io/prom/node-exporter:v1.12.1
+    archive: node-exporter_v1.12.1.tar
+  - image: docker.io/pgsty/pg_exporter:1.5.0
+    archive: pg_exporter_1.5.0.tar
 
 pgcli_install_path: /usr/local/bin/pg
 pgcli_config_path: /root/.pgcli/pg.yaml
@@ -69,8 +148,22 @@ pgcli_config_defaults:
 pgcli_config_overrides: {}
 pgcli_config: "{{ pgcli_config_defaults | combine(pgcli_config_overrides) }}"
 
-# Per-instance defaults merged over each pgcli_instances entry.
-# state: present | started | stopped | absent
+# Per-instance attribute defaults. This is ONE template applied to ONE
+# instance at a time, not a list of instances. For every entry in
+# pgcli_instances the role computes (shallow merge):
+#
+#   spec = pgcli_instance_defaults | combine(entry)
+#
+# Keys set on an entry override the defaults below; missing keys fall back to
+# them. `name` cannot be defaulted and must be set on each entry.
+#
+# state:           present | started | stopped | absent
+#                  present = create the instance but leave its run state alone
+# autostart:       enable the instance at boot (`pg autostart enable`)
+# backup_target:   local | s3; fixed at creation time, later changes only warn
+# password_length: generated admin password length used by `pg create`
+# extensions:      PostgreSQL extensions to install; an entry that sets this
+#                  list replaces the default list entirely (no append)
 pgcli_instance_defaults:
   state: started
   autostart: false
@@ -78,6 +171,10 @@ pgcli_instance_defaults:
   password_length: 16
   extensions: []
 
-# Desired state consumed by the pg_instance / pg_addon roles.
+# Desired instances on this host, consumed by the pg_instance role. Each list
+# item is one instance and must at least set `name`; every other key overrides
+# pgcli_instance_defaults as described above.
 pgcli_instances: []
+
+# Add-ons on this host, consumed by the pg_addon role.
 pgcli_addons: []
