@@ -1,0 +1,12 @@
+# pgcli Ansible inventory
+# Copy to hosts.ini and edit for your environment.
+#
+# Usage:
+#   uv run ansible-playbook playbooks/ping.yaml
+#   uv run ansible-playbook playbooks/ping.yaml --limit debian12-01
+
+[pgcli_hosts]
+debian12-01 ansible_host=192.0.2.10 ansible_user=root ansible_port=22
+debian12-02 ansible_host=192.0.2.11 ansible_user=root ansible_port=22
+debian12-03 ansible_host=192.0.2.12 ansible_user=root ansible_port=22
+debian12-04 ansible_host=192.0.2.13 ansible_user=root ansible_port=22

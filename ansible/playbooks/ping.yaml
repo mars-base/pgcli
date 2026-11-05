@@ -1,0 +1,11 @@
+---
+# Usage:
+#   uv run ansible-playbook playbooks/ping.yaml
+#   uv run ansible-playbook playbooks/ping.yaml --limit debian12-01
+
+- name: Verify connectivity
+  hosts: "{{ HOSTS | default('pgcli_hosts') }}"
+  gather_facts: false
+  tasks:
+    - name: Ping
+      ansible.builtin.ping:

@@ -1,0 +1,35 @@
+[defaults]
+
+# Output and logging
+stdout_callback = yaml
+bin_ansible_callbacks = True
+log_path = var/ansible.log
+
+# Inventory and connection
+inventory = hosts.ini
+host_key_checking = False
+remote_port = 22
+transport = ssh
+forks = 20
+
+# Facts caching
+gathering = smart
+fact_caching = jsonfile
+fact_caching_timeout = 86400
+fact_caching_connection = var/facts
+
+# Roles and paths
+roles_path = roles
+retry_files_save_path = var
+
+# Warnings and behavior
+deprecation_warnings = False
+command_warnings = False
+force_valid_group_names = ignore
+interpreter_python = auto_silent
+
+ansible_managed = Ansible managed: modified on %Y-%m-%d %H:%M:%S by {uid} on {host}
+
+[ssh_connection]
+scp_if_ssh = True
+pipelining = True

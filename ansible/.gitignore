@@ -1,0 +1,15 @@
+.claude/
+*.egg-info/
+hosts.ini
+ansible.cfg
+group_vars/*/secrets.yaml
+host_vars/*/secrets.yaml
+.idea/
+*.pyc
+__pycache__/
+*.pyo
+*.retry
+var/ansible.log
+var/facts/
+.venv/
+.vscode/

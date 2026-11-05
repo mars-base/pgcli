@@ -1,0 +1,15 @@
+---
+# Shared defaults for pgcli hosts.
+pgcli_local_binary: "{{ inventory_dir | dirname }}/bin/pg"
+pgcli_install_path: /usr/local/bin/pg
+
+# Desired state consumed by the pg_instance / pg_addon roles.
+pgcli_instances: []
+# - name: demo
+#   port: 5433
+#   autostart: true
+
+pgcli_addons: []
+# - type: minio
+#   name: s3test
+#   args: []
