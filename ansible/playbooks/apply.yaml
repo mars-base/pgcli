@@ -1,0 +1,38 @@
+---
+# Usage:
+#   cd ansible
+#   uv run ansible-playbook playbooks/apply.yaml
+#   uv run ansible-playbook playbooks/apply.yaml --tags instance --limit debian12-01
+#
+# Play order matters: the DCS add-ons must be up before Patroni members are
+# created, and serial: 1 keeps the first host bootstrapping the rest.
+
+- name: Install and configure pgcli
+  hosts: pgcli_hosts
+  gather_facts: false
+  roles:
+    - role: pgcli
+      tags: [pgcli]
+
+- name: Standalone PostgreSQL instances
+  hosts: standalone_hosts
+  gather_facts: false
+  roles:
+    - role: pg_instance
+      tags: [instance]
+
+- name: Add-ons
+  hosts: pgcli_hosts
+  gather_facts: false
+  serial: 1
+  roles:
+    - role: pg_addon
+      tags: [addon]
+
+- name: Patroni HA members
+  hosts: ha_hosts
+  gather_facts: false
+  serial: 1
+  roles:
+    - role: pg_ha
+      tags: [ha]

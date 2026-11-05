@@ -3,10 +3,20 @@
 #
 # Usage:
 #   uv run ansible-playbook playbooks/ping.yaml
-#   uv run ansible-playbook playbooks/ping.yaml --limit debian12-01
+#   uv run ansible-playbook playbooks/apply.yaml
+#
+# Inventory groups are the host roles: standalone_hosts runs one local
+# instance; ha_hosts forms one Patroni cluster over a shared etcd DCS.
+# Host order inside ha_hosts matters: the first host bootstraps the cluster.
 
-[pgcli_hosts]
+[standalone_hosts]
 debian12-01 ansible_host=192.0.2.10 ansible_user=root ansible_port=22
+
+[ha_hosts]
 debian12-02 ansible_host=192.0.2.11 ansible_user=root ansible_port=22
 debian12-03 ansible_host=192.0.2.12 ansible_user=root ansible_port=22
 debian12-04 ansible_host=192.0.2.13 ansible_user=root ansible_port=22
+
+[pgcli_hosts:children]
+standalone_hosts
+ha_hosts

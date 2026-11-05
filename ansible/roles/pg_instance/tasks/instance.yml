@@ -1,0 +1,204 @@
+---
+- name: Build the desired instance spec
+  ansible.builtin.set_fact:
+    _spec: "{{ pgcli_instance_defaults | combine(item) }}"
+    _instances: "{{ pgcli_cfg.instances | default({}) }}"
+
+- name: Validate the instance spec
+  ansible.builtin.assert:
+    that:
+      - _spec.name is defined
+      - _spec.name | length > 0
+      - _spec.state in ['present', 'started', 'stopped', 'absent']
+      - _spec.backup_target in ['local', 's3']
+    fail_msg: "Invalid pgcli_instances entry: {{ item | to_nice_yaml }}"
+
+- name: Destroy the instance
+  ansible.builtin.command:
+    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'destroy', '-i', _spec.name, '--force'] + (['--clean-data'] if _spec.clean_data | default(false) else []) }}"
+  when:
+    - _spec.state == 'absent'
+    - _instances.get(_spec.name) is not none
+
+- name: Create the instance
+  ansible.builtin.command:
+    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'create', '-i', _spec.name, '--backup-target', _spec.backup_target, '--password-length', _spec.password_length | string] + (['--base-dir', _spec.base_dir] if _spec.base_dir is defined else []) }}"
+  when:
+    - _spec.state != 'absent'
+    - _instances.get(_spec.name) is none
+
+- name: Refresh pgcli config after creating the instance
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - config
+      - show
+  register: pgcli_instance_config_refresh
+  changed_when: false
+  when:
+    - _spec.state != 'absent'
+    - _instances.get(_spec.name) is none
+
+- name: Apply the refreshed config
+  ansible.builtin.set_fact:
+    pgcli_cfg: "{{ pgcli_instance_config_refresh.stdout | from_yaml }}"
+  when:
+    - _spec.state != 'absent'
+    - _instances.get(_spec.name) is none
+
+- name: Resolve the instance config
+  ansible.builtin.set_fact:
+    _inst_cfg: "{{ (pgcli_cfg.instances | default({})).get(_spec.name, {}) }}"
+
+# backup_target is fixed at creation time; pgcli has no command to change it.
+- name: Warn about creation-time settings that cannot change
+  ansible.builtin.debug:
+    msg: >-
+      Instance {{ _spec.name }} was created with backup_target={{
+      _inst_cfg.pitr.backup_target | default('local') }}, desired {{
+      _spec.backup_target }}. Recreate the instance to change it.
+  when:
+    - _spec.state != 'absent'
+    - _instances.get(_spec.name) is not none
+    - (_inst_cfg.pitr.backup_target | default('local')) != _spec.backup_target
+
+- name: Enable instance autostart
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - autostart
+      - enable
+      - "-i"
+      - "{{ _spec.name }}"
+  when:
+    - _spec.state != 'absent'
+    - _spec.autostart | default(false) | bool
+    - not (_inst_cfg.autostart | default(false) | bool)
+
+- name: Disable instance autostart
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - autostart
+      - disable
+      - "-i"
+      - "{{ _spec.name }}"
+  when:
+    - _spec.state != 'absent'
+    - not (_spec.autostart | default(false) | bool)
+    - _inst_cfg.autostart | default(false) | bool
+
+- name: Resolve the extensions to install
+  ansible.builtin.set_fact:
+    _missing_extensions: "{{ _spec.extensions | default([]) | difference(_inst_cfg.extensions | default([])) }}"
+
+- name: Resolve the container name
+  ansible.builtin.set_fact:
+    _container: "{{ _inst_cfg.podman.container_name | default('') }}"
+
+# `pg create` only writes pg.yaml, so the container may not exist yet. `pg
+# status` always exits 0; podman inspect is the source of truth for run state.
+- name: Read the container state before changes
+  ansible.builtin.command:
+    argv:
+      - podman
+      - inspect
+      - "--format"
+      - "{{ '{{.State.Running}}' }}"
+      - "{{ _container }}"
+  register: pgcli_instance_container
+  changed_when: false
+  failed_when: false
+  when:
+    - _spec.state != 'absent'
+    - _container | length > 0
+
+- name: Record the previous running state
+  ansible.builtin.set_fact:
+    _was_running: "{{ (pgcli_instance_container.stdout | default('') | trim) == 'true' }}"
+  when: _spec.state != 'absent'
+
+# `pg extension install` replaces (rm + run) the container, so it needs a
+# running instance even when the final state is stopped.
+- name: Start the instance before extensions
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - start
+      - "-i"
+      - "{{ _spec.name }}"
+  when:
+    - _spec.state != 'absent'
+    - not (_was_running | bool)
+    - (_spec.state == 'started') or (_missing_extensions | length > 0)
+
+- name: Install missing extensions
+  ansible.builtin.command:
+    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'extension', 'install', _missing_extensions | join(','), '--auto-restart', '-i', _spec.name] }}"
+  when:
+    - _spec.state != 'absent'
+    - _missing_extensions | length > 0
+
+- name: Read the container state after extensions
+  ansible.builtin.command:
+    argv:
+      - podman
+      - inspect
+      - "--format"
+      - "{{ '{{.State.Running}}' }}"
+      - "{{ _container }}"
+  register: pgcli_instance_container_after
+  changed_when: false
+  failed_when: false
+  when:
+    - _spec.state != 'absent'
+    - _container | length > 0
+
+- name: Stop the instance
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - stop
+      - "-i"
+      - "{{ _spec.name }}"
+  when:
+    - _spec.state == 'stopped'
+    - (pgcli_instance_container_after.stdout | default('') | trim) == 'true'
+
+# state=present leaves the run state unmanaged; undo a temporary start.
+- name: Restore the stopped state
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - stop
+      - "-i"
+      - "{{ _spec.name }}"
+  when:
+    - _spec.state == 'present'
+    - not (_was_running | bool)
+    - (pgcli_instance_container_after.stdout | default('') | trim) == 'true'
+
+- name: Start the instance
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - start
+      - "-i"
+      - "{{ _spec.name }}"
+  when:
+    - _spec.state == 'started'
+    - (pgcli_instance_container_after.stdout | default('') | trim) != 'true'

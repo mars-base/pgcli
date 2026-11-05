@@ -1,0 +1,55 @@
+---
+- name: Check for a locally built pg binary
+  ansible.builtin.stat:
+    path: "{{ pgcli_binary_src }}"
+  register: pgcli_local_binary
+  delegate_to: localhost
+  become: false
+
+- name: Install the pg binary
+  ansible.builtin.copy:
+    src: "{{ pgcli_binary_src }}"
+    dest: "{{ pgcli_install_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when: pgcli_local_binary.stat.exists
+
+- name: Check for an installed pg binary
+  ansible.builtin.stat:
+    path: "{{ pgcli_install_path }}"
+  register: pgcli_installed_binary
+
+- name: Require a pg binary
+  ansible.builtin.assert:
+    that:
+      - pgcli_installed_binary.stat.exists
+    fail_msg: >-
+      No pg binary at {{ pgcli_install_path }} and no local build at
+      {{ pgcli_binary_src }}. Run `make build` on the controller first.
+
+- name: Check the pgcli config file
+  ansible.builtin.stat:
+    path: "{{ pgcli_config_path }}"
+  register: pgcli_config_file
+
+# `pg config init` refuses to overwrite an existing file, so this runs once.
+- name: Initialize pgcli config
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - config
+      - init
+      - "-o"
+      - "{{ pgcli_config_path }}"
+      - "--namespace"
+      - "{{ pgcli_config.namespace }}"
+      - "--base-dir"
+      - "{{ pgcli_config.base_dir }}"
+      - "--backup-dir"
+      - "{{ pgcli_config.backup_dir }}"
+      - "--pg-start-port"
+      - "{{ pgcli_config.pg_start_port | string }}"
+      - "--pg-ssh-port"
+      - "{{ pgcli_config.pg_ssh_port | string }}"
+  when: not pgcli_config_file.stat.exists

@@ -1,0 +1,11 @@
+---
+# Standalone host role: one local PostgreSQL instance, no cluster DCS.
+pgcli_config_overrides:
+  namespace: dev
+
+pgcli_instances:
+  - name: "{{ pgcli_instance_name }}"
+    state: started
+    autostart: true
+    extensions:
+      - pg_stat_statements

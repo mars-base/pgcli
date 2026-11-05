@@ -1,0 +1,36 @@
+---
+- name: Validate the add-on spec
+  ansible.builtin.assert:
+    that:
+      - addon.type is defined
+      - addon.type | length > 0
+      - (addon.instance is defined) or (addon.name is defined)
+      - (addon.state | default('present')) in ['present', 'absent']
+    fail_msg: >-
+      Each pgcli_addons entry needs type plus either name (top-level) or
+      instance (instance-scoped), and state present|absent.
+
+- name: Resolve add-on facts
+  ansible.builtin.set_fact:
+    _addon_key: "{{ addon.type | replace('-', '_') }}"
+    _addon_state: "{{ addon.state | default('present') }}"
+    _addon_installed: >-
+      {%- if addon.instance is defined -%}
+      {{ ((pgcli_cfg.instances or {}).get(addon.instance, {}).get('addons') or {}).get(_addon_key) is not none }}
+      {%- else -%}
+      {{ ((pgcli_cfg.addons or {}).get(_addon_key) or {}).get(addon.name) is not none }}
+      {%- endif -%}
+
+- name: Install the add-on
+  ansible.builtin.command:
+    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'install', addon.type] + (['-i', addon.instance] if addon.instance is defined else ['--name', addon.name]) + (addon.args | default([])) }}"
+  when:
+    - _addon_state == 'present'
+    - not (_addon_installed | bool)
+
+- name: Remove the add-on
+  ansible.builtin.command:
+    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'remove', addon.type] + (['-i', addon.instance] if addon.instance is defined else ['--name', addon.name]) + (['--clean-data'] if addon.clean_data | default(false) else []) }}"
+  when:
+    - _addon_state == 'absent'
+    - _addon_installed | bool

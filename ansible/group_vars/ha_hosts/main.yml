@@ -1,0 +1,28 @@
+---
+# HA host role: one etcd DCS member and one Patroni member per host.
+# The first host in ha_hosts bootstraps etcd and the Patroni scope; the rest
+# join it. apply.yaml runs the add-on and HA plays with serial: 1 so this
+# ordering holds.
+
+pgcli_config_overrides:
+  namespace: ha
+
+pgcli_addons:
+  - type: etcd
+    name: etcd
+    state: present
+    args: "{{ ['--cluster', 'ha', '--advertise-host', ansible_host] + (['--join', 'http://' + hostvars[groups['ha_hosts'] | first].ansible_host + ':2379'] if inventory_hostname != (groups['ha_hosts'] | first) else []) }}"
+
+pg_ha_cluster:
+  scope: pgcluster
+  # Must stay in the same order as ha_hosts in the inventory.
+  members:
+    - ha1
+    - ha2
+    - ha3
+  dcs_endpoints:
+    - "{{ hostvars[groups['ha_hosts'][0]].ansible_host }}:2379"
+    - "{{ hostvars[groups['ha_hosts'][1]].ansible_host }}:2379"
+    - "{{ hostvars[groups['ha_hosts'][2]].ansible_host }}:2379"
+  state: started
+  autostart: true

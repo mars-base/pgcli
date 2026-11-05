@@ -1,0 +1,22 @@
+---
+- name: Read pgcli config
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - config
+      - show
+  register: pgcli_addon_config_raw
+  changed_when: false
+
+- name: Parse pgcli config
+  ansible.builtin.set_fact:
+    pgcli_cfg: "{{ pgcli_addon_config_raw.stdout | from_yaml }}"
+
+- name: Reconcile add-ons
+  ansible.builtin.include_tasks: addon.yml
+  loop: "{{ pgcli_addons }}"
+  loop_control:
+    loop_var: addon
+    label: "{{ addon.type }}{{ ('/' + addon.name) if addon.name is defined else '' }}"
