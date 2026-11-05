@@ -1,0 +1,83 @@
+---
+# Example group configuration. Copy to main.yml and edit for the real
+# environment; group_vars/*/main.yml is gitignored.
+#
+# Shared defaults for every pgcli host.
+# Host-role groups (standalone_hosts, ha_hosts) override them in their own
+# group_vars; host_vars only carry identity (instance name / HA member name).
+
+# Installation goes through scripts/install.sh (GitHub release, not a local
+# build). The installer only runs when pg is missing or force is true.
+pgcli_install_script_src: "{{ inventory_dir | dirname }}/scripts/install.sh"
+pgcli_install_script_path: /tmp/pgcli-install.sh
+pgcli_install_version: ""       # release tag, e.g. v1.2.3; empty = latest
+pgcli_install_skip_pull: false  # pass --skip-pull: do not pre-pull images
+pgcli_install_force: false      # re-run the installer even if pg exists
+
+# ── Offline container images ────────────────────────────────────────────────
+# The image tarballs are large, so hosts can load them from a LAN static HTTP
+# server instead of pulling from public registries.
+#
+# Leave empty for the online path: scripts/install.sh pulls the core images.
+# Set it to the server root that contains the `podman save` tarballs produced
+# by `make container-images-export`, for example:
+#
+#   pgcli_images_http_url: "http://192.0.2.10:18080"
+#
+# and serve that directory with:
+#
+#   pg http start --listen 0.0.0.0 --port 18080 --dir images
+#
+# When set, the installer runs with --skip-pull, and every image missing from
+# podman's local store is fetched from <url>/<archive> and loaded with
+# `podman load`.
+pgcli_images_http_url: ""
+
+# Where downloaded tarballs are cached on the target host. Kept across runs so
+# only missing images are transferred again; safe to delete at any time.
+pgcli_images_cache_dir: /var/cache/pgcli/images
+
+# true = always re-download and re-load every archive, even when the image
+# tag already exists in podman. Use after replacing an archive on the server.
+pgcli_images_force_load: false
+
+# Core images pulled by scripts/install.sh. `archive` matches the tar name
+# produced by `make container-images-export` (`<repo>_<tag>.tar`). Add addon
+# images here as well when they must be available offline.
+pgcli_images:
+  - image: ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0
+    archive: pgcli-pg_18-2.58.0.tar
+  - image: ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0
+    archive: pgcli-backup_2.58.0.tar
+  - image: ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5
+    archive: pgcli-patroni_18-4.1.5.tar
+  - image: quay.io/coreos/etcd:v3.5.30
+    archive: etcd_v3.5.30.tar
+
+pgcli_install_path: /usr/local/bin/pg
+pgcli_config_path: /root/.pgcli/pg.yaml
+
+# Consumed by `pg config init` on the first run only. Editing these later
+# does NOT rewrite an existing pg.yaml.
+pgcli_config_defaults:
+  namespace: default
+  base_dir: /data/pg
+  backup_dir: /mnt/backup/pg
+  pg_start_port: 35432
+  pg_ssh_port: 42201
+
+pgcli_config_overrides: {}
+pgcli_config: "{{ pgcli_config_defaults | combine(pgcli_config_overrides) }}"
+
+# Per-instance defaults merged over each pgcli_instances entry.
+# state: present | started | stopped | absent
+pgcli_instance_defaults:
+  state: started
+  autostart: false
+  backup_target: local
+  password_length: 16
+  extensions: []
+
+# Desired state consumed by the pg_instance / pg_addon roles.
+pgcli_instances: []
+pgcli_addons: []

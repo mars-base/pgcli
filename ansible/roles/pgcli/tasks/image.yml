@@ -1,0 +1,23 @@
+---
+# `pgcli_image.archive` is a `podman save` tar (docker-archive format) served
+# as a static file by pgcli_images_http_url.
+- name: Check whether {{ pgcli_image.image }} is already present
+  ansible.builtin.command:
+    argv: [podman, image, exists, "{{ pgcli_image.image }}"]
+  register: _pgcli_image_present
+  changed_when: false
+  failed_when: false
+
+- name: Download {{ pgcli_image.archive }}
+  ansible.builtin.get_url:
+    url: "{{ pgcli_images_http_url | regex_replace('/+$', '') }}/{{ pgcli_image.archive }}"
+    dest: "{{ pgcli_images_cache_dir }}/{{ pgcli_image.archive }}"
+    mode: "0644"
+    force: "{{ pgcli_images_force_load | bool }}"
+    timeout: 60
+  when: pgcli_images_force_load | bool or _pgcli_image_present.rc != 0
+
+- name: Load {{ pgcli_image.archive }} into podman
+  ansible.builtin.command:
+    argv: [podman, load, -i, "{{ pgcli_images_cache_dir }}/{{ pgcli_image.archive }}"]
+  when: pgcli_images_force_load | bool or _pgcli_image_present.rc != 0

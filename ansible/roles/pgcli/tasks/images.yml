@@ -1,0 +1,22 @@
+---
+# Offline path: load the tarballs exported by `make container-images-export`
+# from pgcli_images_http_url instead of pulling from public registries.
+- name: Require podman for offline images
+  ansible.builtin.command:
+    argv: [podman, --version]
+  changed_when: false
+
+- name: Ensure the image cache directory exists
+  ansible.builtin.file:
+    path: "{{ pgcli_images_cache_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Load images from the offline HTTP server
+  ansible.builtin.include_tasks: image.yml
+  loop: "{{ pgcli_images }}"
+  loop_control:
+    loop_var: pgcli_image
+    label: "{{ pgcli_image.image }}"

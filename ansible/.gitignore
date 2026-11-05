@@ -3,6 +3,7 @@
 hosts.ini
 ansible.cfg
 group_vars/*/secrets.yaml
+group_vars/*/main.yml
 host_vars/*/secrets.yaml
 .idea/
 *.pyc

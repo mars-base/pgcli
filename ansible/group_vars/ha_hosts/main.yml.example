@@ -1,4 +1,7 @@
 ---
+# Example HA group configuration. Copy to main.yml and edit for the real
+# environment; group_vars/*/main.yml is gitignored.
+#
 # HA host role: one etcd DCS member and one Patroni member per host.
 # The first host in ha_hosts bootstraps etcd and the Patroni scope; the rest
 # join it. apply.yaml runs the add-on and HA plays with serial: 1 so this

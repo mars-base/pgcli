@@ -1,32 +1,55 @@
 ---
-- name: Check for a locally built pg binary
-  ansible.builtin.stat:
-    path: "{{ pgcli_binary_src }}"
-  register: pgcli_local_binary
-  delegate_to: localhost
-  become: false
-
-- name: Install the pg binary
-  ansible.builtin.copy:
-    src: "{{ pgcli_binary_src }}"
-    dest: "{{ pgcli_install_path }}"
-    owner: root
-    group: root
-    mode: "0755"
-  when: pgcli_local_binary.stat.exists
-
 - name: Check for an installed pg binary
   ansible.builtin.stat:
     path: "{{ pgcli_install_path }}"
   register: pgcli_installed_binary
 
-- name: Require a pg binary
+- name: Decide whether the installer must run
+  ansible.builtin.set_fact:
+    _pgcli_install_needed: "{{ pgcli_install_force | bool or not pgcli_installed_binary.stat.exists }}"
+
+- name: Ensure installer prerequisites
+  ansible.builtin.package:
+    name:
+      - curl
+      - tar
+    state: present
+  when: _pgcli_install_needed | bool
+
+- name: Copy the pgcli install script
+  ansible.builtin.copy:
+    src: "{{ pgcli_install_script_src }}"
+    dest: "{{ pgcli_install_script_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when: _pgcli_install_needed | bool
+
+# The script downloads a GitHub release into INSTALL_DIR. Pulling is skipped
+# when an offline image source is configured; images.yml loads them instead.
+- name: Install pg via the install script
+  ansible.builtin.command:
+    argv: "{{ [pgcli_install_script_path] + ([pgcli_install_version] if pgcli_install_version | length > 0 else []) + (['--skip-pull'] if (pgcli_install_skip_pull | bool) or (pgcli_images_http_url | length > 0) else []) }}"
+  environment:
+    INSTALL_DIR: "{{ pgcli_install_path | dirname }}"
+  when: _pgcli_install_needed | bool
+
+- name: Check for the pg binary after installation
+  ansible.builtin.stat:
+    path: "{{ pgcli_install_path }}"
+  register: pgcli_installed_binary_after
+
+- name: Require the pg binary
   ansible.builtin.assert:
     that:
-      - pgcli_installed_binary.stat.exists
+      - pgcli_installed_binary_after.stat.exists
     fail_msg: >-
-      No pg binary at {{ pgcli_install_path }} and no local build at
-      {{ pgcli_binary_src }}. Run `make build` on the controller first.
+      The install script did not produce {{ pgcli_install_path }}.
+      Check its output and the INSTALL_DIR environment it received.
+
+- name: Load container images from the offline HTTP server
+  ansible.builtin.include_tasks: images.yml
+  when: pgcli_images_http_url | length > 0
 
 - name: Check the pgcli config file
   ansible.builtin.stat:

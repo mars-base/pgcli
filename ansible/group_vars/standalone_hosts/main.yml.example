@@ -1,4 +1,7 @@
 ---
+# Example standalone group configuration. Copy to main.yml and edit for the
+# real environment; group_vars/*/main.yml is gitignored.
+#
 # Standalone host role: one local PostgreSQL instance, no cluster DCS.
 pgcli_config_overrides:
   namespace: dev
