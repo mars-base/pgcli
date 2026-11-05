@@ -22,6 +22,40 @@
     state: present
   when: _pgcli_install_needed | bool
 
+# When pgcli_install_binary_url is set the pg binary is fetched directly from
+# that URL (offline HTTP server or release tarball) instead of GitHub, and
+# scripts/install.sh runs with --skip-binary: the host initialization
+# (uidmap, /etc/containers/policy.json, userns check, SELinux) still happens.
+# Offline podman: when pgcli_podman_binary_url is set, the launcher binary is
+# fetched from that URL instead of GitHub. The launcher downloads the real
+# static podman tree on first use.
+- name: Check for an installed podman binary
+  ansible.builtin.stat:
+    path: /usr/local/bin/podman
+  register: pgcli_podman_binary
+
+- name: Install the podman launcher from the offline URL
+  ansible.builtin.get_url:
+    url: "{{ pgcli_podman_binary_url }}"
+    dest: /usr/local/bin/podman
+    owner: root
+    group: root
+    mode: "0755"
+    timeout: 60
+  when:
+    - pgcli_podman_binary_url | length > 0
+    - not pgcli_podman_binary.stat.exists
+
+- name: Trigger the podman launcher first-use download
+  ansible.builtin.command:
+    argv: [/usr/local/bin/podman, --version]
+  when:
+    - pgcli_podman_binary_url | length > 0
+    - not pgcli_podman_binary.stat.exists
+
+# The install script is always delivered: the online path runs it in full,
+# the offline path runs it with --skip-binary so the host initialization
+# (uidmap, /etc/containers/policy.json, userns check, SELinux) still happens.
 - name: Copy the local pgcli install script
   ansible.builtin.copy:
     src: "{{ pgcli_install_script_src }}"
@@ -51,7 +85,87 @@
     argv: "{{ [pgcli_install_script_path] + ([pgcli_install_version] if pgcli_install_version | length > 0 else []) + (['--skip-pull'] if (pgcli_install_skip_pull | bool) or (pgcli_images_http_url | length > 0) else []) }}"
   environment:
     INSTALL_DIR: "{{ pgcli_install_path | dirname }}"
-  when: _pgcli_install_needed | bool
+  when:
+    - _pgcli_install_needed | bool
+    - pgcli_install_binary_url | length == 0
+
+# The URL may point at a raw pg binary or at a release tarball
+# (pgcli_<version>_linux_amd64.tar.gz); tarballs are extracted first.
+- name: Detect whether the offline pg artifact is an archive
+  ansible.builtin.set_fact:
+    _pgcli_binary_is_archive: "{{ pgcli_install_binary_url is match('.*\\.(tar\\.gz|tgz)(\\?.*)?$') }}"
+  when:
+    - _pgcli_install_needed | bool
+    - pgcli_install_binary_url | length > 0
+
+- name: Remove a stale offline pg binary staging directory
+  ansible.builtin.file:
+    path: /tmp/pgcli-binary
+    state: absent
+  when:
+    - _pgcli_install_needed | bool
+    - _pgcli_binary_is_archive | bool
+
+- name: Create the offline pg binary staging directory
+  ansible.builtin.file:
+    path: /tmp/pgcli-binary
+    state: directory
+    mode: "0755"
+  when:
+    - _pgcli_install_needed | bool
+    - _pgcli_binary_is_archive | bool
+
+- name: Download the offline pg artifact
+  ansible.builtin.get_url:
+    url: "{{ pgcli_install_binary_url }}"
+    dest: /tmp/pgcli-binary.download
+    mode: "0644"
+  when:
+    - _pgcli_install_needed | bool
+    - pgcli_install_binary_url | length > 0
+
+- name: Extract the offline pg release tarball
+  ansible.builtin.unarchive:
+    src: /tmp/pgcli-binary.download
+    dest: /tmp/pgcli-binary
+    remote_src: true
+  when:
+    - _pgcli_install_needed | bool
+    - _pgcli_binary_is_archive | bool
+
+- name: Install the pg binary from the offline tarball
+  ansible.builtin.copy:
+    src: /tmp/pgcli-binary/pg
+    dest: "{{ pgcli_install_path }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - _pgcli_install_needed | bool
+    - _pgcli_binary_is_archive | bool
+
+- name: Install the offline pg binary file
+  ansible.builtin.copy:
+    src: /tmp/pgcli-binary.download
+    dest: "{{ pgcli_install_path }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - _pgcli_install_needed | bool
+    - pgcli_install_binary_url | length > 0
+    - not _pgcli_binary_is_archive | bool
+
+- name: Initialize the host for the offline pg binary
+  ansible.builtin.command:
+    argv: "{{ [pgcli_install_script_path, '--skip-binary'] + (['--skip-pull'] if (pgcli_install_skip_pull | bool) or (pgcli_images_http_url | length > 0) else []) }}"
+  environment:
+    INSTALL_DIR: "{{ pgcli_install_path | dirname }}"
+  when:
+    - _pgcli_install_needed | bool
+    - pgcli_install_binary_url | length > 0
 
 - name: Check for the pg binary after installation
   ansible.builtin.stat:

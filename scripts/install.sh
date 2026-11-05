@@ -2,14 +2,19 @@
 # pgcli install script — installs the pg binary and container dependencies.
 # Supports Linux and macOS (amd64/arm64).
 #
-# Usage: install.sh [VERSION] [--skip-pull]
-#   --skip-pull  do not pull container images during install
+# Usage: install.sh [VERSION] [--skip-pull] [--skip-binary]
+#   --skip-pull    do not pull container images during install
+#   --skip-binary  do not download the pg binary or the podman launcher
+#                  (use when both are already placed on the host); system
+#                  initialization (uidmap, policy.json, userns check,
+#                  SELinux) still runs
 set -euo pipefail
 
 REPO="mars-base/pgcli"
 BINARY="pg"
 INSTALL_DIR="${INSTALL_DIR:-}"
 SKIP_PULL=false
+SKIP_BINARY=false
 VERSION_ARG=""
 
 # Container images (pulled during install for faster first startup)
@@ -477,9 +482,13 @@ main() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --skip-pull) SKIP_PULL=true ;;
+            --skip-binary) SKIP_BINARY=true ;;
             -h|--help)
-                echo "Usage: install.sh [VERSION] [--skip-pull]"
-                echo "  --skip-pull  do not pull container images during install"
+                echo "Usage: install.sh [VERSION] [--skip-pull] [--skip-binary]"
+                echo "  --skip-pull    do not pull container images during install"
+                echo "  --skip-binary  keep system initialization (uidmap, policy.json,"
+                echo "                 userns, SELinux) but skip downloading the pg"
+                echo "                 binary and the podman launcher"
                 exit 0
                 ;;
             *) VERSION_ARG="$1" ;;
@@ -494,8 +503,10 @@ main() {
     os="$(detect_os)"
     arch="$(detect_arch)"
 
-    # Version from argument or latest release
-    if [ -n "$VERSION_ARG" ]; then
+    # Version from argument or latest release (skipped with --skip-binary)
+    if $SKIP_BINARY; then
+        version="skipped"
+    elif [ -n "$VERSION_ARG" ]; then
         version="$VERSION_ARG"
     else
         version="$(latest_version)"
@@ -508,13 +519,25 @@ main() {
     echo "  Install: $INSTALL_DIR"
     echo ""
 
-    install_binary "$os" "$arch" "$version"
+    if $SKIP_BINARY; then
+        yellow "-> Skipping pg binary download (--skip-binary)"
+        [ -x "$INSTALL_DIR/$BINARY" ] || die "$BINARY not found in $INSTALL_DIR — --skip-binary requires it to be pre-installed"
+        green "  [OK] $BINARY already present at $INSTALL_DIR/$BINARY"
+    else
+        install_binary "$os" "$arch" "$version"
+    fi
 
     if $IS_MACOS; then
         re_sign_macos_binary
         setup_macos_deps
     elif $IS_LINUX; then
-        install_podman_launcher
+        if $SKIP_BINARY; then
+            yellow "-> Skipping podman launcher download (--skip-binary)"
+            command -v podman &>/dev/null || die "podman not found — --skip-binary requires it to be pre-installed"
+            green "  [OK] podman already available ($(command -v podman))"
+        else
+            install_podman_launcher
+        fi
         setup_linux_deps
         setup_selinux
     fi
