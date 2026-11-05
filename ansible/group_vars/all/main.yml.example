@@ -30,7 +30,9 @@ pgcli_install_force: false      # re-run the installer even if pg exists
 #
 # When set, the installer runs with --skip-pull, and every image missing from
 # podman's local store is fetched from <url>/<archive> and loaded with
-# `podman load`.
+# `podman load`. The playbook first sends HEAD requests to the server root and
+# to every enabled archive; if any is unreachable or missing it aborts before
+# changing anything.
 pgcli_images_http_url: ""
 
 # Where downloaded tarballs are cached on the target host. Kept across runs so
@@ -173,7 +175,13 @@ pgcli_instance_defaults:
 
 # Desired instances on this host, consumed by the pg_instance role. Each list
 # item is one instance and must at least set `name`; every other key overrides
-# pgcli_instance_defaults as described above.
+# pgcli_instance_defaults as described above. Add `replica_of: <name>` to
+# create a same-host read-only replica instead of a primary; primaries are
+# reconciled first and the referenced primary must exist and be running before
+# the replica is created. Replica entries accept only name, replica_of, state,
+# autostart and clean_data; password, database, image, extensions and PITR
+# settings are inherited from the primary. Replica names must be lower case
+# letters, digits and underscores only (the slot is named pgcli_r_<replica>).
 pgcli_instances: []
 
 # Add-ons on this host, consumed by the pg_addon role.

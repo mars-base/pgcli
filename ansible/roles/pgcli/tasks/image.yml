@@ -10,7 +10,7 @@
 
 - name: Download {{ pgcli_image.archive }}
   ansible.builtin.get_url:
-    url: "{{ pgcli_images_http_url | regex_replace('/+$', '') }}/{{ pgcli_image.archive }}"
+    url: "{{ _pgcli_images_base_url }}/{{ pgcli_image.archive }}"
     dest: "{{ pgcli_images_cache_dir }}/{{ pgcli_image.archive }}"
     mode: "0644"
     force: "{{ pgcli_images_force_load | bool }}"

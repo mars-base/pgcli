@@ -4,6 +4,10 @@
 #   uv run ansible-playbook playbooks/apply.yaml
 #   uv run ansible-playbook playbooks/apply.yaml --tags instance --limit debian12-01
 #
+# Re-running apply is idempotent: every state-changing task is guarded by the
+# current pgcli config and podman container state, and read-only commands
+# report changed=false.
+#
 # Play order matters: the DCS add-ons must be up before Patroni members are
 # created, and serial: 1 keeps the first host bootstrapping the rest.
 

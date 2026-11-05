@@ -14,8 +14,16 @@
   ansible.builtin.set_fact:
     pgcli_cfg: "{{ pgcli_instance_config_raw.stdout | from_yaml }}"
 
-- name: Reconcile instances
+- name: Reconcile primary instances
   ansible.builtin.include_tasks: instance.yml
-  loop: "{{ pgcli_instances }}"
+  loop: "{{ pgcli_instances | rejectattr('replica_of', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.name | default('?') }}"
+
+# Replicas run after every primary so `pg replica create -i` finds a running
+# primary; the instance tasks also verify this before creating one.
+- name: Reconcile replica instances
+  ansible.builtin.include_tasks: instance.yml
+  loop: "{{ pgcli_instances | selectattr('replica_of', 'defined') | list }}"
   loop_control:
     label: "{{ item.name | default('?') }}"

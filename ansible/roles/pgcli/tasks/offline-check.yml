@@ -1,0 +1,53 @@
+---
+# Offline mode is opt-in: when pgcli_images_http_url is set the server must be
+# reachable from this host, otherwise abort before changing anything.
+- name: Normalize the offline image base URL
+  ansible.builtin.set_fact:
+    _pgcli_images_base_url: "{{ pgcli_images_http_url | regex_replace('/+$', '') }}"
+
+- name: Check the offline image server
+  ansible.builtin.uri:
+    url: "{{ _pgcli_images_base_url }}/"
+    method: HEAD
+    status_code: 200
+    timeout: 10
+    use_proxy: false
+  register: _pgcli_image_server_check
+  changed_when: false
+  failed_when: false
+
+- name: Fail when the offline image server is unreachable
+  ansible.builtin.fail:
+    msg: >-
+      pgcli_images_http_url is set to {{ pgcli_images_http_url }} but the
+      server is not reachable from {{ inventory_hostname }}. Start the image
+      server or clear pgcli_images_http_url to use public registries.
+  when: _pgcli_image_server_check.status | default(0) != 200
+
+- name: Check the enabled image archives
+  ansible.builtin.uri:
+    url: "{{ _pgcli_images_base_url }}/{{ item.archive }}"
+    method: HEAD
+    status_code: 200
+    timeout: 10
+    use_proxy: false
+  loop: "{{ pgcli_images }}"
+  loop_control:
+    label: "{{ item.archive }}"
+  register: _pgcli_image_url_checks
+  changed_when: false
+  failed_when: false
+
+- name: Collect unreachable image archive URLs
+  ansible.builtin.set_fact:
+    _pgcli_bad_image_archives: >-
+      {{ (_pgcli_image_url_checks.results | rejectattr('status', 'defined') | map(attribute='item.archive') | list)
+         + (_pgcli_image_url_checks.results | selectattr('status', 'defined') | selectattr('status', 'ne', 200) | map(attribute='item.archive') | list) }}
+
+- name: Fail when an image archive is missing
+  ansible.builtin.fail:
+    msg: >-
+      Offline image source {{ pgcli_images_http_url }} is unreachable or
+      missing files for: {{ _pgcli_bad_image_archives | join(', ') }}.
+      Fix the server content or clear pgcli_images_http_url.
+  when: _pgcli_bad_image_archives | length > 0

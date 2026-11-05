@@ -13,6 +13,40 @@
       - _spec.backup_target in ['local', 's3']
     fail_msg: "Invalid pgcli_instances entry: {{ item | to_nice_yaml }}"
 
+# A same-host replica inherits the password, database, image, extensions and
+# PITR settings from its primary; only its identity and lifecycle are local.
+- name: Validate replica settings
+  ansible.builtin.assert:
+    that:
+      - item.replica_of | length > 0
+      - item.replica_of != item.name
+      - item.backup_target is not defined
+      - item.password_length is not defined
+      - item.extensions is not defined
+      - item.base_dir is not defined
+    fail_msg: >-
+      Invalid pgcli_instances replica entry: {{ item | to_nice_yaml }}.
+      A replica accepts only name, replica_of, state, autostart and
+      clean_data; password, database, image, extensions, PITR, backup and
+      base_dir settings are inherited from the primary.
+  when: item.replica_of is defined
+
+# The physical replication slot is named pgcli_r_<replica>, and PostgreSQL only
+# allows lower case letters, digits and underscores there. Reject invalid
+# names before pgcli writes a half-created instance. Absent entries may still
+# be destroyed even if their name is invalid.
+- name: Validate the replica name
+  ansible.builtin.assert:
+    that:
+      - item.name is match('^[a-z0-9_]+$')
+    fail_msg: >-
+      Invalid replica name {{ item.name }}: replication slot
+      pgcli_r_{{ item.name }} would contain invalid characters. Use only
+      lower case letters, digits and underscores (for example pg01_ro1).
+  when:
+    - item.replica_of is defined
+    - _spec.state != 'absent'
+
 - name: Destroy the instance
   ansible.builtin.command:
     argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'destroy', '-i', _spec.name, '--force'] + (['--clean-data'] if _spec.clean_data | default(false) else []) }}"
@@ -20,12 +54,70 @@
     - _spec.state == 'absent'
     - _instances.get(_spec.name) is not none
 
-- name: Create the instance
+- name: Create the primary instance
   ansible.builtin.command:
     argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'create', '-i', _spec.name, '--backup-target', _spec.backup_target, '--password-length', _spec.password_length | string] + (['--base-dir', _spec.base_dir] if _spec.base_dir is defined else []) }}"
   when:
     - _spec.state != 'absent'
     - _instances.get(_spec.name) is none
+    - _spec.replica_of is not defined
+
+- name: Decide whether the replica must be created
+  ansible.builtin.set_fact:
+    _create_replica: "{{ _spec.replica_of is defined and _spec.state != 'absent' and _instances.get(_spec.name) is none }}"
+
+# `pg replica create` requires a running primary and inherits its settings, so
+# fail with an actionable message before pgcli touches anything.
+- name: Look up the replica primary
+  ansible.builtin.set_fact:
+    _primary_cfg: "{{ (pgcli_cfg.instances | default({})).get(_spec.replica_of, {}) }}"
+  when: _create_replica | bool
+
+- name: Require the replica primary to exist
+  ansible.builtin.assert:
+    that:
+      - _primary_cfg | length > 0
+      - _primary_cfg.podman.container_name | default('') | length > 0
+    fail_msg: >-
+      Replica {{ _spec.name }} requires primary {{ _spec.replica_of }}, which
+      is not defined in {{ pgcli_config_path }}. Add the primary to
+      pgcli_instances and rerun.
+  when: _create_replica | bool
+
+- name: Read the primary container state
+  ansible.builtin.command:
+    argv:
+      - podman
+      - inspect
+      - "--format"
+      - "{{ '{{.State.Running}}' }}"
+      - "{{ _primary_cfg.podman.container_name }}"
+  register: _pgcli_primary_container
+  changed_when: false
+  failed_when: false
+  when: _create_replica | bool
+
+- name: Require the replica primary to be running
+  ansible.builtin.assert:
+    that:
+      - (_pgcli_primary_container.stdout | default('') | trim) == 'true'
+    fail_msg: >-
+      Replica {{ _spec.name }} requires primary {{ _spec.replica_of }} to be
+      running. Set state: started on the primary entry and rerun.
+  when: _create_replica | bool
+
+- name: Create the replica
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - replica
+      - create
+      - "{{ _spec.name }}"
+      - "-i"
+      - "{{ _spec.replica_of }}"
+  when: _create_replica | bool
 
 - name: Refresh pgcli config after creating the instance
   ansible.builtin.command:
@@ -52,6 +144,21 @@
   ansible.builtin.set_fact:
     _inst_cfg: "{{ (pgcli_cfg.instances | default({})).get(_spec.name, {}) }}"
 
+# An existing instance keeps its role; never silently treat a replica as a
+# primary or vice versa.
+- name: Verify the existing instance matches the desired role
+  ansible.builtin.assert:
+    that:
+      - (_inst_cfg.replica_of | default('', true)) == (_spec.replica_of | default('', true))
+    fail_msg: >-
+      Instance {{ _spec.name }} exists with replica_of={{
+      _inst_cfg.replica_of | default('(primary)', true) }}, but the desired
+      replica_of is {{ _spec.replica_of | default('(primary)', true) }}.
+      Destroy the instance first or fix the entry.
+  when:
+    - _spec.state != 'absent'
+    - _instances.get(_spec.name) is not none
+
 # backup_target is fixed at creation time; pgcli has no command to change it.
 - name: Warn about creation-time settings that cannot change
   ansible.builtin.debug:
@@ -62,6 +169,7 @@
   when:
     - _spec.state != 'absent'
     - _instances.get(_spec.name) is not none
+    - _spec.replica_of is not defined
     - (_inst_cfg.pitr.backup_target | default('local')) != _spec.backup_target
 
 - name: Enable instance autostart
