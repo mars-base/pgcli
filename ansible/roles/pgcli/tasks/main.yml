@@ -22,14 +22,27 @@
     state: present
   when: _pgcli_install_needed | bool
 
-- name: Copy the pgcli install script
+- name: Copy the local pgcli install script
   ansible.builtin.copy:
     src: "{{ pgcli_install_script_src }}"
     dest: "{{ pgcli_install_script_path }}"
     owner: root
     group: root
     mode: "0755"
-  when: _pgcli_install_needed | bool
+  when:
+    - _pgcli_install_needed | bool
+    - pgcli_install_script_src is not match('^https?://')
+
+- name: Download the pgcli install script
+  ansible.builtin.get_url:
+    url: "{{ pgcli_install_script_src }}"
+    dest: "{{ pgcli_install_script_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - _pgcli_install_needed | bool
+    - pgcli_install_script_src is match('^https?://')
 
 # The script downloads a GitHub release into INSTALL_DIR. Pulling is skipped
 # when an offline image source is configured; images.yml loads them instead.

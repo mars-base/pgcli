@@ -8,7 +8,9 @@
 
 # Installation goes through scripts/install.sh (GitHub release, not a local
 # build). The installer only runs when pg is missing or force is true.
-pgcli_install_script_src: "{{ inventory_dir | dirname }}/scripts/install.sh"
+# Use an https:// URL to download it on the target host, or a controller path
+# to copy it from a local checkout (for offline or air-gapped setups).
+pgcli_install_script_src: "https://raw.githubusercontent.com/mars-base/pgcli/main/scripts/install.sh"
 pgcli_install_script_path: /tmp/pgcli-install.sh
 pgcli_install_version: ""       # release tag, e.g. v1.2.3; empty = latest
 pgcli_install_skip_pull: false  # pass --skip-pull: do not pre-pull images
