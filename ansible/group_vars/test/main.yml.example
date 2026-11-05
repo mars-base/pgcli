@@ -1,0 +1,16 @@
+---
+# Example test environment configuration. Copy to main.yml and edit for the
+# real environment; group_vars/*/main.yml is gitignored.
+#
+# An empty list disables standalone instances for this environment (used when
+# the hosts are managed by the HA role instead). Add entries with `host:` to
+# manage one or more instances here.
+pgcli_config_overrides:
+  namespace: test
+
+pgcli_instances: []
+# pgcli_instances:
+#   - name: pg01
+#     host: debian12-03
+#     state: started
+#     autostart: true

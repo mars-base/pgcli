@@ -10,15 +10,18 @@
       Each pgcli_addons entry needs type plus either name (top-level) or
       instance (instance-scoped), and state present|absent.
 
-- name: Resolve add-on facts
+- name: Resolve the add-on key
   ansible.builtin.set_fact:
     _addon_key: "{{ addon.type | replace('-', '_') }}"
+
+- name: Resolve add-on facts
+  ansible.builtin.set_fact:
     _addon_state: "{{ addon.state | default('present') }}"
     _addon_installed: >-
       {%- if addon.instance is defined -%}
-      {{ ((pgcli_cfg.instances or {}).get(addon.instance, {}).get('addons') or {}).get(_addon_key) is not none }}
+      {{ ((pgcli_cfg.get('instances') or {}).get(addon.instance, {}).get('addons') or {}).get(_addon_key) is not none }}
       {%- else -%}
-      {{ ((pgcli_cfg.addons or {}).get(_addon_key) or {}).get(addon.name) is not none }}
+      {{ ((pgcli_cfg.get('addons') or {}).get(_addon_key) or {}).get(addon.name) is not none }}
       {%- endif -%}
 
 - name: Install the add-on

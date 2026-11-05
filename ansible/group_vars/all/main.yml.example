@@ -3,8 +3,10 @@
 # environment; group_vars/*/main.yml is gitignored.
 #
 # Shared defaults for every pgcli host.
-# Host-role groups (standalone_hosts, ha_hosts) override them in their own
-# group_vars; host_vars only carry identity (instance name / HA member name).
+# Environment groups (dev, test, release) and the role marker group
+# (ha_hosts) override them in their own group_vars; each group_vars
+# directory mirrors one inventory group. Environment vars take precedence
+# over role marker vars (ansible_group_priority).
 
 # Installation goes through scripts/install.sh (GitHub release, not a local
 # build). The installer only runs when pg is missing or force is true.
@@ -15,6 +17,21 @@ pgcli_install_script_path: /tmp/pgcli-install.sh
 pgcli_install_version: ""       # release tag, e.g. v1.2.3; empty = latest
 pgcli_install_skip_pull: false  # pass --skip-pull: do not pre-pull images
 pgcli_install_force: false      # re-run the installer even if pg exists
+
+# Offline binary: URL of a raw pg binary or a release tarball
+# (pgcli_<version>_linux_amd64.tar.gz). When set, pg is installed from that
+# artifact and scripts/install.sh runs with --skip-binary (host
+# initialization still happens: uidmap, /etc/containers/policy.json,
+# userns check, SELinux).
+# Empty = install via scripts/install.sh (GitHub releases).
+pgcli_install_binary_url: ""
+
+# Offline podman launcher: URL of the podman-launcher binary
+# (https://github.com/89luca89/podman-launcher). When set and no podman
+# exists on the host, the launcher is fetched from that URL; the launcher
+# then downloads the static podman tree on first use.
+# Empty = the launcher comes from GitHub releases via install.sh.
+pgcli_podman_binary_url: ""
 
 # ── Offline container images ────────────────────────────────────────────────
 # The image tarballs are large, so hosts can load them from a LAN static HTTP
@@ -177,14 +194,26 @@ pgcli_instance_defaults:
 
 # Desired instances on this host, consumed by the pg_instance role. Each list
 # item is one instance and must at least set `name`; every other key overrides
-# pgcli_instance_defaults as described above. Add `replica_of: <name>` to
-# create a same-host read-only replica instead of a primary; primaries are
-# reconciled first and the referenced primary must exist and be running before
-# the replica is created. Replica entries accept only name, replica_of, state,
-# autostart and clean_data; password, database, image, extensions and PITR
-# settings are inherited from the primary. Replica names must be lower case
-# letters, digits and underscores only (the slot is named pgcli_r_<replica>).
-pgcli_instances: []
+# pgcli_instance_defaults as described above. Add `host: <inventory host>` to
+# scope an entry to one host; without it the entry applies to every host in
+# the group. A replica may set both `host` (where it runs) and
+# `replica_of_host` (where its primary runs). Add `replica_of: <name>` to
+# create a read-only replica instead of a primary; primaries are reconciled
+# first and the referenced primary must exist and be running before the
+# replica is created. Add `replica_of_host: <inventory host>` when the primary
+# runs on another host: the role prepares the primary there (slot + pg_hba),
+# then creates the replica with --primary-dsn, reading the primary password
+# from that host's pg.yaml. Replica entries accept only name, replica_of,
+# replica_of_host, state, autostart and clean_data; password, database, image,
+# extensions and PITR settings are inherited from the primary. Replica names
+# must be lower case letters, digits and underscores only (the slot is named
+# pgcli_r_<replica>).
+# The fallback for hosts that do not override this list; group vars replace it
+# rather than merge, so each group must repeat any instance it wants to keep.
+pgcli_instances:
+  - name: default
+    state: started
+    autostart: true
 
 # Add-ons on this host, consumed by the pg_addon role.
 pgcli_addons: []

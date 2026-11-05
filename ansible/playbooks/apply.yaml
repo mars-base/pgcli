@@ -10,23 +10,29 @@
 #
 # Play order matters: the DCS add-ons must be up before Patroni members are
 # created, and serial: 1 keeps the first host bootstrapping the rest.
+# Environment groups (dev, test, release) are all members of the implicit
+# `all` group, so the pgcli, instance and add-on plays target every host;
+# each host only reconciles the instance entries assigned to it.
 
 - name: Install and configure pgcli
-  hosts: pgcli_hosts
+  hosts: all
   gather_facts: false
   roles:
     - role: pgcli
       tags: [pgcli]
 
-- name: Standalone PostgreSQL instances
-  hosts: standalone_hosts
+# serial: 1 processes hosts in inventory order, so a primary host completes
+# its instances before the next host creates cross-host replicas from it.
+- name: PostgreSQL instances
+  hosts: all
   gather_facts: false
+  serial: 1
   roles:
     - role: pg_instance
       tags: [instance]
 
 - name: Add-ons
-  hosts: pgcli_hosts
+  hosts: all
   gather_facts: false
   serial: 1
   roles:

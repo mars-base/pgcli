@@ -5,18 +5,38 @@
 #   uv run ansible-playbook playbooks/ping.yaml
 #   uv run ansible-playbook playbooks/apply.yaml
 #
-# Inventory groups are the host roles: standalone_hosts runs one local
-# instance; ha_hosts forms one Patroni cluster over a shared etcd DCS.
-# Host order inside ha_hosts matters: the first host bootstraps the cluster.
+# Hosts are grouped by environment: dev, test and release. Each environment is
+# one inventory group that may contain one or many hosts, and a host belongs
+# to exactly one environment. The implicit `all` group still contains every
+# host, so plays that apply to every managed host target `all`. Each
+# group_vars/<group>/ directory describes exactly one inventory group.
+#
+# Environment groups are the primary configuration source and take precedence
+# over role marker groups (ha_hosts) through ansible_group_priority. Host order
+# inside a group matters: list a primary host before the hosts that create
+# cross-host replicas from it, because the instance play runs with serial: 1.
 
-[standalone_hosts]
+[dev]
 debian12-01 ansible_host=192.0.2.10 ansible_user=root ansible_port=22
+debian12-02 ansible_host=192.0.2.11 ansible_user=root ansible_port=22
 
+[test]
+debian12-03 ansible_host=192.0.2.12 ansible_user=root ansible_port=22
+debian12-04 ansible_host=192.0.2.13 ansible_user=root ansible_port=22
+
+[release]
+# No release hosts yet.
+
+[dev:vars]
+ansible_group_priority=20
+[test:vars]
+ansible_group_priority=20
+[release:vars]
+ansible_group_priority=20
+
+# Role marker: hosts that form one Patroni cluster over a shared etcd DCS.
+# Order matters: the first host bootstraps etcd and the Patroni scope.
 [ha_hosts]
 debian12-02 ansible_host=192.0.2.11 ansible_user=root ansible_port=22
 debian12-03 ansible_host=192.0.2.12 ansible_user=root ansible_port=22
 debian12-04 ansible_host=192.0.2.13 ansible_user=root ansible_port=22
-
-[pgcli_hosts:children]
-standalone_hosts
-ha_hosts

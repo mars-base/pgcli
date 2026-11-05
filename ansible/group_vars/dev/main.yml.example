@@ -1,0 +1,40 @@
+---
+# Example development environment configuration. Copy to main.yml and edit for
+# the real environment; group_vars/*/main.yml is gitignored.
+#
+# One environment group may contain one or many hosts. Set `host:` on an
+# entry to run it on one inventory host only; entries without `host` apply to
+# every host in the group, which keeps single-host environments terse.
+#
+# Replica names must be unique per host (the replication slot is named
+# pgcli_r_<replica>) and may contain only lower case letters, digits and
+# underscores. With many hosts, template the name, for example:
+#   - name: "{{ inventory_hostname | replace('-', '_') }}_ro"
+pgcli_config_overrides:
+  namespace: dev
+
+pgcli_instances:
+  - name: pg01
+    host: debian12-01
+    state: started
+    autostart: true
+    extensions:
+      - pg_stat_statements
+
+  # Same-host read-only replica. The primary above must exist and be running;
+  # password, database, image, extensions and PITR settings are inherited.
+  - name: pg01_ro1
+    host: debian12-01
+    replica_of: pg01
+    state: started
+    autostart: true
+
+  # Cross-host read-only replica. The role prepares the primary on
+  # debian12-01 (replication slot + pg_hba), reads its password from that
+  # host's pg.yaml, then creates the replica here with --primary-dsn.
+  - name: pg01_ro2
+    host: debian12-02
+    replica_of: pg01
+    replica_of_host: debian12-01
+    state: started
+    autostart: true

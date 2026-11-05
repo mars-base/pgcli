@@ -26,9 +26,9 @@
       - item.base_dir is not defined
     fail_msg: >-
       Invalid pgcli_instances replica entry: {{ item | to_nice_yaml }}.
-      A replica accepts only name, replica_of, state, autostart and
-      clean_data; password, database, image, extensions, PITR, backup and
-      base_dir settings are inherited from the primary.
+      A replica accepts only name, host, replica_of, replica_of_host, state,
+      autostart and clean_data; password, database, image, extensions, PITR,
+      backup and base_dir settings are inherited from the primary.
   when: item.replica_of is defined
 
 # The physical replication slot is named pgcli_r_<replica>, and PostgreSQL only
@@ -66,12 +66,18 @@
   ansible.builtin.set_fact:
     _create_replica: "{{ _spec.replica_of is defined and _spec.state != 'absent' and _instances.get(_spec.name) is none }}"
 
+- name: Detect a cross-host replica
+  ansible.builtin.set_fact:
+    _cross_host_replica: "{{ _spec.replica_of is defined and ((_spec.replica_of_host | default('')) | length > 0) }}"
+
 # `pg replica create` requires a running primary and inherits its settings, so
 # fail with an actionable message before pgcli touches anything.
 - name: Look up the replica primary
   ansible.builtin.set_fact:
     _primary_cfg: "{{ (pgcli_cfg.instances | default({})).get(_spec.replica_of, {}) }}"
-  when: _create_replica | bool
+  when:
+    - _create_replica | bool
+    - not _cross_host_replica | bool
 
 - name: Require the replica primary to exist
   ansible.builtin.assert:
@@ -82,7 +88,9 @@
       Replica {{ _spec.name }} requires primary {{ _spec.replica_of }}, which
       is not defined in {{ pgcli_config_path }}. Add the primary to
       pgcli_instances and rerun.
-  when: _create_replica | bool
+  when:
+    - _create_replica | bool
+    - not _cross_host_replica | bool
 
 - name: Read the primary container state
   ansible.builtin.command:
@@ -95,7 +103,9 @@
   register: _pgcli_primary_container
   changed_when: false
   failed_when: false
-  when: _create_replica | bool
+  when:
+    - _create_replica | bool
+    - not _cross_host_replica | bool
 
 - name: Require the replica primary to be running
   ansible.builtin.assert:
@@ -104,7 +114,9 @@
     fail_msg: >-
       Replica {{ _spec.name }} requires primary {{ _spec.replica_of }} to be
       running. Set state: started on the primary entry and rerun.
-  when: _create_replica | bool
+  when:
+    - _create_replica | bool
+    - not _cross_host_replica | bool
 
 - name: Create the replica
   ansible.builtin.command:
@@ -117,7 +129,135 @@
       - "{{ _spec.name }}"
       - "-i"
       - "{{ _spec.replica_of }}"
-  when: _create_replica | bool
+  when:
+    - _create_replica | bool
+    - not _cross_host_replica | bool
+
+# Cross-host replicas need one command on each side: prepare the primary on
+# its own host, then create the replica here with --primary-dsn. The primary
+# password is read from its pg.yaml at runtime and kept out of the vars.
+- name: Require a known inventory host for the replica primary
+  ansible.builtin.assert:
+    that:
+      - _spec.replica_of_host in groups['all']
+      - _spec.replica_of_host != inventory_hostname
+    fail_msg: >-
+      Replica {{ _spec.name }} sets replica_of_host={{
+      _spec.replica_of_host }}, but that host is not in the inventory or is
+      this host. Use an inventory hostname, and omit replica_of_host for a
+      same-host replica.
+  when:
+    - _create_replica | bool
+    - _cross_host_replica | bool
+
+- name: Read the remote primary config
+  ansible.builtin.command:
+    argv:
+      - "{{ hostvars[_spec.replica_of_host].pgcli_install_path | default(pgcli_install_path) }}"
+      - "-c"
+      - "{{ hostvars[_spec.replica_of_host].pgcli_config_path | default(pgcli_config_path) }}"
+      - config
+      - show
+  delegate_to: "{{ _spec.replica_of_host }}"
+  register: _pgcli_remote_primary_config
+  changed_when: false
+  when:
+    - _create_replica | bool
+    - _cross_host_replica | bool
+
+- name: Resolve the remote primary instance
+  ansible.builtin.set_fact:
+    _remote_primary_cfg: "{{ ((_pgcli_remote_primary_config.stdout | from_yaml).instances | default({})).get(_spec.replica_of, {}) }}"
+  when:
+    - _create_replica | bool
+    - _cross_host_replica | bool
+
+- name: Require the remote primary instance to exist
+  ansible.builtin.assert:
+    that:
+      - _remote_primary_cfg | length > 0
+      - _remote_primary_cfg.podman.container_name | default('') | length > 0
+      - _remote_primary_cfg.podman.host_port | default(0) | int > 0
+      - _remote_primary_cfg.postgres | default({}) | length > 0
+    fail_msg: >-
+      Replica {{ _spec.name }} requires instance {{ _spec.replica_of }} on
+      {{ _spec.replica_of_host }}, but it is not fully defined in that host's
+      pgcli config.
+  when:
+    - _create_replica | bool
+    - _cross_host_replica | bool
+
+- name: Read the remote primary container state
+  ansible.builtin.command:
+    argv:
+      - podman
+      - inspect
+      - "--format"
+      - "{{ '{{.State.Running}}' }}"
+      - "{{ _remote_primary_cfg.podman.container_name }}"
+  delegate_to: "{{ _spec.replica_of_host }}"
+  register: _pgcli_remote_primary_container
+  changed_when: false
+  failed_when: false
+  when:
+    - _create_replica | bool
+    - _cross_host_replica | bool
+
+- name: Require the remote primary to be running
+  ansible.builtin.assert:
+    that:
+      - (_pgcli_remote_primary_container.stdout | default('') | trim) == 'true'
+    fail_msg: >-
+      Replica {{ _spec.name }} requires {{ _spec.replica_of }} on
+      {{ _spec.replica_of_host }} to be running. Start it and rerun.
+  when:
+    - _create_replica | bool
+    - _cross_host_replica | bool
+
+- name: Prepare the remote primary for the replica
+  ansible.builtin.command:
+    argv:
+      - "{{ hostvars[_spec.replica_of_host].pgcli_install_path | default(pgcli_install_path) }}"
+      - "-c"
+      - "{{ hostvars[_spec.replica_of_host].pgcli_config_path | default(pgcli_config_path) }}"
+      - replica
+      - create
+      - "{{ _spec.name }}"
+      - "-i"
+      - "{{ _spec.replica_of }}"
+      - "--replica-host"
+      - "{{ hostvars[inventory_hostname].ansible_host | default(inventory_hostname) }}"
+  delegate_to: "{{ _spec.replica_of_host }}"
+  when:
+    - _create_replica | bool
+    - _cross_host_replica | bool
+
+- name: Build the remote primary DSN
+  ansible.builtin.set_fact:
+    _primary_dsn: >-
+      postgres://{{ _remote_primary_cfg.postgres.user | default('admin') | urlencode | replace('/', '%2F') }}:{{ _remote_primary_cfg.postgres.password | default('admin') | urlencode | replace('/', '%2F') }}@{{ hostvars[_spec.replica_of_host].ansible_host | default(_spec.replica_of_host) }}:{{ _remote_primary_cfg.podman.host_port }}/{{ _remote_primary_cfg.postgres.database | default('admin') | urlencode | replace('/', '%2F') }}
+  no_log: true
+  when:
+    - _create_replica | bool
+    - _cross_host_replica | bool
+
+- name: Create the cross-host replica
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - replica
+      - create
+      - "{{ _spec.name }}"
+      - "--primary-dsn"
+      - "{{ _primary_dsn }}"
+      - "--primary-name"
+      - "{{ _spec.replica_of }}"
+  no_log: true
+  when:
+    - _create_replica | bool
+    - _cross_host_replica | bool
 
 - name: Refresh pgcli config after creating the instance
   ansible.builtin.command:

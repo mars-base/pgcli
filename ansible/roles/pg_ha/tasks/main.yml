@@ -29,7 +29,7 @@
 
 - name: Resolve this member's config
   ansible.builtin.set_fact:
-    _pg_ha_member_cfg: "{{ (((pgcli_cfg.addons or {}).get('patroni') or {}).get(pg_ha_cluster.scope) or {}).get('members', {}).get(pgcli_ha_member, {}) }}"
+    _pg_ha_member_cfg: "{{ (((pgcli_cfg.get('addons') or {}).get('patroni') or {}).get(pg_ha_cluster.scope) or {}).get('members', {}).get(pgcli_ha_member, {}) }}"
 
 - name: Check the inventory order matches the member plan
   ansible.builtin.assert:
@@ -109,7 +109,7 @@
 
 - name: Resolve the member config after creation
   ansible.builtin.set_fact:
-    _pg_ha_member_cfg: "{{ (((pgcli_cfg.addons or {}).get('patroni') or {}).get(pg_ha_cluster.scope) or {}).get('members', {}).get(pgcli_ha_member, {}) }}"
+    _pg_ha_member_cfg: "{{ (((pgcli_cfg.get('addons') or {}).get('patroni') or {}).get(pg_ha_cluster.scope) or {}).get('members', {}).get(pgcli_ha_member, {}) }}"
 
 - name: Read the member container state
   ansible.builtin.command:

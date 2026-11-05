@@ -14,9 +14,28 @@
   ansible.builtin.set_fact:
     pgcli_cfg: "{{ pgcli_instance_config_raw.stdout | from_yaml }}"
 
+# `host` scopes one entry to a single inventory host; entries without it apply
+# to every host in the group. Validate every entry on every host so a typo
+# fails loudly instead of silently matching no host.
+- name: Validate instance host assignments
+  ansible.builtin.assert:
+    that:
+      - item.host is not defined or item.host in groups['all']
+    fail_msg: >-
+      pgcli_instances entry {{ item.name | default('?') }} sets host={{
+      item.host | default('') }}, which is not an inventory host.
+  loop: "{{ pgcli_instances }}"
+  loop_control:
+    label: "{{ item.name | default('?') }}"
+
 - name: Reconcile primary instances
   ansible.builtin.include_tasks: instance.yml
-  loop: "{{ pgcli_instances | rejectattr('replica_of', 'defined') | list }}"
+  loop: >-
+    {{ (pgcli_instances | rejectattr('replica_of', 'defined')
+        | selectattr('host', 'defined')
+        | selectattr('host', 'equalto', inventory_hostname) | list)
+       + (pgcli_instances | rejectattr('replica_of', 'defined')
+          | rejectattr('host', 'defined') | list) }}
   loop_control:
     label: "{{ item.name | default('?') }}"
 
@@ -24,6 +43,11 @@
 # primary; the instance tasks also verify this before creating one.
 - name: Reconcile replica instances
   ansible.builtin.include_tasks: instance.yml
-  loop: "{{ pgcli_instances | selectattr('replica_of', 'defined') | list }}"
+  loop: >-
+    {{ (pgcli_instances | selectattr('replica_of', 'defined')
+        | selectattr('host', 'defined')
+        | selectattr('host', 'equalto', inventory_hostname) | list)
+       + (pgcli_instances | selectattr('replica_of', 'defined')
+          | rejectattr('host', 'defined') | list) }}
   loop_control:
     label: "{{ item.name | default('?') }}"

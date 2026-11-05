@@ -4,7 +4,7 @@
 #   uv run ansible-playbook playbooks/ping.yaml --limit debian12-01
 
 - name: Verify connectivity
-  hosts: "{{ HOSTS | default('pgcli_hosts') }}"
+  hosts: "{{ HOSTS | default('all') }}"
   gather_facts: false
   tasks:
     - name: Ping
