@@ -3,10 +3,10 @@
 package podman
 
 import (
-	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -2011,25 +2011,32 @@ func (m *Manager) CheckDSNDumpPrivilege(dsn string) error {
 // replication slot prepared on the primary side.
 func (m *Manager) ExecDSNQuery(dsn, sql string) (string, error) {
 	imageTag := m.cfg.Podman.ImageTag
-	containerName := fmt.Sprintf("pgcli-query-%d", time.Now().UnixNano())
-	defer func() {
-		m.run("rm", "-f", containerName)
-	}()
-
-	podmanArgs := []string{
-		"run", "--rm", "--name", containerName,
-		"--network", "host",
-		imageTag,
-		"psql", "--dbname=" + dsn, "-q", "-t", "-A", "-c", sql,
+	var lastErr error
+	// `podman run --rm` can exit non-zero after removing the container (for
+	// example while forwarding SIGWINCH), even though the command succeeded.
+	// Retry once with a fresh name; the queries are SELECTs or idempotent
+	// setup SQL, so replaying them is safe.
+	for attempt := 0; attempt < 2; attempt++ {
+		containerName := fmt.Sprintf("pgcli-query-%d", time.Now().UnixNano())
+		podmanArgs := []string{
+			"run", "--rm", "--name", containerName,
+			"--network", "host",
+			imageTag,
+			"psql", "--dbname=" + dsn, "-q", "-t", "-A", "-c", sql,
+		}
+		out, err := execWithTimeoutCleanupNoise(m.podman, podmanArgs, 30*time.Second)
+		if _, rmErr := execWithTimeout(m.podman, []string{"rm", "-f", containerName}, 10*time.Second); rmErr != nil {
+			slog.Debug("removing query container", "container", containerName, "err", rmErr)
+		}
+		if err == nil {
+			return out, nil
+		}
+		lastErr = err
+		if !errors.Is(err, errPodmanCleanupNoise) {
+			break
+		}
 	}
-	cmd := podmanCommand(m.podman, podmanArgs...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("querying source database: %w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-	return string(out), nil
+	return "", fmt.Errorf("querying source database: %w", lastErr)
 }
 
 // ParseDSN extracts connection parameters from a postgres:// connection

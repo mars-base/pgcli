@@ -3,6 +3,7 @@
 package podman
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -184,7 +185,10 @@ func execWithTimeoutRaw(binary string, args []string, timeout time.Duration) (st
 				if errMsg == "" {
 					errMsg = out
 				}
-				done <- result{"", fmt.Errorf("podman %s: %s", strings.Join(args, " "), errMsg)}
+				done <- result{"", &podmanExitError{
+					message: fmt.Errorf("podman %s: %s", strings.Join(args, " "), errMsg).Error(),
+					stderr:  stderr.String(),
+				}}
 				return
 			}
 			done <- result{"", fmt.Errorf("podman %s: %w", strings.Join(args, " "), err)}
@@ -203,6 +207,38 @@ func execWithTimeoutRaw(binary string, args []string, timeout time.Duration) (st
 		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		return "", fmt.Errorf("podman %s timed out after %v", strings.Join(args, " "), timeout)
 	}
+}
+
+// errPodmanCleanupNoise marks a podman run whose only stderr output is
+// cleanup noise (signal forwarding to an already-removed container). The
+// container command itself may have succeeded, so callers can retry.
+var errPodmanCleanupNoise = errors.New("podman clean-up noise")
+
+// podmanExitError is a non-zero podman exit. message formats the failure the
+// same way plain string errors did; stderr keeps the raw stream so callers
+// can classify the failure without parsing message.
+type podmanExitError struct {
+	message string
+	stderr  string
+}
+
+func (e *podmanExitError) Error() string { return e.message }
+
+// execWithTimeoutCleanupNoise is execWithTimeout for one-shot `podman run
+// --rm` commands whose stdout is the only result. Podman can exit non-zero
+// after the container is gone (e.g. while forwarding SIGWINCH), so an exit
+// whose stderr is entirely cleanup noise is reported as errPodmanCleanupNoise
+// (wrapping the stderr text) instead of a command failure.
+func execWithTimeoutCleanupNoise(podmanPath string, args []string, timeout time.Duration) (string, error) {
+	out, err := execWithTimeout(podmanPath, args, timeout)
+	if err == nil {
+		return out, nil
+	}
+	var pe *podmanExitError
+	if errors.As(err, &pe) && pe.stderr != "" && isPodmanCleanupNoise(pe.stderr) {
+		return "", fmt.Errorf("%w: %s", errPodmanCleanupNoise, strings.TrimSpace(pe.stderr))
+	}
+	return "", err
 }
 
 // execWithTimeoutStdin is execWithTimeout with input fed on stdin. Used for
