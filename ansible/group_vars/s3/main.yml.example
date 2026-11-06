@@ -13,7 +13,22 @@ pgcli_s3_root_user: admin
 # pgcli_s3_root_password: "change-me"  # empty/omitted = generated and stored in pg.yaml
 # Data directory. Recommended: a dedicated large-capacity disk or RAID array,
 # not the device that holds the PostgreSQL data or the OS. The directory is
-# created automatically when it does not exist.
+# created automatically when it does not exist. Ignored when pgcli_s3_drives
+# is set (the two layouts are mutually exclusive).
 # pgcli_s3_data_dir: /data/pg/addon/minio/backup/data
+
+# Single-node multi-drive (SNMD). Each entry is a host directory on its own
+# device; pgcli passes one --drive per entry and MinIO erasure-codes across
+# them (a 4-drive set tolerates 2 disk failures, at roughly half the raw
+# capacity). MinIO refuses a drive that shares the host root device, so mount
+# each entry on a separate disk first. Leave empty for the single-drive SNSD
+# layout above.
+# pgcli_s3_drives:
+#   - /mnt/minio/disk1
+#   - /mnt/minio/disk2
+#   - /mnt/minio/disk3
+#   - /mnt/minio/disk4
+pgcli_s3_drives: []
+
 pgcli_s3_buckets:
   - pgbackrest
