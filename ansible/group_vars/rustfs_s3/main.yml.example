@@ -1,0 +1,85 @@
+---
+# Standalone rustfs store for the pgBackRest `s3` backup target, consumed by
+# playbooks/deploy-s3.yaml. Keys left unset keep the defaults defined in the
+# playbook.
+
+pgcli_s3_type: rustfs      # minio | silo | rustfs
+pgcli_s3_name: backup
+pgcli_s3_api_port: 9000
+pgcli_s3_console_port: 9001
+pgcli_s3_listen: 0.0.0.0    # TLS + network boundary guard the store
+pgcli_s3_tls: true          # pgBackRest refuses plaintext HTTP
+pgcli_s3_root_user: admin
+# Empty/omitted = generated per node. A multi-host cluster instead REQUIRES a
+# shared value, otherwise every node generates its own and the grid cannot
+# form. Keep it in the gitignored group_vars/rustfs_s3/secrets.yaml:
+# pgcli_s3_root_password: "change-me"
+#
+# Length limits come from the store, not pgcli: minio/silo need at least 8
+# characters and enforce no upper bound, rustfs has no minimum; pgcli
+# generates a 20-character value when omitted. The role only asserts a
+# cluster password is non-empty.
+
+# The deployment layout is derived from the selected nodes
+# (pgcli_s3_nodes, default the whole [rustfs_s3] group) and pgcli_s3_drives.
+# rustfs has THREE layouts; it has no multi-node single-drive mode:
+#
+#   hosts | drives | mode | pgcli flags per node
+#   1     | 0      | SNSD | --data-dir
+#   1     | N      | SNMD | --drive x N
+#   >1    | N      | MNMD | --drive x N + one --endpoint per node (no path)
+#
+# Every --drive must sit on its own block device: rustfs exits FATAL when two
+# drives share a device (stricter than minio/silo, which only warn).
+#
+# The endpoint matrix is generated in inventory order from each host's
+# private_ip (falling back to ansible_host), one scheme://host:port entry per
+# node with no path — rustfs appends its own /data/rustfsN volume range. Set
+# pgcli_s3_endpoints to override it explicitly (scheme must match
+# pgcli_s3_tls):
+# pgcli_s3_endpoints:
+#   - https://10.0.0.11:9000
+#   - https://10.0.0.12:9000
+#   - https://10.0.0.13:9000
+#   - https://10.0.0.14:9000
+
+# Multi-drive host directories, each on its own physical disk (pgcli passes
+# one --drive per entry; rustfs requires distinct devices). This group var
+# applies to every s3 host; override per node in host_vars/<host>.yml when
+# the mount points differ:
+# pgcli_s3_drives:
+#   - /mnt/rustfs/disk1
+#   - /mnt/rustfs/disk2
+#   - /mnt/rustfs/disk3
+#   - /mnt/rustfs/disk4
+pgcli_s3_drives: []
+
+# Single-node data directory, used only when pgcli_s3_drives is empty.
+# Recommended: a dedicated large-capacity disk or RAID array, not the device
+# that holds the PostgreSQL data or the OS. Created automatically when
+# missing.
+# pgcli_s3_data_dir: /data/pg/addon/rustfs/backup/data
+
+# Multi-host TLS: pgcli cannot generate per-node CAs for one cluster (they
+# would not handshake), so deploy-s3.yaml generates ONE shared pair on the
+# controller under ansible/var/s3-tls/<name>/ and copies it to every node as
+# <base>/tls/rustfs/<name>/{grid.crt,grid.key}. rustfs verifies cluster peers
+# against the CA in the chain, so the generated material is a CA + leaf and
+# grid.crt carries both; ca.crt (the published trust anchor) is the CA. Its
+# SANs cover all store hosts plus 127.0.0.1/localhost; add extra names here
+# if clients dial another address.
+# pgcli_s3_tls_sans: ["DNS:s3.internal", "IP:10.0.0.10"]
+# pgcli_s3_cert_cn: s3-grid
+#
+# Bring your own shared pair instead (controller paths; replacing the files
+# recreates the containers):
+# pgcli_s3_tls_cert: /path/to/grid.crt
+# pgcli_s3_tls_key: /path/to/grid.key
+#
+# Layout changes (endpoints/drives/ports/TLS material) need --force; the play
+# adds it automatically when the shared certificate changes. Force a recreate
+# after editing other install flags:
+# pgcli_s3_force: true
+
+pgcli_s3_buckets:
+  - pgbackup

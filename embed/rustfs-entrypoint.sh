@@ -40,16 +40,24 @@ done
 #    owned by 10001 and point RUSTFS_TLS_PATH there. pgcli mounts the source read
 #    only at /opt/rustfs/certs-src: for generated mode that dir is pgcli's cert
 #    dir (rustfsSyncGeneratedCerts already placed rustfs_cert.pem/rustfs_key.pem
-#    in it), for BYO mode the two operator files are mounted at those same names.
-#    Either way the copy is uniform and no host file is ever mutated.
+#    in it), for BYO mode the operator files are mounted at those same names.
+#    Either way the copy is uniform and no host file is ever mutated. ca.crt is
+#    copied too: rustfs builds its peer-gRPC client root store from ca.crt (or
+#    public.crt) inside RUSTFS_TLS_PATH, so leaving it out makes every peer dial
+#    fail with a transport error even though the served chain is valid.
 TLS_SRC=/opt/rustfs/certs-src
 TLS_DST="${RUSTFS_TLS_PATH:-}"
 if [ -n "${TLS_DST:-}" ] && [ "$TLS_DST" != "$TLS_SRC" ] && [ -d "$TLS_SRC" ]; then
     mkdir -p "$TLS_DST"
     cp -f "$TLS_SRC/rustfs_cert.pem" "$TLS_DST/rustfs_cert.pem" 2>/dev/null || true
     cp -f "$TLS_SRC/rustfs_key.pem"  "$TLS_DST/rustfs_key.pem"  2>/dev/null || true
+    cp -f "$TLS_SRC/ca.crt"          "$TLS_DST/ca.crt"          2>/dev/null || true
     chown "$RUSTFS_UID:$RUSTFS_GID" "$TLS_DST/rustfs_cert.pem" "$TLS_DST/rustfs_key.pem" 2>/dev/null || true
     [ -f "$TLS_DST/rustfs_key.pem" ] && chmod 0600 "$TLS_DST/rustfs_key.pem" 2>/dev/null || true
+    if [ -f "$TLS_DST/ca.crt" ]; then
+        chown "$RUSTFS_UID:$RUSTFS_GID" "$TLS_DST/ca.crt" 2>/dev/null || true
+        chmod 0644 "$TLS_DST/ca.crt" 2>/dev/null || true
+    fi
 fi
 
 # 3) Drop to the rustfs user and exec the real entrypoint, forwarding our args.

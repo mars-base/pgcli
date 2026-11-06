@@ -92,3 +92,19 @@
     _s3_tls_cert_host: "{{ pgcli_config.base_dir }}/tls/{{ _s3_type }}/{{ _s3_name }}/grid.crt"
     _s3_tls_key_host: "{{ pgcli_config.base_dir }}/tls/{{ _s3_type }}/{{ _s3_name }}/grid.key"
     _s3_tls_ca_host: "{{ pgcli_config.base_dir }}/tls/{{ _s3_type }}/{{ _s3_name }}/ca.crt"
+
+- name: Resolve the shared TLS directory
+  ansible.builtin.set_fact:
+    _s3_tls_dir: "{{ pgcli_s3_tls_dir | default(playbook_dir ~ '/../var/s3-tls/' ~ (pgcli_s3_name | default('backup'))) }}"
+
+# Generated multi-host material publishes a real CA for rustfs (cluster
+# peers verify against it); minio/silo keep the self-signed leaf, which is
+# its own trust anchor.
+- name: Resolve the published trust anchor
+  ansible.builtin.set_fact:
+    _s3_tls_ca_src: >-
+      {{ (_s3_tls_dir ~ '/ca.crt')
+         if ((_s3_type == 'rustfs')
+             and not ((pgcli_s3_tls_cert | default('', true) | length > 0)
+                      or (pgcli_s3_tls_key | default('', true) | length > 0)))
+         else _s3_tls_cert_src }}

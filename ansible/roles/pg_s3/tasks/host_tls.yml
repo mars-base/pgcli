@@ -26,11 +26,11 @@
   register: _s3_tls_key_copy
   when: _s3_shared_tls | bool
 
-# Self-signed leaf: the certificate is its own trust anchor. Consumers copy
-# this file as the pgBackRest ca_file.
-- name: Publish the shared leaf as the store trust anchor
+# Generated multi-host rustfs material publishes the CA that signs the
+# chain; minio/silo publish the self-signed leaf, which is its own anchor.
+- name: Publish the store trust anchor
   ansible.builtin.copy:
-    src: "{{ _s3_tls_cert_src }}"
+    src: "{{ _s3_tls_ca_src }}"
     dest: "{{ _s3_tls_ca_host }}"
     mode: "0644"
   when: _s3_shared_tls | bool

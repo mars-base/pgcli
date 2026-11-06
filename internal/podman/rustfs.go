@@ -30,6 +30,15 @@ const rustfsTLSSrcDir = "/opt/rustfs/certs-src"
 // re-own any host file — its cert dir stays pgcli-owned and traversable.
 const rustfsCertsDir = "/opt/rustfs/certs"
 
+// rustfsCAContainerPath is where the cluster CA is exposed for rustfs's own
+// outbound TLS (peer gRPC). Serving the CA inside the server chain is not
+// enough: rustfs builds the peer client's root store from ca.crt/public.crt
+// inside RUSTFS_TLS_PATH, so the wrapper entrypoint copies this file there.
+// (SSL_CERT_FILE and RUSTFS_EXTRA_CA_CERT do NOT feed peer trust: system roots
+// are only loaded with RUSTFS_TRUST_SYSTEM_CA=1, and the extra-CA variable is
+// OIDC-only.)
+const rustfsCAContainerPath = "/opt/rustfs/certs-src/ca.crt"
+
 // RustfsManager manages standalone rustfs containers (https://rustfs.com) — a
 // Rust object store that is S3-compatible on the wire but shares NONE of
 // MinIO's runtime contract, which is why it is a sibling manager rather than a
@@ -324,12 +333,21 @@ func (m *RustfsManager) createContainer(rc *config.RustfsConfig) error {
 	// dir) before su-dropping to rustfs. pgcli's cert dir / operator's BYO files
 	// are never re-owned or written to by the container.
 	var tlsEnv []string
+	var tlsCA string
 	if rc.TLS {
 		caPath, err := m.EnsureTLS(rc)
 		if err != nil {
 			return err
 		}
 		tlsEnv = []string{"-e", "RUSTFS_TLS_PATH=" + rustfsCertsDir}
+		// Peer gRPC clients take their root store from ca.crt/public.crt in
+		// RUSTFS_TLS_PATH. Generated material mounts the whole cert dir at
+		// rustfsTLSSrcDir (ca.crt included); BYO mounts cert and key one by one,
+		// so the CA needs its own mount. The wrapper entrypoint then copies it
+		// into RUSTFS_TLS_PATH beside the server pair.
+		if c := filepath.Join(m.TLSDir(rc), tlsca.CACertFile); fileExists(c) {
+			tlsCA = c
+		}
 		if BYOTLS(rc.TLS, rc.CertFile, rc.KeyFile) {
 			ci, err := ValidateBYOCert(rc.CertFile, rc.KeyFile)
 			if err != nil {
@@ -384,6 +402,10 @@ func (m *RustfsManager) createContainer(rc *config.RustfsConfig) error {
 	args = append(args, tlsEnv...)
 	if rc.TLS {
 		args = append(args, rustfsTLSMountFlags(rc.CertFile, rc.KeyFile, m.TLSDir(rc))...)
+		// Generated mode already mounts the whole source dir (ca.crt included).
+		if tlsCA != "" && BYOTLS(rc.TLS, rc.CertFile, rc.KeyFile) {
+			args = append(args, "-v", fmt.Sprintf("%s:%s:ro,z", hostMountPath(tlsCA), rustfsCAContainerPath))
+		}
 	}
 	// No positional argv and no --entrypoint override: /entrypoint.sh derives
 	// both from RUSTFS_VOLUMES. The image tag is the final argument.

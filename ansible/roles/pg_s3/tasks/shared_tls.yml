@@ -19,6 +19,9 @@
          and ((_s3_nodes | length > 1)
               or (pgcli_s3_tls_cert | default('', true) | length > 0)
               or (pgcli_s3_tls_key | default('', true) | length > 0)) }}
+    # settings.yml only runs in the later deploy play, so derive the type
+    # here from the explicit var or the active inventory group name.
+    _s3_tls_rustfs: "{{ (pgcli_s3_type | default(_s3_group_prefix, true)) == 'rustfs' }}"
     _s3_tls_dir: "{{ pgcli_s3_tls_dir | default(playbook_dir ~ '/../var/s3-tls/' ~ (pgcli_s3_name | default('backup'))) }}"
     _s3_tls_cert_src: "{{ pgcli_s3_tls_cert | default(playbook_dir ~ '/../var/s3-tls/' ~ (pgcli_s3_name | default('backup')) ~ '/grid.crt') }}"
     _s3_tls_key_src: "{{ pgcli_s3_tls_key | default(playbook_dir ~ '/../var/s3-tls/' ~ (pgcli_s3_name | default('backup')) ~ '/grid.key') }}"
@@ -94,3 +97,143 @@
   when:
     - _s3_shared_tls | bool
     - not (_s3_byo_tls | bool)
+    - not (_s3_tls_rustfs | bool)
+
+# rustfs performs mutual TLS between cluster nodes and verifies peers
+# against the CA carried in the certificate chain. A self-signed leaf
+# (which minio/silo accept) leaves rustfs stuck in "waiting for
+# storage_quorum", so issue a real CA + leaf and serve the chain.
+- name: Generate the rustfs CA private key
+  community.crypto.openssl_privatekey:
+    path: "{{ _s3_tls_dir }}/grid-ca.key"
+    size: 2048
+    mode: "0600"
+  delegate_to: localhost
+  run_once: true
+  when:
+    - _s3_shared_tls | bool
+    - not (_s3_byo_tls | bool)
+    - _s3_tls_rustfs | bool
+
+- name: Generate the rustfs CA CSR
+  community.crypto.openssl_csr:
+    path: "{{ _s3_tls_dir }}/grid-ca.csr"
+    privatekey_path: "{{ _s3_tls_dir }}/grid-ca.key"
+    subject:
+      CN: "{{ pgcli_s3_cert_cn | default(_s3_tls_name) }} CA"
+    basic_constraints:
+      - CA:TRUE
+    basic_constraints_critical: true
+    key_usage:
+      - keyCertSign
+      - cRLSign
+    key_usage_critical: true
+    mode: "0644"
+  delegate_to: localhost
+  run_once: true
+  when:
+    - _s3_shared_tls | bool
+    - not (_s3_byo_tls | bool)
+    - _s3_tls_rustfs | bool
+
+- name: Generate the rustfs CA certificate
+  community.crypto.x509_certificate:
+    path: "{{ _s3_tls_dir }}/grid-ca.crt"
+    csr_path: "{{ _s3_tls_dir }}/grid-ca.csr"
+    privatekey_path: "{{ _s3_tls_dir }}/grid-ca.key"
+    provider: selfsigned
+    selfsigned_not_after: "+3650d"
+    mode: "0644"
+  delegate_to: localhost
+  run_once: true
+  when:
+    - _s3_shared_tls | bool
+    - not (_s3_byo_tls | bool)
+    - _s3_tls_rustfs | bool
+
+- name: Generate the rustfs leaf CSR
+  community.crypto.openssl_csr:
+    path: "{{ _s3_tls_dir }}/grid-leaf.csr"
+    privatekey_path: "{{ _s3_tls_dir }}/grid.key"
+    subject:
+      CN: "{{ pgcli_s3_cert_cn | default(_s3_tls_name) }}"
+    subject_alt_name: "{{ _s3_tls_sans }}"
+    key_usage:
+      - digitalSignature
+      - keyEncipherment
+    key_usage_critical: true
+    extended_key_usage:
+      - serverAuth
+      - clientAuth
+    mode: "0644"
+  delegate_to: localhost
+  run_once: true
+  when:
+    - _s3_shared_tls | bool
+    - not (_s3_byo_tls | bool)
+    - _s3_tls_rustfs | bool
+
+- name: Generate the rustfs leaf certificate
+  community.crypto.x509_certificate:
+    path: "{{ _s3_tls_dir }}/grid-leaf.crt"
+    csr_path: "{{ _s3_tls_dir }}/grid-leaf.csr"
+    provider: ownca
+    ownca_path: "{{ _s3_tls_dir }}/grid-ca.crt"
+    ownca_privatekey_path: "{{ _s3_tls_dir }}/grid-ca.key"
+    ownca_not_after: "+3650d"
+    mode: "0644"
+  delegate_to: localhost
+  run_once: true
+  when:
+    - _s3_shared_tls | bool
+    - not (_s3_byo_tls | bool)
+    - _s3_tls_rustfs | bool
+
+- name: Read the rustfs leaf certificate
+  ansible.builtin.slurp:
+    src: "{{ _s3_tls_dir }}/grid-leaf.crt"
+  register: _s3_tls_leaf_pem
+  delegate_to: localhost
+  run_once: true
+  when:
+    - _s3_shared_tls | bool
+    - not (_s3_byo_tls | bool)
+    - _s3_tls_rustfs | bool
+
+- name: Read the rustfs CA certificate
+  ansible.builtin.slurp:
+    src: "{{ _s3_tls_dir }}/grid-ca.crt"
+  register: _s3_tls_ca_pem
+  delegate_to: localhost
+  run_once: true
+  when:
+    - _s3_shared_tls | bool
+    - not (_s3_byo_tls | bool)
+    - _s3_tls_rustfs | bool
+
+# rustfs serves rustfs_cert.pem as the full chain; peers then find the CA
+# they verify against inside it.
+- name: Assemble the rustfs certificate chain
+  ansible.builtin.copy:
+    content: "{{ (_s3_tls_leaf_pem.content | b64decode) ~ (_s3_tls_ca_pem.content | b64decode) }}"
+    dest: "{{ _s3_tls_dir }}/grid.crt"
+    mode: "0644"
+  delegate_to: localhost
+  run_once: true
+  when:
+    - _s3_shared_tls | bool
+    - not (_s3_byo_tls | bool)
+    - _s3_tls_rustfs | bool
+
+- name: Publish the rustfs CA as the trust anchor
+  ansible.builtin.copy:
+    src: "{{ _s3_tls_dir }}/grid-ca.crt"
+    dest: "{{ _s3_tls_dir }}/ca.crt"
+    remote_src: true
+    mode: "0644"
+  delegate_to: localhost
+  run_once: true
+  when:
+    - _s3_shared_tls | bool
+    - not (_s3_byo_tls | bool)
+    - _s3_tls_rustfs | bool

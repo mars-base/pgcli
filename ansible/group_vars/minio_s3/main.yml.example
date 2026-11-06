@@ -78,4 +78,4 @@ pgcli_s3_drives: []
 # pgcli_s3_force: true
 
 pgcli_s3_buckets:
-  - pgbackrest
+  - pgbackup

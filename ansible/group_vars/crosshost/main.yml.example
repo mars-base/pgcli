@@ -20,7 +20,7 @@ pgcli_namespaces:
 # site/content/docs/s3-instance/.
 pgcli_backup_s3_host: s3-01
 pgcli_backup_s3_port: 9000
-pgcli_backup_s3_bucket: pgbackrest
+pgcli_backup_s3_bucket: pgbackup
 pgcli_backup_s3_access_key: admin
 # Secret key for the access key above. Real deployments keep it in
 # group_vars/crosshost/secrets.yaml (gitignored); this placeholder is listed

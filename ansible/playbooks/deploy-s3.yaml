@@ -32,11 +32,13 @@
 #
 # TLS: single-node stores use pgcli's generated CA (--tls). A multi-host grid
 # needs ONE certificate shared by every node (separate self-signed CAs cannot
-# handshake), so the play generates a shared self-signed leaf on the
-# controller (SANs cover every store host plus 127.0.0.1/localhost) under
+# handshake), so the play generates shared material on the controller under
 # ansible/var/s3-tls/<name>/ and distributes it as
-# <base>/tls/<type>/<name>/{grid.crt,grid.key}, publishing it as ca.crt too so
-# the pg_instance role's normal CA copy keeps working. Pass
+# <base>/tls/<type>/<name>/{grid.crt,grid.key}, publishing the trust anchor
+# as ca.crt too so the pg_instance role's normal CA copy keeps working.
+# minio/silo receive a single self-signed leaf; rustfs verifies cluster peers
+# against the CA carried in the chain, so it gets a real CA + leaf and
+# grid.crt contains both certificates. Pass
 # pgcli_s3_tls_cert/pgcli_s3_tls_key (controller paths) to bring your own
 # pair. Replacing the pair recreates the container (--force) automatically.
 #
