@@ -12,10 +12,16 @@ pgcli_s3_tls: true          # pgBackRest refuses plaintext HTTP
 pgcli_s3_root_user: admin
 # Empty/omitted = generated per node. A multi-host cluster instead REQUIRES a
 # shared value, otherwise every node generates its own and the grid cannot
-# form. Keep it in the gitignored group_vars/s3/secrets.yaml:
+# form. Keep it in the gitignored group_vars/minio_s3/secrets.yaml:
 # pgcli_s3_root_password: "change-me"
+#
+# Length limits come from the store, not pgcli: minio/silo need at least 8
+# characters and enforce no upper bound, rustfs has no minimum; pgcli
+# generates a 20-character value when omitted. The role only asserts a
+# cluster password is non-empty, so a too-short value fails when the
+# container starts rather than during validation.
 
-# The deployment layout is derived from the [s3] inventory group and
+# The deployment layout is derived from the [minio_s3] inventory group and
 # pgcli_s3_drives:
 #
 #   hosts | drives | mode | pgcli flags per node

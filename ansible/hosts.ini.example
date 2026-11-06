@@ -41,8 +41,8 @@ ansible_group_priority=20
 # s3 backup target; deploy with playbooks/deploy-s3.yaml. List every node for a
 # multi-host grid (MNSD/MNMD) in cluster order; a single host here means a
 # single-node store. Drives are declared with pgcli_s3_drives in
-# group_vars/s3/main.yml (or per node in host_vars/<host>.yml).
-[s3]
+# group_vars/minio_s3/main.yml (or per node in host_vars/<host>.yml).
+[minio_s3]
 s3-01 ansible_host=192.0.2.20 private_ip=192.0.2.20 ansible_user=root ansible_port=22
 # s3-02 ansible_host=192.0.2.21 private_ip=192.0.2.21 ansible_user=root ansible_port=22
 # s3-03 ansible_host=192.0.2.22 private_ip=192.0.2.22 ansible_user=root ansible_port=22

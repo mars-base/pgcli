@@ -3,7 +3,7 @@
 # backup target. Supports the three pgcli-managed stores: minio, silo and
 # rustfs.
 #
-# The layout is derived from the size of the [s3] inventory group and
+# The layout is derived from the size of the [minio_s3] inventory group and
 # pgcli_s3_drives:
 #
 #   hosts | drives | mode | pgcli flags per node
@@ -18,7 +18,7 @@
 # Cluster mode (MNSD/MNMD): every node receives the same --endpoint matrix
 # (built in inventory order, private_ip preferred over ansible_host) and the
 # same root password (pgcli_s3_root_password, e.g. in
-# group_vars/s3/secrets.yaml), and --listen must not be loopback. Set
+# group_vars/minio_s3/secrets.yaml), and --listen must not be loopback. Set
 # pgcli_s3_endpoints explicitly to override the derived matrix.
 #
 # TLS: single-node stores use pgcli's generated CA (--tls). A multi-host grid
@@ -53,7 +53,7 @@
 # (post-install bucket setup and endpoint summary).
 
 - name: Install and configure pgcli
-  hosts: s3
+  hosts: minio_s3
   gather_facts: false
   pre_tasks:
     - name: Prepare the shared cluster TLS material
@@ -65,7 +65,7 @@
       tags: [pgcli]
 
 - name: Deploy the S3 object store
-  hosts: s3
+  hosts: minio_s3
   gather_facts: false
   serial: 1
   tags: [s3]
@@ -74,7 +74,7 @@
     - role: pg_addon
 
 - name: Create the S3 buckets and report the endpoint
-  hosts: s3
+  hosts: minio_s3
   gather_facts: false
   tags: [s3]
   roles:

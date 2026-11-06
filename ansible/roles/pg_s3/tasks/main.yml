@@ -1,6 +1,6 @@
 ---
 # The pg_s3 role derives one of the four layouts (SNSD/SNMD/MNSD/MNMD) from
-# the [s3] group size and pgcli_s3_drives, validates the cluster-wide
+# the [minio_s3] group size and pgcli_s3_drives, validates the cluster-wide
 # settings, distributes the shared TLS material and finally hands the install
 # arguments to the pg_addon role through pgcli_addons.
 #

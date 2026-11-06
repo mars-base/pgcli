@@ -31,7 +31,7 @@
       host {{ item }} needs pgcli_s3_drives to be a list of absolute host
       directories (got
       {{ hostvars[item].pgcli_s3_drives | default([]) | to_json }}).
-  loop: "{{ groups['s3'] }}"
+  loop: "{{ groups['minio_s3'] }}"
   run_once: true
 
 - name: Require an identical drive count on every store host
@@ -40,7 +40,7 @@
       - _s3_drive_counts | unique | length == 1
     fail_msg: >-
       Every store host must contribute the same number of drives; got
-      {{ _s3_drive_counts | to_json }} for {{ groups['s3'] | join(', ') }}.
+      {{ _s3_drive_counts | to_json }} for {{ groups['minio_s3'] | join(', ') }}.
   when: _s3_multi | bool
 
 - name: Validate the cluster settings

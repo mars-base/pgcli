@@ -12,18 +12,21 @@
     _s3_listen: "{{ pgcli_s3_listen | default('0.0.0.0') }}"
     _s3_tls: "{{ pgcli_s3_tls | default(true) | bool }}"
     _s3_root_user: "{{ pgcli_s3_root_user | default('admin') }}"
+    # Server-side rules, not enforced here: minio/silo require >= 8
+    # characters (no upper limit), rustfs has no minimum. pgcli generates a
+    # 20-character value when this is empty.
     _s3_root_password: "{{ pgcli_s3_root_password | default('') }}"
     _s3_buckets: "{{ pgcli_s3_buckets | default([]) }}"
     _s3_alias: "{{ pgcli_s3_alias | default('pgcli-s3') }}"
     _s3_drives: "{{ pgcli_s3_drives | default([]) }}"
-    _s3_multi: "{{ groups['s3'] | length > 1 }}"
+    _s3_multi: "{{ groups['minio_s3'] | length > 1 }}"
     _s3_explicit_endpoints: "{{ pgcli_s3_endpoints | default([]) }}"
     _s3_byo_tls: >-
       {{ (pgcli_s3_tls_cert | default('', true) | length > 0)
          or (pgcli_s3_tls_key | default('', true) | length > 0) }}
     _s3_shared_tls: >-
       {{ (pgcli_s3_tls | default(true) | bool)
-         and ((groups['s3'] | length > 1)
+         and ((groups['minio_s3'] | length > 1)
               or (pgcli_s3_tls_cert | default('', true) | length > 0)
               or (pgcli_s3_tls_key | default('', true) | length > 0)) }}
     _s3_tls_cert_src: "{{ pgcli_s3_tls_cert | default(playbook_dir ~ '/../var/s3-tls/' ~ (pgcli_s3_name | default('backup')) ~ '/grid.crt') }}"
@@ -38,7 +41,7 @@
          else ('MNMD' if _s3_drives | length > 0 else 'MNSD') }}
     _s3_drive_counts: >-
       {%- set counts = [] -%}
-      {%- for h in groups['s3'] -%}
+      {%- for h in groups['minio_s3'] -%}
       {%-   set _ = counts.append((hostvars[h].pgcli_s3_drives | default(pgcli_s3_drives | default([]))) | length) -%}
       {%- endfor -%}
       {{ counts }}
@@ -58,7 +61,7 @@
   ansible.builtin.set_fact:
     _s3_auto_endpoints: >-
       {%- set eps = [] -%}
-      {%- for h in groups['s3'] -%}
+      {%- for h in groups['minio_s3'] -%}
       {%-   set hv = hostvars[h] -%}
       {%-   set ip = hv.private_ip | default(hv.ansible_host | default(h, true), true) -%}
       {%-   set base = _s3_scheme ~ '://' ~ ip ~ ':' ~ _s3_api_port -%}
