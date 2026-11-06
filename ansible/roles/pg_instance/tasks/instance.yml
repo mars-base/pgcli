@@ -2,7 +2,117 @@
 - name: Build the desired instance spec
   ansible.builtin.set_fact:
     _spec: "{{ pgcli_instance_defaults | combine(item) }}"
-    _instances: "{{ pgcli_cfg.instances | default({}) }}"
+    _cross_host_replica: "{{ _spec.replica_of is defined and ((_spec.replica_of_host | default('')) | length > 0) }}"
+
+# An instance selects a namespace from pgcli_namespaces; without one it uses
+# the host default (pgcli_namespace_path, already folded into
+# pgcli_config_path). A same-host replica inherits its primary's namespace.
+- name: Resolve the same-host primary entry
+  ansible.builtin.set_fact:
+    _local_primary_entry: >-
+      {{ (pgcli_instances | selectattr('name', 'equalto', _spec.replica_of) | list | first | default({}))
+         if (_spec.replica_of is defined and not (_cross_host_replica | bool)) else {} }}
+
+- name: Resolve the effective namespace name
+  ansible.builtin.set_fact:
+    _spec_namespace: >-
+      {{ _spec.namespace | default('', true)
+         if _spec.namespace | default('', true) | length > 0
+         else (_local_primary_entry.namespace | default('', true)
+               if _spec.replica_of is defined and not (_cross_host_replica | bool)
+               else '') }}
+
+- name: Resolve the namespace entry
+  ansible.builtin.set_fact:
+    _spec_ns_entry: >-
+      {{ (pgcli_namespaces | default([]) | selectattr('name', 'equalto', _spec_namespace) | list | first | default({}))
+         if _spec_namespace | length > 0 else {} }}
+
+- name: Require a known namespace
+  ansible.builtin.assert:
+    that:
+      - _spec_ns_entry | length > 0
+      - _spec_ns_entry.path | default('') | length > 0
+    fail_msg: >-
+      Instance {{ _spec.name }} uses namespace "{{ _spec_namespace }}", but
+      pgcli_namespaces has no entry with that name and a path. Defined
+      namespaces: {{ pgcli_namespaces | default([]) | map(attribute='name') | join(', ') if pgcli_namespaces | default([]) | length > 0 else '(none)' }}.
+  when: _spec_namespace | length > 0
+
+# A same-host replica is recorded in the same pg.yaml as its primary, so
+# their namespaces must resolve to the same file.
+- name: Resolve the namespace config paths
+  ansible.builtin.set_fact:
+    _spec_cfg_path: >-
+      {{ (_spec_ns_entry.path | regex_replace('/+$', '') ~ '/pg.yaml')
+         if _spec_namespace | length > 0 else pgcli_config_path }}
+    _primary_ns_entry: >-
+      {{ (pgcli_namespaces | default([]) | selectattr('name', 'equalto', _local_primary_entry.namespace | default('', true)) | list | first | default({}))
+         if (_local_primary_entry.namespace | default('', true) | length > 0) else {} }}
+    _primary_cfg_path: >-
+      {{ (_primary_ns_entry.path | regex_replace('/+$', '') ~ '/pg.yaml')
+         if (_primary_ns_entry.path | default('', true) | length > 0)
+         else pgcli_config_path }}
+
+- name: Verify a same-host replica shares its primary's namespace
+  ansible.builtin.assert:
+    that:
+      - _spec_cfg_path == _primary_cfg_path
+    fail_msg: >-
+      Replica {{ _spec.name }} resolves to {{ _spec_cfg_path }}, but its
+      primary {{ _spec.replica_of }} lives in {{ _primary_cfg_path }}.
+      A same-host replica must use the same namespace as its primary.
+  when:
+    - _spec.replica_of is defined
+    - not _cross_host_replica | bool
+
+- name: Check the instance config file
+  ansible.builtin.stat:
+    path: "{{ _spec_cfg_path }}"
+  register: _spec_cfg_file
+
+- name: Require an existing namespace config
+  ansible.builtin.assert:
+    that:
+      - _spec_cfg_file.stat.exists
+    fail_msg: >-
+      Instance {{ _spec.name }} uses namespace "{{ _spec_namespace }}", but
+      {{ _spec_cfg_path }} does not exist. Create it first, for example:
+      pg config init -o {{ _spec_cfg_path }} --namespace {{ _spec_namespace }}
+      --base-dir <dir> --pg-start-port <port> --pg-ssh-port <port>
+  when:
+    - _spec_namespace | length > 0
+    - _spec.state != 'absent'
+
+- name: Read the instance config
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ _spec_cfg_path }}"
+      - config
+      - show
+  register: _spec_cfg_raw
+  changed_when: false
+
+- name: Select the instance catalog
+  ansible.builtin.set_fact:
+    _instances: "{{ (_spec_cfg_raw.stdout | from_yaml).instances | default({}) }}"
+
+# The pg_instance role configures the S3 repository in the host config only.
+- name: Require the S3 repository in a namespace config
+  ansible.builtin.assert:
+    that:
+      - ((((_spec_cfg_raw.stdout | from_yaml).get('backup') or {}).get('repo') or {}).get('s3') or {}) | length > 0
+    fail_msg: >-
+      Instance {{ _spec.name }} uses backup_target: s3 but its namespace
+      config {{ _spec_cfg_path }} has no S3 repository. Run
+      `pg -c {{ _spec_cfg_path }} backup setup ...` first.
+  when:
+    - _spec.state != 'absent'
+    - _spec.replica_of is not defined
+    - _spec.backup_target == 's3'
+    - _spec_cfg_path != pgcli_config_path
 
 - name: Validate the instance spec
   ansible.builtin.assert:
@@ -26,9 +136,10 @@
       - item.base_dir is not defined
     fail_msg: >-
       Invalid pgcli_instances replica entry: {{ item | to_nice_yaml }}.
-      A replica accepts only name, host, replica_of, replica_of_host, state,
-      autostart and clean_data; password, database, image, extensions, PITR,
-      backup and base_dir settings are inherited from the primary.
+      A replica accepts only name, host, replica_of, replica_of_host,
+      namespace, state, autostart and clean_data; password, database, image,
+      extensions, PITR, backup and base_dir settings are inherited from the
+      primary.
   when: item.replica_of is defined
 
 # The physical replication slot is named pgcli_r_<replica>, and PostgreSQL only
@@ -49,14 +160,14 @@
 
 - name: Destroy the instance
   ansible.builtin.command:
-    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'destroy', '-i', _spec.name, '--force'] + (['--clean-data'] if _spec.clean_data | default(false) else []) }}"
+    argv: "{{ [pgcli_install_path, '-c', _spec_cfg_path, 'destroy', '-i', _spec.name, '--force'] + (['--clean-data'] if _spec.clean_data | default(false) else []) }}"
   when:
     - _spec.state == 'absent'
     - _instances.get(_spec.name) is not none
 
 - name: Create the primary instance
   ansible.builtin.command:
-    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'create', '-i', _spec.name, '--backup-target', _spec.backup_target, '--password-length', _spec.password_length | string] + (['--base-dir', _spec.base_dir] if _spec.base_dir is defined else []) }}"
+    argv: "{{ [pgcli_install_path, '-c', _spec_cfg_path, 'create', '-i', _spec.name, '--backup-target', _spec.backup_target, '--password-length', _spec.password_length | string] + (['--base-dir', _spec.base_dir] if _spec.base_dir is defined else []) }}"
   register: _pgcli_primary_create
   when:
     - _spec.state != 'absent'
@@ -82,7 +193,7 @@
 # fail with an actionable message before pgcli touches anything.
 - name: Look up the replica primary
   ansible.builtin.set_fact:
-    _primary_cfg: "{{ (pgcli_cfg.instances | default({})).get(_spec.replica_of, {}) }}"
+    _primary_cfg: "{{ _instances.get(_spec.replica_of, {}) }}"
   when:
     - _create_replica | bool
     - not _cross_host_replica | bool
@@ -94,7 +205,7 @@
       - _primary_cfg.podman.container_name | default('') | length > 0
     fail_msg: >-
       Replica {{ _spec.name }} requires primary {{ _spec.replica_of }}, which
-      is not defined in {{ pgcli_config_path }}. Add the primary to
+      is not defined in {{ _spec_cfg_path }}. Add the primary to
       pgcli_instances and rerun.
   when:
     - _create_replica | bool
@@ -131,7 +242,7 @@
     argv:
       - "{{ pgcli_install_path }}"
       - "-c"
-      - "{{ pgcli_config_path }}"
+      - "{{ _spec_cfg_path }}"
       - replica
       - create
       - "{{ _spec.name }}"
@@ -173,12 +284,35 @@
     - _cross_host_replica | bool
     - pgcli_debug_addresses | default(false) | bool
 
+- name: Resolve the remote primary namespace config
+  ansible.builtin.set_fact:
+    _remote_primary_entry: >-
+      {{ (hostvars[_spec.replica_of_host].pgcli_instances | default([]))
+         | selectattr('name', 'equalto', _spec.replica_of) | list | first | default({}) }}
+    _remote_primary_ns_entry: >-
+      {{ (hostvars[_spec.replica_of_host].pgcli_namespaces | default([]))
+         | selectattr('name', 'equalto', _remote_primary_entry.namespace | default('', true))
+         | list | first | default({}) }}
+  when:
+    - _create_replica | bool
+    - _cross_host_replica | bool
+
+- name: Resolve the remote primary config path
+  ansible.builtin.set_fact:
+    _remote_primary_cfg_path: >-
+      {{ (_remote_primary_ns_entry.path | regex_replace('/+$', '') ~ '/pg.yaml')
+         if (_remote_primary_ns_entry.path | default('', true) | length > 0)
+         else (hostvars[_spec.replica_of_host].pgcli_config_path | default(pgcli_config_path)) }}
+  when:
+    - _create_replica | bool
+    - _cross_host_replica | bool
+
 - name: Read the remote primary config
   ansible.builtin.command:
     argv:
       - "{{ hostvars[_spec.replica_of_host].pgcli_install_path | default(pgcli_install_path) }}"
       - "-c"
-      - "{{ hostvars[_spec.replica_of_host].pgcli_config_path | default(pgcli_config_path) }}"
+      - "{{ _remote_primary_cfg_path }}"
       - config
       - show
   delegate_to: "{{ _spec.replica_of_host }}"
@@ -242,7 +376,7 @@
     argv:
       - "{{ hostvars[_spec.replica_of_host].pgcli_install_path | default(pgcli_install_path) }}"
       - "-c"
-      - "{{ hostvars[_spec.replica_of_host].pgcli_config_path | default(pgcli_config_path) }}"
+      - "{{ _remote_primary_cfg_path }}"
       - replica
       - create
       - "{{ _spec.name }}"
@@ -269,7 +403,7 @@
     argv:
       - "{{ pgcli_install_path }}"
       - "-c"
-      - "{{ pgcli_config_path }}"
+      - "{{ _spec_cfg_path }}"
       - replica
       - create
       - "{{ _spec.name }}"
@@ -282,12 +416,12 @@
     - _create_replica | bool
     - _cross_host_replica | bool
 
-- name: Refresh pgcli config after creating the instance
+- name: Refresh the instance config after creating the instance
   ansible.builtin.command:
     argv:
       - "{{ pgcli_install_path }}"
       - "-c"
-      - "{{ pgcli_config_path }}"
+      - "{{ _spec_cfg_path }}"
       - config
       - show
   register: pgcli_instance_config_refresh
@@ -296,16 +430,16 @@
     - _spec.state != 'absent'
     - _instances.get(_spec.name) is none
 
-- name: Apply the refreshed config
+- name: Apply the refreshed instance catalog
   ansible.builtin.set_fact:
-    pgcli_cfg: "{{ pgcli_instance_config_refresh.stdout | from_yaml }}"
+    _instances: "{{ (pgcli_instance_config_refresh.stdout | from_yaml).instances | default({}) }}"
   when:
     - _spec.state != 'absent'
     - _instances.get(_spec.name) is none
 
 - name: Resolve the instance config
   ansible.builtin.set_fact:
-    _inst_cfg: "{{ (pgcli_cfg.instances | default({})).get(_spec.name, {}) }}"
+    _inst_cfg: "{{ _instances.get(_spec.name, {}) }}"
 
 # An existing instance keeps its role; never silently treat a replica as a
 # primary or vice versa.
@@ -340,7 +474,7 @@
     argv:
       - "{{ pgcli_install_path }}"
       - "-c"
-      - "{{ pgcli_config_path }}"
+      - "{{ _spec_cfg_path }}"
       - autostart
       - enable
       - "-i"
@@ -355,7 +489,7 @@
     argv:
       - "{{ pgcli_install_path }}"
       - "-c"
-      - "{{ pgcli_config_path }}"
+      - "{{ _spec_cfg_path }}"
       - autostart
       - disable
       - "-i"
@@ -402,7 +536,7 @@
     argv:
       - "{{ pgcli_install_path }}"
       - "-c"
-      - "{{ pgcli_config_path }}"
+      - "{{ _spec_cfg_path }}"
       - start
       - "-i"
       - "{{ _spec.name }}"
@@ -413,7 +547,7 @@
 
 - name: Install missing extensions
   ansible.builtin.command:
-    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'extension', 'install', _missing_extensions | join(','), '--auto-restart', '-i', _spec.name] }}"
+    argv: "{{ [pgcli_install_path, '-c', _spec_cfg_path, 'extension', 'install', _missing_extensions | join(','), '--auto-restart', '-i', _spec.name] }}"
   when:
     - _spec.state != 'absent'
     - _missing_extensions | length > 0
@@ -438,7 +572,7 @@
     argv:
       - "{{ pgcli_install_path }}"
       - "-c"
-      - "{{ pgcli_config_path }}"
+      - "{{ _spec_cfg_path }}"
       - stop
       - "-i"
       - "{{ _spec.name }}"
@@ -452,7 +586,7 @@
     argv:
       - "{{ pgcli_install_path }}"
       - "-c"
-      - "{{ pgcli_config_path }}"
+      - "{{ _spec_cfg_path }}"
       - stop
       - "-i"
       - "{{ _spec.name }}"
@@ -466,7 +600,7 @@
     argv:
       - "{{ pgcli_install_path }}"
       - "-c"
-      - "{{ pgcli_config_path }}"
+      - "{{ _spec_cfg_path }}"
       - start
       - "-i"
       - "{{ _spec.name }}"

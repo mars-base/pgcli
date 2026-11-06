@@ -2,8 +2,16 @@
 # Cross-host primary/replica deployment mode: the primary host is listed
 # first in the inventory group (serial: 1 creates it before the replica
 # host runs), the replica host follows.
-pgcli_config_overrides:
-  namespace: dev
+#
+# Named namespaces: each instance below selects one with `namespace: <name>`;
+# the config is <path>/pg.yaml. Multiple namespaces can coexist in this group.
+# dev is the long-lived default config; prod is declared for new instances and
+# must be initialized on every host first with `pg config init -o`.
+pgcli_namespaces:
+  - name: dev
+    path: /root/.pgcli
+  - name: prod
+    path: /root/.pgcli/prod
 
 # Shared S3 repository for instances with backup_target: s3. The endpoint is
 # <private_ip>:<port> of pgcli_backup_s3_host, and its CA is copied directly
@@ -32,6 +40,7 @@ pgcli_backup_s3_secret_key: "<secret-key>"
 pgcli_instances:
   - name: pg01
     host: debian12-01
+    namespace: dev
     state: started
     autostart: true
 
@@ -40,12 +49,14 @@ pgcli_instances:
     host: debian12-02
     replica_of: pg01
     replica_of_host: debian12-01
+    namespace: dev
     state: started
     autostart: true
 
   # Independent primary whose backups go to the standalone S3 store.
   - name: pg02
     host: debian12-02
+    namespace: dev
     backup_target: s3
     state: started
     autostart: true

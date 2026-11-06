@@ -155,7 +155,26 @@ pgcli_images:
     archive: pg_exporter_1.5.0.tar
 
 pgcli_install_path: /usr/local/bin/pg
-pgcli_config_path: /root/.pgcli/pg.yaml
+
+# Optional: directory that stores this host's namespace pg.yaml. When
+# non-empty every pgcli command runs with `-c <pgcli_namespace_path>/pg.yaml`
+# (created with `pg config init -o`), so all instances declared in
+# pgcli_instances are created inside that namespace. Leave it empty to use
+# pgcli_config_path.
+# pgcli_namespace_path: /root/.pgcli/dev
+pgcli_namespace_path: ""
+pgcli_config_path: >-
+  {{ (pgcli_namespace_path | regex_replace('/+$', '') ~ '/pg.yaml')
+     if pgcli_namespace_path | default('', true) | length > 0
+     else '/root/.pgcli/pg.yaml' }}
+
+# Named namespaces shared by every host. Each entry maps a selector name to the
+# directory that stores its pg.yaml. An instance picks one with
+# `namespace: <name>` in pgcli_instances; instances without it use
+# pgcli_namespace_path / pgcli_config_path. Add more entries as needed.
+pgcli_namespaces:
+  - name: default
+    path: /root/.pgcli
 
 # Consumed by `pg config init` on the first run only. Editing these later
 # does NOT rewrite an existing pg.yaml.
@@ -180,6 +199,9 @@ pgcli_config: "{{ pgcli_config_defaults | combine(pgcli_config_overrides) }}"
 #
 # state:           present | started | stopped | absent
 #                  present = create the instance but leave its run state alone
+# namespace:       name from pgcli_namespaces; the instance is created in that
+#                  namespace's pg.yaml (-c <path>/pg.yaml). Omit for the host
+#                  default (pgcli_namespace_path / pgcli_config_path)
 # autostart:       enable the instance at boot (`pg autostart enable`)
 # backup_target:   local | s3; fixed at creation time, later changes only warn
 # password_length: generated admin password length used by `pg create`
@@ -211,9 +233,11 @@ pgcli_instance_defaults:
 # replica;
 # primaries are reconciled first and the referenced primary must exist and be
 # running before the replica is created. Replica entries accept only name,
-# replica_of, replica_of_host, state, autostart and clean_data; password,
-# database, image, extensions and PITR settings are inherited from the
-# primary. Replica names must be lower case letters, digits and underscores
+# replica_of, replica_of_host, namespace, state, autostart and clean_data;
+# password, database, image, extensions and PITR settings are inherited from
+# the primary. A same-host replica must use its primary's namespace (the role
+# inherits it when the replica omits namespace). Replica names must be lower
+# case letters, digits and underscores
 # only (the slot is named pgcli_r_<replica>). Add `replica_of_host` when the
 # primary runs on another host: the role prepares the primary there (slot +
 # pg_hba), then creates the replica with --primary-dsn, reading the primary
