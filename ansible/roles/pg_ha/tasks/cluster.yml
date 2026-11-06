@@ -1,15 +1,19 @@
 ---
+- name: Resolve the cluster member list
+  ansible.builtin.set_fact:
+    _pg_ha_members: "{{ pg_ha_cluster_item.members | default([], true) }}"
+
 - name: Validate the cluster definition
   ansible.builtin.assert:
     that:
       - pg_ha_cluster_item.scope | default('') | length > 0
-      - pg_ha_cluster_item.members | default([]) | length > 0
       - pg_ha_cluster_item.dcs_endpoints | default([]) | length > 0
-      - _pg_ha_host_index | int < (pg_ha_cluster_item.members | length)
+      - (_pg_ha_members | length == 0) or (_pg_ha_members | length == groups['ha_cluster'] | length)
+      - (_pg_ha_members | length == 0) or (_pg_ha_members | unique | length == _pg_ha_members | length)
     fail_msg: >-
       HA cluster {{ pg_ha_cluster_item.scope | default('<unnamed>') }} needs
-      scope, members covering every ha_cluster host in inventory order, and
-      dcs_endpoints.
+      scope and dcs_endpoints. The optional members list must have exactly one
+      entry per ha_cluster host, in inventory order, with unique names.
 
 # A cluster without a namespace uses the host-default config (legacy
 # single-cluster layout). A named namespace must be declared in
@@ -37,12 +41,24 @@
     _pg_ha_cfg_path: >-
       {{ ((_pg_ha_ns_entry.path | regex_replace('/+$', '')) ~ '/pg.yaml')
          if (_pg_ha_namespace | length > 0) else pgcli_config_path }}
-    _pg_ha_member: "{{ pg_ha_cluster_item.members[_pg_ha_host_index | int] }}"
+    _pg_ha_member: >-
+      {{ _pg_ha_members[_pg_ha_host_index | int]
+         if (_pg_ha_members | length > 0) else inventory_hostname }}
     _pg_ha_passwords_path: >-
       {{ pg_ha_cluster_item.passwords_file | default(
            (((_pg_ha_ns_entry.path | regex_replace('/+$', '')) ~ '/ha-passwords-' ~ pg_ha_cluster_item.scope ~ '.yml')
             if (_pg_ha_namespace | length > 0) else
             ((pgcli_config_path | dirname) ~ '/ha-passwords-' ~ pg_ha_cluster_item.scope ~ '.yml'))) }}
+
+- name: Validate the member name
+  ansible.builtin.assert:
+    that:
+      - _pg_ha_member is match('^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$')
+    fail_msg: >-
+      Patroni member name "{{ _pg_ha_member }}" (from
+      {{ 'members' if (_pg_ha_members | length > 0) else 'inventory_hostname' }})
+      must match [A-Za-z0-9][A-Za-z0-9_-]{0,31}: no dots or IPs, at most 32
+      characters. Set members explicitly for FQDN-style inventory names.
 
 - name: Check the cluster config file
   ansible.builtin.stat:

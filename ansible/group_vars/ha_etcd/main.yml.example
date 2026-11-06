@@ -1,0 +1,20 @@
+---
+# Example DCS group configuration. Copy to main.yml and edit for the real
+# environment; group_vars/*/main.yml is gitignored.
+#
+# One shared etcd cluster for every pgcli namespace. The first host in
+# [ha_etcd] bootstraps it; the rest join. apply.yaml runs the add-on play with
+# serial: 1 in inventory order, so the bootstrap host must come first.
+
+# Node-to-node addresses prefer private_ip (on public clouds ansible_host is
+# often the EIP); fall back to ansible_host when private_ip is not set.
+_ha_etcd_advertise_host: "{{ private_ip | default(hostvars[inventory_hostname].ansible_host | default(inventory_hostname), true) }}"
+_ha_etcd_bootstrap_endpoint: "http://{{ hostvars[groups['ha_etcd'] | first].private_ip | default(hostvars[groups['ha_etcd'] | first].ansible_host | default(groups['ha_etcd'] | first), true) }}:2379"
+
+# Member names must be unique across the etcd cluster, so derive one from the
+# host's position in [ha_etcd].
+pgcli_addons:
+  - type: etcd
+    name: "etcd-{{ groups['ha_etcd'].index(inventory_hostname) + 1 }}"
+    state: present
+    args: "{{ ['--cluster', 'ha', '--advertise-host', _ha_etcd_advertise_host] + (['--join', _ha_etcd_bootstrap_endpoint] if inventory_hostname != (groups['ha_etcd'] | first) else []) }}"

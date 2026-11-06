@@ -11,7 +11,8 @@
 #   samehost  primary + same-host replica
 #   crosshost primary and replica on different hosts
 #   s3        standalone S3-compatible store for the pgBackRest s3 target
-#   ha_cluster  Patroni cluster over a shared etcd DCS (role marker group)
+#   ha_etcd     hosts running the shared etcd DCS (role marker group)
+#   ha_cluster  Patroni cluster over that DCS (role marker group)
 # Each mode group defines its own pgcli_instances in group_vars/<group>/ and
 # is responsible only for that mode, so enable one mode group at a time.
 # The implicit `all` group still contains every host, so plays target `all`
@@ -70,8 +71,17 @@ s3-01 ansible_host=192.0.2.20 private_ip=192.0.2.20 ansible_user=root ansible_po
 silo_s3
 # rustfs_s3
 
-# Role marker: hosts that form one Patroni cluster over a shared etcd DCS.
-# Order matters: the first host bootstraps etcd and the Patroni scope.
+# DCS role: hosts that run the shared etcd cluster. Order matters: the first
+# host bootstraps etcd; the rest join it in apply.yaml's serial: 1 add-on play.
+# In the co-located layout these hosts also appear in [ha_cluster] below.
+[ha_etcd]
+debian12-02 ansible_host=192.0.2.11 private_ip=192.0.2.11 ansible_user=root ansible_port=22
+debian12-03 ansible_host=192.0.2.12 private_ip=192.0.2.12 ansible_user=root ansible_port=22
+debian12-04 ansible_host=192.0.2.13 private_ip=192.0.2.13 ansible_user=root ansible_port=22
+
+# Role marker: hosts that form the Patroni cluster over the etcd DCS from
+# [ha_etcd]. Patroni member names follow the host order below. The DCS group is
+# selected with pg_ha_etcd_group in group_vars/ha_cluster.
 [ha_cluster]
 debian12-02 ansible_host=192.0.2.11 private_ip=192.0.2.11 ansible_user=root ansible_port=22
 debian12-03 ansible_host=192.0.2.12 private_ip=192.0.2.12 ansible_user=root ansible_port=22

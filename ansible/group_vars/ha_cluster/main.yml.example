@@ -2,22 +2,22 @@
 # Example HA group configuration. Copy to main.yml and edit for the real
 # environment; group_vars/*/main.yml is gitignored.
 #
-# HA host role: one shared etcd DCS member per host plus one Patroni member per
-# namespace. The first host in ha_cluster bootstraps etcd and every Patroni
-# scope; the rest join. apply.yaml runs the add-on and HA plays with serial: 1
-# so this ordering holds.
+# HA host role: one Patroni member per namespace. The shared etcd DCS lives in
+# group_vars/ha_etcd; the first host in ha_cluster bootstraps every Patroni
+# scope and the rest join. apply.yaml runs the HA play with serial: 1 so this
+# ordering holds.
 
+# The host-default config (pgcli_config_path, /root/.pgcli/pg.yaml). This
+# override sets the namespace it is initialized with; it must match the name of
+# the pgcli_namespaces entry whose path is that same directory. The entry is
+# matched by path/name, not by list position.
 pgcli_config_overrides:
   namespace: ha
 
-# Node-to-node addresses prefer private_ip (on public clouds ansible_host is
-# often the EIP); fall back to ansible_host when private_ip is not set.
-_ha_advertise_host: "{{ private_ip | default(hostvars[inventory_hostname].ansible_host | default(inventory_hostname), true) }}"
-_ha_bootstrap_endpoint: "http://{{ hostvars[groups['ha_cluster'] | first].private_ip | default(hostvars[groups['ha_cluster'] | first].ansible_host | default(groups['ha_cluster'] | first), true) }}:2379"
-
 # Namespaces for the Patroni clusters below. The ha entry is the host-default
-# config (initialized from the pgcli_config overrides above); ha2 is an extra
-# config the pgcli role initializes automatically because it declares base_dir.
+# config (initialized through the overrides above, matched by path); ha2 is an
+# extra config the pgcli role initializes automatically because it declares
+# base_dir. Every lookup elsewhere is by name, so entry order does not matter.
 # Data directories and port ranges must not overlap between namespaces.
 pgcli_namespaces:
   - name: ha
@@ -29,30 +29,25 @@ pgcli_namespaces:
     pg_start_port: 36432
     pg_ssh_port: 43201
 
-# One shared etcd DCS for every namespace. Member names must be unique across
-# the etcd cluster, so derive one from the host's position in ha_cluster.
-pgcli_addons:
-  - type: etcd
-    name: "etcd-{{ groups['ha_cluster'].index(inventory_hostname) + 1 }}"
-    state: present
-    args: "{{ ['--cluster', 'ha', '--advertise-host', _ha_advertise_host] + (['--join', _ha_bootstrap_endpoint] if inventory_hostname != (groups['ha_cluster'] | first) else []) }}"
+# Which inventory group provides the shared etcd DCS. Several etcd groups can
+# coexist in hosts.ini; every ha_cluster points at exactly one of them.
+pg_ha_etcd_group: ha_etcd
 
-_ha_dcs_endpoints:
-  - "{{ hostvars[groups['ha_cluster'][0]].private_ip | default(hostvars[groups['ha_cluster'][0]].ansible_host | default(groups['ha_cluster'][0]), true) }}:2379"
-  - "{{ hostvars[groups['ha_cluster'][1]].private_ip | default(hostvars[groups['ha_cluster'][1]].ansible_host | default(groups['ha_cluster'][1]), true) }}:2379"
-  - "{{ hostvars[groups['ha_cluster'][2]].private_ip | default(hostvars[groups['ha_cluster'][2]].ansible_host | default(groups['ha_cluster'][2]), true) }}:2379"
+# Patroni reaches the etcd DCS through the hosts in [ha_etcd] (their etcd
+# member config lives in group_vars/ha_etcd).
+_ha_dcs_endpoints: >-
+  {{ groups[pg_ha_etcd_group] | map('extract', hostvars, '_ha_etcd_advertise_host')
+     | map('regex_replace', '$', ':2379') | list }}
 
 # One Patroni cluster per namespace. The same scope name is safe: pgcli bakes
 # the namespace suffix into the DCS scope (pgcluster-ha / pgcluster-ha2).
-# members must stay in the same order as ha_cluster in inventory; host_port and
-# restapi_port must be disjoint per cluster.
+# members is optional: when omitted, each host uses its inventory_hostname as
+# the Patroni member name. Set it only for custom names; the list must follow
+# ha_cluster order, stay unique, and match [A-Za-z0-9][A-Za-z0-9_-]{0,31}
+# (no FQDNs or IPs). host_port and restapi_port must be disjoint per cluster.
 pg_ha_clusters:
   - namespace: ha
     scope: pgcluster
-    members:
-      - ha1
-      - ha2
-      - ha3
     host_port: 35532
     restapi_port: 8008
     dcs_endpoints: "{{ _ha_dcs_endpoints }}"
@@ -60,10 +55,6 @@ pg_ha_clusters:
     autostart: true
   - namespace: ha2
     scope: pgcluster
-    members:
-      - ha1
-      - ha2
-      - ha3
     host_port: 35542
     restapi_port: 8018
     dcs_endpoints: "{{ _ha_dcs_endpoints }}"

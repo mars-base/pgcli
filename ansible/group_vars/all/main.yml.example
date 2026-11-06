@@ -5,8 +5,9 @@
 # Shared defaults for every pgcli host.
 # Deployment-mode groups (single, samehost, crosshost) override the defaults
 # in their own group_vars and each define their own pgcli_instances; the role
-# marker group (ha_cluster) does the same for the HA stack. Mode groups take
-# precedence over the role marker group (ansible_group_priority).
+# marker groups (ha_etcd for the DCS, ha_cluster for Patroni members) do the
+# same for the HA stack. Mode groups take precedence over the role marker
+# groups (ansible_group_priority).
 
 # Installation goes through scripts/install.sh (GitHub release, not a local
 # build). The installer only runs when pg is missing or force is true.
@@ -172,6 +173,10 @@ pgcli_config_path: >-
 # directory that stores its pg.yaml. An instance picks one with
 # `namespace: <name>` in pgcli_instances; instances without it use
 # pgcli_namespace_path / pgcli_config_path. Add more entries as needed.
+# Lookups are by name, never by list position. The entry whose path resolves to
+# pgcli_config_path represents the host-default config: the pgcli role's main
+# init task creates it from pgcli_config_overrides.namespace, and the
+# extra-namespace loop skips it by path.
 #
 # An extra entry whose path differs from pgcli_config_path is initialized
 # automatically when it also declares `base_dir`. Optional init fields:
