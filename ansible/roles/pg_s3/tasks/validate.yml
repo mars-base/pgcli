@@ -1,0 +1,71 @@
+---
+# Fail fast on configurations that pgcli's add-on installer would reject
+# later, with messages that name the offending inventory values.
+
+- name: Validate the S3 store type
+  ansible.builtin.assert:
+    that:
+      - _s3_type in ['minio', 'silo', 'rustfs']
+    fail_msg: >-
+      pgcli_s3_type must be minio, silo or rustfs (got
+      {{ _s3_type }}).
+
+- name: Validate the multi-drive setting
+  ansible.builtin.assert:
+    that:
+      - _s3_drives is sequence
+      - _s3_drives is not string
+      - _s3_drives | reject('match', '^/') | list | length == 0
+    fail_msg: >-
+      pgcli_s3_drives must be a list of absolute host directories
+      (got {{ _s3_drives | to_json }}).
+  when: _s3_drives | length > 0
+
+- name: Validate every store host's drive layout
+  ansible.builtin.assert:
+    that:
+      - hostvars[item].pgcli_s3_drives | default([]) is sequence
+      - hostvars[item].pgcli_s3_drives | default([]) is not string
+      - hostvars[item].pgcli_s3_drives | default([]) | reject('match', '^/') | list | length == 0
+    fail_msg: >-
+      host {{ item }} needs pgcli_s3_drives to be a list of absolute host
+      directories (got
+      {{ hostvars[item].pgcli_s3_drives | default([]) | to_json }}).
+  loop: "{{ groups['s3'] }}"
+  run_once: true
+
+- name: Require an identical drive count on every store host
+  ansible.builtin.assert:
+    that:
+      - _s3_drive_counts | unique | length == 1
+    fail_msg: >-
+      Every store host must contribute the same number of drives; got
+      {{ _s3_drive_counts | to_json }} for {{ groups['s3'] | join(', ') }}.
+  when: _s3_multi | bool
+
+- name: Validate the cluster settings
+  ansible.builtin.assert:
+    that:
+      - _s3_listen not in ['127.0.0.1', 'localhost', '::1', '[::1]']
+      - _s3_root_password | length > 0
+      - _s3_endpoints | length >= 4
+      - _s3_endpoints | reject('match', '^' ~ _s3_scheme ~ '://') | list | length == 0
+      - _s3_drives | length == 0 or ((_s3_endpoints | length) % (_s3_drives | length) == 0)
+      - _s3_drives | length == 0 or ((_s3_endpoints | length) > (_s3_drives | length))
+      - _s3_type != 'rustfs' or _s3_drives | length > 0
+    fail_msg: >-
+      Cluster mode needs a non-loopback --listen, a shared non-empty
+      pgcli_s3_root_password, at least four endpoints using the same
+      scheme as TLS, and an endpoint matrix matching this host's drive
+      count (rustfs has no multi-node single-drive mode).
+  when: (_s3_multi | bool) or (_s3_explicit_endpoints | length > 0)
+
+- name: Validate the shared TLS inputs
+  ansible.builtin.assert:
+    that:
+      - (pgcli_s3_tls_cert | default('', true) | length > 0) == (pgcli_s3_tls_key | default('', true) | length > 0)
+      - not (_s3_byo_tls | bool) or (_s3_tls | bool)
+    fail_msg: >-
+      pgcli_s3_tls_cert and pgcli_s3_tls_key must be set together, and a
+      bring-your-own pair requires pgcli_s3_tls=true.
+  when: _s3_shared_tls | bool

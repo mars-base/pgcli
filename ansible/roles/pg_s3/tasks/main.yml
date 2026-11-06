@@ -1,0 +1,23 @@
+---
+# The pg_s3 role derives one of the four layouts (SNSD/SNMD/MNSD/MNMD) from
+# the [s3] group size and pgcli_s3_drives, validates the cluster-wide
+# settings, distributes the shared TLS material and finally hands the install
+# arguments to the pg_addon role through pgcli_addons.
+#
+# Entry points:
+#   main.yml        full deploy (play 2 of deploy-s3.yaml); imports the four
+#                   stages below in order
+#   shared_tls.yml  controller-side certificate generation (play 1)
+#   buckets.yml     post-install bucket setup and endpoint summary (play 3)
+
+- name: Load the S3 store settings
+  ansible.builtin.import_tasks: settings.yml
+
+- name: Validate the S3 store configuration
+  ansible.builtin.import_tasks: validate.yml
+
+- name: Distribute the shared TLS material
+  ansible.builtin.import_tasks: host_tls.yml
+
+- name: Build the add-on install arguments
+  ansible.builtin.import_tasks: install.yml

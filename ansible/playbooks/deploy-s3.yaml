@@ -3,24 +3,43 @@
 # backup target. Supports the three pgcli-managed stores: minio, silo and
 # rustfs.
 #
+# The layout is derived from the size of the [s3] inventory group and
+# pgcli_s3_drives:
+#
+#   hosts | drives | mode | pgcli flags per node
+#   1     | 0      | SNSD | --data-dir
+#   1     | N      | SNMD | --drive x N
+#   >1    | 0      | MNSD | --data-dir + one --endpoint per node (minio/silo)
+#   >1    | N      | MNMD | --drive x N + one --endpoint per node per drive
+#
+# rustfs has no MNSD: a multi-node rustfs grid needs --drive on every node and
+# one --endpoint per node (no path; rustfs derives its drive slots itself).
+#
+# Cluster mode (MNSD/MNMD): every node receives the same --endpoint matrix
+# (built in inventory order, private_ip preferred over ansible_host) and the
+# same root password (pgcli_s3_root_password, e.g. in
+# group_vars/s3/secrets.yaml), and --listen must not be loopback. Set
+# pgcli_s3_endpoints explicitly to override the derived matrix.
+#
+# TLS: single-node stores use pgcli's generated CA (--tls). A multi-host grid
+# needs ONE certificate shared by every node (separate self-signed CAs cannot
+# handshake), so the play generates a shared self-signed leaf on the
+# controller (SANs cover every store host plus 127.0.0.1/localhost) under
+# ansible/var/s3-tls/<name>/ and distributes it as
+# <base>/tls/<type>/<name>/{grid.crt,grid.key}, publishing it as ca.crt too so
+# the pg_instance role's normal CA copy keeps working. Pass
+# pgcli_s3_tls_cert/pgcli_s3_tls_key (controller paths) to bring your own
+# pair. Replacing the pair recreates the container (--force) automatically.
+#
 # Usage:
 #   cd ansible
 #   uv run ansible-playbook playbooks/deploy-s3.yaml
-#   uv run ansible-playbook playbooks/deploy-s3.yaml --limit s3-01
 #   uv run ansible-playbook playbooks/deploy-s3.yaml -e pgcli_s3_type=rustfs
-#
-# Defaults suit a pgBackRest repository: TLS on (pgBackRest refuses plaintext
-# HTTP) and a listener reachable from the database hosts. Override the
-# pgcli_s3_* defaults in group_vars/s3/main.yml.
-#
-# Single-node multi-drive (SNMD): set pgcli_s3_drives to a list of host
-# directories, each on its own device. The play then passes one --drive per
-# entry and omits --data-dir (the two are mutually exclusive); MinIO
-# erasure-codes across the drives and survives disk failures on one host.
+#   uv run ansible-playbook playbooks/deploy-s3.yaml -e pgcli_s3_force=true
 #
 # After the store is up, database hosts using backup_target: s3 pick it up
 # from inventory (see group_vars/crosshost/main.yml):
-#   pgcli_backup_s3_host: <inventory host of this store>
+#   pgcli_backup_s3_host: <inventory host of one store node>
 #   pgcli_backup_s3_port: <api-port>
 #   pgcli_backup_s3_bucket / _access_key, secret in secrets.yaml
 # The pg_instance role resolves <private_ip>:<port>, copies the store CA from
@@ -28,10 +47,19 @@
 # and runs `pg backup setup` automatically before creating the instance.
 # Stores outside this inventory can set pgcli_backup_s3_endpoint instead and
 # fall back to `pg backup fetch-ca`.
+#
+# The work lives in roles/pg_s3: shared_tls.yml (controller-side certificate),
+# main.yml (layout detection, validation, install arguments) and buckets.yml
+# (post-install bucket setup and endpoint summary).
 
 - name: Install and configure pgcli
   hosts: s3
   gather_facts: false
+  pre_tasks:
+    - name: Prepare the shared cluster TLS material
+      ansible.builtin.import_role:
+        name: pg_s3
+        tasks_from: shared_tls
   roles:
     - role: pgcli
       tags: [pgcli]
@@ -41,153 +69,14 @@
   gather_facts: false
   serial: 1
   tags: [s3]
-  pre_tasks:
-    - name: Resolve the S3 store settings
-      ansible.builtin.set_fact:
-        _s3_type: "{{ pgcli_s3_type | default('minio') }}"
-        _s3_name: "{{ pgcli_s3_name | default('backup') }}"
-        _s3_api_port: "{{ pgcli_s3_api_port | default(9000) | int }}"
-        _s3_console_port: "{{ pgcli_s3_console_port | default(9001) | int }}"
-        _s3_listen: "{{ pgcli_s3_listen | default('0.0.0.0') }}"
-        _s3_tls: "{{ pgcli_s3_tls | default(true) | bool }}"
-        _s3_root_user: "{{ pgcli_s3_root_user | default('admin') }}"
-        _s3_root_password: "{{ pgcli_s3_root_password | default('') }}"
-        _s3_buckets: "{{ pgcli_s3_buckets | default([]) }}"
-        _s3_alias: "{{ pgcli_s3_alias | default('pgcli-s3') }}"
-        _s3_drives: "{{ pgcli_s3_drives | default([]) }}"
-
-    # Recommended: pgcli_s3_data_dir should live on a dedicated large-capacity
-    # disk or RAID array, not the device holding the PostgreSQL data or the OS.
-    # pgcli creates the directory automatically when it does not exist. SNMD
-    # takes its data locations from pgcli_s3_drives instead, so the data dir is
-    # only resolved for the single-drive layout.
-    - name: Resolve the S3 data directory
-      ansible.builtin.set_fact:
-        _s3_data_dir: "{{ pgcli_s3_data_dir | default(pgcli_config.base_dir ~ '/addon/' ~ _s3_type ~ '/' ~ _s3_name ~ '/data') }}"
-      when: _s3_drives | length == 0
-
-    - name: Validate the S3 store type
-      ansible.builtin.assert:
-        that:
-          - _s3_type in ['minio', 'silo', 'rustfs']
-        fail_msg: >-
-          pgcli_s3_type must be minio, silo or rustfs (got
-          {{ _s3_type }}).
-
-    - name: Validate the multi-drive setting
-      ansible.builtin.assert:
-        that:
-          - _s3_drives is sequence
-          - _s3_drives is not string
-          - _s3_drives | reject('match', '^/') | list | length == 0
-        fail_msg: >-
-          pgcli_s3_drives must be a list of absolute host directories
-          (got {{ _s3_drives | to_json }}).
-      when: _s3_drives | length > 0
-
-    - name: Build the multi-drive arguments
-      ansible.builtin.set_fact:
-        _s3_drive_args: "{{ (['--drive'] * (_s3_drives | length)) | zip(_s3_drives) | flatten }}"
-
-    - name: Resolve the S3 addressing
-      ansible.builtin.set_fact:
-        _s3_scheme: "{{ 'https' if _s3_tls | bool else 'http' }}"
-        _s3_endpoint_host: "{{ private_ip | default(hostvars[inventory_hostname].ansible_host | default(inventory_hostname), true) }}"
-
-    - name: Build the add-on install arguments
-      ansible.builtin.set_fact:
-        _s3_install_args: >-
-          {{ ['--api-port', _s3_api_port | string,
-              '--console-port', _s3_console_port | string,
-              '--listen', _s3_listen,
-              '--root-user', _s3_root_user]
-             + (['--data-dir', _s3_data_dir] if _s3_drives | length == 0 else [])
-             + _s3_drive_args
-             + (['--tls'] if _s3_tls | bool else [])
-             + (['--root-password', _s3_root_password] if _s3_root_password | length > 0 else []) }}
-
-    # The role installs through `pg addon install <type> --name <name> ...args`.
-    - name: Define the S3 add-on
-      ansible.builtin.set_fact:
-        pgcli_addons:
-          - type: "{{ _s3_type }}"
-            name: "{{ _s3_name }}"
-            args: "{{ _s3_install_args }}"
   roles:
+    - role: pg_s3
     - role: pg_addon
-  post_tasks:
-    - name: Read the S3 root password
-      ansible.builtin.command:
-        argv:
-          - "{{ pgcli_install_path }}"
-          - "-c"
-          - "{{ pgcli_config_path }}"
-          - addon
-          - password
-          - "{{ _s3_type }}"
-          - "--name"
-          - "{{ _s3_name }}"
-      register: _s3_password
-      changed_when: false
-      no_log: true
-      when: _s3_buckets | length > 0
 
-    # Loopback alias: pg mc adds --insecure for a loopback TLS store, so the
-    # self-signed certificate does not need to be trusted here.
-    - name: Register the loopback mc alias
-      ansible.builtin.command:
-        argv:
-          - "{{ pgcli_install_path }}"
-          - "-c"
-          - "{{ pgcli_config_path }}"
-          - mc
-          - alias
-          - set
-          - "{{ _s3_alias }}"
-          - "{{ _s3_scheme }}://127.0.0.1:{{ _s3_api_port }}"
-          - "{{ _s3_root_user }}"
-          - "{{ _s3_password.stdout | trim }}"
-      no_log: true
-      changed_when: false
-      when: _s3_buckets | length > 0
-
-    - name: Check the S3 buckets
-      ansible.builtin.command:
-        argv:
-          - "{{ pgcli_install_path }}"
-          - "-c"
-          - "{{ pgcli_config_path }}"
-          - mc
-          - ls
-          - "{{ _s3_alias }}/{{ item }}"
-      register: _s3_bucket_check
-      changed_when: false
-      failed_when: false
-      loop: "{{ _s3_buckets }}"
-      loop_control:
-        label: "{{ item }}"
-
-    - name: Create the missing S3 buckets
-      ansible.builtin.command:
-        argv:
-          - "{{ pgcli_install_path }}"
-          - "-c"
-          - "{{ pgcli_config_path }}"
-          - mc
-          - mb
-          - "{{ _s3_alias }}/{{ item.item }}"
-      loop: "{{ _s3_bucket_check.results | default([]) }}"
-      loop_control:
-        label: "{{ item.item }}"
-      when: item.rc != 0
-
-    - name: Show the S3 endpoint
-      ansible.builtin.debug:
-        msg:
-          - "S3 endpoint:  {{ _s3_scheme }}://{{ _s3_endpoint_host }}:{{ _s3_api_port }}"
-          - "Console:      {{ _s3_scheme }}://{{ _s3_endpoint_host }}:{{ _s3_console_port }}"
-          - "Credentials:  {{ _s3_root_user }} / (pg addon password {{ _s3_type }} --name {{ _s3_name }})"
-          - "Layout:       {{ ('SNMD, ' ~ (_s3_drives | length) ~ ' drives: ' ~ (_s3_drives | join(', '))) if _s3_drives | length > 0 else ('SNSD, data dir: ' ~ _s3_data_dir) }}"
-          - "Buckets:      {{ _s3_buckets | join(', ') if _s3_buckets | length > 0 else '(none)' }}"
-          - "CA file:      {{ pgcli_cfg.base_dir | default(pgcli_config.base_dir) }}/tls/{{ _s3_type }}/{{ _s3_name }}/ca.crt"
-          - "Consumers:    pgcli_backup_s3_host={{ inventory_hostname }}, pgcli_backup_s3_port={{ _s3_api_port }}"
+- name: Create the S3 buckets and report the endpoint
+  hosts: s3
+  gather_facts: false
+  tags: [s3]
+  roles:
+    - role: pg_s3
+      tasks_from: buckets

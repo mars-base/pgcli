@@ -1,0 +1,43 @@
+---
+# Translate the resolved layout into pgcli add-on flags and hand the install
+# to the pg_addon role.
+
+- name: Build the multi-drive arguments
+  ansible.builtin.set_fact:
+    _s3_drive_args: "{{ (['--drive'] * (_s3_drives | length)) | zip(_s3_drives) | flatten }}"
+
+- name: Build the endpoint arguments
+  ansible.builtin.set_fact:
+    _s3_endpoint_args: "{{ (['--endpoint'] * (_s3_endpoints | length)) | zip(_s3_endpoints) | flatten }}"
+
+- name: Build the TLS arguments
+  ansible.builtin.set_fact:
+    _s3_tls_args: >-
+      {{ ['--tls-cert', _s3_tls_cert_host, '--tls-key', _s3_tls_key_host]
+         if _s3_shared_tls | bool
+         else (['--tls'] if _s3_tls | bool else []) }}
+
+- name: Build the add-on install arguments
+  ansible.builtin.set_fact:
+    _s3_install_args: >-
+      {{ ['--api-port', _s3_api_port | string,
+          '--console-port', _s3_console_port | string,
+          '--listen', _s3_listen,
+          '--root-user', _s3_root_user]
+         + (['--data-dir', _s3_data_dir] if _s3_drives | length == 0 else [])
+         + _s3_drive_args
+         + _s3_endpoint_args
+         + _s3_tls_args
+         + (['--root-password', _s3_root_password] if _s3_root_password | length > 0 else []) }}
+
+# The pg_addon role installs through
+# `pg addon install <type> --name <name> ...args`. force recreates an existing
+# container so changed endpoints/drives/TLS material converge; it is automatic
+# when the shared certificate changed (see host_tls.yml).
+- name: Define the S3 add-on
+  ansible.builtin.set_fact:
+    pgcli_addons:
+      - type: "{{ _s3_type }}"
+        name: "{{ _s3_name }}"
+        args: "{{ _s3_install_args }}"
+        force: "{{ _s3_force | bool }}"

@@ -1,0 +1,93 @@
+---
+# Shared TLS material for a multi-host (or bring-your-own) S3 grid.
+# Runs on the store hosts but generates and owns the pair on the controller:
+# every node must serve the byte-identical certificate, because separately
+# generated self-signed CAs cannot handshake with each other.
+
+- name: Resolve the shared TLS settings
+  ansible.builtin.set_fact:
+    _s3_tls_name: "{{ pgcli_s3_name | default('backup') }}"
+    _s3_tls_enabled: "{{ pgcli_s3_tls | default(true) | bool }}"
+    _s3_byo_tls: >-
+      {{ (pgcli_s3_tls_cert | default('', true) | length > 0)
+         or (pgcli_s3_tls_key | default('', true) | length > 0) }}
+    _s3_shared_tls: >-
+      {{ (pgcli_s3_tls | default(true) | bool)
+         and ((groups['s3'] | length > 1)
+              or (pgcli_s3_tls_cert | default('', true) | length > 0)
+              or (pgcli_s3_tls_key | default('', true) | length > 0)) }}
+    _s3_tls_dir: "{{ pgcli_s3_tls_dir | default(playbook_dir ~ '/../var/s3-tls/' ~ (pgcli_s3_name | default('backup'))) }}"
+    _s3_tls_cert_src: "{{ pgcli_s3_tls_cert | default(playbook_dir ~ '/../var/s3-tls/' ~ (pgcli_s3_name | default('backup')) ~ '/grid.crt') }}"
+    _s3_tls_key_src: "{{ pgcli_s3_tls_key | default(playbook_dir ~ '/../var/s3-tls/' ~ (pgcli_s3_name | default('backup')) ~ '/grid.key') }}"
+    _s3_tls_sans: >-
+      {%- set sans = [] -%}
+      {%- for h in groups['s3'] -%}
+      {%-   set hv = hostvars[h] -%}
+      {%-   set ip = hv.private_ip | default(hv.ansible_host | default(h, true), true) -%}
+      {%-   set _ = sans.append('IP:' ~ ip) -%}
+      {%-   set _ = sans.append('DNS:' ~ h) -%}
+      {%- endfor -%}
+      {%- set _ = sans.append('IP:127.0.0.1') -%}
+      {%- set _ = sans.append('DNS:localhost') -%}
+      {{ sans + (pgcli_s3_tls_sans | default([])) }}
+
+- name: Validate the shared TLS inputs
+  ansible.builtin.assert:
+    that:
+      - (pgcli_s3_tls_cert | default('', true) | length > 0) == (pgcli_s3_tls_key | default('', true) | length > 0)
+      - not (_s3_byo_tls | bool) or (_s3_tls_enabled | bool)
+    fail_msg: >-
+      pgcli_s3_tls_cert and pgcli_s3_tls_key must be set together, and a
+      bring-your-own pair requires pgcli_s3_tls=true.
+  when: _s3_shared_tls | bool
+
+- name: Ensure the shared TLS directory
+  ansible.builtin.file:
+    path: "{{ _s3_tls_dir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  run_once: true
+  when:
+    - _s3_shared_tls | bool
+    - not (_s3_byo_tls | bool)
+
+- name: Generate the shared TLS private key
+  community.crypto.openssl_privatekey:
+    path: "{{ _s3_tls_dir }}/grid.key"
+    size: 2048
+    mode: "0600"
+  delegate_to: localhost
+  run_once: true
+  when:
+    - _s3_shared_tls | bool
+    - not (_s3_byo_tls | bool)
+
+- name: Generate the shared TLS CSR
+  community.crypto.openssl_csr:
+    path: "{{ _s3_tls_dir }}/grid.csr"
+    privatekey_path: "{{ _s3_tls_dir }}/grid.key"
+    subject:
+      CN: "{{ pgcli_s3_cert_cn | default(_s3_tls_name) }}"
+    subject_alt_name: "{{ _s3_tls_sans }}"
+    mode: "0644"
+  delegate_to: localhost
+  run_once: true
+  register: _s3_tls_csr
+  when:
+    - _s3_shared_tls | bool
+    - not (_s3_byo_tls | bool)
+
+- name: Generate the shared TLS certificate
+  community.crypto.x509_certificate:
+    path: "{{ _s3_tls_dir }}/grid.crt"
+    csr_path: "{{ _s3_tls_dir }}/grid.csr"
+    privatekey_path: "{{ _s3_tls_dir }}/grid.key"
+    provider: selfsigned
+    mode: "0644"
+    force: "{{ _s3_tls_csr.changed | default(false) }}"
+  delegate_to: localhost
+  run_once: true
+  when:
+    - _s3_shared_tls | bool
+    - not (_s3_byo_tls | bool)

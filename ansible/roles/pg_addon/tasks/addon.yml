@@ -17,6 +17,7 @@
 - name: Resolve add-on facts
   ansible.builtin.set_fact:
     _addon_state: "{{ addon.state | default('present') }}"
+    _addon_force: "{{ addon.force | default(false) | bool }}"
     _addon_installed: >-
       {%- if addon.instance is defined -%}
       {{ ((pgcli_cfg.get('instances') or {}).get(addon.instance, {}).get('addons') or {}).get(_addon_key) is not none }}
@@ -26,10 +27,10 @@
 
 - name: Install the add-on
   ansible.builtin.command:
-    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'install', addon.type] + (['-i', addon.instance] if addon.instance is defined else ['--name', addon.name]) + (addon.args | default([])) }}"
+    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'install', addon.type] + (['-i', addon.instance] if addon.instance is defined else ['--name', addon.name]) + (['--force'] if _addon_force | bool else []) + (addon.args | default([])) }}"
   when:
     - _addon_state == 'present'
-    - not (_addon_installed | bool)
+    - (not (_addon_installed | bool)) or (_addon_force | bool)
 
 - name: Remove the add-on
   ansible.builtin.command:

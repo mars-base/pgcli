@@ -12,5 +12,6 @@ __pycache__/
 *.retry
 var/ansible.log
 var/facts/
+var/s3-tls/
 .venv/
 .vscode/

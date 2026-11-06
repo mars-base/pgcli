@@ -1,0 +1,43 @@
+---
+# Publish the controller-generated pair (see shared_tls.yml) on every store
+# host. A changed certificate or key must recreate the container, so the
+# copy results feed the force decision used by install.yml.
+
+- name: Ensure the store TLS directory
+  ansible.builtin.file:
+    path: "{{ pgcli_config.base_dir }}/tls/{{ _s3_type }}/{{ _s3_name }}"
+    state: directory
+    mode: "0700"
+  when: _s3_shared_tls | bool
+
+- name: Install the shared TLS certificate
+  ansible.builtin.copy:
+    src: "{{ _s3_tls_cert_src }}"
+    dest: "{{ _s3_tls_cert_host }}"
+    mode: "0644"
+  register: _s3_tls_cert_copy
+  when: _s3_shared_tls | bool
+
+- name: Install the shared TLS key
+  ansible.builtin.copy:
+    src: "{{ _s3_tls_key_src }}"
+    dest: "{{ _s3_tls_key_host }}"
+    mode: "0600"
+  register: _s3_tls_key_copy
+  when: _s3_shared_tls | bool
+
+# Self-signed leaf: the certificate is its own trust anchor. Consumers copy
+# this file as the pgBackRest ca_file.
+- name: Publish the shared leaf as the store trust anchor
+  ansible.builtin.copy:
+    src: "{{ _s3_tls_cert_src }}"
+    dest: "{{ _s3_tls_ca_host }}"
+    mode: "0644"
+  when: _s3_shared_tls | bool
+
+- name: Decide whether the add-on must be recreated
+  ansible.builtin.set_fact:
+    _s3_force: >-
+      {{ (pgcli_s3_force | default(false) | bool)
+         or ((_s3_tls_cert_copy | default({})).changed | default(false))
+         or ((_s3_tls_key_copy | default({})).changed | default(false)) }}

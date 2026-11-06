@@ -1,0 +1,109 @@
+---
+# Bucket setup runs after every node is installed: a distributed MinIO/silo
+# cluster is not ready until its peers are up, so doing it during the
+# serial: 1 deploy play would fail on the first node. Every task is run_once
+# (first store host); facts come from the deploy role's play.
+
+- name: Read the S3 root password
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - addon
+      - password
+      - "{{ _s3_type }}"
+      - "--name"
+      - "{{ _s3_name }}"
+  register: _s3_password
+  changed_when: false
+  no_log: true
+  run_once: true
+  when: _s3_buckets | length > 0
+
+# Loopback alias: pg mc adds --insecure for a loopback TLS store, so the
+# certificate does not need to be trusted here.
+- name: Register the loopback mc alias
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - mc
+      - alias
+      - set
+      - "{{ _s3_alias }}"
+      - "{{ _s3_scheme }}://127.0.0.1:{{ _s3_api_port }}"
+      - "{{ _s3_root_user }}"
+      - "{{ _s3_password.stdout | trim }}"
+  no_log: true
+  changed_when: false
+  register: _s3_alias_set
+  until: _s3_alias_set.rc == 0
+  retries: 10
+  delay: 2
+  run_once: true
+  when: _s3_buckets | length > 0
+
+- name: Wait for the S3 store to become ready
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - mc
+      - ls
+      - "{{ _s3_alias }}"
+  register: _s3_ready
+  until: _s3_ready.rc == 0
+  retries: 60
+  delay: 2
+  changed_when: false
+  run_once: true
+  when: _s3_buckets | length > 0
+
+- name: Check the S3 buckets
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - mc
+      - ls
+      - "{{ _s3_alias }}/{{ item }}"
+  register: _s3_bucket_check
+  changed_when: false
+  failed_when: false
+  loop: "{{ _s3_buckets }}"
+  loop_control:
+    label: "{{ item }}"
+  run_once: true
+
+- name: Create the missing S3 buckets
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - mc
+      - mb
+      - "{{ _s3_alias }}/{{ item.item }}"
+  loop: "{{ _s3_bucket_check.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  run_once: true
+  when: item.rc != 0
+
+- name: Show the S3 endpoint
+  ansible.builtin.debug:
+    msg:
+      - "S3 endpoint:  {{ _s3_scheme }}://{{ _s3_endpoint_host }}:{{ _s3_api_port }}"
+      - "Console:      {{ _s3_scheme }}://{{ _s3_endpoint_host }}:{{ _s3_console_port }}"
+      - "Credentials:  {{ _s3_root_user }} / (pg addon password {{ _s3_type }} --name {{ _s3_name }})"
+      - "Layout:       {{ _s3_mode }}{{ (', ' ~ (_s3_drives | length) ~ ' drives: ' ~ (_s3_drives | join(', '))) if _s3_drives | length > 0 else (', data dir: ' ~ _s3_data_dir) }}"
+      - "Nodes:        {{ groups['s3'] | length }} ({{ groups['s3'] | join(', ') }})"
+      - "Endpoints:    {{ _s3_endpoints | join(', ') if _s3_endpoints | length > 0 else 'none (single node)' }}"
+      - "Buckets:      {{ _s3_buckets | join(', ') if _s3_buckets | length > 0 else '(none)' }}"
+      - "CA file:      {{ pgcli_config.base_dir }}/tls/{{ _s3_type }}/{{ _s3_name }}/ca.crt"
+      - "Consumers:    pgcli_backup_s3_host={{ groups['s3'][0] }}, pgcli_backup_s3_port={{ _s3_api_port }}"
+  run_once: true

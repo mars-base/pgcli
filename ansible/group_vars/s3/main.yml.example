@@ -10,25 +10,66 @@ pgcli_s3_console_port: 9001
 pgcli_s3_listen: 0.0.0.0    # TLS + network boundary guard the store
 pgcli_s3_tls: true          # pgBackRest refuses plaintext HTTP
 pgcli_s3_root_user: admin
-# pgcli_s3_root_password: "change-me"  # empty/omitted = generated and stored in pg.yaml
-# Data directory. Recommended: a dedicated large-capacity disk or RAID array,
-# not the device that holds the PostgreSQL data or the OS. The directory is
-# created automatically when it does not exist. Ignored when pgcli_s3_drives
-# is set (the two layouts are mutually exclusive).
-# pgcli_s3_data_dir: /data/pg/addon/minio/backup/data
+# Empty/omitted = generated per node. A multi-host cluster instead REQUIRES a
+# shared value, otherwise every node generates its own and the grid cannot
+# form. Keep it in the gitignored group_vars/s3/secrets.yaml:
+# pgcli_s3_root_password: "change-me"
 
-# Single-node multi-drive (SNMD). Each entry is a host directory on its own
-# device; pgcli passes one --drive per entry and MinIO erasure-codes across
-# them (a 4-drive set tolerates 2 disk failures, at roughly half the raw
-# capacity). MinIO refuses a drive that shares the host root device, so mount
-# each entry on a separate disk first. Leave empty for the single-drive SNSD
-# layout above.
+# The deployment layout is derived from the [s3] inventory group and
+# pgcli_s3_drives:
+#
+#   hosts | drives | mode | pgcli flags per node
+#   1     | 0      | SNSD | --data-dir
+#   1     | N      | SNMD | --drive x N
+#   >1    | 0      | MNSD | --data-dir + one --endpoint per node (minio/silo)
+#   >1    | N      | MNMD | --drive x N + one --endpoint per node per drive
+#
+# The endpoint matrix is generated in inventory order from each host's
+# private_ip (falling back to ansible_host), so every node receives the same
+# list. Set pgcli_s3_endpoints to override it explicitly (scheme must match
+# pgcli_s3_tls; minio/silo MNMD uses one /dataN per drive):
+# pgcli_s3_endpoints:
+#   - https://10.0.0.11:9000/data1
+#   - https://10.0.0.11:9000/data2
+#   - https://10.0.0.12:9000/data1
+#   - https://10.0.0.12:9000/data2
+
+# Multi-drive host directories, each on its own disk (pgcli passes one
+# --drive per entry; minio/silo erasure-code across them, rustfs requires
+# distinct physical devices). Leave empty for the single-drive layouts.
+# This group var applies to every s3 host; override per node in
+# host_vars/<host>.yml when the mount points differ:
 # pgcli_s3_drives:
 #   - /mnt/minio/disk1
 #   - /mnt/minio/disk2
 #   - /mnt/minio/disk3
 #   - /mnt/minio/disk4
 pgcli_s3_drives: []
+
+# Single-node data directory, used only when pgcli_s3_drives is empty.
+# Recommended: a dedicated large-capacity disk or RAID array, not the device
+# that holds the PostgreSQL data or the OS. Created automatically when
+# missing.
+# pgcli_s3_data_dir: /data/pg/addon/minio/backup/data
+
+# Multi-host TLS: pgcli cannot generate per-node CAs for one cluster (they
+# would not handshake), so deploy-s3.yaml generates ONE shared self-signed
+# leaf on the controller under ansible/var/s3-tls/<name>/ and copies it to
+# every node as <base>/tls/<type>/<name>/{grid.crt,grid.key}, also publishing
+# it as ca.crt. Its SANs cover all store hosts plus 127.0.0.1/localhost;
+# add extra names here if clients dial another address.
+# pgcli_s3_tls_sans: ["DNS:s3.internal", "IP:10.0.0.10"]
+# pgcli_s3_cert_cn: s3-grid
+#
+# Bring your own shared pair instead (controller paths; replacing the files
+# recreates the containers):
+# pgcli_s3_tls_cert: /path/to/grid.crt
+# pgcli_s3_tls_key: /path/to/grid.key
+#
+# Layout changes (endpoints/drives/ports/TLS material) need --force; the play
+# adds it automatically when the shared certificate changes. Force a recreate
+# after editing other install flags:
+# pgcli_s3_force: true
 
 pgcli_s3_buckets:
   - pgbackrest
