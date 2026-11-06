@@ -185,12 +185,18 @@ pgcli_config: "{{ pgcli_config_defaults | combine(pgcli_config_overrides) }}"
 # password_length: generated admin password length used by `pg create`
 # extensions:      PostgreSQL extensions to install; an entry that sets this
 #                  list replaces the default list entirely (no append)
+# clean_data:      only used with state absent; true also deletes the data and
+#                  WAL directories and the pgBackRest stanza. Default false
+#                  keeps the host data so a later create reuses it. Fully
+#                  destroying an instance needs both state: absent and
+#                  clean_data: true; clean_data alone does nothing.
 pgcli_instance_defaults:
   state: started
   autostart: false
   backup_target: local
   password_length: 16
   extensions: []
+  clean_data: false
 
 # Desired instances are consumed by the pg_instance role. Each deployment-mode
 # group defines pgcli_instances in its own group_vars/<mode>/main.yml and is
@@ -198,7 +204,11 @@ pgcli_instance_defaults:
 # inventory; apply.yaml runs a single generic instance play over all hosts.
 #
 # Each list item is one instance and sets `host` to scope itself to one
-# inventory host. Add `replica_of: <name>` for a read-only replica;
+# inventory host. Fully destroying an instance requires both `state: absent`
+# and `clean_data: true`; with the default clean_data (false) only the
+# container and config are removed, while the data and WAL directories and
+# the pgBackRest stanza are kept. Add `replica_of: <name>` for a read-only
+# replica;
 # primaries are reconciled first and the referenced primary must exist and be
 # running before the replica is created. Replica entries accept only name,
 # replica_of, replica_of_host, state, autostart and clean_data; password,
