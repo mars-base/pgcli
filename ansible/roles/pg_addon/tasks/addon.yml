@@ -32,6 +32,36 @@
     - _addon_state == 'present'
     - (not (_addon_installed | bool)) or (_addon_force | bool)
 
+# A fresh etcd member returns from `addon install` before it can answer
+# requests. The next host in this serial:1 play joins it, so wait here before
+# the play advances.
+- name: Resolve the etcd client port
+  ansible.builtin.set_fact:
+    _addon_etcd_port: >-
+      {{ ((addon.args | default([]))[(addon.args | default([])).index('--client-port') + 1])
+         if ('--client-port' in (addon.args | default([]))) else 2379 }}
+
+- name: Wait for the etcd client port
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ _addon_etcd_port }}"
+    timeout: 60
+  when:
+    - addon.type == 'etcd'
+    - _addon_state == 'present'
+
+- name: Wait for etcd to answer requests
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ _addon_etcd_port }}/version"
+    status_code: 200
+  register: _addon_etcd_ready
+  until: _addon_etcd_ready.status | default(0) == 200
+  retries: 30
+  delay: 1
+  when:
+    - addon.type == 'etcd'
+    - _addon_state == 'present'
+
 - name: Remove the add-on
   ansible.builtin.command:
     argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'remove', addon.type] + (['-i', addon.instance] if addon.instance is defined else ['--name', addon.name]) + (['--clean-data'] if addon.clean_data | default(false) else []) }}"

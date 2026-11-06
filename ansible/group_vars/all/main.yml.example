@@ -172,6 +172,13 @@ pgcli_config_path: >-
 # directory that stores its pg.yaml. An instance picks one with
 # `namespace: <name>` in pgcli_instances; instances without it use
 # pgcli_namespace_path / pgcli_config_path. Add more entries as needed.
+#
+# An extra entry whose path differs from pgcli_config_path is initialized
+# automatically when it also declares `base_dir`. Optional init fields:
+#   base_dir, backup_dir, pg_start_port, pg_ssh_port
+# Missing fields fall back to pgcli_config; a missing backup_dir lets
+# `pg config init` default to <base_dir>/backup. Entries without base_dir keep
+# the manual `pg config init -o <path>/pg.yaml` workflow.
 pgcli_namespaces:
   - name: default
     path: /root/.pgcli

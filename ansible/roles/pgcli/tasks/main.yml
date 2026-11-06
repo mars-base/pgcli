@@ -208,4 +208,38 @@
       - "{{ pgcli_config.pg_start_port | string }}"
       - "--pg-ssh-port"
       - "{{ pgcli_config.pg_ssh_port | string }}"
+    # Confirm the "base-dir/backup-dir is not empty" prompts non-interactively
+    # (e.g. when the config was lost but the data directories survived).
+    stdin: |
+      y
+      y
   when: not pgcli_config_file.stat.exists
+
+- name: Check additional namespace config files
+  ansible.builtin.stat:
+    path: "{{ item.path | regex_replace('/+$', '') }}/pg.yaml"
+  loop: "{{ pgcli_namespaces | default([]) }}"
+  register: pgcli_namespace_config_files
+
+# Extra namespaces opt into automatic initialization by declaring base_dir.
+# This keeps entries that are intentionally set up by hand (for example
+# crosshost's prod) unchanged.
+- name: Initialize additional namespace configs
+  ansible.builtin.command:
+    argv: >-
+      {{ [pgcli_install_path, 'config', 'init',
+          '-o', (item.item.path | regex_replace('/+$', '')) ~ '/pg.yaml',
+          '--namespace', item.item.name,
+          '--base-dir', item.item.base_dir,
+          '--pg-start-port', (item.item.pg_start_port | default(pgcli_config.pg_start_port)) | string,
+          '--pg-ssh-port', (item.item.pg_ssh_port | default(pgcli_config.pg_ssh_port)) | string]
+         + (['--backup-dir', item.item.backup_dir]
+            if item.item.backup_dir | default('') | length > 0 else []) }}
+    stdin: |
+      y
+      y
+  loop: "{{ pgcli_namespace_config_files.results }}"
+  when:
+    - not item.stat.exists
+    - (((item.item.path | regex_replace('/+$', '')) ~ '/pg.yaml') != pgcli_config_path)
+    - item.item.base_dir | default('') | length > 0

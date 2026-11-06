@@ -1,175 +1,24 @@
 ---
+- name: Build the HA cluster list
+  ansible.builtin.set_fact:
+    _pg_ha_clusters: >-
+      {{ pg_ha_clusters | default(([pg_ha_cluster] if pg_ha_cluster is defined else []), true) }}
+    _pg_ha_first_host: "{{ groups['ha_cluster'] | first }}"
+    _pg_ha_host_index: "{{ groups['ha_cluster'].index(inventory_hostname) }}"
+    # Patroni members talk over the private network; on public clouds
+    # ansible_host is often the EIP, so advertise private_ip when defined.
+    _pg_ha_advertise_host: "{{ private_ip | default(hostvars[inventory_hostname].ansible_host | default(inventory_hostname), true) }}"
+
 - name: Validate HA inputs
   ansible.builtin.assert:
     that:
-      - pgcli_ha_member | length > 0
-      - pg_ha_cluster is defined
-      - pg_ha_cluster.scope is defined
-      - pgcli_ha_member in pg_ha_cluster.members
-      - pg_ha_cluster.dcs_endpoints | length > 0
+      - _pg_ha_clusters | length > 0
     fail_msg: >-
-      pg_ha needs pgcli_ha_member and pg_ha_cluster
-      (scope, members, dcs_endpoints) in group_vars/ha_cluster.
+      pg_ha needs pg_ha_clusters (or the legacy single pg_ha_cluster) in
+      group_vars/ha_cluster.
 
-- name: Read pgcli config
-  ansible.builtin.command:
-    argv:
-      - "{{ pgcli_install_path }}"
-      - "-c"
-      - "{{ pgcli_config_path }}"
-      - config
-      - show
-  register: pg_ha_config_raw
-  changed_when: false
-
-- name: Set HA facts
-  ansible.builtin.set_fact:
-    pgcli_cfg: "{{ pg_ha_config_raw.stdout | from_yaml }}"
-    _pg_ha_first_host: "{{ groups['ha_cluster'] | first }}"
-
-- name: Resolve this member's config
-  ansible.builtin.set_fact:
-    _pg_ha_member_cfg: "{{ (((pgcli_cfg.get('addons') or {}).get('patroni') or {}).get(pg_ha_cluster.scope) or {}).get('members', {}).get(pgcli_ha_member, {}) }}"
-
-# Patroni members talk over the private network; on public clouds ansible_host
-# is often the EIP, so advertise private_ip when the inventory defines it.
-- name: Resolve the advertise address
-  ansible.builtin.set_fact:
-    _pg_ha_advertise_host: "{{ private_ip | default(hostvars[inventory_hostname].ansible_host | default(inventory_hostname), true) }}"
-
-- name: Check the inventory order matches the member plan
-  ansible.builtin.assert:
-    that:
-      - hostvars[_pg_ha_first_host].pgcli_ha_member == pg_ha_cluster.members[0]
-    fail_msg: >-
-      The first host in ha_cluster must own pg_ha_cluster.members[0]
-      ({{ pg_ha_cluster.members[0] }}), got
-      {{ hostvars[_pg_ha_first_host].pgcli_ha_member | default('') }}.
-
-- name: Create the bootstrap member
-  ansible.builtin.command:
-    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'ha', 'create', pg_ha_cluster.scope, '--member', pgcli_ha_member, '--advertise-host', _pg_ha_advertise_host, '--host-port', pgcli_ha_pg_port | string, '--restapi-port', pgcli_ha_restapi_port | string, '--etcd-endpoints', pg_ha_cluster.dcs_endpoints | join(',')] }}"
-  when:
-    - inventory_hostname == _pg_ha_first_host
-    - _pg_ha_member_cfg | length == 0
-
-- name: Export the cluster password set from the bootstrap host
-  ansible.builtin.command:
-    argv:
-      - "{{ pgcli_install_path }}"
-      - "-c"
-      - "{{ pgcli_config_path }}"
-      - ha
-      - passwords
-      - "{{ pg_ha_cluster.scope }}"
-      - "--file"
-      - "{{ pgcli_ha_passwords_path }}"
-  args:
-    creates: "{{ pgcli_ha_passwords_path }}"
-  when: inventory_hostname == _pg_ha_first_host
-
-- name: Read the password file from the bootstrap host
-  ansible.builtin.slurp:
-    src: "{{ pgcli_ha_passwords_path }}"
-  delegate_to: "{{ _pg_ha_first_host }}"
-  register: pg_ha_passwords_raw
-  no_log: true
-  when:
-    - inventory_hostname != _pg_ha_first_host
-    - _pg_ha_member_cfg | length == 0
-
-- name: Install the password file
-  ansible.builtin.copy:
-    content: "{{ pg_ha_passwords_raw.content | b64decode }}"
-    dest: "{{ pgcli_ha_passwords_path }}"
-    owner: root
-    group: root
-    mode: "0600"
-  no_log: true
-  when:
-    - inventory_hostname != _pg_ha_first_host
-    - _pg_ha_member_cfg | length == 0
-
-# The password file makes the joiner reuse the cluster-wide credentials.
-- name: Create the joining member
-  ansible.builtin.command:
-    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'ha', 'create', pg_ha_cluster.scope, '--member', pgcli_ha_member, '--advertise-host', _pg_ha_advertise_host, '--host-port', pgcli_ha_pg_port | string, '--restapi-port', pgcli_ha_restapi_port | string, '--etcd-endpoints', pg_ha_cluster.dcs_endpoints | join(','), '--passwords-file', pgcli_ha_passwords_path] }}"
-  when:
-    - inventory_hostname != _pg_ha_first_host
-    - _pg_ha_member_cfg | length == 0
-
-- name: Refresh pgcli config
-  ansible.builtin.command:
-    argv:
-      - "{{ pgcli_install_path }}"
-      - "-c"
-      - "{{ pgcli_config_path }}"
-      - config
-      - show
-  register: pg_ha_config_refresh
-  changed_when: false
-
-- name: Apply the refreshed config
-  ansible.builtin.set_fact:
-    pgcli_cfg: "{{ pg_ha_config_refresh.stdout | from_yaml }}"
-
-- name: Resolve the member config after creation
-  ansible.builtin.set_fact:
-    _pg_ha_member_cfg: "{{ (((pgcli_cfg.get('addons') or {}).get('patroni') or {}).get(pg_ha_cluster.scope) or {}).get('members', {}).get(pgcli_ha_member, {}) }}"
-
-- name: Read the member container state
-  ansible.builtin.command:
-    argv:
-      - podman
-      - inspect
-      - "--format"
-      - "{{ '{{.State.Running}}' }}"
-      - "{{ _pg_ha_member_cfg.container_name }}"
-  register: pg_ha_container
-  changed_when: false
-  failed_when: false
-  when: _pg_ha_member_cfg.container_name is defined
-
-- name: Start the member
-  ansible.builtin.command:
-    argv:
-      - "{{ pgcli_install_path }}"
-      - "-c"
-      - "{{ pgcli_config_path }}"
-      - ha
-      - start
-      - "{{ pg_ha_cluster.scope }}"
-      - "--member"
-      - "{{ pgcli_ha_member }}"
-  when:
-    - (pg_ha_cluster.state | default('started')) == 'started'
-    - (pg_ha_container.stdout | default('') | trim) != 'true'
-
-- name: Stop the member
-  ansible.builtin.command:
-    argv:
-      - "{{ pgcli_install_path }}"
-      - "-c"
-      - "{{ pgcli_config_path }}"
-      - ha
-      - stop
-      - "{{ pg_ha_cluster.scope }}"
-      - "--member"
-      - "{{ pgcli_ha_member }}"
-  when:
-    - (pg_ha_cluster.state | default('started')) == 'stopped'
-    - (pg_ha_container.stdout | default('') | trim) == 'true'
-
-- name: Enable member autostart
-  ansible.builtin.command:
-    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'autostart', 'enable', '--ha', '--scope', pg_ha_cluster.scope, '--name', pgcli_ha_member] }}"
-  when:
-    - pg_ha_cluster.autostart | default(true) | bool
-    - not (_pg_ha_member_cfg.autostart | default(false) | bool)
-
-- name: Disable member autostart
-  ansible.builtin.command:
-    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'autostart', 'disable', '--ha', '--scope', pg_ha_cluster.scope, '--name', pgcli_ha_member] }}"
-  when:
-    - not (pg_ha_cluster.autostart | default(true) | bool)
-    - _pg_ha_member_cfg.autostart | default(false) | bool
+- name: Reconcile each HA cluster
+  ansible.builtin.include_tasks: cluster.yml
+  loop: "{{ _pg_ha_clusters }}"
+  loop_control:
+    loop_var: pg_ha_cluster_item

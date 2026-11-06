@@ -1,10 +1,5 @@
 ---
-# Set per host in host_vars, e.g. pgcli_ha_member: ha1.
-pgcli_ha_member: ""
-
-# Shared password set exported from the bootstrap host and copied to joiners.
-pgcli_ha_passwords_path: /root/.pgcli/ha-passwords.yml
-
-# Explicit ports keep every host's member reachable at a predictable address.
+# Fallback ports for clusters that do not set host_port/restapi_port. Every
+# namespace's cluster needs a disjoint range; override per cluster.
 pgcli_ha_pg_port: 35532
 pgcli_ha_restapi_port: 8008
