@@ -1,0 +1,11 @@
+---
+# Single-instance deployment mode: one stand-alone primary, no replicas.
+# `host` scopes each entry to a single inventory host.
+pgcli_config_overrides:
+  namespace: dev
+
+pgcli_instances:
+  - name: pg_single
+    host: debian12-01
+    state: started
+    autostart: true

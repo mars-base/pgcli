@@ -10,9 +10,8 @@
 #
 # Play order matters: the DCS add-ons must be up before Patroni members are
 # created, and serial: 1 keeps the first host bootstrapping the rest.
-# Environment groups (dev, test, release) are all members of the implicit
-# `all` group, so the pgcli, instance and add-on plays target every host;
-# each host only reconciles the instance entries assigned to it.
+# Hosts are grouped by deployment mode; each host reconciles its own
+# pgcli_instances list, scoped by each entry's `host:`.
 
 - name: Install and configure pgcli
   hosts: all
@@ -40,7 +39,7 @@
       tags: [addon]
 
 - name: Patroni HA members
-  hosts: ha_hosts
+  hosts: ha_cluster
   gather_facts: false
   serial: 1
   roles:

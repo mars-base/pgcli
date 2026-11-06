@@ -3,10 +3,10 @@
 # environment; group_vars/*/main.yml is gitignored.
 #
 # Shared defaults for every pgcli host.
-# Environment groups (dev, test, release) and the role marker group
-# (ha_hosts) override them in their own group_vars; each group_vars
-# directory mirrors one inventory group. Environment vars take precedence
-# over role marker vars (ansible_group_priority).
+# Deployment-mode groups (single, samehost, crosshost) override the defaults
+# in their own group_vars and each define their own pgcli_instances; the role
+# marker group (ha_cluster) does the same for the HA stack. Mode groups take
+# precedence over the role marker group (ansible_group_priority).
 
 # Installation goes through scripts/install.sh (GitHub release, not a local
 # build). The installer only runs when pg is missing or force is true.
@@ -192,28 +192,27 @@ pgcli_instance_defaults:
   password_length: 16
   extensions: []
 
-# Desired instances on this host, consumed by the pg_instance role. Each list
-# item is one instance and must at least set `name`; every other key overrides
-# pgcli_instance_defaults as described above. Add `host: <inventory host>` to
-# scope an entry to one host; without it the entry applies to every host in
-# the group. A replica may set both `host` (where it runs) and
-# `replica_of_host` (where its primary runs). Add `replica_of: <name>` to
-# create a read-only replica instead of a primary; primaries are reconciled
-# first and the referenced primary must exist and be running before the
-# replica is created. Add `replica_of_host: <inventory host>` when the primary
-# runs on another host: the role prepares the primary there (slot + pg_hba),
-# then creates the replica with --primary-dsn, reading the primary password
-# from that host's pg.yaml. Replica entries accept only name, replica_of,
-# replica_of_host, state, autostart and clean_data; password, database, image,
-# extensions and PITR settings are inherited from the primary. Replica names
-# must be lower case letters, digits and underscores only (the slot is named
-# pgcli_r_<replica>).
-# The fallback for hosts that do not override this list; group vars replace it
-# rather than merge, so each group must repeat any instance it wants to keep.
-pgcli_instances:
-  - name: default
-    state: started
-    autostart: true
+# Desired instances are consumed by the pg_instance role. Each deployment-mode
+# group defines pgcli_instances in its own group_vars/<mode>/main.yml and is
+# responsible only for that mode. Enable one mode group at a time in the
+# inventory; apply.yaml runs a single generic instance play over all hosts.
+#
+# Each list item is one instance and sets `host` to scope itself to one
+# inventory host. Add `replica_of: <name>` for a read-only replica;
+# primaries are reconciled first and the referenced primary must exist and be
+# running before the replica is created. Replica entries accept only name,
+# replica_of, replica_of_host, state, autostart and clean_data; password,
+# database, image, extensions and PITR settings are inherited from the
+# primary. Replica names must be lower case letters, digits and underscores
+# only (the slot is named pgcli_r_<replica>). Add `replica_of_host` when the
+# primary runs on another host: the role prepares the primary there (slot +
+# pg_hba), then creates the replica with --primary-dsn, reading the primary
+# password from that host's pg.yaml.
+
+# Empty default; each deployment-mode group overrides it with its own list in
+# group_vars/<mode>/main.yml. Enable one mode group at a time so every
+# selected host reconciles that group's list.
+pgcli_instances: []
 
 # Add-ons on this host, consumed by the pg_addon role.
 pgcli_addons: []

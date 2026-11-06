@@ -1,0 +1,16 @@
+---
+# Cross-host primary/replica deployment mode: the primary host is listed
+# first in the inventory group (serial: 1 creates it before the replica
+# host runs), the replica host follows. pg01 is owned by the samehost mode;
+# this group only declares the replica side.
+pgcli_config_overrides:
+  namespace: dev
+
+pgcli_instances:
+  # Cross-host read-only replica; the role prepares it on debian12-01.
+  - name: pg01_ro2
+    host: debian12-02
+    replica_of: pg01
+    replica_of_host: debian12-01
+    state: started
+    autostart: true

@@ -4,39 +4,41 @@
 # Usage:
 #   uv run ansible-playbook playbooks/ping.yaml
 #   uv run ansible-playbook playbooks/apply.yaml
+#   uv run ansible-playbook playbooks/apply.yaml --limit crosshost
 #
-# Hosts are grouped by environment: dev, test and release. Each environment is
-# one inventory group that may contain one or many hosts, and a host belongs
-# to exactly one environment. The implicit `all` group still contains every
-# host, so plays that apply to every managed host target `all`. Each
-# group_vars/<group>/ directory describes exactly one inventory group.
-#
-# Environment groups are the primary configuration source and take precedence
-# over role marker groups (ha_hosts) through ansible_group_priority. Host order
-# inside a group matters: list a primary host before the hosts that create
-# cross-host replicas from it, because the instance play runs with serial: 1.
+# Hosts are grouped by the deployment mode they exercise, not by environment:
+#   single    one stand-alone instance
+#   samehost  primary + same-host replica
+#   crosshost primary and replica on different hosts
+#   ha_cluster  Patroni cluster over a shared etcd DCS (role marker group)
+# Each mode group defines its own pgcli_instances in group_vars/<group>/ and
+# is responsible only for that mode, so enable one mode group at a time.
+# The implicit `all` group still contains every host, so plays target `all`
+# and --limit selects the mode to exercise. ansible_group_priority keeps the
+# mode groups ahead of the role marker group. Host order inside a group
+# matters: list the primary host before the hosts that create cross-host
+# replicas from it, because the instance play runs with serial: 1.
 
-[dev]
+[single]
+debian12-01 ansible_host=192.0.2.10 ansible_user=root ansible_port=22
+
+[samehost]
+debian12-01 ansible_host=192.0.2.10 ansible_user=root ansible_port=22
+
+[crosshost]
 debian12-01 ansible_host=192.0.2.10 ansible_user=root ansible_port=22
 debian12-02 ansible_host=192.0.2.11 ansible_user=root ansible_port=22
 
-[test]
-debian12-03 ansible_host=192.0.2.12 ansible_user=root ansible_port=22
-debian12-04 ansible_host=192.0.2.13 ansible_user=root ansible_port=22
-
-[release]
-# No release hosts yet.
-
-[dev:vars]
+[single:vars]
 ansible_group_priority=20
-[test:vars]
+[samehost:vars]
 ansible_group_priority=20
-[release:vars]
+[crosshost:vars]
 ansible_group_priority=20
 
 # Role marker: hosts that form one Patroni cluster over a shared etcd DCS.
 # Order matters: the first host bootstraps etcd and the Patroni scope.
-[ha_hosts]
+[ha_cluster]
 debian12-02 ansible_host=192.0.2.11 ansible_user=root ansible_port=22
 debian12-03 ansible_host=192.0.2.12 ansible_user=root ansible_port=22
 debian12-04 ansible_host=192.0.2.13 ansible_user=root ansible_port=22

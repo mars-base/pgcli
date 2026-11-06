@@ -8,8 +8,8 @@
       - pgcli_ha_member in pg_ha_cluster.members
       - pg_ha_cluster.dcs_endpoints | length > 0
     fail_msg: >-
-      pg_ha needs pgcli_ha_member in host_vars and pg_ha_cluster
-      (scope, members, dcs_endpoints) in group_vars/ha_hosts.
+      pg_ha needs pgcli_ha_member and pg_ha_cluster
+      (scope, members, dcs_endpoints) in group_vars/ha_cluster.
 
 - name: Read pgcli config
   ansible.builtin.command:
@@ -25,7 +25,7 @@
 - name: Set HA facts
   ansible.builtin.set_fact:
     pgcli_cfg: "{{ pg_ha_config_raw.stdout | from_yaml }}"
-    _pg_ha_first_host: "{{ groups['ha_hosts'] | first }}"
+    _pg_ha_first_host: "{{ groups['ha_cluster'] | first }}"
 
 - name: Resolve this member's config
   ansible.builtin.set_fact:
@@ -36,7 +36,7 @@
     that:
       - hostvars[_pg_ha_first_host].pgcli_ha_member == pg_ha_cluster.members[0]
     fail_msg: >-
-      The first host in ha_hosts must own pg_ha_cluster.members[0]
+      The first host in ha_cluster must own pg_ha_cluster.members[0]
       ({{ pg_ha_cluster.members[0] }}), got
       {{ hostvars[_pg_ha_first_host].pgcli_ha_member | default('') }}.
 

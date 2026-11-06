@@ -1,0 +1,18 @@
+---
+# Same-host primary/replica deployment mode: the replica lives on the same
+# host as its primary.
+pgcli_config_overrides:
+  namespace: dev
+
+pgcli_instances:
+  - name: pg01
+    host: debian12-01
+    state: started
+    autostart: true
+
+  # Same-host read-only replica of pg01.
+  - name: pg01_ro1
+    host: debian12-01
+    replica_of: pg01
+    state: started
+    autostart: true
