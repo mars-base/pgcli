@@ -46,6 +46,182 @@
   loop_control:
     label: "{{ item.name | default('?') }}"
 
+# A primary with backup_target: s3 needs the shared repository in pg.yaml
+# before `pg create --backup-target s3`; the CLI rejects an incomplete repo.
+# The endpoint comes from pgcli_backup_s3_endpoint or is resolved from
+# pgcli_backup_s3_host; the trust anchor is copied from a managed store host,
+# or fetched TOFU for an external one.
+- name: Select this host's S3-backed instances
+  ansible.builtin.set_fact:
+    _s3_backed_instances: >-
+      {{ (pgcli_instances | rejectattr('replica_of', 'defined')
+          | selectattr('backup_target', 'defined')
+          | selectattr('backup_target', 'equalto', 's3')
+          | selectattr('host', 'defined')
+          | selectattr('host', 'equalto', inventory_hostname) | list)
+         + (pgcli_instances | rejectattr('replica_of', 'defined')
+            | selectattr('backup_target', 'defined')
+            | selectattr('backup_target', 'equalto', 's3')
+            | rejectattr('host', 'defined') | list) }}
+
+- name: Validate the S3 repository host
+  ansible.builtin.assert:
+    that:
+      - (pgcli_backup_s3_host | default('')) in groups['all']
+    fail_msg: >-
+      pgcli_backup_s3_host={{ pgcli_backup_s3_host | default('(unset)') }} is
+      not an inventory host. Set it to the store's inventory name, or set
+      pgcli_backup_s3_endpoint to host:port (no scheme) instead.
+  when:
+    - _s3_backed_instances | length > 0
+    - (pgcli_backup_s3_host | default('', true) | length > 0) or (pgcli_backup_s3_endpoint | default('', true) | length == 0)
+
+# The endpoint defaults to <private_ip>:<port> of pgcli_backup_s3_host, so
+# instance-to-store traffic stays on the private network.
+- name: Resolve the S3 repository endpoint
+  ansible.builtin.set_fact:
+    _s3_endpoint: >-
+      {{ pgcli_backup_s3_endpoint | default('', true)
+         if (pgcli_backup_s3_endpoint | default('', true) | length > 0)
+         else ((hostvars[pgcli_backup_s3_host].private_ip | default(hostvars[pgcli_backup_s3_host].ansible_host | default(pgcli_backup_s3_host), true)) ~ ':' ~ (pgcli_backup_s3_port | default(9000) | string)) }}
+  when: _s3_backed_instances | length > 0
+
+- name: Require the S3 repository settings
+  ansible.builtin.assert:
+    that:
+      - _s3_endpoint | length > 0
+      - _s3_endpoint is not match('^https?://')
+      - pgcli_backup_s3_bucket | default('') | length > 0
+      - pgcli_backup_s3_access_key | default('') | length > 0
+      - pgcli_backup_s3_secret_key | default('') | length > 0
+    fail_msg: >-
+      Instance(s) {{ _s3_backed_instances | map(attribute='name') | join(', ') }}
+      use backup_target: s3, but the endpoint (pgcli_backup_s3_endpoint as
+      host:port with no scheme, or pgcli_backup_s3_host/pgcli_backup_s3_port),
+      pgcli_backup_s3_bucket, _access_key and _secret_key must all be set for
+      {{ inventory_hostname }}.
+  when: _s3_backed_instances | length > 0
+
+# Same default path as `pg backup fetch-ca`: <base-dir>/backup/repo-ca/
+# ca-<host>-<port>.crt, unless pgcli_backup_s3_ca_file points elsewhere.
+- name: Resolve the S3 repository CA path
+  ansible.builtin.set_fact:
+    _s3_repo_ca_file: >-
+      {{ pgcli_backup_s3_ca_file | default(
+           (pgcli_cfg.base_dir | default(pgcli_config.base_dir)) ~ '/backup/repo-ca/ca-'
+           ~ (_s3_endpoint | replace(':', '-') | replace('[', '') | replace(']', '') ~ '.crt'), true) }}
+  when: _s3_backed_instances | length > 0
+
+# The CA is automated in two ways. When the store is a pgcli-managed host in
+# this inventory, its CA is copied straight from <base>/tls/<type>/<name>/
+# ca.crt — authoritative, no trust-on-first-use. Otherwise fall back to
+# `pg backup fetch-ca` (TOFU; pgcli_backup_s3_ca_sha256 pins the fingerprint).
+# pgcli_backup_s3_ca_file overrides both with a manually distributed anchor.
+- name: Resolve the managed store CA
+  ansible.builtin.set_fact:
+    _s3_store_ca_file: >-
+      {{ (hostvars[pgcli_backup_s3_host].pgcli_config | default(pgcli_config)).base_dir
+         ~ '/tls/' ~ (hostvars[pgcli_backup_s3_host].pgcli_s3_type | default('minio'))
+         ~ '/' ~ (hostvars[pgcli_backup_s3_host].pgcli_s3_name | default('backup')) ~ '/ca.crt' }}
+  when:
+    - _s3_backed_instances | length > 0
+    - pgcli_backup_s3_ca_file | default('', true) | length == 0
+    - pgcli_backup_s3_host | default('') | length > 0
+
+- name: Read the managed store CA
+  ansible.builtin.slurp:
+    src: "{{ _s3_store_ca_file }}"
+  delegate_to: "{{ pgcli_backup_s3_host }}"
+  register: _s3_store_ca
+  failed_when: false
+  changed_when: false
+  when:
+    - _s3_backed_instances | length > 0
+    - pgcli_backup_s3_ca_file | default('', true) | length == 0
+    - pgcli_backup_s3_host | default('') | length > 0
+
+- name: Install the managed store CA
+  ansible.builtin.copy:
+    content: "{{ _s3_store_ca.content | b64decode }}"
+    dest: "{{ _s3_repo_ca_file }}"
+    mode: "0644"
+  register: _s3_store_ca_installed
+  when:
+    - _s3_backed_instances | length > 0
+    - pgcli_backup_s3_ca_file | default('', true) | length == 0
+    - pgcli_backup_s3_host | default('') | length > 0
+    - _s3_store_ca.content is defined
+
+- name: Fetch the S3 repository CA
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - backup
+      - fetch-ca
+      - "{{ _s3_endpoint }}"
+    creates: "{{ _s3_repo_ca_file }}"
+  when:
+    - _s3_backed_instances | length > 0
+    - pgcli_backup_s3_ca_file | default('', true) | length == 0
+    - _s3_store_ca.content is not defined
+
+- name: Read the S3 repository CA fingerprint
+  ansible.builtin.command:
+    argv:
+      - sha256sum
+      - "{{ _s3_repo_ca_file }}"
+  register: _s3_repo_ca_sha256
+  changed_when: false
+  when:
+    - _s3_backed_instances | length > 0
+    - pgcli_backup_s3_ca_sha256 | default('') | length > 0
+
+- name: Verify the S3 repository CA fingerprint
+  ansible.builtin.assert:
+    that:
+      - (_s3_repo_ca_sha256.stdout | default('') | split() | first | lower) == pgcli_backup_s3_ca_sha256 | lower
+    fail_msg: >-
+      The CA fetched from {{ _s3_endpoint }} does not match
+      pgcli_backup_s3_ca_sha256 (got {{
+      _s3_repo_ca_sha256.stdout | default('') | split() | first }}).
+      Compare it with the store host's ca.crt before trusting this endpoint.
+  when:
+    - _s3_backed_instances | length > 0
+    - pgcli_backup_s3_ca_sha256 | default('') | length > 0
+
+- name: Read the configured S3 repository
+  ansible.builtin.set_fact:
+    _s3_cfg: "{{ pgcli_cfg.get('backup', {}).get('repo', {}).get('s3') or {} }}"
+  when: _s3_backed_instances | length > 0
+
+- name: Configure the S3 backup repository
+  ansible.builtin.command:
+    argv: >-
+      {{ [pgcli_install_path, '-c', pgcli_config_path, 'backup', 'setup',
+          '--s3-endpoint', _s3_endpoint,
+          '--s3-bucket', pgcli_backup_s3_bucket,
+          '--s3-access-key', pgcli_backup_s3_access_key,
+          '--s3-secret-key', pgcli_backup_s3_secret_key,
+          '--s3-region', pgcli_backup_s3_region | default('us-east-1') | string,
+          '--s3-path', pgcli_backup_s3_path | default('/pgbackrest') | string,
+          '--s3-ca-file', _s3_repo_ca_file]
+         + (['--s3-no-verify-tls'] if pgcli_backup_s3_no_verify_tls | default(false) | bool else []) }}
+  no_log: true
+  when:
+    - _s3_backed_instances | length > 0
+    - >-
+      (_s3_cfg.get('endpoint', '') != _s3_endpoint) or
+      (_s3_cfg.get('bucket', '') != pgcli_backup_s3_bucket) or
+      (_s3_cfg.get('access_key', '') != pgcli_backup_s3_access_key) or
+      (_s3_cfg.get('secret_key', '') != pgcli_backup_s3_secret_key) or
+      (_s3_cfg.get('ca_file', '') != _s3_repo_ca_file) or
+      (_s3_cfg.get('region', 'us-east-1') != (pgcli_backup_s3_region | default('us-east-1'))) or
+      (_s3_cfg.get('path', '/pgbackrest') != (pgcli_backup_s3_path | default('/pgbackrest'))) or
+      ((_s3_cfg.get('verify_tls', true) | bool) != (not (pgcli_backup_s3_no_verify_tls | default(false) | bool))) or
+      (_s3_store_ca_installed is changed)
+
 - name: Reconcile primary instances
   ansible.builtin.include_tasks: instance.yml
   loop: >-
@@ -56,6 +232,19 @@
           | rejectattr('host', 'defined') | list) }}
   loop_control:
     label: "{{ item.name | default('?') }}"
+
+# The pre-create setup above ran before a fresh instance existed, so no stanza
+# was created; run it once more now that the stanza exists.
+- name: Run backup setup for newly created S3-backed instances
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - backup
+      - setup
+  no_log: true
+  when: _created_backup_s3_instance | default(false)
 
 # Replicas run after every primary so `pg replica create -i` finds a running
 # primary; the instance tasks also verify this before creating one.

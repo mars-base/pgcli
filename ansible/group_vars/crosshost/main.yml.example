@@ -5,6 +5,26 @@
 pgcli_config_overrides:
   namespace: dev
 
+# Shared S3 repository for instances with backup_target: s3. The endpoint is
+# <private_ip>:<port> of pgcli_backup_s3_host, and its CA is copied directly
+# from that pgcli-managed store (no manual fetch-ca / fingerprint step). The
+# secret key lives in group_vars/crosshost/secrets.yaml (gitignored). See
+# site/content/docs/s3-instance/.
+pgcli_backup_s3_host: s3-01
+pgcli_backup_s3_port: 9000
+pgcli_backup_s3_bucket: pgbackrest
+pgcli_backup_s3_access_key: admin
+# Optional extras (defaults shown):
+# pgcli_backup_s3_region: us-east-1
+# pgcli_backup_s3_path: /pgbackrest
+# pgcli_backup_s3_no_verify_tls: false
+# pgcli_backup_s3_ca_file: /path/to/ca.crt   # manual anchor; skips the copy
+# pgcli_backup_s3_ca_sha256: "<sha256>"      # pin the anchor (TOFU / rotation check)
+#
+# A store that is NOT a pgcli-managed inventory host: omit
+# pgcli_backup_s3_host, set pgcli_backup_s3_endpoint to its host:port (no
+# scheme) instead, and the role falls back to `pg backup fetch-ca`.
+
 pgcli_instances:
   - name: pg01
     host: debian12-01
@@ -16,5 +36,12 @@ pgcli_instances:
     host: debian12-02
     replica_of: pg01
     replica_of_host: debian12-01
+    state: started
+    autostart: true
+
+  # Independent primary whose backups go to the standalone S3 store.
+  - name: pg02
+    host: debian12-02
+    backup_target: s3
     state: started
     autostart: true

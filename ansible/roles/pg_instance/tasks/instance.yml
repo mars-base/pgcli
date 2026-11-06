@@ -57,10 +57,18 @@
 - name: Create the primary instance
   ansible.builtin.command:
     argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'create', '-i', _spec.name, '--backup-target', _spec.backup_target, '--password-length', _spec.password_length | string] + (['--base-dir', _spec.base_dir] if _spec.base_dir is defined else []) }}"
+  register: _pgcli_primary_create
   when:
     - _spec.state != 'absent'
     - _instances.get(_spec.name) is none
     - _spec.replica_of is not defined
+
+- name: Record a newly created S3-backed instance
+  ansible.builtin.set_fact:
+    _created_backup_s3_instance: true
+  when:
+    - _pgcli_primary_create is changed
+    - _spec.backup_target == 's3'
 
 - name: Decide whether the replica must be created
   ansible.builtin.set_fact:

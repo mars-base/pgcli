@@ -13,12 +13,16 @@
 # HTTP) and a listener reachable from the database hosts. Override the
 # pgcli_s3_* defaults in group_vars/s3/main.yml.
 #
-# After the store is up, configure each database host with:
-#   pg backup fetch-ca <store-host>:<api-port>
-#   pg backup setup --s3-endpoint <url> --s3-bucket <bucket> \
-#     --s3-access-key <user> --s3-secret-key <password> \
-#     --s3-ca-file ~/.pgcli/backup/repo-ca/ca-<store-host>-<api-port>.crt
-# then create instances with `pg create --backup-target s3`.
+# After the store is up, database hosts using backup_target: s3 pick it up
+# from inventory (see group_vars/crosshost/main.yml):
+#   pgcli_backup_s3_host: <inventory host of this store>
+#   pgcli_backup_s3_port: <api-port>
+#   pgcli_backup_s3_bucket / _access_key, secret in secrets.yaml
+# The pg_instance role resolves <private_ip>:<port>, copies the store CA from
+# <base>/tls/<type>/<name>/ca.crt (no manual fetch-ca or fingerprint step),
+# and runs `pg backup setup` automatically before creating the instance.
+# Stores outside this inventory can set pgcli_backup_s3_endpoint instead and
+# fall back to `pg backup fetch-ca`.
 
 - name: Install and configure pgcli
   hosts: s3
@@ -153,4 +157,4 @@
           - "Credentials:  {{ _s3_root_user }} / (pg addon password {{ _s3_type }} --name {{ _s3_name }})"
           - "Buckets:      {{ _s3_buckets | join(', ') if _s3_buckets | length > 0 else '(none)' }}"
           - "CA file:      {{ pgcli_cfg.base_dir | default(pgcli_config.base_dir) }}/tls/{{ _s3_type }}/{{ _s3_name }}/ca.crt"
-          - "Consumers:    pg backup fetch-ca {{ _s3_endpoint_host }}:{{ _s3_api_port }}"
+          - "Consumers:    pgcli_backup_s3_host={{ inventory_hostname }}, pgcli_backup_s3_port={{ _s3_api_port }}"
