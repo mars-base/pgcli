@@ -31,6 +31,12 @@
   ansible.builtin.set_fact:
     _pg_ha_member_cfg: "{{ (((pgcli_cfg.get('addons') or {}).get('patroni') or {}).get(pg_ha_cluster.scope) or {}).get('members', {}).get(pgcli_ha_member, {}) }}"
 
+# Patroni members talk over the private network; on public clouds ansible_host
+# is often the EIP, so advertise private_ip when the inventory defines it.
+- name: Resolve the advertise address
+  ansible.builtin.set_fact:
+    _pg_ha_advertise_host: "{{ private_ip | default(hostvars[inventory_hostname].ansible_host | default(inventory_hostname), true) }}"
+
 - name: Check the inventory order matches the member plan
   ansible.builtin.assert:
     that:
@@ -42,7 +48,7 @@
 
 - name: Create the bootstrap member
   ansible.builtin.command:
-    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'ha', 'create', pg_ha_cluster.scope, '--member', pgcli_ha_member, '--advertise-host', ansible_host, '--host-port', pgcli_ha_pg_port | string, '--restapi-port', pgcli_ha_restapi_port | string, '--etcd-endpoints', pg_ha_cluster.dcs_endpoints | join(',')] }}"
+    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'ha', 'create', pg_ha_cluster.scope, '--member', pgcli_ha_member, '--advertise-host', _pg_ha_advertise_host, '--host-port', pgcli_ha_pg_port | string, '--restapi-port', pgcli_ha_restapi_port | string, '--etcd-endpoints', pg_ha_cluster.dcs_endpoints | join(',')] }}"
   when:
     - inventory_hostname == _pg_ha_first_host
     - _pg_ha_member_cfg | length == 0
@@ -87,7 +93,7 @@
 # The password file makes the joiner reuse the cluster-wide credentials.
 - name: Create the joining member
   ansible.builtin.command:
-    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'ha', 'create', pg_ha_cluster.scope, '--member', pgcli_ha_member, '--advertise-host', ansible_host, '--host-port', pgcli_ha_pg_port | string, '--restapi-port', pgcli_ha_restapi_port | string, '--etcd-endpoints', pg_ha_cluster.dcs_endpoints | join(','), '--passwords-file', pgcli_ha_passwords_path] }}"
+    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'ha', 'create', pg_ha_cluster.scope, '--member', pgcli_ha_member, '--advertise-host', _pg_ha_advertise_host, '--host-port', pgcli_ha_pg_port | string, '--restapi-port', pgcli_ha_restapi_port | string, '--etcd-endpoints', pg_ha_cluster.dcs_endpoints | join(','), '--passwords-file', pgcli_ha_passwords_path] }}"
   when:
     - inventory_hostname != _pg_ha_first_host
     - _pg_ha_member_cfg | length == 0

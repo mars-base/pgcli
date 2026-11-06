@@ -14,6 +14,24 @@
   ansible.builtin.set_fact:
     pgcli_cfg: "{{ pgcli_instance_config_raw.stdout | from_yaml }}"
 
+# Node-to-node traffic (pg_hba entries and replication DSNs) prefers the
+# private address; fall back to ansible_host when private_ip is not set.
+- name: Validate the private address
+  ansible.builtin.assert:
+    that:
+      - private_ip | string | length > 0
+    fail_msg: "private_ip must be a non-empty address when defined in the inventory."
+  when: private_ip is defined
+
+- name: Resolve the node address
+  ansible.builtin.set_fact:
+    _node_ip: "{{ private_ip | default(hostvars[inventory_hostname].ansible_host | default(inventory_hostname), true) }}"
+
+- name: Show the resolved node address
+  ansible.builtin.debug:
+    msg: "private_ip={{ private_ip | default('(unset)') }} ansible_host={{ hostvars[inventory_hostname].ansible_host | default('(unset)') }} resolved={{ _node_ip }}"
+  when: pgcli_debug_addresses | default(false) | bool
+
 # `host` scopes one entry to a single inventory host; entries without it apply
 # to every host in the group. Validate every entry on every host so a typo
 # fails loudly instead of silently matching no host.

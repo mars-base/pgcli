@@ -20,14 +20,14 @@
 # replicas from it, because the instance play runs with serial: 1.
 
 [single]
-debian12-01 ansible_host=192.0.2.10 ansible_user=root ansible_port=22
+debian12-01 ansible_host=192.0.2.10 private_ip=192.0.2.10 ansible_user=root ansible_port=22
 
 [samehost]
-debian12-01 ansible_host=192.0.2.10 ansible_user=root ansible_port=22
+debian12-01 ansible_host=192.0.2.10 private_ip=192.0.2.10 ansible_user=root ansible_port=22
 
 [crosshost]
-debian12-01 ansible_host=192.0.2.10 ansible_user=root ansible_port=22
-debian12-02 ansible_host=192.0.2.11 ansible_user=root ansible_port=22
+debian12-01 ansible_host=192.0.2.10 private_ip=192.0.2.10 ansible_user=root ansible_port=22
+debian12-02 ansible_host=192.0.2.11 private_ip=192.0.2.11 ansible_user=root ansible_port=22
 
 [single:vars]
 ansible_group_priority=20
@@ -39,6 +39,6 @@ ansible_group_priority=20
 # Role marker: hosts that form one Patroni cluster over a shared etcd DCS.
 # Order matters: the first host bootstraps etcd and the Patroni scope.
 [ha_cluster]
-debian12-02 ansible_host=192.0.2.11 ansible_user=root ansible_port=22
-debian12-03 ansible_host=192.0.2.12 ansible_user=root ansible_port=22
-debian12-04 ansible_host=192.0.2.13 ansible_user=root ansible_port=22
+debian12-02 ansible_host=192.0.2.11 private_ip=192.0.2.11 ansible_user=root ansible_port=22
+debian12-03 ansible_host=192.0.2.12 private_ip=192.0.2.12 ansible_user=root ansible_port=22
+debian12-04 ansible_host=192.0.2.13 private_ip=192.0.2.13 ansible_user=root ansible_port=22

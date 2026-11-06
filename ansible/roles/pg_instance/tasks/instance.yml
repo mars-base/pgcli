@@ -150,6 +150,21 @@
     - _create_replica | bool
     - _cross_host_replica | bool
 
+# Same precedence as _node_ip: the primary's private address wins over
+# ansible_host so replication crosses the private network.
+- name: Resolve the remote primary address
+  ansible.builtin.set_fact:
+    _primary_host_ip: "{{ hostvars[_spec.replica_of_host].private_ip | default(hostvars[_spec.replica_of_host].ansible_host | default(_spec.replica_of_host), true) }}"
+  when:
+    - _cross_host_replica | bool
+
+- name: Show the resolved remote primary address
+  ansible.builtin.debug:
+    msg: "replica_of_host={{ _spec.replica_of_host }} private_ip={{ hostvars[_spec.replica_of_host].private_ip | default('(unset)') }} ansible_host={{ hostvars[_spec.replica_of_host].ansible_host | default('(unset)') }} resolved={{ _primary_host_ip }}"
+  when:
+    - _cross_host_replica | bool
+    - pgcli_debug_addresses | default(false) | bool
+
 - name: Read the remote primary config
   ansible.builtin.command:
     argv:
@@ -226,7 +241,7 @@
       - "-i"
       - "{{ _spec.replica_of }}"
       - "--replica-host"
-      - "{{ hostvars[inventory_hostname].ansible_host | default(inventory_hostname) }}"
+      - "{{ _node_ip }}"
   delegate_to: "{{ _spec.replica_of_host }}"
   when:
     - _create_replica | bool
@@ -235,7 +250,7 @@
 - name: Build the remote primary DSN
   ansible.builtin.set_fact:
     _primary_dsn: >-
-      postgres://{{ _remote_primary_cfg.postgres.user | default('admin') | urlencode | replace('/', '%2F') }}:{{ _remote_primary_cfg.postgres.password | default('admin') | urlencode | replace('/', '%2F') }}@{{ hostvars[_spec.replica_of_host].ansible_host | default(_spec.replica_of_host) }}:{{ _remote_primary_cfg.podman.host_port }}/{{ _remote_primary_cfg.postgres.database | default('admin') | urlencode | replace('/', '%2F') }}
+      postgres://{{ _remote_primary_cfg.postgres.user | default('admin') | urlencode | replace('/', '%2F') }}:{{ _remote_primary_cfg.postgres.password | default('admin') | urlencode | replace('/', '%2F') }}@{{ _primary_host_ip }}:{{ _remote_primary_cfg.podman.host_port }}/{{ _remote_primary_cfg.postgres.database | default('admin') | urlencode | replace('/', '%2F') }}
   no_log: true
   when:
     - _create_replica | bool
