@@ -744,22 +744,44 @@ func (m *BackupManager) WritePgbackrestArchiveConf() (string, error) {
 
 // backupContainerDrift returns a short reason when the running backup
 // container's mounts no longer match the desired config — today only the S3 CA
-// file (a mount a pre-S3 container never had). "" means it's current.
+// file. "" means it's current.
+//
+// The destination alone is not enough: switching repositories (or re-fetching a
+// CA) keeps /etc/pgbackrest/ca.crt mounted but pointed at the previous host
+// file, and a file bind mount pins the inode, so edits or deletions of that
+// source never reach the container. Compare the source path too.
 func (m *BackupManager) backupContainerDrift() (string, error) {
 	s3 := m.cfg.Backup.Repo.S3
 	if s3 == nil || s3.CAFile == "" {
 		return "", nil // nothing to drift on (local repo, or system CAs)
 	}
-	out, err := m.run("inspect", "--format", "{{range .Mounts}}{{.Destination}}\n{{end}}", m.cfg.Backup.ContainerName)
+	want := hostMountPath(s3.CAFile)
+	out, err := m.run("inspect", "--format", "{{range .Mounts}}{{.Destination}}\t{{.Source}}\n{{end}}", m.cfg.Backup.ContainerName)
 	if err != nil {
 		return "", fmt.Errorf("inspecting backup container mounts: %w", err)
 	}
 	for _, line := range strings.Split(out, "\n") {
-		if strings.TrimSpace(line) == "/etc/pgbackrest/ca.crt" {
+		dest, src, ok := strings.Cut(line, "\t")
+		if !ok || strings.TrimSpace(dest) != "/etc/pgbackrest/ca.crt" {
+			continue
+		}
+		if sameHostPath(strings.TrimSpace(src), want) {
 			return "", nil
 		}
+		return "its S3 CA mount points at a different file", nil
 	}
 	return "missing the S3 CA mount", nil
+}
+
+// sameHostPath compares two host paths, resolving symlinks so a canonicalized
+// podman mount source still matches the configured path.
+func sameHostPath(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	return errA == nil && errB == nil && ra == rb
 }
 
 // --- Container management ---------------------------------------------
@@ -797,7 +819,6 @@ func (m *BackupManager) EnsureBackupContainer(confPath string) error {
 		fmt.Println("-> Backup container already running")
 		return nil
 	}
-
 
 	exists, err := m.containerExists(containerName)
 	if err != nil {
@@ -1217,7 +1238,7 @@ func (m *BackupManager) createBackupContainer(confPath string) error {
 	chownArgs := []string{"exec", "-u", "root", m.cfg.Backup.ContainerName,
 		"sh", "-c",
 		"chown -R postgres:postgres /var/lib/pgbackrest /var/log/pgbackrest " +
-				"/home/postgres/.ssh/id_rsa /home/postgres/.ssh/id_rsa.pub"}
+			"/home/postgres/.ssh/id_rsa /home/postgres/.ssh/id_rsa.pub"}
 	if _, err := m.run(chownArgs...); err != nil {
 		fmt.Printf("  [!] ownership migration to postgres: %v\n", err)
 	}
