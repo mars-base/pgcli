@@ -10,6 +10,7 @@
 #   single    one stand-alone instance
 #   samehost  primary + same-host replica
 #   crosshost primary and replica on different hosts
+#   s3        standalone S3-compatible store for the pgBackRest s3 target
 #   ha_cluster  Patroni cluster over a shared etcd DCS (role marker group)
 # Each mode group defines its own pgcli_instances in group_vars/<group>/ and
 # is responsible only for that mode, so enable one mode group at a time.
@@ -35,6 +36,11 @@ ansible_group_priority=20
 ansible_group_priority=20
 [crosshost:vars]
 ansible_group_priority=20
+
+# Standalone S3-compatible object store (minio/silo/rustfs) for the pgBackRest
+# s3 backup target; deploy with playbooks/deploy-s3.yaml.
+[s3]
+s3-01 ansible_host=192.0.2.20 private_ip=192.0.2.20 ansible_user=root ansible_port=22
 
 # Role marker: hosts that form one Patroni cluster over a shared etcd DCS.
 # Order matters: the first host bootstraps etcd and the Patroni scope.

@@ -1,0 +1,19 @@
+---
+# Standalone S3-compatible store for the pgBackRest `s3` backup target,
+# consumed by playbooks/deploy-s3.yaml. Keys left unset keep the defaults
+# defined in the playbook.
+
+pgcli_s3_type: minio        # minio | silo | rustfs
+pgcli_s3_name: backup
+pgcli_s3_api_port: 9000
+pgcli_s3_console_port: 9001
+pgcli_s3_listen: 0.0.0.0    # TLS + network boundary guard the store
+pgcli_s3_tls: true          # pgBackRest refuses plaintext HTTP
+pgcli_s3_root_user: admin
+# pgcli_s3_root_password: "change-me"  # empty/omitted = generated and stored in pg.yaml
+# Data directory. Recommended: a dedicated large-capacity disk or RAID array,
+# not the device that holds the PostgreSQL data or the OS. The directory is
+# created automatically when it does not exist.
+# pgcli_s3_data_dir: /data/pg/addon/minio/backup/data
+pgcli_s3_buckets:
+  - pgbackrest
