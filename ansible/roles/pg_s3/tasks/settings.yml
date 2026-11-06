@@ -5,7 +5,9 @@
 
 - name: Resolve the S3 store settings
   ansible.builtin.set_fact:
-    _s3_type: "{{ pgcli_s3_type | default('minio') }}"
+    # The active group names the store type ([silo_s3] → silo); an explicit
+    # pgcli_s3_type may be set, but validate.yml requires it to agree.
+    _s3_type: "{{ pgcli_s3_type | default(_s3_group_prefix, true) }}"
     _s3_name: "{{ pgcli_s3_name | default('backup') }}"
     _s3_api_port: "{{ pgcli_s3_api_port | default(9000) | int }}"
     _s3_console_port: "{{ pgcli_s3_console_port | default(9001) | int }}"
@@ -17,16 +19,18 @@
     # 20-character value when this is empty.
     _s3_root_password: "{{ pgcli_s3_root_password | default('') }}"
     _s3_buckets: "{{ pgcli_s3_buckets | default([]) }}"
-    _s3_alias: "{{ pgcli_s3_alias | default('pgcli-s3') }}"
+    # One alias per store type/name: a shared alias would silently point
+    # bucket operations at whichever store was deployed last.
+    _s3_alias: "{{ pgcli_s3_alias | default('pgcli-' ~ _s3_group_prefix ~ '-' ~ (pgcli_s3_name | default('backup'))) }}"
     _s3_drives: "{{ pgcli_s3_drives | default([]) }}"
-    _s3_multi: "{{ groups[_s3_group] | length > 1 }}"
+    _s3_multi: "{{ _s3_nodes | length > 1 }}"
     _s3_explicit_endpoints: "{{ pgcli_s3_endpoints | default([]) }}"
     _s3_byo_tls: >-
       {{ (pgcli_s3_tls_cert | default('', true) | length > 0)
          or (pgcli_s3_tls_key | default('', true) | length > 0) }}
     _s3_shared_tls: >-
       {{ (pgcli_s3_tls | default(true) | bool)
-         and ((groups[_s3_group] | length > 1)
+         and ((_s3_nodes | length > 1)
               or (pgcli_s3_tls_cert | default('', true) | length > 0)
               or (pgcli_s3_tls_key | default('', true) | length > 0)) }}
     _s3_tls_cert_src: "{{ pgcli_s3_tls_cert | default(playbook_dir ~ '/../var/s3-tls/' ~ (pgcli_s3_name | default('backup')) ~ '/grid.crt') }}"
@@ -41,7 +45,7 @@
          else ('MNMD' if _s3_drives | length > 0 else 'MNSD') }}
     _s3_drive_counts: >-
       {%- set counts = [] -%}
-      {%- for h in groups[_s3_group] -%}
+      {%- for h in _s3_nodes -%}
       {%-   set _ = counts.append((hostvars[h].pgcli_s3_drives | default(pgcli_s3_drives | default([]))) | length) -%}
       {%- endfor -%}
       {{ counts }}
@@ -61,7 +65,7 @@
   ansible.builtin.set_fact:
     _s3_auto_endpoints: >-
       {%- set eps = [] -%}
-      {%- for h in groups[_s3_group] -%}
+      {%- for h in _s3_nodes -%}
       {%-   set hv = hostvars[h] -%}
       {%-   set ip = hv.private_ip | default(hv.ansible_host | default(h, true), true) -%}
       {%-   set base = _s3_scheme ~ '://' ~ ip ~ ':' ~ _s3_api_port -%}

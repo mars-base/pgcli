@@ -3,8 +3,17 @@
 # backup target. Supports the three pgcli-managed stores: minio, silo and
 # rustfs.
 #
-# The layout is derived from the size of the host's active store-type group
-# ([minio_s3], [silo_s3], ...) and pgcli_s3_drives:
+# The layout is derived from the number of nodes selected by pgcli_s3_nodes
+# (default: the host's active store-type group, e.g. [silo_s3]) and
+# pgcli_s3_drives. The store type is taken from the group name
+# ([silo_s3] → silo); pgcli_s3_type is optional and must agree when set.
+#
+# pgcli_s3_nodes selects the subset of the store group that forms this
+# deployment: one host for SNSD/SNMD, several for MNSD/MNMD. Pass a single
+# name or a comma-separated pattern, e.g.
+#   -e pgcli_s3_nodes=debian12-01
+#   -e pgcli_s3_nodes=debian12-01,debian12-02,debian12-03,debian12-04
+# Omit it to target the whole pgcli_s3_group.
 #
 #   hosts | drives | mode | pgcli flags per node
 #   1     | 0      | SNSD | --data-dir
@@ -35,6 +44,8 @@
 #   cd ansible
 #   uv run ansible-playbook playbooks/deploy-s3.yaml
 #   uv run ansible-playbook playbooks/deploy-s3.yaml -e pgcli_s3_group=minio_s3
+#   uv run ansible-playbook playbooks/deploy-s3.yaml -e pgcli_s3_nodes=debian12-01
+#   uv run ansible-playbook playbooks/deploy-s3.yaml -e pgcli_s3_nodes=debian12-01,debian12-02,debian12-03,debian12-04
 #   uv run ansible-playbook playbooks/deploy-s3.yaml -e pgcli_s3_type=rustfs
 #   uv run ansible-playbook playbooks/deploy-s3.yaml -e pgcli_s3_force=true
 #
@@ -61,7 +72,7 @@
 # each host to the store-type group it actually belongs to.
 
 - name: Install and configure pgcli
-  hosts: "{{ pgcli_s3_group | default('s3') }}"
+  hosts: "{{ pgcli_s3_nodes | default(pgcli_s3_group | default('s3')) }}"
   gather_facts: false
   pre_tasks:
     - name: Prepare the shared cluster TLS material
@@ -73,7 +84,7 @@
       tags: [pgcli]
 
 - name: Deploy the S3 object store
-  hosts: "{{ pgcli_s3_group | default('s3') }}"
+  hosts: "{{ pgcli_s3_nodes | default(pgcli_s3_group | default('s3')) }}"
   gather_facts: false
   serial: 1
   tags: [s3]
@@ -82,9 +93,11 @@
     - role: pg_addon
 
 - name: Create the S3 buckets and report the endpoint
-  hosts: "{{ pgcli_s3_group | default('s3') }}"
+  hosts: "{{ pgcli_s3_nodes | default(pgcli_s3_group | default('s3')) }}"
   gather_facts: false
   tags: [s3]
-  roles:
-    - role: pg_s3
-      tasks_from: buckets
+  tasks:
+    - name: Create the S3 buckets and report the endpoint
+      ansible.builtin.import_role:
+        name: pg_s3
+        tasks_from: buckets

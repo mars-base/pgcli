@@ -23,3 +23,13 @@
 - name: Set the active S3 inventory group
   ansible.builtin.set_fact:
     _s3_group: "{{ _s3_group_names[0] }}"
+    _s3_group_prefix: "{{ _s3_group_names[0] | regex_replace('_s3$', '') }}"
+
+# A mode may target only part of the store group (one host for SNSD/SNMD,
+# four for MNSD, ...), so the cluster shape is derived from the hosts this
+# play actually targets, not from the whole group. pgcli_s3_nodes feeds the
+# play's hosts pattern and defaults to the group; ansible_play_hosts_all is
+# the same list resolved by Ansible (stable under serial).
+- name: Resolve the targeted store nodes
+  ansible.builtin.set_fact:
+    _s3_nodes: "{{ ansible_play_hosts_all | default(groups[_s3_group]) }}"
