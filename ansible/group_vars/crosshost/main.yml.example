@@ -14,6 +14,10 @@ pgcli_backup_s3_host: s3-01
 pgcli_backup_s3_port: 9000
 pgcli_backup_s3_bucket: pgbackrest
 pgcli_backup_s3_access_key: admin
+# Secret key for the access key above. Real deployments keep it in
+# group_vars/crosshost/secrets.yaml (gitignored); this placeholder is listed
+# here so the variable is easy to find.
+pgcli_backup_s3_secret_key: "<secret-key>"
 # Optional extras (defaults shown):
 # pgcli_backup_s3_region: us-east-1
 # pgcli_backup_s3_path: /pgbackrest
