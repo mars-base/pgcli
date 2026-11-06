@@ -4,6 +4,9 @@
 # every node must serve the byte-identical certificate, because separately
 # generated self-signed CAs cannot handshake with each other.
 
+- name: Resolve the active store inventory group
+  ansible.builtin.import_tasks: group.yml
+
 - name: Resolve the shared TLS settings
   ansible.builtin.set_fact:
     _s3_tls_name: "{{ pgcli_s3_name | default('backup') }}"
@@ -13,7 +16,7 @@
          or (pgcli_s3_tls_key | default('', true) | length > 0) }}
     _s3_shared_tls: >-
       {{ (pgcli_s3_tls | default(true) | bool)
-         and ((groups['minio_s3'] | length > 1)
+         and ((groups[_s3_group] | length > 1)
               or (pgcli_s3_tls_cert | default('', true) | length > 0)
               or (pgcli_s3_tls_key | default('', true) | length > 0)) }}
     _s3_tls_dir: "{{ pgcli_s3_tls_dir | default(playbook_dir ~ '/../var/s3-tls/' ~ (pgcli_s3_name | default('backup'))) }}"
@@ -21,7 +24,7 @@
     _s3_tls_key_src: "{{ pgcli_s3_tls_key | default(playbook_dir ~ '/../var/s3-tls/' ~ (pgcli_s3_name | default('backup')) ~ '/grid.key') }}"
     _s3_tls_sans: >-
       {%- set sans = [] -%}
-      {%- for h in groups['minio_s3'] -%}
+      {%- for h in groups[_s3_group] -%}
       {%-   set hv = hostvars[h] -%}
       {%-   set ip = hv.private_ip | default(hv.ansible_host | default(h, true), true) -%}
       {%-   set _ = sans.append('IP:' ~ ip) -%}

@@ -3,8 +3,8 @@
 # backup target. Supports the three pgcli-managed stores: minio, silo and
 # rustfs.
 #
-# The layout is derived from the size of the [minio_s3] inventory group and
-# pgcli_s3_drives:
+# The layout is derived from the size of the host's active store-type group
+# ([minio_s3], [silo_s3], ...) and pgcli_s3_drives:
 #
 #   hosts | drives | mode | pgcli flags per node
 #   1     | 0      | SNSD | --data-dir
@@ -17,8 +17,8 @@
 #
 # Cluster mode (MNSD/MNMD): every node receives the same --endpoint matrix
 # (built in inventory order, private_ip preferred over ansible_host) and the
-# same root password (pgcli_s3_root_password, e.g. in
-# group_vars/minio_s3/secrets.yaml), and --listen must not be loopback. Set
+# same root password (pgcli_s3_root_password, e.g. in the active group's
+# group_vars/<group>/secrets.yaml), and --listen must not be loopback. Set
 # pgcli_s3_endpoints explicitly to override the derived matrix.
 #
 # TLS: single-node stores use pgcli's generated CA (--tls). A multi-host grid
@@ -34,8 +34,13 @@
 # Usage:
 #   cd ansible
 #   uv run ansible-playbook playbooks/deploy-s3.yaml
+#   uv run ansible-playbook playbooks/deploy-s3.yaml -e pgcli_s3_group=minio_s3
 #   uv run ansible-playbook playbooks/deploy-s3.yaml -e pgcli_s3_type=rustfs
 #   uv run ansible-playbook playbooks/deploy-s3.yaml -e pgcli_s3_force=true
+#
+# The play targets pgcli_s3_group (default the [s3] parent group, whose only
+# active child is the store-type group under test); override the variable to
+# target a different group directly.
 #
 # After the store is up, database hosts using backup_target: s3 pick it up
 # from inventory (see group_vars/crosshost/main.yml):
@@ -48,12 +53,15 @@
 # Stores outside this inventory can set pgcli_backup_s3_endpoint instead and
 # fall back to `pg backup fetch-ca`.
 #
-# The work lives in roles/pg_s3: shared_tls.yml (controller-side certificate),
-# main.yml (layout detection, validation, install arguments) and buckets.yml
-# (post-install bucket setup and endpoint summary).
+# The work lives in roles/pg_s3: group.yml (resolve the active store group),
+# shared_tls.yml (controller-side certificate), settings/validate/host_tls/
+# install (main.yml) and buckets.yml (post-install bucket setup and endpoint
+# summary). Activate exactly one store-type group in the inventory's [s3]
+# children; the play targets pgcli_s3_group (default s3) and the role narrows
+# each host to the store-type group it actually belongs to.
 
 - name: Install and configure pgcli
-  hosts: minio_s3
+  hosts: "{{ pgcli_s3_group | default('s3') }}"
   gather_facts: false
   pre_tasks:
     - name: Prepare the shared cluster TLS material
@@ -65,7 +73,7 @@
       tags: [pgcli]
 
 - name: Deploy the S3 object store
-  hosts: minio_s3
+  hosts: "{{ pgcli_s3_group | default('s3') }}"
   gather_facts: false
   serial: 1
   tags: [s3]
@@ -74,7 +82,7 @@
     - role: pg_addon
 
 - name: Create the S3 buckets and report the endpoint
-  hosts: minio_s3
+  hosts: "{{ pgcli_s3_group | default('s3') }}"
   gather_facts: false
   tags: [s3]
   roles:

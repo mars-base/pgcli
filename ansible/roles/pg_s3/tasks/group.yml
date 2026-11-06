@@ -1,0 +1,25 @@
+---
+# Store-type inventory groups ([minio_s3], [silo_s3], ...) are mutually
+# exclusive: a host is placed in exactly one active group at a time, and the
+# [s3] parent group lists only the active child. The deploy play targets
+# pgcli_s3_group (default s3); this verifies the current host really belongs
+# to exactly one store-type group so every cluster-wide lookup
+# (groups[_s3_group]) sees only that store's nodes.
+
+- name: Resolve the active S3 inventory group
+  ansible.builtin.set_fact:
+    _s3_group_names: "{{ group_names | select('search', '_s3$') | list }}"
+
+- name: Require exactly one active store group per host
+  ansible.builtin.assert:
+    that:
+      - _s3_group_names | length == 1
+    fail_msg: >-
+      {{ inventory_hostname }} belongs to
+      {{ _s3_group_names | length }} store groups
+      ({{ _s3_group_names | join(', ') if _s3_group_names | length > 0 else 'none' }});
+      activate exactly one [minio_s3]/[silo_s3]/... group in the inventory.
+
+- name: Set the active S3 inventory group
+  ansible.builtin.set_fact:
+    _s3_group: "{{ _s3_group_names[0] }}"

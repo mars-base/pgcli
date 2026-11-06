@@ -4,6 +4,9 @@
 # serial: 1 deploy play would fail on the first node. Every task is run_once
 # (first store host); facts come from the deploy role's play.
 
+- name: Resolve the active store inventory group
+  ansible.builtin.import_tasks: group.yml
+
 - name: Read the S3 root password
   ansible.builtin.command:
     argv:
@@ -101,9 +104,9 @@
       - "Console:      {{ _s3_scheme }}://{{ _s3_endpoint_host }}:{{ _s3_console_port }}"
       - "Credentials:  {{ _s3_root_user }} / (pg addon password {{ _s3_type }} --name {{ _s3_name }})"
       - "Layout:       {{ _s3_mode }}{{ (', ' ~ (_s3_drives | length) ~ ' drives: ' ~ (_s3_drives | join(', '))) if _s3_drives | length > 0 else (', data dir: ' ~ _s3_data_dir) }}"
-      - "Nodes:        {{ groups['minio_s3'] | length }} ({{ groups['minio_s3'] | join(', ') }})"
+      - "Nodes:        {{ groups[_s3_group] | length }} ({{ groups[_s3_group] | join(', ') }})"
       - "Endpoints:    {{ _s3_endpoints | join(', ') if _s3_endpoints | length > 0 else 'none (single node)' }}"
       - "Buckets:      {{ _s3_buckets | join(', ') if _s3_buckets | length > 0 else '(none)' }}"
       - "CA file:      {{ pgcli_config.base_dir }}/tls/{{ _s3_type }}/{{ _s3_name }}/ca.crt"
-      - "Consumers:    pgcli_backup_s3_host={{ groups['minio_s3'][0] }}, pgcli_backup_s3_port={{ _s3_api_port }}"
+      - "Consumers:    pgcli_backup_s3_host={{ groups[_s3_group][0] }}, pgcli_backup_s3_port={{ _s3_api_port }}"
   run_once: true

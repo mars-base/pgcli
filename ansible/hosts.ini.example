@@ -38,15 +38,30 @@ ansible_group_priority=20
 ansible_group_priority=20
 
 # Standalone S3-compatible object store (minio/silo/rustfs) for the pgBackRest
-# s3 backup target; deploy with playbooks/deploy-s3.yaml. List every node for a
-# multi-host grid (MNSD/MNMD) in cluster order; a single host here means a
-# single-node store. Drives are declared with pgcli_s3_drives in
-# group_vars/minio_s3/main.yml (or per node in host_vars/<host>.yml).
+# s3 backup target; deploy with playbooks/deploy-s3.yaml. Store-type groups
+# are mutually exclusive: activate exactly ONE of [minio_s3] / [silo_s3] (add
+# [rustfs_s3] the same way). List every node for a multi-host grid
+# (MNSD/MNMD) in cluster order; a single host means a single-node store.
+# Drives are declared with pgcli_s3_drives in group_vars/<group>/main.yml (or
+# per node in host_vars/<host>.yml). deploy-s3.yaml defaults to
+# pgcli_s3_group=s3; the [s3] parent lists exactly one active store-type
+# child. Keep inactive groups declared but empty so the play pattern still
+# resolves without a warning.
 [minio_s3]
+# s3-01 ansible_host=192.0.2.20 private_ip=192.0.2.20 ansible_user=root ansible_port=22
+# s3-02 ansible_host=192.0.2.21 private_ip=192.0.2.21 ansible_user=root ansible_port=22
+# s3-03 ansible_host=192.0.2.22 private_ip=192.0.2.22 ansible_user=root ansible_port=22
+# s3-04 ansible_host=192.0.2.23 private_ip=192.0.2.23 ansible_user=root ansible_port=22
+
+[silo_s3]
 s3-01 ansible_host=192.0.2.20 private_ip=192.0.2.20 ansible_user=root ansible_port=22
 # s3-02 ansible_host=192.0.2.21 private_ip=192.0.2.21 ansible_user=root ansible_port=22
 # s3-03 ansible_host=192.0.2.22 private_ip=192.0.2.22 ansible_user=root ansible_port=22
 # s3-04 ansible_host=192.0.2.23 private_ip=192.0.2.23 ansible_user=root ansible_port=22
+
+[s3:children]
+# minio_s3
+silo_s3
 
 # Role marker: hosts that form one Patroni cluster over a shared etcd DCS.
 # Order matters: the first host bootstraps etcd and the Patroni scope.
