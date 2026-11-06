@@ -10,11 +10,16 @@
 pgcli_config_overrides:
   namespace: ha
 
+# Node-to-node addresses prefer private_ip (on public clouds ansible_host is
+# often the EIP); fall back to ansible_host when private_ip is not set.
+_ha_advertise_host: "{{ private_ip | default(hostvars[inventory_hostname].ansible_host | default(inventory_hostname), true) }}"
+_ha_bootstrap_endpoint: "http://{{ hostvars[groups['ha_cluster'] | first].private_ip | default(hostvars[groups['ha_cluster'] | first].ansible_host | default(groups['ha_cluster'] | first), true) }}:2379"
+
 pgcli_addons:
   - type: etcd
     name: etcd
     state: present
-    args: "{{ ['--cluster', 'ha', '--advertise-host', ansible_host] + (['--join', 'http://' + hostvars[groups['ha_cluster'] | first].ansible_host + ':2379'] if inventory_hostname != (groups['ha_cluster'] | first) else []) }}"
+    args: "{{ ['--cluster', 'ha', '--advertise-host', _ha_advertise_host] + (['--join', _ha_bootstrap_endpoint] if inventory_hostname != (groups['ha_cluster'] | first) else []) }}"
 
 pg_ha_cluster:
   scope: pgcluster
@@ -24,9 +29,9 @@ pg_ha_cluster:
     - ha2
     - ha3
   dcs_endpoints:
-    - "{{ hostvars[groups['ha_cluster'][0]].ansible_host }}:2379"
-    - "{{ hostvars[groups['ha_cluster'][1]].ansible_host }}:2379"
-    - "{{ hostvars[groups['ha_cluster'][2]].ansible_host }}:2379"
+    - "{{ hostvars[groups['ha_cluster'][0]].private_ip | default(hostvars[groups['ha_cluster'][0]].ansible_host | default(groups['ha_cluster'][0]), true) }}:2379"
+    - "{{ hostvars[groups['ha_cluster'][1]].private_ip | default(hostvars[groups['ha_cluster'][1]].ansible_host | default(groups['ha_cluster'][1]), true) }}:2379"
+    - "{{ hostvars[groups['ha_cluster'][2]].private_ip | default(hostvars[groups['ha_cluster'][2]].ansible_host | default(groups['ha_cluster'][2]), true) }}:2379"
   state: started
   autostart: true
 
