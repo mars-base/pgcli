@@ -104,6 +104,13 @@
     _pg_ha_member_cfg: >-
       {{ (((_pg_ha_cfg.get('addons') or {}).get('patroni') or {}).get(pg_ha_cluster_item.scope) or {}).get('members', {}).get(_pg_ha_member, {}) }}
 
+# Configure S3 before the member exists so `ha create` renders archive
+# parameters immediately. For members created earlier, the same setup
+# reconciles them (see backup_s3.yml).
+- name: Configure the S3 backup repository
+  ansible.builtin.include_tasks: backup_s3.yml
+  when: _pg_ha_s3_enabled | bool
+
 - name: Create the bootstrap member
   ansible.builtin.command:
     argv: >-

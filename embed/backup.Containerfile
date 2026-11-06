@@ -1,6 +1,8 @@
 FROM docker.io/library/debian:13-slim
 
-# Add PostgreSQL APT repository to get the same pgbackrest version as postgres:18
+# Add PostgreSQL APT repository to get pgbackrest. Pin the exact version the
+# Patroni member image installs: pgBackRest's remote protocol requires both
+# ends to run the same version.
 # Unset proxy env vars so curl doesn't try to connect to a local proxy inside build.
 RUN apt-get update && apt-get install -y curl ca-certificates gnupg \
     && unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY \
@@ -8,7 +10,7 @@ RUN apt-get update && apt-get install -y curl ca-certificates gnupg \
        gpg --dearmor -o /usr/share/keyrings/pgdg.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt trixie-pgdg main" \
        > /etc/apt/sources.list.d/pgdg.list \
-    && apt-get update && apt-get install -y pgbackrest openssh-client \
+    && apt-get update && apt-get install -y pgbackrest=2.59.3* openssh-client \
     && rm -rf /var/lib/apt/lists/* \
     # Ensure postgres user/group has uid/gid 999. debian:13-slim ships
     # postgres with uid/gid ~101; systemd dep pulls in systemd-journal at

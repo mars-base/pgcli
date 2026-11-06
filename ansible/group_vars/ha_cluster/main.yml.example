@@ -33,6 +33,32 @@ pgcli_namespaces:
 # coexist in hosts.ini; every ha_cluster points at exactly one of them.
 pg_ha_etcd_group: ha_etcd
 
+# Shared S3 repository for WAL archiving and PITR. When pgcli_backup_s3_host
+# (or pgcli_backup_s3_endpoint) is set, pg_ha runs `pg backup setup` for every
+# namespace config before creating members, so archive parameters are present
+# from the first start; on existing members it reconciles them automatically.
+# Leave both empty to skip S3 (local snapshot backups still work, but WAL
+# archiving and PITR do not). The endpoint is <private_ip>:<port> of
+# pgcli_backup_s3_host; its CA is copied from that pgcli-managed store. The
+# secret key lives in group_vars/ha_cluster/secrets.yaml (gitignored).
+pgcli_backup_s3_host: s3-01
+pgcli_backup_s3_port: 9000
+pgcli_backup_s3_bucket: pgbackup
+pgcli_backup_s3_access_key: admin
+# Real deployments keep the secret in group_vars/ha_cluster/secrets.yaml;
+# this placeholder is listed so the variable is easy to find.
+pgcli_backup_s3_secret_key: "<secret-key>"
+# Optional extras (defaults shown):
+# pgcli_backup_s3_region: us-east-1
+# pgcli_backup_s3_path: /pgbackrest
+# pgcli_backup_s3_no_verify_tls: false
+# pgcli_backup_s3_ca_file: /path/to/ca.crt
+# pgcli_backup_s3_ca_sha256: "<sha256>"
+#
+# A store that is not a pgcli-managed inventory host: omit
+# pgcli_backup_s3_host, set pgcli_backup_s3_endpoint to host:port (no scheme)
+# instead, and the role falls back to `pg backup fetch-ca`.
+
 # Patroni reaches the etcd DCS through the hosts in [ha_etcd] (their etcd
 # member config lives in group_vars/ha_etcd).
 _ha_dcs_endpoints: >-

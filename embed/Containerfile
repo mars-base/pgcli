@@ -1,6 +1,8 @@
 FROM docker.io/library/postgres:18
 
-RUN apt-get update && apt-get install -y pgbackrest openssh-server \
+# pgBackRest's remote protocol requires the backup container to run the exact
+# same version, so pin it identically in all three runtime images.
+RUN apt-get update && apt-get install -y pgbackrest=2.59.3* openssh-server \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /var/run/sshd /home/postgres/.ssh /var/log/pgbackrest \
     && chmod 700 /home/postgres/.ssh \

@@ -45,3 +45,15 @@
   roles:
     - role: pg_ha
       tags: [ha]
+
+# Runs after every member exists (the previous play is serial, so a single
+# pass cannot see the complete topology). Each host refreshes the cluster-wide
+# backup key set and creates/verifies the shared pgBackRest stanza.
+- name: Patroni HA backup convergence
+  hosts: ha_cluster
+  gather_facts: false
+  roles:
+    - role: pg_ha
+      tags: [ha]
+      vars:
+        pg_ha_converge_only: true

@@ -8,6 +8,11 @@
     # Patroni members talk over the private network; on public clouds
     # ansible_host is often the EIP, so advertise private_ip when defined.
     _pg_ha_advertise_host: "{{ private_ip | default(hostvars[inventory_hostname].ansible_host | default(inventory_hostname), true) }}"
+    # S3 is the backup repository only when configured: an empty or missing
+    # pgcli_backup_s3_host/endpoint keeps the local snapshot-only setup.
+    _pg_ha_s3_enabled: >-
+      {{ (pgcli_backup_s3_host | default('', true) | length > 0) or
+         (pgcli_backup_s3_endpoint | default('', true) | length > 0) }}
 
 - name: Validate HA inputs
   ansible.builtin.assert:
@@ -22,3 +27,18 @@
   loop: "{{ _pg_ha_clusters }}"
   loop_control:
     loop_var: pg_ha_cluster_item
+  when: not (pg_ha_converge_only | default(false) | bool)
+
+# apply.yaml runs the role a second time, without serial, after every member
+# exists: each host can then merge the complete backup key set and create or
+# verify the shared stanzas. The serial reconcile pass cannot do this because
+# the topology (and therefore cross-host trust) is incomplete for the hosts
+# that run before the last member is created.
+- name: Converge the S3 backup setup on every host
+  ansible.builtin.include_tasks: backup_converge.yml
+  loop: "{{ _pg_ha_clusters }}"
+  loop_control:
+    loop_var: pg_ha_cluster_item
+  when:
+    - pg_ha_converge_only | default(false) | bool
+    - _pg_ha_s3_enabled | bool

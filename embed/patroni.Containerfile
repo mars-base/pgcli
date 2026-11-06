@@ -18,7 +18,7 @@ FROM docker.io/library/postgres:18
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
          python3 python3-pip vim-tiny \
-         pgbackrest=2.59.1* openssh-server \
+         pgbackrest=2.59.3* openssh-server \
     && rm -rf /var/lib/apt/lists/* \
     && pip3 install --no-cache-dir --break-system-packages "patroni[psycopg3,etcd3]==4.1.5" \
     && mkdir -p /var/run/sshd /home/postgres/.ssh /var/log/pgbackrest \

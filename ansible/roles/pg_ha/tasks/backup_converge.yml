@@ -1,0 +1,40 @@
+---
+# Final S3 pass, run by apply.yaml as a separate non-serial play after every
+# Patroni member exists. Unlike the pre-create setup in backup_s3.yml, these
+# tasks fail hard: by now the full member topology is in the DCS, so every
+# host can merge all backup public keys and stanza-create must succeed.
+- name: Resolve the cluster namespace entry
+  ansible.builtin.set_fact:
+    _pg_ha_ns_entry: >-
+      {{ (pgcli_namespaces | default([]) | selectattr('name', 'equalto', pg_ha_cluster_item.namespace | default('', true)) | list | first | default({}))
+         if (pg_ha_cluster_item.namespace | default('', true) | length > 0) else {} }}
+
+- name: Resolve the cluster config path
+  ansible.builtin.set_fact:
+    _pg_ha_cfg_path: >-
+      {{ ((_pg_ha_ns_entry.path | regex_replace('/+$', '')) ~ '/pg.yaml')
+         if (pg_ha_cluster_item.namespace | default('', true) | length > 0) else pgcli_config_path }}
+
+- name: Converge the S3 backup setup
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ _pg_ha_cfg_path }}"
+      - backup
+      - setup
+  no_log: true
+  register: _pg_ha_s3_converge
+  until: _pg_ha_s3_converge.rc == 0
+  retries: 18
+  delay: 10
+  failed_when: false
+
+- name: Require the S3 backup setup to converge
+  ansible.builtin.assert:
+    that:
+      - _pg_ha_s3_converge.rc == 0
+    fail_msg: >-
+      `pg backup setup` did not converge for cluster
+      {{ pg_ha_cluster_item.scope }} on {{ inventory_hostname }}:
+      {{ _pg_ha_s3_converge.stderr | default('') | trim | truncate(1000) }}
