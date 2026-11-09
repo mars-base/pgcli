@@ -134,12 +134,10 @@ S3 与 HA 分组见本站的对应页面。
 `group_vars/ha_etcd/main.yml.example` 为每台主机生成一个 etcd 成员：
 
 ```yaml
-pg_etcd_state: present
-
 pgcli_addons:
   - type: etcd
     name: "etcd-{{ groups[pg_etcd_group].index(inventory_hostname) + 1 }}"
-    state: "{{ pg_etcd_state }}"
+    state: present
     autostart: true
     args: "{{ ['--cluster', 'ha', '--advertise-host', _ha_etcd_advertise_host]
              + (['--join', _ha_etcd_bootstrap_endpoint]
@@ -198,12 +196,8 @@ uv run ansible-playbook playbooks/apply.yaml --tags addon --limit ha_etcd
 
 ## etcd 生命周期
 
-`pg_etcd_state` 是分组级开关：
-
-```yaml
-pg_etcd_state: present   # 创建/收敛本地成员（默认）
-# pg_etcd_state: absent  # 移除本地成员
-```
+etcd 条目的 `state` 控制成员生命周期：`present`（插件默认值）创建/收敛本地
+成员，`absent` 移除本地成员。
 
 只有在 Patroni 集群销毁**之后**才能设为 `absent`：它们把该 etcd 当作 DCS。
 由于 `serial: 1`，成员按主机逐台移除；etcd 移除命令本身会删除数据目录。重建时

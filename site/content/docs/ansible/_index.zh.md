@@ -26,7 +26,7 @@ pgcli 仓库的 `ansible/` 目录把 CLI 变成声明式部署工具。不必在
 | `pg` 二进制、podman、主机配置 | `group_vars/all` 中的 `pgcli_*` 变量 | `pgcli` |
 | PostgreSQL 实例与只读副本 | `pgcli_instances` | `pg_instance` |
 | 插件（etcd、pgbouncer、MinIO 等） | `pgcli_addons` | `pg_addon` |
-| Patroni HA 集群及其 etcd DCS | `pg_ha_clusters`、`pg_etcd_state` | `pg_ha` |
+| Patroni HA 集群及其 etcd DCS | `pg_ha_clusters`、`pgcli_addons`（etcd） | `pg_ha`、`pg_addon` |
 | HA 集群前置的 HAProxy | `pg_ha_haproxy` | `pg_ha_haproxy` |
 | 备份用的独立 S3 兼容存储 | `pgcli_s3_*` | `pg_s3` |
 

@@ -26,12 +26,10 @@ _ha_etcd_advertise_host: "{{ private_ip | default(ansible_host, true) }}"
 _ha_etcd_client_endpoint: "{{ _ha_etcd_advertise_host }}:2379"
 _ha_etcd_bootstrap_endpoint: "http://{{ hostvars[groups[pg_etcd_group] | first].private_ip | default(...) }}:2379"
 
-pg_etcd_state: present   # present (default) | absent
-
 pgcli_addons:
   - type: etcd
     name: "etcd-{{ groups[pg_etcd_group].index(inventory_hostname) + 1 }}"
-    state: "{{ pg_etcd_state }}"
+    state: present
     autostart: true
     args: "{{ ['--cluster', 'ha', '--advertise-host', _ha_etcd_advertise_host]
              + (['--join', _ha_etcd_bootstrap_endpoint]
@@ -39,8 +37,8 @@ pgcli_addons:
 ```
 
 `_ha_etcd_client_endpoint` is consumed by `ha_cluster` to build the Patroni DCS
-endpoint list. `pg_etcd_state: absent` destroys the group (remove the Patroni
-clusters first).
+endpoint list. Setting the entry's `state: absent` destroys the group (remove
+the Patroni clusters first).
 
 ## Patroni: `group_vars/ha_cluster/main.yml.example`
 
@@ -160,7 +158,8 @@ The state switches are independent; destroy in dependency order:
 1. HAProxy: set `pg_ha_haproxy.clusters[].state: absent`, run `--tags haproxy`.
 2. Patroni clusters: set `pg_ha_clusters[].state: absent` (add `clean_data:
    true` to delete member data dirs), run `--tags ha`.
-3. etcd: set `pg_etcd_state: absent`, run `--tags addon`.
+3. etcd: set `state: absent` on the etcd entry in `group_vars/ha_etcd`, run
+   `--tags addon`.
 
 The HA plays clear the DCS scope on the first host and remove each host's local
 members serially; later hosts are a no-op for the scope. `clean_data` deletes

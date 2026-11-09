@@ -117,10 +117,11 @@ pass by design.
 | Add-on | `pgcli_addons[].state` | `present` | Removes the add-on container + config entry; `clean_data` applies where the add-on supports it |
 | HA cluster | `pg_ha_clusters[].state` | `started` | Removes local members and clears the DCS scope; `clean_data: true` deletes member data dirs (empty `addon/patroni/<scope>` dir remains) |
 | HAProxy | `pg_ha_haproxy.clusters[].state` | `present` | Removes the proxy instance from the proxy host and prunes its config |
-| etcd group | `pg_etcd_state` | `present` | Removes the local etcd member; its data dir is always deleted |
 
-Destroy order for HA: HAProxy → Patroni clusters → etcd. Backup containers,
-pgBackRest configuration and S3 backups are not removed by the HA plays.
+Destroy order for HA: HAProxy → Patroni clusters → etcd. etcd is an add-on
+entry (`pgcli_addons[].state`); its removal always deletes the data dir.
+Backup containers, pgBackRest configuration and S3 backups are not removed by
+the HA plays.
 S3 stores are deploy-only in this playbook; remove one with
 `pg addon remove <type> --name <name> --clean-data` on the node.
 

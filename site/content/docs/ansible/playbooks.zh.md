@@ -110,10 +110,10 @@ uv run ansible-playbook playbooks/ha-status.yaml -l db-02
 | 插件 | `pgcli_addons[].state` | `present` | 删除插件容器与配置项；支持的插件可用 `clean_data` |
 | HA 集群 | `pg_ha_clusters[].state` | `started` | 删除本地成员并清理 DCS scope；`clean_data: true` 删除成员数据目录（保留空的 `addon/patroni/<scope>` 目录） |
 | HAProxy | `pg_ha_haproxy.clusters[].state` | `present` | 从代理主机移除实例并清理配置 |
-| etcd 分组 | `pg_etcd_state` | `present` | 移除本地 etcd 成员；数据目录总会删除 |
 
-HA 的销毁顺序：HAProxy → Patroni 集群 → etcd。HA 相关 play 不会删除备份容器、
-pgBackRest 配置和 S3 备份。S3 存储在本 playbook 中只负责部署；销毁时在对应节点
+HA 的销毁顺序：HAProxy → Patroni 集群 → etcd。etcd 是插件条目
+（`pgcli_addons[].state`），移除时总会删除数据目录。HA 相关 play 不会删除
+备份容器、pgBackRest 配置和 S3 备份。S3 存储在本 playbook 中只负责部署；销毁时在对应节点
 执行 `pg addon remove <type> --name <name> --clean-data`。
 
 ## 日志

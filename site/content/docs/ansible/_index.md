@@ -28,7 +28,7 @@ the hosts to that state and is safe to repeat.
 | `pg` binary, podman, host config | `pgcli_*` variables in `group_vars/all` | `pgcli` |
 | PostgreSQL instances and read-only replicas | `pgcli_instances` | `pg_instance` |
 | Add-ons (etcd, pgbouncer, MinIO, …) | `pgcli_addons` | `pg_addon` |
-| Patroni HA clusters and their etcd DCS | `pg_ha_clusters`, `pg_etcd_state` | `pg_ha` |
+| Patroni HA clusters and their etcd DCS | `pg_ha_clusters`, `pgcli_addons` (etcd) | `pg_ha`, `pg_addon` |
 | HAProxy in front of HA clusters | `pg_ha_haproxy` | `pg_ha_haproxy` |
 | Standalone S3-compatible stores for backups | `pgcli_s3_*` | `pg_s3` |
 

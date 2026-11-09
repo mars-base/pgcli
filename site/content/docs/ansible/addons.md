@@ -142,12 +142,10 @@ with the S3 and HA groups covered in their own pages here.
 `group_vars/ha_etcd/main.yml.example` builds one etcd member per host:
 
 ```yaml
-pg_etcd_state: present
-
 pgcli_addons:
   - type: etcd
     name: "etcd-{{ groups[pg_etcd_group].index(inventory_hostname) + 1 }}"
-    state: "{{ pg_etcd_state }}"
+    state: present
     autostart: true
     args: "{{ ['--cluster', 'ha', '--advertise-host', _ha_etcd_advertise_host]
              + (['--join', _ha_etcd_bootstrap_endpoint]
@@ -211,12 +209,8 @@ uv run ansible-playbook playbooks/apply.yaml --tags addon --limit ha_etcd
 
 ## etcd lifecycle
 
-`pg_etcd_state` is the group-level switch:
-
-```yaml
-pg_etcd_state: present   # create/reconcile the local member (default)
-# pg_etcd_state: absent  # remove the local member
-```
+The etcd entry's `state` controls the member lifecycle: `present` (the add-on
+default) creates/reconciles the local member, `absent` removes it.
 
 Set it to `absent` only **after** the Patroni clusters are gone: they use this
 etcd as their DCS. With `serial: 1`, members are removed one host at a time;

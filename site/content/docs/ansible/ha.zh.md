@@ -25,12 +25,10 @@ _ha_etcd_advertise_host: "{{ private_ip | default(ansible_host, true) }}"
 _ha_etcd_client_endpoint: "{{ _ha_etcd_advertise_host }}:2379"
 _ha_etcd_bootstrap_endpoint: "http://{{ hostvars[groups[pg_etcd_group] | first].private_ip | default(...) }}:2379"
 
-pg_etcd_state: present   # present（默认）| absent
-
 pgcli_addons:
   - type: etcd
     name: "etcd-{{ groups[pg_etcd_group].index(inventory_hostname) + 1 }}"
-    state: "{{ pg_etcd_state }}"
+    state: present
     autostart: true
     args: "{{ ['--cluster', 'ha', '--advertise-host', _ha_etcd_advertise_host]
              + (['--join', _ha_etcd_bootstrap_endpoint]
@@ -38,7 +36,7 @@ pgcli_addons:
 ```
 
 `_ha_etcd_client_endpoint` 被 `ha_cluster` 用来构造 Patroni 的 DCS 端点列表。
-`pg_etcd_state: absent` 会销毁整个分组（必须先销毁 Patroni 集群）。
+把条目的 `state` 设为 `absent` 会销毁整个分组（必须先销毁 Patroni 集群）。
 
 ## Patroni：`group_vars/ha_cluster/main.yml.example`
 
@@ -155,7 +153,8 @@ uv run ansible-playbook playbooks/ha-status.yaml
    `--tags haproxy`。
 2. Patroni 集群：设置 `pg_ha_clusters[].state: absent`（要删除成员数据目录再加
    `clean_data: true`），运行 `--tags ha`。
-3. etcd：设置 `pg_etcd_state: absent`，运行 `--tags addon`。
+3. etcd：把 `group_vars/ha_etcd` 中 etcd 条目的 `state` 设为 `absent`，运行
+   `--tags addon`。
 
 HA 相关 play 会在首台主机清理 DCS scope，并串行移除各主机的本地成员；后续主机
 对 scope 是 no-op。`clean_data` 删除成员数据目录，但保留空的
