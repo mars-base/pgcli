@@ -129,7 +129,7 @@ it later does not rewrite an existing `pg.yaml`.
 
 ```bash
 cd ansible
-uv run ansible-inventory --list >/dev/null   # validates hosts.ini
+uv run ansible-inventory --graph   # validates hosts.ini and prints the groups
 uv run ansible-playbook playbooks/ping.yaml
 uv run ansible-playbook playbooks/apply.yaml --limit single
 ```

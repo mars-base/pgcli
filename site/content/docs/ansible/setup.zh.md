@@ -121,7 +121,7 @@ ansible_group_priority=20
 
 ```bash
 cd ansible
-uv run ansible-inventory --list >/dev/null   # 校验 hosts.ini
+uv run ansible-inventory --graph   # 校验 hosts.ini 并打印分组结构
 uv run ansible-playbook playbooks/ping.yaml
 uv run ansible-playbook playbooks/apply.yaml --limit single
 ```
