@@ -28,9 +28,54 @@
 - name: Install the add-on
   ansible.builtin.command:
     argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'install', addon.type] + (['-i', addon.instance] if addon.instance is defined else ['--name', addon.name]) + (['--force'] if _addon_force | bool else []) + (addon.args | default([])) }}"
+  register: _addon_install
   when:
     - _addon_state == 'present'
     - (not (_addon_installed | bool)) or (_addon_force | bool)
+
+- name: Refresh the pgcli config after installing
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - config
+      - show
+  register: _addon_config_refresh
+  changed_when: false
+  when: _addon_install is changed
+
+- name: Apply the refreshed pgcli config
+  ansible.builtin.set_fact:
+    pgcli_cfg: "{{ _addon_config_refresh.stdout | from_yaml }}"
+  when: _addon_config_refresh.stdout is defined
+
+- name: Resolve the current add-on entry
+  ansible.builtin.set_fact:
+    _addon_cfg: >-
+      {{ ( ((pgcli_cfg.get('instances') or {}).get(addon.instance, {}).get('addons') or {}).get(_addon_key)
+           if addon.instance is defined else
+           ((pgcli_cfg.get('addons') or {}).get(_addon_key) or {}).get(addon.name) )
+         | default({}, true) }}
+    _addon_autostart: "{{ addon.autostart | default(false) | bool }}"
+
+- name: Enable add-on autostart
+  ansible.builtin.command:
+    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'autostart', 'enable'] + (['-i', addon.instance] if addon.instance is defined else ['--name', addon.name]) + ['--' + (addon.type | replace('_', '-'))] }}"
+  when:
+    - _addon_state == 'present'
+    - _addon_cfg | length > 0
+    - _addon_autostart | bool
+    - not ((_addon_cfg.autostart | default(false)) | bool)
+
+- name: Disable add-on autostart
+  ansible.builtin.command:
+    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'autostart', 'disable'] + (['-i', addon.instance] if addon.instance is defined else ['--name', addon.name]) + ['--' + (addon.type | replace('_', '-'))] }}"
+  when:
+    - _addon_state == 'present'
+    - _addon_cfg | length > 0
+    - not (_addon_autostart | bool)
+    - (_addon_cfg.autostart | default(false)) | bool
 
 # A fresh etcd member returns from `addon install` before it can answer
 # requests. The next host in this serial:1 play joins it, so wait here before

@@ -13,6 +13,7 @@
     _s3_console_port: "{{ pgcli_s3_console_port | default(9001) | int }}"
     _s3_listen: "{{ pgcli_s3_listen | default('0.0.0.0') }}"
     _s3_tls: "{{ pgcli_s3_tls | default(true) | bool }}"
+    _s3_autostart: "{{ pgcli_s3_autostart | default(true) | bool }}"
     _s3_root_user: "{{ pgcli_s3_root_user | default('admin') }}"
     # Server-side rules, not enforced here: minio/silo require >= 8
     # characters (no upper limit), rustfs has no minimum. pgcli generates a

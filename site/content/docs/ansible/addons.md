@@ -19,6 +19,7 @@ Add-ons are declared in `pgcli_addons` (empty by default in
 | `args` | List of flags appended verbatim to `pg addon install` |
 | `clean_data` | With `state: absent`, also delete data where the add-on supports it |
 | `force` | With `state: present`, recreate with `pg addon install --force` |
+| `autostart` | `true` enables boot autostart, `false` (default) disables it |
 
 Every entry needs `type` and exactly one of `name` or `instance`; the role
 asserts this before doing anything.
@@ -34,6 +35,7 @@ pgcli_addons:
   - type: etcd
     name: "etcd-{{ groups[pg_etcd_group].index(inventory_hostname) + 1 }}"
     state: "{{ pg_etcd_state }}"
+    autostart: true
     args: "{{ ['--cluster', 'ha', '--advertise-host', _ha_etcd_advertise_host]
              + (['--join', _ha_etcd_bootstrap_endpoint]
                 if inventory_hostname != (groups[pg_etcd_group] | first) else []) }}"
@@ -84,7 +86,9 @@ uv run ansible-playbook playbooks/apply.yaml --tags addon --limit ha_etcd
 ```
 
 - `state: present` installs only when the name/instance is missing from the
-  config, unless `force: true` is set.
+  config, unless `force: true` is set. It also reconciles `autostart` with
+  `pg autostart enable|disable --<type> ...`; leaving it unset disables boot
+  autostart for the add-on.
 - `state: absent` calls `pg addon remove <type> --name <name>` (or `-i
   <instance>`); add `clean_data: true` for the add-ons that keep data by
   default. The etcd remove path always deletes its data directory.

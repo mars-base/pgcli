@@ -18,6 +18,7 @@ weight: 40
 | `args` | 原样追加到 `pg addon install` 的参数列表 |
 | `clean_data` | 与 `state: absent` 搭配，在插件支持时一并删除数据 |
 | `force` | 与 `state: present` 搭配，用 `pg addon install --force` 重建 |
+| `autostart` | `true` 启用开机自启，`false`（默认）关闭 |
 
 每个条目必须有 `type`，并且 `name`/`instance` 恰好设置一个；角色会在执行前断言。
 
@@ -32,6 +33,7 @@ pgcli_addons:
   - type: etcd
     name: "etcd-{{ groups[pg_etcd_group].index(inventory_hostname) + 1 }}"
     state: "{{ pg_etcd_state }}"
+    autostart: true
     args: "{{ ['--cluster', 'ha', '--advertise-host', _ha_etcd_advertise_host]
              + (['--join', _ha_etcd_bootstrap_endpoint]
                 if inventory_hostname != (groups[pg_etcd_group] | first) else []) }}"
@@ -79,7 +81,8 @@ uv run ansible-playbook playbooks/apply.yaml --tags addon --limit ha_etcd
 ```
 
 - `state: present`：仅当配置中缺少该 name/instance 时才安装；设置
-  `force: true` 会强制重建。
+  `force: true` 会强制重建。同时按 `autostart` 调用
+  `pg autostart enable|disable --<type> ...` 收敛开机自启；未设置时默认关闭。
 - `state: absent`：执行 `pg addon remove <type> --name <name>`（或 `-i
   <instance>`）；对默认保留数据的插件可加 `clean_data: true`。etcd 的移除路径
   总会删除其数据目录。

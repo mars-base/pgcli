@@ -40,4 +40,5 @@
       - type: "{{ _s3_type }}"
         name: "{{ _s3_name }}"
         args: "{{ _s3_install_args }}"
+        autostart: "{{ _s3_autostart }}"
         force: "{{ _s3_force | bool }}"

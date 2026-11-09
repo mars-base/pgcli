@@ -77,5 +77,8 @@ pgcli_s3_drives: []
 # after editing other install flags:
 # pgcli_s3_force: true
 
+# Start the store at boot (pg autostart enable --silo --name <name>).
+pgcli_s3_autostart: true
+
 pgcli_s3_buckets:
   - pgbackup

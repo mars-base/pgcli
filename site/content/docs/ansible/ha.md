@@ -32,6 +32,7 @@ pgcli_addons:
   - type: etcd
     name: "etcd-{{ groups[pg_etcd_group].index(inventory_hostname) + 1 }}"
     state: "{{ pg_etcd_state }}"
+    autostart: true
     args: "{{ ['--cluster', 'ha', '--advertise-host', _ha_etcd_advertise_host]
              + (['--join', _ha_etcd_bootstrap_endpoint]
                 if inventory_hostname != (groups[pg_etcd_group] | first) else []) }}"
