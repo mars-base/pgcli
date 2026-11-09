@@ -2,7 +2,11 @@
 # Runs on every ha_cluster host (serial: 1 in apply.yaml) for clusters with
 # state: absent. Members only exist on their own host, so each host removes its
 # local members; `pg ha remove --scope-all` also clears the DCS scope, which is
-# a clean no-op once a previous host already removed it.
+# a clean no-op once a previous host already removed it. Autostart targets for
+# the local members are disabled first so the boot service cannot resurrect a
+# member at the next reboot.
+# clean_data deletes each member's data dir but leaves the now-empty
+# addon/patroni/<scope> directory in place.
 # etcd, the backup container and the pgBackRest stanza/backups are left intact:
 # they are shared/final copies, remove them separately if that is the intent.
 

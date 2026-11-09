@@ -81,10 +81,13 @@ pgcli_backup_s3_secret_key: "<secret-key>"
 # CREATE EXTENSION (default: postgres). Removing an entry from the list does
 # not uninstall it; use `pg ha extension remove` for that.
 #
-# state: started | stopped | absent. absent removes this host's local members
-# and clears the DCS scope (serial across ha_cluster); clean_data: true also
-# deletes the member data dirs. etcd, the backup container and the pgBackRest
-# stanza/backups are left intact. Remove the matching HAProxy entry too.
+# state: started | stopped | absent. absent runs on each ha_cluster host in
+# serial order: it disables the local members' autostart, removes the members
+# and clears the DCS scope (hosts after the first are a clean no-op).
+# clean_data: true also deletes each member's data dir; the now-empty
+# addon/patroni/<scope> directory itself is left behind. etcd, the backup
+# container and the pgBackRest stanza/backups are shared or final copies, so
+# they are left intact. Remove the matching HAProxy entry too (state: absent).
 pg_ha_clusters:
   - namespace: ha
     scope: pgcluster
