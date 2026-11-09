@@ -121,6 +121,7 @@ pg_ha_haproxy:
   mode: split          # rw/ro listeners
   max_lag: 1MB
   listen: 0.0.0.0
+  autostart: true      # default for all entries; override per cluster
   clusters:
     - namespace: ha
       name: lb-ha
@@ -132,7 +133,9 @@ pg_ha_haproxy:
 
 The proxy targets every `[ha_cluster]` member via `--node`; run it on a host
 that carries the namespace config. Both instances share one host network, so
-their ports must differ.
+their ports must differ. `autostart` reconciles
+`pg autostart enable|disable --haproxy --name <name>` per instance; it defaults
+to `false` when unset.
 
 ## Run it
 

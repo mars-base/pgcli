@@ -17,6 +17,9 @@
     _pg_hap_rw: "{{ pg_ha_haproxy_item.rw_port | default(0) | int }}"
     _pg_hap_ro: "{{ pg_ha_haproxy_item.ro_port | default(0) | int }}"
     _pg_hap_stats: "{{ pg_ha_haproxy_item.stats_port | default(0) | int }}"
+    _pg_hap_autostart: >-
+      {{ pg_ha_haproxy_item.autostart
+         | default(_pg_hap_deployment.autostart | default(false)) | bool }}
 
 - name: Resolve the Patroni cluster
   ansible.builtin.set_fact:
@@ -152,3 +155,39 @@
     (_pg_hap_cur.stats_port | default(0, true) | int) != (_pg_hap_stats | int) or
     (_pg_hap_cur.replica_max_lag | default('', true)) != _pg_hap_lag or
     (_pg_hap_cur.targets | default([])) != _pg_hap_targets
+  register: _pg_hap_install
+
+- name: Refresh the namespace config after installing
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ _pg_hap_cfg }}"
+      - config
+      - show
+  register: _pg_hap_cfg_after
+  changed_when: false
+  when: _pg_hap_install is changed
+
+- name: Resolve the freshly installed instance
+  ansible.builtin.set_fact:
+    _pg_hap_cur: >-
+      {{ (((_pg_hap_cfg_after.stdout | from_yaml).get('addons') or {})
+          .get('haproxy') or {}).get(_pg_hap_name) }}
+  when: _pg_hap_install is changed
+
+- name: Enable HAProxy autostart
+  ansible.builtin.command:
+    argv: "{{ [pgcli_install_path, '-c', _pg_hap_cfg, 'autostart', 'enable',
+              '--haproxy', '--name', _pg_hap_name] }}"
+  when:
+    - _pg_hap_autostart | bool
+    - not ((_pg_hap_cur.autostart | default(false)) | bool)
+
+- name: Disable HAProxy autostart
+  ansible.builtin.command:
+    argv: "{{ [pgcli_install_path, '-c', _pg_hap_cfg, 'autostart', 'disable',
+              '--haproxy', '--name', _pg_hap_name] }}"
+  when:
+    - not (_pg_hap_autostart | bool)
+    - (_pg_hap_cur.autostart | default(false)) | bool

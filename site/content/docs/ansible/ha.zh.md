@@ -117,6 +117,7 @@ pg_ha_haproxy:
   mode: split          # 读写/只读监听
   max_lag: 1MB
   listen: 0.0.0.0
+  autostart: true      # 所有条目的默认值；可按 cluster 覆盖
   clusters:
     - namespace: ha
       name: lb-ha
@@ -127,7 +128,8 @@ pg_ha_haproxy:
 ```
 
 代理通过 `--node` 指向 `[ha_cluster]` 的全部成员；应运行在带有对应 namespace
-配置的主机上。两个实例共享同一个主机网络，端口必须不同。
+配置的主机上。两个实例共享同一个主机网络，端口必须不同。`autostart` 会按实例
+收敛 `pg autostart enable|disable --haproxy --name <name>`；未设置时默认 `false`。
 
 ## 运行
 

@@ -125,12 +125,15 @@ pg_ha_clusters:
 #
 # Each cluster entry takes state: present (default, create/reconcile) or
 # absent (remove the instance from the proxy host and prune its config).
+# autostart (top-level default, overridable per entry) brings the proxy up on
+# host boot via pg autostart enable --haproxy.
 pg_ha_haproxy_host: "{{ groups['ha_cluster'] | first }}"
 pg_ha_haproxy:
   enabled: true
   mode: split
   max_lag: 1MB
   listen: 0.0.0.0
+  autostart: true
   clusters:
     - namespace: ha
       name: lb-ha
