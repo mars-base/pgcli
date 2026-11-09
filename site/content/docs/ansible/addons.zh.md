@@ -19,7 +19,7 @@ prometheus、kafka 等）。
 | `instance` | 与 `name` 二选一：把插件挂到某个 pgcli 实例上 |
 | `state` | `present`（默认）或 `absent` |
 | `args` | 原样追加到 `pg addon install` 的参数列表 |
-| `clean_data` | 与 `state: absent` 搭配，在插件支持时一并删除数据 |
+| `clean_data` | 与 `state: absent` 搭配，在插件支持时一并删除数据（默认 `true`，设为 `false` 保留数据） |
 | `force` | 与 `state: present` 搭配，用 `pg addon install --force` 重建 |
 | `autostart` | `true`（默认）启用开机自启，`false` 关闭 |
 
@@ -140,8 +140,8 @@ uv run ansible-playbook playbooks/apply.yaml --tags addon --limit ha_etcd
   `force: true` 会强制重建。同时按 `autostart` 调用
   `pg autostart enable|disable --<type> ...` 收敛开机自启；未设置时默认开启。
 - `state: absent`：执行 `pg addon remove <type> --name <name>`（或 `-i
-  <instance>`）；对默认保留数据的插件可加 `clean_data: true`。etcd 的移除路径
-  总会删除其数据目录。
+  <instance>`）；默认一并删除数据，插件支持时可用 `clean_data: false` 保留。
+  etcd 的移除路径总会删除其数据目录。
 - 未声明插件的 `pgcli_addons: []` 主机是 no-op，所以对整个 inventory 执行
   `--tags addon` 是安全的。
 

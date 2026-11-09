@@ -109,7 +109,7 @@
 
 - name: Remove the add-on
   ansible.builtin.command:
-    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'remove', addon.type] + (['-i', addon.instance] if addon.instance is defined else ['--name', addon.name]) + (['--clean-data'] if addon.clean_data | default(false) else []) }}"
+    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'remove', addon.type] + (['-i', addon.instance] if addon.instance is defined else ['--name', addon.name]) + (['--clean-data'] if addon.clean_data | default(true) else []) }}"
   when:
     - _addon_state == 'absent'
     - _addon_installed | bool

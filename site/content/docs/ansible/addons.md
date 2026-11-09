@@ -20,7 +20,7 @@ haproxy, minio/silo/rustfs, redis, nginx, prometheus, kafka, and so on).
 | `instance` | Instead of `name`: scope the add-on to a pgcli instance |
 | `state` | `present` (default) or `absent` |
 | `args` | List of flags appended verbatim to `pg addon install` |
-| `clean_data` | With `state: absent`, also delete data where the add-on supports it |
+| `clean_data` | With `state: absent`, delete data where the add-on supports it (default `true`; set `false` to keep it) |
 | `force` | With `state: present`, recreate with `pg addon install --force` |
 | `autostart` | `true` (default) enables boot autostart, `false` disables it |
 
@@ -148,8 +148,9 @@ uv run ansible-playbook playbooks/apply.yaml --tags addon --limit ha_etcd
   `pg autostart enable|disable --<type> ...`; leaving it unset enables boot
   autostart for the add-on.
 - `state: absent` calls `pg addon remove <type> --name <name>` (or `-i
-  <instance>`); add `clean_data: true` for the add-ons that keep data by
-  default. The etcd remove path always deletes its data directory.
+  <instance>`); data is deleted by default, and `clean_data: false` keeps it
+  where the add-on supports that. The etcd remove path always deletes its data
+  directory.
 - A host with `pgcli_addons: []` is a no-op, so the play is safe to run with
   `--tags addon` on the whole inventory.
 

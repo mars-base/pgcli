@@ -269,5 +269,5 @@ pgcli_instances: []
 
 # Add-ons on this host, consumed by the pg_addon role. Every entry accepts
 # type, name or instance, state, args, clean_data, force and autostart;
-# autostart defaults to true.
+# autostart defaults to true and clean_data defaults to true with state absent.
 pgcli_addons: []
