@@ -1,0 +1,46 @@
+---
+# Usage:
+#   cd ansible
+#   uv run ansible-playbook playbooks/ha-status.yaml
+#   uv run ansible-playbook playbooks/ha-status.yaml -l ha_cluster
+#   uv run ansible-playbook playbooks/ha-status.yaml -l debian12-02
+#
+# --limit accepts the ha_cluster group or any single host in it (any selected
+# host may read the shared DCS view). Without --limit the whole group is
+# targeted.
+#
+# Prints the live Patroni topology (role, state, LSN, lag) for every cluster
+# declared in pg_ha_clusters. The command runs once on the first host in the
+# play: all members share the same etcd DCS, so any one of them returns the
+# same cluster view.
+
+- name: Patroni HA status
+  hosts: ha_cluster
+  gather_facts: false
+
+  tasks:
+    - name: Read the status of every HA cluster
+      ansible.builtin.shell: >-
+        {{ pgcli_install_path }} -c {{ _ha_status_cfg }} ha status {{ item.scope }}
+      loop: "{{ pg_ha_clusters }}"
+      loop_control:
+        label: "{{ item.namespace | default('-') }}/{{ item.scope }}"
+      vars:
+        _ha_status_ns: >-
+          {{ (pgcli_namespaces | default([]) | selectattr('name', 'equalto', item.namespace | default('', true))
+              | list | first | default({}))
+             if (item.namespace | default('', true) | length > 0) else {} }}
+        _ha_status_cfg: >-
+          {{ ((_ha_status_ns.path | regex_replace('/+$', '')) ~ '/pg.yaml')
+             if (item.namespace | default('', true) | length > 0) else pgcli_config_path }}
+      register: _ha_status
+      changed_when: false
+      run_once: true
+
+    - name: Show the status tables
+      ansible.builtin.debug:
+        msg: "{{ item.stdout }}"
+      loop: "{{ _ha_status.results }}"
+      loop_control:
+        label: "{{ item.item.namespace | default('-') }}/{{ item.item.scope }}"
+      run_once: true
