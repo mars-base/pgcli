@@ -1,0 +1,6 @@
+---
+- name: Load the shared SeaweedFS root password
+  tags: [addon]
+  ansible.builtin.set_fact:
+    _addon_cluster_seaweedfs_root_password: "{{ lookup('file', addon_cluster_shared_dir ~ '/seaweedfs_root_password') }}"
+  no_log: true

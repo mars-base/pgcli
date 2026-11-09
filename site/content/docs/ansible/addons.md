@@ -109,9 +109,11 @@ cluster — not whether several independent copies can run on different hosts:
 - **Standalone + cluster**: installable either standalone or in cluster mode.
 - **Cluster only**: only installable as a cluster (a quorum is required).
 
-This repository's `group_vars` examples currently exercise the standalone
-form; the cluster forms are documented on each [add-on page](../../addon/),
-with the S3 and HA groups covered in their own pages here.
+This repository's `group_vars` examples exercise both forms: `addon_single`
+covers standalone add-ons and [Add-on clusters](./addon-cluster/) covers the
+multi-host `addon_cluster` group. The cluster form of each [add-on
+page](../../addon/) documents the product flags; the S3 and HA groups are
+covered in their own pages here.
 
 | Add-on | Installation | Notes |
 |--------|--------------|-------|

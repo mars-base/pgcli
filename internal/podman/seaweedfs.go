@@ -540,15 +540,15 @@ func (m *SeaweedfsManager) Remove(sc *config.SeaweedfsConfig, cleanData bool) er
 	for _, d := range m.resolveDriveDirs(sc) {
 		entries = append(entries, entry{d, "data directory"})
 	}
-	if sc.DataDir == "" {
-		// pgcli-rendered files only live under the instance dir when no
-		// DataDir override moved it elsewhere.
-		entries = append(entries,
-			entry{m.s3ConfigPath(sc), "s3.json"},
-			entry{m.filerConfigPath(sc), "filer.toml"},
-			entry{m.TLSDir(sc), "TLS dir"},
-		)
-	}
+	// pgcli renders s3.json/filer.toml next to the data dir even when a
+	// DataDir override moves the data; filer.toml and the TLS dir only exist
+	// when that instance actually uses them, and the removal loop skips paths
+	// that are not there.
+	entries = append(entries,
+		entry{m.s3ConfigPath(sc), "s3.json"},
+		entry{m.filerConfigPath(sc), "filer.toml"},
+		entry{m.TLSDir(sc), "TLS dir"},
+	)
 	if !cleanData {
 		for _, e := range entries {
 			fmt.Printf("  [OK] SeaweedFS %s kept: %s\n", e.label, e.path)

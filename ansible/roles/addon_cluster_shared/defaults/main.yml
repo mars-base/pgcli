@@ -1,0 +1,38 @@
+---
+# Shared material for multi-host add-on clusters. Generated once on the
+# controller (the host running ansible-playbook), then pushed to every member.
+addon_cluster_shared_dir: "{{ playbook_dir | dirname }}/var/addon_cluster/shared"
+addon_cluster_shared_remote_dir: /data/pg/addon/shared
+addon_cluster_shared_ca_cert: "{{ addon_cluster_shared_remote_dir }}/ca.crt"
+addon_cluster_shared_server_chain_cert: "{{ addon_cluster_shared_remote_dir }}/server-chain.crt"
+addon_cluster_shared_server_key: "{{ addon_cluster_shared_remote_dir }}/server.key"
+addon_cluster_shared_server_pem: "{{ addon_cluster_shared_remote_dir }}/server.pem"
+addon_cluster_shared_ca_days: 3650
+addon_cluster_shared_cert_days: 825
+# Inventory group targeted by the selected add-on. Each add-on section in
+# group_vars/addon_cluster names it with _addon_cluster_<type>_group; types
+# without such a section fall back to addon_cluster.
+addon_cluster_shared_group: >-
+  {{ lookup('vars', '_addon_cluster_' ~ (addon_type | default('') | replace('-', '_')) ~ '_group', default='addon_cluster') }}
+# SANs for the shared server certificate: every member's private address.
+addon_cluster_shared_cert_san: >-
+  {%- set out = [] -%}
+  {%- for host in groups[addon_cluster_shared_group] -%}
+  {%- set _ = out.extend(['IP:' ~ hostvars[host].private_ip]) -%}
+  {%- endfor -%}
+  {{ out | join(',') }}
+addon_cluster_shared_password_files:
+  - minio_root_password
+  - silo_root_password
+  - rustfs_root_password
+  - seaweedfs_root_password
+  - redis_password
+  - clickhouse_admin_password
+addon_cluster_shared_types:
+  - minio
+  - silo
+  - rustfs
+  - seaweedfs
+  - redis
+  - clickhouse
+  - rabbitmq

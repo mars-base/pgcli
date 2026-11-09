@@ -47,6 +47,19 @@
   serial: 1
   environment:
     PGCLI_DOWNLOAD_MIRROR: "{{ pgcli_download_mirror | default('') }}"
+  pre_tasks:
+    # Multi-host clusters need shared secrets and TLS material. Generate them
+    # once on the controller and publish them as host facts before pg_addon
+    # renders any install command. Each add-on section names its target group
+    # with _addon_cluster_<type>_group; types without a section fall back to
+    # the default addon_cluster group.
+    - name: Prepare shared add-on cluster material
+      ansible.builtin.include_role:
+        name: addon_cluster_shared
+      when:
+        - addon_type | default('') | length > 0
+        - inventory_hostname in groups[lookup('vars', '_addon_cluster_' ~ (addon_type | replace('-', '_')) ~ '_group', default='addon_cluster')]
+      tags: [addon]
   roles:
     - role: pg_addon
       tags: [addon]

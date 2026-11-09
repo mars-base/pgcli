@@ -1,0 +1,6 @@
+---
+- name: Load the shared silo root password
+  tags: [addon]
+  ansible.builtin.set_fact:
+    _addon_cluster_silo_root_password: "{{ lookup('file', addon_cluster_shared_dir ~ '/silo_root_password') }}"
+  no_log: true

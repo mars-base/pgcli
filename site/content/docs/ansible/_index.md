@@ -50,6 +50,7 @@ ansible/
 │   ├── all/main.yml.example        # global defaults: install, config, instance defaults
 │   ├── single/ samehost/ crosshost/  # one deployment mode per group
 │   ├── minio_s3/ silo_s3/ rustfs_s3/ # S3 store types
+│   ├── addon_single/ addon_cluster/  # standalone and multi-host add-on tests
 │   └── ha_etcd/ ha_cluster/          # shared DCS and Patroni members
 ├── host_vars/               # optional per-host overrides
 ├── playbooks/
@@ -57,7 +58,7 @@ ansible/
 │   ├── deploy-s3.yaml       # standalone S3 store
 │   ├── ha-status.yaml       # read-only Patroni/HAProxy status
 │   └── ping.yaml            # connectivity smoke test
-└── roles/                   # pgcli, pg_instance, pg_addon, pg_ha, pg_ha_haproxy, pg_s3
+└── roles/                   # pgcli, pg_instance, pg_addon, addon_cluster_shared, pg_ha, pg_ha_haproxy, pg_s3
 ```
 
 ## Pages
@@ -69,5 +70,6 @@ ansible/
 | [Playbooks](./playbooks/) | `ping.yaml`, `apply.yaml`, `ha-status.yaml`, `deploy-s3.yaml`: tags, `--limit`, idempotency, lifecycle orders |
 | [Instances and replicas](./instances/) | The `single`/`samehost`/`crosshost` example files and every `pgcli_instances` field |
 | [Add-ons](./addons/) | `pgcli_addons` entries: install/remove, instance-scoped add-ons, etcd |
+| [Add-on clusters](./addon-cluster/) | Multi-host add-on clusters: per-type group sections, shared secrets/CA, quorum layouts, lifecycle |
 | [HA clusters](./ha/) | `ha_etcd`/`ha_cluster` example files, `pg_ha_clusters`, HAProxy, state-driven destroy |
 | [S3 storage](./s3/) | Store-type example files, `deploy-s3.yaml` options, using the store as a backup target |

@@ -10,8 +10,8 @@ host_vars/*/secrets.yaml
 __pycache__/
 *.pyo
 *.retry
-var/ansible.log
-var/facts/
-var/s3-tls/
+# Controller-side runtime state: logs, facts, generated TLS material for the
+# S3 target, and shared add-on-cluster secrets/keys.
+var/
 .venv/
 .vscode/

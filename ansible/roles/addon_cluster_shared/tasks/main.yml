@@ -1,0 +1,134 @@
+---
+# Passwords and a shared CA/server certificate live on the controller under
+# var/addon_cluster/shared (gitignored). Every member gets the same values;
+# the CA private key never leaves the controller. Each add-on's own shared
+# variables are loaded by add-on-specific task files at the end of this file.
+- name: Ensure the controller-side shared directory exists
+  tags: [addon]
+  ansible.builtin.file:
+    path: "{{ addon_cluster_shared_dir }}"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+
+- name: Generate shared cluster passwords
+  tags: [addon]
+  ansible.builtin.shell:
+    cmd: "openssl rand -hex 16 > {{ addon_cluster_shared_dir }}/{{ item }}"
+    creates: "{{ addon_cluster_shared_dir }}/{{ item }}"
+  loop: "{{ addon_cluster_shared_password_files }}"
+  delegate_to: localhost
+
+- name: Restrict shared secret permissions
+  tags: [addon]
+  ansible.builtin.file:
+    path: "{{ addon_cluster_shared_dir }}/{{ item }}"
+    mode: '0600'
+  loop: "{{ addon_cluster_shared_password_files }}"
+  delegate_to: localhost
+
+- name: Generate the shared CA key and certificate
+  tags: [addon]
+  ansible.builtin.shell:
+    cmd: >-
+      openssl req -x509 -newkey rsa:4096 -sha256
+      -days {{ addon_cluster_shared_ca_days }} -nodes
+      -keyout {{ addon_cluster_shared_dir }}/ca.key
+      -out {{ addon_cluster_shared_dir }}/ca.crt
+      -subj "/CN=pgcli-addon-cluster-ca"
+    creates: "{{ addon_cluster_shared_dir }}/ca.crt"
+  delegate_to: localhost
+
+- name: Write the shared server certificate SAN list
+  tags: [addon]
+  ansible.builtin.copy:
+    dest: "{{ addon_cluster_shared_dir }}/server-san.cnf"
+    content: "subjectAltName={{ addon_cluster_shared_cert_san }}\n"
+    mode: '0600'
+  delegate_to: localhost
+
+- name: Generate the shared server key and CSR
+  tags: [addon]
+  ansible.builtin.shell:
+    cmd: >-
+      openssl req -newkey rsa:2048 -sha256 -nodes
+      -keyout {{ addon_cluster_shared_dir }}/server.key
+      -out {{ addon_cluster_shared_dir }}/server.csr
+      -subj "/CN=pgcli-addon-cluster"
+    creates: "{{ addon_cluster_shared_dir }}/server.csr"
+  delegate_to: localhost
+
+- name: Sign the shared server certificate
+  tags: [addon]
+  ansible.builtin.shell:
+    cmd: >-
+      openssl x509 -req
+      -in {{ addon_cluster_shared_dir }}/server.csr
+      -CA {{ addon_cluster_shared_dir }}/ca.crt
+      -CAkey {{ addon_cluster_shared_dir }}/ca.key
+      -CAcreateserial
+      -out {{ addon_cluster_shared_dir }}/server.crt
+      -days {{ addon_cluster_shared_cert_days }} -sha256
+      -extfile {{ addon_cluster_shared_dir }}/server-san.cnf
+    creates: "{{ addon_cluster_shared_dir }}/server.crt"
+  delegate_to: localhost
+
+- name: Build the shared chain certificate
+  tags: [addon]
+  ansible.builtin.shell:
+    cmd: >-
+      cat {{ addon_cluster_shared_dir }}/server.crt
+      {{ addon_cluster_shared_dir }}/ca.crt
+      > {{ addon_cluster_shared_dir }}/server-chain.crt
+    creates: "{{ addon_cluster_shared_dir }}/server-chain.crt"
+  delegate_to: localhost
+
+- name: Build the shared combined PEM for single-file TLS options
+  tags: [addon]
+  ansible.builtin.shell:
+    cmd: >-
+      cat {{ addon_cluster_shared_dir }}/server-chain.crt
+      {{ addon_cluster_shared_dir }}/server.key
+      > {{ addon_cluster_shared_dir }}/server.pem
+    creates: "{{ addon_cluster_shared_dir }}/server.pem"
+  delegate_to: localhost
+
+- name: Ensure the shared material directory exists on the member
+  tags: [addon]
+  ansible.builtin.file:
+    path: "{{ addon_cluster_shared_remote_dir }}"
+    state: directory
+    mode: '0700'
+
+- name: Copy the shared CA certificate to the member
+  tags: [addon]
+  ansible.builtin.copy:
+    src: "{{ addon_cluster_shared_dir }}/ca.crt"
+    dest: "{{ addon_cluster_shared_ca_cert }}"
+    mode: '0644'
+
+- name: Copy the shared chain certificate to the member
+  tags: [addon]
+  ansible.builtin.copy:
+    src: "{{ addon_cluster_shared_dir }}/server-chain.crt"
+    dest: "{{ addon_cluster_shared_server_chain_cert }}"
+    mode: '0644'
+
+- name: Copy the shared server key to the member
+  tags: [addon]
+  ansible.builtin.copy:
+    src: "{{ addon_cluster_shared_dir }}/server.key"
+    dest: "{{ addon_cluster_shared_server_key }}"
+    mode: '0600'
+
+- name: Copy the shared combined PEM to the member
+  tags: [addon]
+  ansible.builtin.copy:
+    src: "{{ addon_cluster_shared_dir }}/server.pem"
+    dest: "{{ addon_cluster_shared_server_pem }}"
+    mode: '0600'
+
+- name: Load add-on specific shared material
+  tags: [addon]
+  ansible.builtin.include_tasks: "{{ addon_type | replace('-', '_') }}.yml"
+  when: (addon_type | replace('-', '_')) in addon_cluster_shared_types

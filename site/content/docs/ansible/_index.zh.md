@@ -48,6 +48,7 @@ ansible/
 │   ├── all/main.yml.example        # 全局默认：安装、配置、实例默认值
 │   ├── single/ samehost/ crosshost/  # 每种部署模式一个分组
 │   ├── minio_s3/ silo_s3/ rustfs_s3/ # S3 存储类型
+│   ├── addon_single/ addon_cluster/  # 单机与多主机插件测试分组
 │   └── ha_etcd/ ha_cluster/          # 共享 DCS 与 Patroni 成员
 ├── host_vars/               # 可选的单主机覆盖
 ├── playbooks/
@@ -55,7 +56,7 @@ ansible/
 │   ├── deploy-s3.yaml       # 独立 S3 存储
 │   ├── ha-status.yaml       # 只读的 Patroni/HAProxy 状态
 │   └── ping.yaml            # 连通性冒烟测试
-└── roles/                   # pgcli、pg_instance、pg_addon、pg_ha、pg_ha_haproxy、pg_s3
+└── roles/                   # pgcli、pg_instance、pg_addon、addon_cluster_shared、pg_ha、pg_ha_haproxy、pg_s3
 ```
 
 ## 子页面
@@ -67,5 +68,6 @@ ansible/
 | [剧本](./playbooks/) | `ping.yaml`、`apply.yaml`、`ha-status.yaml`、`deploy-s3.yaml`：tags、`--limit`、幂等、生命周期顺序 |
 | [实例与副本](./instances/) | `single`/`samehost`/`crosshost` 示例文件与 `pgcli_instances` 全部字段 |
 | [插件](./addons/) | `pgcli_addons` 条目：安装/移除、实例级插件、etcd |
+| [插件集群](./addon-cluster/) | 多主机插件集群：按类型的配置段落、共享密钥/CA、法定人数布局、生命周期 |
 | [HA 集群](./ha/) | `ha_etcd`/`ha_cluster` 示例文件、`pg_ha_clusters`、HAProxy、基于 state 的销毁 |
 | [S3 存储](./s3/) | 存储类型示例文件、`deploy-s3.yaml` 选项、作为备份目标使用 |

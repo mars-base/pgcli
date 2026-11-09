@@ -11,6 +11,8 @@
 #   samehost  primary + same-host replica
 #   crosshost primary and replica on different hosts
 #   s3        standalone S3-compatible store for the pgBackRest s3 target
+#   addon_single   single-host add-on test group (commented out)
+#   addon_cluster  multi-host add-on test group (4 nodes)
 #   ha_etcd     hosts running the shared etcd DCS (role marker group)
 #   ha_cluster  Patroni cluster over that DCS (role marker group)
 # Each mode group defines its own pgcli_instances in group_vars/<group>/ and
@@ -70,6 +72,37 @@ s3-01 ansible_host=192.0.2.20 private_ip=192.0.2.20 ansible_user=root ansible_po
 # minio_s3
 silo_s3
 # rustfs_s3
+
+# Single-node add-on test group (paused). One host runs every standalone
+# add-on; all addon_<type>_* variables live in group_vars/addon_single/main.yml.
+# Select one type at runtime:
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_single \
+#     --tags addon -e addon_type=haproxy
+#
+# [addon_single]
+# debian12-01 ansible_host=192.0.2.10 private_ip=192.0.2.10 ansible_user=root ansible_port=22
+
+# Multi-host add-on test group. The full group has four nodes because MinIO
+# and silo MNSD need at least four endpoints; etcd, Kafka, Keeper, RabbitMQ
+# and RocketMQ use the first three as a quorum. All addon_<type>_* variables
+# live in group_vars/addon_cluster/main.yml; each add-on section names its
+# target group with _addon_cluster_<type>_group (all currently point at
+# addon_cluster), and the play targets that same group. Select one type at
+# runtime:
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_cluster \
+#     --tags addon -e addon_type=etcd
+#
+# Each entry's state field controls the lifecycle: present installs/keeps the
+# member, absent removes it (and its data, unless clean_data: false). Shared
+# passwords and TLS material are generated on the controller under
+# var/addon_cluster/shared and pushed to every member.
+[addon_cluster]
+debian12-01 ansible_host=192.0.2.10 private_ip=192.0.2.10 ansible_user=root ansible_port=22
+debian12-02 ansible_host=192.0.2.11 private_ip=192.0.2.11 ansible_user=root ansible_port=22
+debian12-03 ansible_host=192.0.2.12 private_ip=192.0.2.12 ansible_user=root ansible_port=22
+debian12-04 ansible_host=192.0.2.13 private_ip=192.0.2.13 ansible_user=root ansible_port=22
 
 # DCS role: hosts that run the shared etcd cluster. Order matters: the first
 # host bootstraps etcd; the rest join it in apply.yaml's serial: 1 add-on play.

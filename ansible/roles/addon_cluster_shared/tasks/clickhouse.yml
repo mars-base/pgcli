@@ -1,0 +1,6 @@
+---
+- name: Load the shared ClickHouse admin password
+  tags: [addon]
+  ansible.builtin.set_fact:
+    _addon_cluster_clickhouse_admin_password: "{{ lookup('file', addon_cluster_shared_dir ~ '/clickhouse_admin_password') }}"
+  no_log: true

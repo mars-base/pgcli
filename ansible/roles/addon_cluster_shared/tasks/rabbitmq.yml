@@ -1,0 +1,43 @@
+---
+# RabbitMQ cluster members share one Erlang cookie and admin password. The
+# CLI generates them once on the controller and publishes them to etcd; every
+# member installs with --secrets-from-etcd, so the files never need to be
+# copied to the members. The controller therefore needs the pg binary, and the
+# first etcd endpoint must be reachable from it.
+- name: Check whether the RabbitMQ cluster secrets already exist
+  tags: [addon]
+  ansible.builtin.uri:
+    url: "http://{{ _addon_cluster_rabbitmq_etcd_endpoints.split(',')[0] }}/v3/kv/range"
+    method: POST
+    body_format: json
+    body:
+      key: "{{ (('/pgcli/rabbitmq/clusters/' ~ _addon_cluster_rabbitmq_cluster_name ~ '/secrets/')) | b64encode }}"
+      range_end: "{{ (('/pgcli/rabbitmq/clusters/' ~ _addon_cluster_rabbitmq_cluster_name ~ '/secrets/')[:-1] ~ '0') | b64encode }}"
+    status_code: 200
+  register: _addon_cluster_rmq_secret
+  changed_when: false
+  when: inventory_hostname == _addon_cluster_rabbitmq_first_host
+
+- name: Generate and publish the shared RabbitMQ secrets
+  tags: [addon]
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - addon
+      - rabbitmq
+      - secret
+      - generate
+      - --cluster
+      - "{{ _addon_cluster_rabbitmq_cluster_name }}"
+      - --etcd-endpoints
+      - "{{ _addon_cluster_rabbitmq_etcd_endpoints }}"
+      - --cookie-file
+      - "{{ addon_cluster_shared_dir }}/rabbitmq_erlang_cookie"
+      - --admin-password-file
+      - "{{ addon_cluster_shared_dir }}/rabbitmq_admin_password"
+      - --force
+  delegate_to: localhost
+  when:
+    - inventory_hostname == _addon_cluster_rabbitmq_first_host
+    - (_addon_cluster_rmq_secret.json.count | default('0')) != '2'
+  changed_when: true
