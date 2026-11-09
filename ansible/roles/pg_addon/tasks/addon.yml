@@ -76,6 +76,12 @@
     - _addon_state == 'present'
     - _addon_conf_content | length > 0
 
+- name: Remove the inline add-on config
+  ansible.builtin.file:
+    path: "{{ _addon_conf_path }}"
+    state: absent
+  when: _addon_state == 'absent'
+
 - name: Resolve add-on facts
   ansible.builtin.set_fact:
     _addon_installed: >-
