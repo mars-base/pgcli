@@ -30,8 +30,14 @@ pgcli_namespaces:
     pg_ssh_port: 43201
 
 # Which inventory group provides the shared etcd DCS. Several etcd groups can
-# coexist in hosts.ini; every ha_cluster points at exactly one of them.
+# coexist in hosts.ini; to switch the DCS, change this variable only — the
+# endpoints are derived from the group's hosts automatically. Each etcd host
+# exposes its client endpoint as _ha_etcd_client_endpoint in
+# group_vars/ha_etcd.
 pg_ha_etcd_group: ha_etcd
+_ha_dcs_endpoints: >-
+  {{ groups[pg_ha_etcd_group]
+     | map('extract', hostvars, '_ha_etcd_client_endpoint') | list }}
 
 # Shared S3 repository for WAL archiving and PITR. When pgcli_backup_s3_host
 # (or pgcli_backup_s3_endpoint) is set, pg_ha runs `pg backup setup` for every
@@ -58,12 +64,6 @@ pgcli_backup_s3_secret_key: "<secret-key>"
 # A store that is not a pgcli-managed inventory host: omit
 # pgcli_backup_s3_host, set pgcli_backup_s3_endpoint to host:port (no scheme)
 # instead, and the role falls back to `pg backup fetch-ca`.
-
-# Patroni reaches the etcd DCS through the hosts in [ha_etcd] (their etcd
-# member config lives in group_vars/ha_etcd).
-_ha_dcs_endpoints: >-
-  {{ groups[pg_ha_etcd_group] | map('extract', hostvars, '_ha_etcd_advertise_host')
-     | map('regex_replace', '$', ':2379') | list }}
 
 # One Patroni cluster per namespace. The same scope name is safe: pgcli bakes
 # the namespace suffix into the DCS scope (pgcluster-ha / pgcluster-ha2).

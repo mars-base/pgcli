@@ -9,6 +9,8 @@
 # Node-to-node addresses prefer private_ip (on public clouds ansible_host is
 # often the EIP); fall back to ansible_host when private_ip is not set.
 _ha_etcd_advertise_host: "{{ private_ip | default(hostvars[inventory_hostname].ansible_host | default(inventory_hostname), true) }}"
+# Client endpoint (no scheme; pgcli adds http://) used as a Patroni DCS member.
+_ha_etcd_client_endpoint: "{{ _ha_etcd_advertise_host }}:2379"
 _ha_etcd_bootstrap_endpoint: "http://{{ hostvars[groups['ha_etcd'] | first].private_ip | default(hostvars[groups['ha_etcd'] | first].ansible_host | default(groups['ha_etcd'] | first), true) }}:2379"
 
 # Member names must be unique across the etcd cluster, so derive one from the
