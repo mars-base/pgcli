@@ -23,6 +23,8 @@
 - name: Install and configure pgcli
   hosts: all
   gather_facts: false
+  environment:
+    PGCLI_DOWNLOAD_MIRROR: "{{ pgcli_download_mirror | default('') }}"
   roles:
     - role: pgcli
       tags: [pgcli]
@@ -33,6 +35,8 @@
   hosts: all
   gather_facts: false
   serial: 1
+  environment:
+    PGCLI_DOWNLOAD_MIRROR: "{{ pgcli_download_mirror | default('') }}"
   roles:
     - role: pg_instance
       tags: [instance]
@@ -41,6 +45,8 @@
   hosts: all
   gather_facts: false
   serial: 1
+  environment:
+    PGCLI_DOWNLOAD_MIRROR: "{{ pgcli_download_mirror | default('') }}"
   roles:
     - role: pg_addon
       tags: [addon]

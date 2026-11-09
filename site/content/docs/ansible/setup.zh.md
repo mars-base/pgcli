@@ -104,7 +104,7 @@ ansible_group_priority=20
 |------|------|
 | `pgcli_install_version` | 安装的 release tag；留空表示最新版 |
 | `pgcli_install_force` | 即使 `pg` 已存在也重跑安装脚本 |
-| `pgcli_install_binary_url`、`pgcli_images_http_url` | 离线/隔离环境的安装源 |
+| `pgcli_install_binary_url`、`pgcli_images_http_url`、`pgcli_download_mirror` | 离线/隔离环境的安装源（后者供 juicefs/zerofs/duckdb 二进制与 DocumentDB DEB 使用） |
 | `pgcli_install_path` | 二进制路径，默认 `/usr/local/bin/pg` |
 | `pgcli_namespace_path` | 主机默认 namespace 目录；留空用 `/root/.pgcli/pg.yaml` |
 | `pgcli_namespaces` | namespace 名称 → `pg.yaml` 目录的映射 |

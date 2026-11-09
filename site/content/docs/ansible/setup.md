@@ -112,7 +112,7 @@ The example file is commented field by field. The blocks that matter most:
 |----------|---------|
 | `pgcli_install_version` | Release tag to install; empty means latest |
 | `pgcli_install_force` | Re-run the installer even when `pg` exists |
-| `pgcli_install_binary_url`, `pgcli_images_http_url` | Offline/air-gapped install source |
+| `pgcli_install_binary_url`, `pgcli_images_http_url`, `pgcli_download_mirror` | Offline/air-gapped install source (the last covers juicefs/zerofs/duckdb binaries and DocumentDB DEBs) |
 | `pgcli_install_path` | Binary path, default `/usr/local/bin/pg` |
 | `pgcli_namespace_path` | Host-default namespace directory; empty uses `/root/.pgcli/pg.yaml` |
 | `pgcli_namespaces` | Named namespace → `pg.yaml` directory map |

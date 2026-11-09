@@ -20,6 +20,7 @@ import (
 
 	"github.com/mars-base/pgcli/internal/config"
 	"github.com/mars-base/pgcli/internal/hostbin"
+	"github.com/mars-base/pgcli/internal/mirror"
 	"github.com/mars-base/pgcli/internal/platform"
 	"github.com/spf13/cobra"
 )
@@ -40,6 +41,7 @@ import (
 // This is the same pattern as hostbin.fetch but for zip assets (hostbin.Ensure
 // only supports tar.gz).
 func duckdbFetch(url, dest, wantSHA string) error {
+	url = mirror.Resolve(url)
 	f, err := os.Create(dest)
 	if err != nil {
 		return fmt.Errorf("creating %s: %w", dest, err)

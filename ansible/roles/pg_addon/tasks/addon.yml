@@ -57,7 +57,7 @@
            if addon.instance is defined else
            ((pgcli_cfg.get('addons') or {}).get(_addon_key) or {}).get(addon.name) )
          | default({}, true) }}
-    _addon_autostart: "{{ addon.autostart | default(false) | bool }}"
+    _addon_autostart: "{{ addon.autostart | default(true) | bool }}"
 
 - name: Enable add-on autostart
   ansible.builtin.command:

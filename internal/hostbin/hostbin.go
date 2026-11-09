@@ -18,6 +18,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
+
+	"github.com/mars-base/pgcli/internal/mirror"
 )
 
 // Detect returns an existing binary on PATH (vm images may pre-install it),
@@ -181,6 +183,7 @@ func LatestRelease(repo string) (string, error) {
 }
 
 func fetch(url string, w io.Writer) error {
+	url = mirror.Resolve(url)
 	client := &http.Client{
 		Transport: &http.Transport{
 			Proxy: http.ProxyFromEnvironment,

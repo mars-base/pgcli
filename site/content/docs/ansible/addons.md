@@ -6,23 +6,81 @@ weight: 40
 
 Add-ons are declared in `pgcli_addons` (empty by default in
 `group_vars/all/main.yml`). A deployment-mode group adds its own list; the
-`ha_etcd` group uses the same mechanism for the shared etcd DCS.
+`ha_etcd` group uses the same mechanism for the shared etcd DCS. `type` takes
+any add-on accepted by `pg addon install` — see the
+[add-on reference](../../addon/) for the full list (pgbouncer, pgdog, etcd,
+haproxy, minio/silo/rustfs, redis, nginx, prometheus, kafka, and so on).
 
 ## Entry fields
 
 | Field | Meaning |
 |-------|---------|
-| `type` | Add-on type, e.g. `etcd`, `haproxy`, `pgbouncer`, `minio` |
+| `type` | Add-on type accepted by `pg addon install` (see the [add-on reference](../../addon/)) |
 | `name` | Top-level add-on instance name (e.g. this etcd member) |
 | `instance` | Instead of `name`: scope the add-on to a pgcli instance |
 | `state` | `present` (default) or `absent` |
 | `args` | List of flags appended verbatim to `pg addon install` |
 | `clean_data` | With `state: absent`, also delete data where the add-on supports it |
 | `force` | With `state: present`, recreate with `pg addon install --force` |
-| `autostart` | `true` enables boot autostart, `false` (default) disables it |
+| `autostart` | `true` (default) enables boot autostart, `false` disables it |
 
 Every entry needs `type` and exactly one of `name` or `instance`; the role
 asserts this before doing anything.
+
+## Standalone vs cluster installation
+
+`Installation` describes whether the add-on is installed standalone or as a
+cluster — not whether several independent copies can run on different hosts:
+
+- **Standalone**: only a single-host installation exists. Copies deployed on
+  multiple hosts are independent and do not form a cluster.
+- **Standalone + cluster**: installable either standalone or in cluster mode.
+- **Cluster only**: only installable as a cluster (a quorum is required).
+
+This repository's `group_vars` examples currently exercise the standalone
+form; the cluster forms are documented on each [add-on page](../../addon/),
+with the S3 and HA groups covered in their own pages here.
+
+| Add-on | Installation | Notes |
+|--------|--------------|-------|
+| pgbouncer | standalone | instance-scoped |
+| etcd | standalone + cluster | `--cluster`; shared DCS for HA |
+| pgdog | standalone + cluster | one backend vs sharded backends |
+| haproxy | standalone | each proxy is independent, no cluster mode |
+| minio | standalone + cluster | SNSD/SNMD vs MNMD |
+| silo | standalone + cluster | SNSD/SNMD vs MNMD |
+| rustfs | standalone + cluster | cluster mode is MNMD only (no MNSD) |
+| garage | standalone | v1 supports one host only |
+| seaweedfs | standalone + cluster | `weed mini` vs `weed server` |
+| redis | standalone + cluster | standalone vs `--cluster` sharding |
+| predixy | standalone | one proxy fronting one or more Redis backends |
+| postgrest | standalone | |
+| pgadmin | standalone | |
+| grafana | standalone | |
+| prometheus | standalone | |
+| alertmanager | standalone | HA gossip disabled by pgcli |
+| victoriametrics | standalone | |
+| nodeexporter | standalone | |
+| pgexporter | standalone | |
+| documentdb | standalone | requires a local PG 18 instance |
+| vmcluster | standalone + cluster | all roles on one host vs role split |
+| vlcluster | standalone + cluster | all roles on one host vs role split |
+| victorialogs | standalone | |
+| vlagent | standalone | |
+| vmalert | standalone | HA via repeated instances and `--external-label` |
+| influxdb | standalone | no HA in v1 |
+| influx2tsdb | standalone | |
+| clickhouse | standalone + cluster | static replicated cluster with Keeper |
+| clickhouse-keeper | cluster only | Raft quorum of 3 or 5 |
+| kafka | standalone + cluster | KRaft controller quorum |
+| rabbitmq | standalone + cluster | etcd peer discovery |
+| rocketmq | standalone + cluster | standalone vs DLedger cluster |
+| gitea | standalone | |
+| beegfs | standalone | v1 is one filesystem per host |
+| juicefs | standalone | host binary; external S3 + metadata |
+| zerofs | standalone | host binary; external S3 |
+| duckdb | standalone | host binary |
+| nginx | standalone | one reverse proxy |
 
 ## Top-level add-on example
 
@@ -70,8 +128,8 @@ pgcli_addons:
   - type: etcd
     name: etcd-1
     args: [...]
-  - type: semaphore
-    name: ui
+  - type: redis
+    name: cache
     state: absent
 ```
 
@@ -87,7 +145,7 @@ uv run ansible-playbook playbooks/apply.yaml --tags addon --limit ha_etcd
 
 - `state: present` installs only when the name/instance is missing from the
   config, unless `force: true` is set. It also reconciles `autostart` with
-  `pg autostart enable|disable --<type> ...`; leaving it unset disables boot
+  `pg autostart enable|disable --<type> ...`; leaving it unset enables boot
   autostart for the add-on.
 - `state: absent` calls `pg addon remove <type> --name <name>` (or `-i
   <instance>`); add `clean_data: true` for the add-ons that keep data by

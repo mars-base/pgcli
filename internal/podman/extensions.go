@@ -13,6 +13,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/mars-base/pgcli/internal/mirror"
 )
 
 // createNameAlias maps alternative user-facing extension names to the
@@ -279,6 +281,7 @@ func downloadVerifiedFile(dir, name, label, url, want string) error {
 	}
 
 	fmt.Printf("-> Downloading %s package for %s...\n", label, runtime.GOARCH)
+	url = mirror.Resolve(url)
 	client := &http.Client{
 		Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
 		Timeout:   300 * time.Second,

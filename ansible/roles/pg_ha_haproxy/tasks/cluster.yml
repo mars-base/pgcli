@@ -19,7 +19,7 @@
     _pg_hap_stats: "{{ pg_ha_haproxy_item.stats_port | default(0) | int }}"
     _pg_hap_autostart: >-
       {{ pg_ha_haproxy_item.autostart
-         | default(_pg_hap_deployment.autostart | default(false)) | bool }}
+         | default(_pg_hap_deployment.autostart | default(true)) | bool }}
 
 - name: Resolve the Patroni cluster
   ansible.builtin.set_fact:

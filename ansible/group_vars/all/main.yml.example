@@ -34,6 +34,13 @@ pgcli_install_binary_url: ""
 # Empty = the launcher comes from GitHub releases via install.sh.
 pgcli_podman_binary_url: ""
 
+# Offline mirror for host-side downloads: juicefs/zerofs/duckdb binaries and
+# the DocumentDB DEBs. When set, pgcli fetches each external release asset
+# from <mirror>/<basename> instead of GitHub or archive.ubuntu.com. This is the
+# same static server used for container images.
+# pgcli_download_mirror: "http://192.0.2.10:18080"
+pgcli_download_mirror: ""
+
 # ── Offline container images ────────────────────────────────────────────────
 # The image tarballs are large, so hosts can load them from a LAN static HTTP
 # server instead of pulling from public registries.
@@ -260,5 +267,7 @@ pgcli_instance_defaults:
 # selected host reconciles that group's list.
 pgcli_instances: []
 
-# Add-ons on this host, consumed by the pg_addon role.
+# Add-ons on this host, consumed by the pg_addon role. Every entry accepts
+# type, name or instance, state, args, clean_data, force and autostart;
+# autostart defaults to true.
 pgcli_addons: []
