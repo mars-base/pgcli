@@ -31,9 +31,17 @@
 
 # apply.yaml runs the role a second time, without serial, after every member
 # exists: each host can then merge the complete backup key set and create or
-# verify the shared stanzas. The serial reconcile pass cannot do this because
-# the topology (and therefore cross-host trust) is incomplete for the hosts
-# that run before the last member is created.
+# verify the shared stanzas, and the cluster-wide extension `apply` can run
+# once after every host finished its local `install`. The serial reconcile pass
+# cannot do this because the topology (and therefore cross-host trust) is
+# incomplete for the hosts that run before the last member is created.
+- name: Converge the cluster extensions
+  ansible.builtin.include_tasks: extension_converge.yml
+  loop: "{{ _pg_ha_clusters }}"
+  loop_control:
+    loop_var: pg_ha_cluster_item
+  when: pg_ha_converge_only | default(false) | bool
+
 - name: Converge the S3 backup setup on every host
   ansible.builtin.include_tasks: backup_converge.yml
   loop: "{{ _pg_ha_clusters }}"

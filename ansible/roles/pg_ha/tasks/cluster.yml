@@ -258,3 +258,40 @@
   when:
     - not (pg_ha_cluster_item.autostart | default(true) | bool)
     - _pg_ha_member_cfg.autostart | default(false) | bool
+
+# Extensions are cluster-level and each host only manages its own members, so
+# this runs on every host. For a cross-host cluster `install` pauses the
+# cluster and leaves it paused; the single `apply` in extension_converge.yml
+# resumes it after the last host. Builtin-only lists skip the image build and
+# container recreate inside pgcli.
+- name: Resolve the extensions to install
+  ansible.builtin.set_fact:
+    _pg_ha_ext_desired: "{{ pg_ha_cluster_item.extensions | default([], true) }}"
+    _pg_ha_ext_current: >-
+      {{ (((_pg_ha_cfg.get('addons') or {}).get('patroni') or {})
+          .get(pg_ha_cluster_item.scope) or {}).get('extensions', []) }}
+
+- name: Resolve the missing extensions
+  ansible.builtin.set_fact:
+    _pg_ha_ext_missing: "{{ _pg_ha_ext_desired | difference(_pg_ha_ext_current) }}"
+
+- name: Install missing HA extensions
+  ansible.builtin.command:
+    argv: >-
+      {{ [pgcli_install_path, '-c', _pg_ha_cfg_path, 'ha', 'extension', 'install',
+          pg_ha_cluster_item.scope, _pg_ha_ext_missing | join(','),
+          '--database', pg_ha_cluster_item.extension_database | default('postgres', true),
+          '--auto-restart'] }}
+  when:
+    - _pg_ha_ext_missing | length > 0
+    - (pg_ha_cluster_item.state | default('started')) == 'started'
+
+- name: Warn that a stopped cluster skips extensions
+  ansible.builtin.debug:
+    msg: >-
+      Cluster {{ pg_ha_cluster_item.scope }} is configured state=stopped;
+      extensions {{ _pg_ha_ext_missing | join(',') }} were not installed. Set
+      state: started to converge them.
+  when:
+    - _pg_ha_ext_missing | length > 0
+    - (pg_ha_cluster_item.state | default('started')) != 'started'

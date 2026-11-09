@@ -735,9 +735,17 @@ func runHAExtensionApplyWithCluster(pm *podman.PatroniManager, cfg *config.Confi
 		editArgs = append(editArgs, "-s", fmt.Sprintf("postgresql.parameters.cron.database_name=%s", database))
 	}
 
-	if err := pm.Patronictl(cluster, editArgs...); err != nil {
+	editOut, err := pm.PatronictlCapture(cluster, editArgs...)
+	if err != nil {
 		return fmt.Errorf("edit-config: %w", err)
 	}
+	fmt.Print(editOut)
+	// Patroni needs a moment to propagate the new config before it marks
+	// members as pending_restart, and the wait loop below polls right after
+	// edit-config. A "Configuration changed" result therefore must trigger the
+	// restart unconditionally — otherwise the loop can see a healthy cluster
+	// and return before anything was restarted.
+	restartNeeded := strings.Contains(editOut, "Configuration changed")
 
 	// Wait for rolling restart to complete. After edit-config changes
 	// shared_preload_libraries, Patroni marks each member with "pending_restart"
@@ -745,6 +753,14 @@ func runHAExtensionApplyWithCluster(pm *podman.PatroniManager, cfg *config.Confi
 	// `patronictl restart` is required to trigger the rolling restart.
 	fmt.Println("-> Waiting for rolling restart to complete...")
 	restartTriggered := false
+	if restartNeeded {
+		fmt.Println("  -> Triggering rolling restart (patronictl restart)...")
+		if rerr := pm.Patronictl(cluster, "restart", nsScope, "--force"); rerr != nil {
+			fmt.Printf("  [!] Warning: patronictl restart: %v\n", rerr)
+		}
+		restartTriggered = true
+	}
+	healthy := false
 	for i := 0; i < 60; i++ { // 5min timeout
 		time.Sleep(5 * time.Second)
 		out, err := pm.PatronictlCapture(cluster, "list", nsScope, "-f", "json")
@@ -769,10 +785,14 @@ func runHAExtensionApplyWithCluster(pm *podman.PatroniManager, cfg *config.Confi
 				leader := podman.PatroniLeaderFromListJSON(out)
 				if leader != "" {
 					fmt.Printf("  [OK] Cluster healthy, leader: %s\n", leader)
+					healthy = true
 					break
 				}
 			}
 		}
+	}
+	if !healthy {
+		return fmt.Errorf("rolling restart did not complete within 5 minutes; run `pg ha extension apply %s` again", scope)
 	}
 
 	// CREATE EXTENSION on leader

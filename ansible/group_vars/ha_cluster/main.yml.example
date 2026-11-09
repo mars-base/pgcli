@@ -71,6 +71,15 @@ pgcli_backup_s3_secret_key: "<secret-key>"
 # the Patroni member name. Set it only for custom names; the list must follow
 # ha_cluster order, stay unique, and match [A-Za-z0-9][A-Za-z0-9_-]{0,31}
 # (no FQDNs or IPs). host_port and restapi_port must be disjoint per cluster.
+#
+# extensions: builtin contrib or Pigsty catalog names only (`pg extension
+# available` lists the latter). Every host runs `pg ha extension install` for
+# its local members when pg.yaml lacks an entry; after the last member one
+# `pg ha extension apply` resumes the cluster, writes
+# shared_preload_libraries to the DCS and creates the extensions on the
+# leader. extension_database selects the target database for
+# CREATE EXTENSION (default: postgres). Removing an entry from the list does
+# not uninstall it; use `pg ha extension remove` for that.
 pg_ha_clusters:
   - namespace: ha
     scope: pgcluster
@@ -79,6 +88,9 @@ pg_ha_clusters:
     dcs_endpoints: "{{ _ha_dcs_endpoints }}"
     state: started
     autostart: true
+    extensions:
+      - pg_stat_statements
+    # extension_database: postgres
   - namespace: ha2
     scope: pgcluster
     host_port: 35542
@@ -86,6 +98,9 @@ pg_ha_clusters:
     dcs_endpoints: "{{ _ha_dcs_endpoints }}"
     state: started
     autostart: true
+    extensions:
+      - pg_stat_statements
+    # extension_database: postgres
 
 # HAProxy in front of both Patroni clusters, one instance per namespace. The
 # proxy targets every member of ha_cluster via --node (it usually runs on a

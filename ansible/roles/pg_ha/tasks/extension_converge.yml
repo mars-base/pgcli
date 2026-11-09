@@ -1,0 +1,83 @@
+---
+# Runs in the non-serial convergence play, after every member exists. In a
+# cross-host cluster each host's `install` only rebuilds its own members and
+# leaves the cluster paused, so exactly one `apply` resumes it, writes
+# shared_preload_libraries to the DCS and runs CREATE EXTENSION on the leader.
+# Keying on the pause flag also converges a cluster left paused by an
+# interrupted earlier run, where every pg.yaml already lists the extensions
+# and therefore no install runs. Single-host installs already applied
+# themselves and leave the cluster running, so they skip this step.
+
+- name: Resolve the cluster namespace entry
+  ansible.builtin.set_fact:
+    _pg_ha_ns_entry: >-
+      {{ (pgcli_namespaces | default([]) | selectattr('name', 'equalto', pg_ha_cluster_item.namespace | default('', true)) | list | first | default({}))
+         if (pg_ha_cluster_item.namespace | default('', true) | length > 0) else {} }}
+
+- name: Resolve the cluster config path
+  ansible.builtin.set_fact:
+    _pg_ha_cfg_path: >-
+      {{ ((_pg_ha_ns_entry.path | regex_replace('/+$', '')) ~ '/pg.yaml')
+         if (pg_ha_cluster_item.namespace | default('', true) | length > 0) else pgcli_config_path }}
+    _pg_ha_ext_desired: "{{ pg_ha_cluster_item.extensions | default([], true) }}"
+
+- name: Read the cluster pause state from the DCS
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ _pg_ha_cfg_path }}"
+      - ha
+      - ctl
+      - "{{ pg_ha_cluster_item.scope }}"
+      - "--"
+      - show-config
+  register: _pg_ha_ext_show_config
+  changed_when: false
+  until: _pg_ha_ext_show_config.rc == 0
+  retries: 5
+  delay: 2
+  run_once: true
+  when:
+    - _pg_ha_ext_desired | length > 0
+    - (pg_ha_cluster_item.state | default('started')) == 'started'
+
+# A previous apply can leave the DCS updated while the members still carry
+# pending_restart (e.g. it timed out mid-restart). The pause flag alone would
+# not catch that state, so read the member list too.
+- name: Read the cluster member state from patronictl
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ _pg_ha_cfg_path }}"
+      - ha
+      - ctl
+      - "{{ pg_ha_cluster_item.scope }}"
+      - "--"
+      - list
+      - "-f"
+      - json
+  register: _pg_ha_ext_list
+  changed_when: false
+  until: _pg_ha_ext_list.rc == 0
+  retries: 5
+  delay: 2
+  run_once: true
+  when:
+    - _pg_ha_ext_desired | length > 0
+    - (pg_ha_cluster_item.state | default('started')) == 'started'
+
+- name: Apply the cluster extensions once
+  ansible.builtin.command:
+    argv: >-
+      {{ [pgcli_install_path, '-c', _pg_ha_cfg_path, 'ha', 'extension', 'apply',
+          pg_ha_cluster_item.scope,
+          '--database', pg_ha_cluster_item.extension_database | default('postgres', true),
+          '--auto-restart'] }}
+  run_once: true
+  when:
+    - _pg_ha_ext_desired | length > 0
+    - (pg_ha_cluster_item.state | default('started')) == 'started'
+    - (_pg_ha_ext_show_config.stdout is search('(?m)^pause:\s*true')) or
+      (_pg_ha_ext_list.stdout is search('"Pending restart"'))
