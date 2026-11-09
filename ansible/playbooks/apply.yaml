@@ -11,7 +11,9 @@
 # Desired lifecycle is config-driven. state: absent in pg_ha_clusters removes
 # this host's local members (plus their data dirs with clean_data: true) and
 # clears the DCS scope; state: absent in pg_ha_haproxy.clusters removes that
-# proxy instance. etcd, backup containers and pgBackRest backups are kept.
+# proxy instance; pg_etcd_state: absent (group_vars/ha_etcd) removes the local
+# etcd member together with its data dir. Backup containers and pgBackRest
+# backups are kept.
 #
 # Play order matters: the DCS add-ons must be up before Patroni members are
 # created, and serial: 1 keeps the first host bootstrapping the rest.

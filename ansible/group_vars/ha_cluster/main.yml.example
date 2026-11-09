@@ -87,7 +87,9 @@ pgcli_backup_s3_secret_key: "<secret-key>"
 # clean_data: true also deletes each member's data dir; the now-empty
 # addon/patroni/<scope> directory itself is left behind. etcd, the backup
 # container and the pgBackRest stanza/backups are shared or final copies, so
-# they are left intact. Remove the matching HAProxy entry too (state: absent).
+# they are left intact. Remove the matching HAProxy entry too (state: absent);
+# etcd has its own switch (pg_etcd_state: absent in group_vars/ha_etcd) and
+# must be destroyed only after the clusters are.
 pg_ha_clusters:
   - namespace: ha
     scope: pgcluster

@@ -20,8 +20,16 @@ _ha_etcd_bootstrap_endpoint: "http://{{ hostvars[groups[pg_etcd_group] | first].
 
 # Member names must be unique across the etcd cluster, so derive one from the
 # host's position in pg_etcd_group.
+#
+# Lifecycle of this etcd group. present (default) creates/reconciles each
+# host's local member; absent removes the local member. etcd removal always
+# deletes its data dir. apply.yaml runs the add-on play with serial: 1, so
+# absent removes one member per host in inventory order. Destroy the Patroni
+# clusters first (set their state to absent): they use this etcd as their DCS.
+pg_etcd_state: present
+
 pgcli_addons:
   - type: etcd
     name: "etcd-{{ groups[pg_etcd_group].index(inventory_hostname) + 1 }}"
-    state: present
+    state: "{{ pg_etcd_state }}"
     args: "{{ ['--cluster', 'ha', '--advertise-host', _ha_etcd_advertise_host] + (['--join', _ha_etcd_bootstrap_endpoint] if inventory_hostname != (groups[pg_etcd_group] | first) else []) }}"
