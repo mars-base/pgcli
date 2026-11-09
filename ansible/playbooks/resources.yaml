@@ -1,0 +1,90 @@
+---
+# Usage:
+#   cd ansible
+#   uv run ansible-playbook playbooks/resources.yaml
+#   uv run ansible-playbook playbooks/resources.yaml -l addon_single
+#   uv run ansible-playbook playbooks/resources.yaml -e HOSTS=debian12-01
+#
+# Shows live host resources (CPU, load, memory, swap, filesystems and the top
+# memory consumers) plus the pgcli version and configured instances. Only
+# hosts that carry the pgcli binary at pgcli_install_path are reported; other
+# selected hosts are skipped with a short message. Override the path with
+# -e pgcli_install_path=/path/to/pg if it is installed elsewhere.
+
+- name: Host and pgcli resources
+  hosts: "{{ HOSTS | default('all') }}"
+  gather_facts: false
+
+  tasks:
+    - name: Check for the pgcli binary
+      ansible.builtin.stat:
+        path: "{{ pgcli_install_path }}"
+      register: _resources_pgcli_bin
+
+    - name: Skip hosts without pgcli
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: pgcli not found at {{ pgcli_install_path }}; skipped"
+      when: not _resources_pgcli_bin.stat.exists
+
+    - name: Collect host resources
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          printf 'host: %s\n' "$(hostname)"
+          printf 'kernel: %s\n' "$(uname -srm)"
+          printf 'uptime: %s\n' "$(uptime -p 2>/dev/null || uptime)"
+          printf 'cpu: %s vCPU\n' "$(nproc)"
+          printf 'load: %s\n' "$(awk '{printf "%s, %s, %s\n", $1, $2, $3}' /proc/loadavg)"
+          printf 'memory: %s\n' "$(free -h | awk '/^Mem:/{printf "total %s, used %s, available %s\n", $2, $3, $7}')"
+          printf 'swap: %s\n' "$(free -h | awk '/^Swap:/{printf "total %s, used %s, free %s\n", $2, $3, $4}')"
+          printf 'filesystems:\n'
+          df -hP -x tmpfs -x devtmpfs -x overlay -x squashfs
+          printf 'top memory processes:\n'
+          ps -eo pid,comm,%cpu,%mem --sort=-%mem | head -n 6
+        executable: /bin/bash
+      register: _resources_host
+      changed_when: false
+      when: _resources_pgcli_bin.stat.exists
+
+    - name: Read the pgcli version
+      ansible.builtin.command:
+        argv:
+          - "{{ pgcli_install_path }}"
+          - "--version"
+      register: _resources_version
+      changed_when: false
+      failed_when: false
+      when: _resources_pgcli_bin.stat.exists
+
+    - name: List the pgcli instances
+      ansible.builtin.command:
+        argv:
+          - "{{ pgcli_install_path }}"
+          - "-c"
+          - "{{ pgcli_config_path }}"
+          - list
+      register: _resources_instances
+      changed_when: false
+      failed_when: false
+      when: _resources_pgcli_bin.stat.exists
+
+    - name: Normalize the pgcli output
+      ansible.builtin.set_fact:
+        _resources_version_text: >-
+          {{ (_resources_version.stdout | trim)
+             if (_resources_version.stdout | trim | length > 0)
+             else (_resources_version.stderr | trim | default('unknown', true)) }}
+        _resources_instances_text: >-
+          {{ (_resources_instances.stdout | trim)
+             if (_resources_instances.stdout | trim | length > 0)
+             else (_resources_instances.stderr | trim | default('(none)', true)) }}
+      when: _resources_pgcli_bin.stat.exists
+
+    - name: Show the resource report
+      ansible.builtin.debug:
+        msg:
+          - "{{ _resources_host.stdout }}"
+          - "pgcli: {{ _resources_version_text }}"
+          - "instances:"
+          - "{{ _resources_instances_text }}"
+      when: _resources_pgcli_bin.stat.exists
