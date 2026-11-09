@@ -10,9 +10,11 @@
 # targeted.
 #
 # Prints the live Patroni topology (role, state, LSN, lag) for every cluster
-# declared in pg_ha_clusters. The command runs once on the first host in the
-# play: all members share the same etcd DCS, so any one of them returns the
-# same cluster view.
+# declared in pg_ha_clusters, followed by the HAProxy instances in front of
+# them (mode, read-write/read-only/stats endpoints, backends). The command runs
+# once on the first host in the play: all members share the same etcd DCS, so
+# any one of them returns the same cluster view. Proxy details are read on
+# pg_ha_haproxy_host.
 
 - name: Patroni HA status
   hosts: ha_cluster
@@ -44,3 +46,38 @@
       loop_control:
         label: "{{ item.item.namespace | default('-') }}/{{ item.item.scope }}"
       run_once: true
+
+    - name: Read the proxies in front of every cluster
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          {{ pgcli_install_path }} -c {{ _ha_proxy_cfg }} addon list \
+            | awk '/^Infra add-ons \(haproxy\):/{f=1}
+                   f && /^[^ ]/ && !/^Infra add-ons \(haproxy\):/{exit}
+                   f'
+        executable: /bin/bash
+      loop: "{{ (pg_ha_haproxy | default({})).clusters | default([]) }}"
+      loop_control:
+        label: "{{ item.namespace | default('-') }}/{{ item.name | default('lb') }}"
+      vars:
+        _ha_proxy_ns: >-
+          {{ (pgcli_namespaces | default([]) | selectattr('name', 'equalto', item.namespace | default('', true))
+              | list | first | default({}))
+             if (item.namespace | default('', true) | length > 0) else {} }}
+        _ha_proxy_cfg: >-
+          {{ ((_ha_proxy_ns.path | regex_replace('/+$', '')) ~ '/pg.yaml')
+             if (item.namespace | default('', true) | length > 0) else pgcli_config_path }}
+      register: _ha_proxy_status
+      changed_when: false
+      run_once: true
+      delegate_to: "{{ pg_ha_haproxy_host | default(groups['ha_cluster'] | first) }}"
+      when: (pg_ha_haproxy | default({})).enabled | default(false) | bool
+
+    - name: Show the proxy details
+      ansible.builtin.debug:
+        msg: "{{ item.stdout if item.stdout | length > 0 else '(no HAProxy instance)' }}"
+      loop: "{{ _ha_proxy_status.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.namespace | default('-') }}/{{ item.item.name | default('lb') }} @ {{ pg_ha_haproxy_host | default(groups['ha_cluster'] | first) }}"
+      run_once: true
+      when: (pg_ha_haproxy | default({})).enabled | default(false) | bool

@@ -1,0 +1,15 @@
+---
+- name: Validate the HAProxy configuration
+  ansible.builtin.assert:
+    that:
+      - pg_ha_haproxy.clusters | default([]) | length > 0
+    fail_msg: >-
+      pg_ha_haproxy.enabled is true but clusters is empty; add one entry per
+      Patroni namespace with rw_port/ro_port/stats_port.
+
+- name: Reconcile each HAProxy instance
+  ansible.builtin.include_tasks: cluster.yml
+  loop: "{{ pg_ha_haproxy.clusters }}"
+  loop_control:
+    loop_var: pg_ha_haproxy_item
+    label: "{{ pg_ha_haproxy_item.namespace | default('-') }}/{{ pg_ha_haproxy_item.name | default('lb') }}"

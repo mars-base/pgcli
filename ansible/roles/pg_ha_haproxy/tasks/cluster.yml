@@ -1,0 +1,154 @@
+---
+- name: Resolve the instance settings
+  ansible.builtin.set_fact:
+    _pg_hap_namespace: "{{ pg_ha_haproxy_item.namespace | default('', true) }}"
+    _pg_hap_name: >-
+      {{ pg_ha_haproxy_item.name
+         | default('lb-' ~ (pg_ha_haproxy_item.namespace | default('default', true))) }}
+    _pg_hap_mode: >-
+      {{ (pg_ha_haproxy_item.mode | default(_pg_hap_deployment.mode | default('split'))) | lower }}
+    _pg_hap_lag: >-
+      {{ pg_ha_haproxy_item.max_lag
+         | default(_pg_hap_deployment.max_lag | default('', true), true) }}
+    _pg_hap_listen: >-
+      {{ pg_ha_haproxy_item.listen
+         | default(_pg_hap_deployment.listen | default('', true), true)
+         or '0.0.0.0' }}
+    _pg_hap_rw: "{{ pg_ha_haproxy_item.rw_port | default(0) | int }}"
+    _pg_hap_ro: "{{ pg_ha_haproxy_item.ro_port | default(0) | int }}"
+    _pg_hap_stats: "{{ pg_ha_haproxy_item.stats_port | default(0) | int }}"
+
+- name: Resolve the Patroni cluster
+  ansible.builtin.set_fact:
+    _pg_hap_cluster: >-
+      {{ _pg_hap_clusters_all
+         | selectattr('namespace', 'equalto', _pg_hap_namespace) | list | first | default({}) }}
+
+- name: Resolve the namespace config path
+  ansible.builtin.set_fact:
+    _pg_hap_ns_entry: >-
+      {{ (_pg_hap_namespaces_all | selectattr('name', 'equalto', _pg_hap_namespace)
+          | list | first | default({}))
+         if (_pg_hap_namespace | length > 0) else {} }}
+
+- name: Build the namespace config file path
+  ansible.builtin.set_fact:
+    _pg_hap_cfg: >-
+      {{ ((_pg_hap_ns_entry.path | regex_replace('/+$', '')) ~ '/pg.yaml')
+         if (_pg_hap_namespace | length > 0) else _pg_hap_default_cfg }}
+
+- name: Validate the instance spec
+  ansible.builtin.assert:
+    that:
+      - _pg_hap_cluster | length > 0
+      - _pg_hap_cluster.host_port is defined
+      - _pg_hap_cluster.restapi_port is defined
+      - (_pg_hap_rw | int) > 0
+      - (_pg_hap_stats | int) > 0
+      - _pg_hap_mode in ['unified', 'split']
+      - (_pg_hap_mode != 'split') or ((_pg_hap_ro | int) > 0)
+      - (_pg_hap_namespace | length == 0) or ((_pg_hap_ns_entry.path | default('')) | length > 0)
+      # members must map one-to-one onto ha_cluster, in inventory order
+      - (_pg_hap_cluster.members | default([], true) | length == 0) or
+        ((_pg_hap_cluster.members | length) == (groups['ha_cluster'] | length))
+    fail_msg: >-
+      HAProxy {{ _pg_hap_name }}: namespace "{{ _pg_hap_namespace }}" must match
+      an entry in both pgcli_namespaces and pg_ha_clusters; rw_port and
+      stats_port are required (plus ro_port in split mode).
+
+- name: Resolve the member names in ha_cluster order
+  ansible.builtin.set_fact:
+    _pg_hap_members: >-
+      {{ _pg_hap_cluster.members | default([], true)
+         if (_pg_hap_cluster.members | default([], true) | length > 0)
+         else groups['ha_cluster'] }}
+
+- name: Start from an empty backend list
+  ansible.builtin.set_fact:
+    _pg_hap_targets: []
+    _pg_hap_nodes: []
+
+# --ha cannot be used here: it only derives members of THIS host's config, and
+# the proxy usually runs on a host that is not a Patroni member. List every
+# member explicitly instead, addressed over the private network.
+- name: Add every Patroni member as a backend
+  ansible.builtin.set_fact:
+    _pg_hap_targets: >-
+      {{ _pg_hap_targets + [{'name': item.1,
+                             'host': _pg_hap_addr,
+                             'pg_port': _pg_hap_cluster.host_port | int,
+                             'rest_port': _pg_hap_cluster.restapi_port | int}] }}
+    _pg_hap_nodes: >-
+      {{ _pg_hap_nodes + [item.1 ~ '=' ~ _pg_hap_addr ~ ':' ~
+                          (_pg_hap_cluster.host_port | string) ~ ':' ~
+                          (_pg_hap_cluster.restapi_port | string)] }}
+  loop: "{{ groups['ha_cluster'] | zip(_pg_hap_members) | list }}"
+  loop_control:
+    label: "{{ item.1 }}"
+  vars:
+    _pg_hap_addr: >-
+      {{ hostvars[item.0].private_ip
+         | default(hostvars[item.0].ansible_host | default(item.0, true), true) }}
+
+- name: Check the namespace config file
+  ansible.builtin.stat:
+    path: "{{ _pg_hap_cfg }}"
+  register: _pg_hap_cfg_file
+
+- name: Require the namespace config file
+  ansible.builtin.assert:
+    that:
+      - _pg_hap_cfg_file.stat.exists
+    fail_msg: >-
+      HAProxy {{ _pg_hap_name }} needs {{ _pg_hap_cfg }} on this host. Run the
+      pgcli role here first, or point pg_ha_haproxy_host at a host that already
+      carries the pgcli namespace configs.
+
+- name: Read the namespace config
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ _pg_hap_cfg }}"
+      - config
+      - show
+  register: _pg_hap_cfg_raw
+  changed_when: false
+
+- name: Look up the current instance
+  ansible.builtin.set_fact:
+    _pg_hap_cur: >-
+      {{ (((_pg_hap_cfg_raw.stdout | from_yaml).get('addons') or {})
+          .get('haproxy') or {}).get(_pg_hap_name) }}
+
+- name: Refuse to overwrite a custom HAProxy instance
+  ansible.builtin.assert:
+    that:
+      - _pg_hap_cur is none or (_pg_hap_cur.conf_file | default('') | length == 0)
+    fail_msg: >-
+      addons.haproxy.{{ _pg_hap_name }} in {{ _pg_hap_cfg }} runs a custom
+      --conf-file; rename or remove it before managing this name from Ansible.
+
+# Install replaces the whole target list and recreates the container, so it
+# only runs when something actually differs. This keeps re-runs idempotent and
+# avoids dropping live connections on every apply.
+- name: Install or resync HAProxy
+  ansible.builtin.command:
+    argv: >-
+      {{ [pgcli_install_path, '-c', _pg_hap_cfg, 'addon', 'install', 'haproxy',
+          '--name', _pg_hap_name, '--mode', _pg_hap_mode,
+          '--max-lag', _pg_hap_lag, '--listen', _pg_hap_listen,
+          '--rw-port', _pg_hap_rw | string]
+         + (['--ro-port', _pg_hap_ro | string] if _pg_hap_mode == 'split' else [])
+         + ['--stats-port', _pg_hap_stats | string]
+         + (_pg_hap_nodes | map('regex_replace', '^', '--node=') | list) }}
+  when: >-
+    _pg_hap_cur is none or
+    (_pg_hap_cur.mode | default('unified', true) | lower) != _pg_hap_mode or
+    (_pg_hap_cur.listen | default('0.0.0.0', true)) != _pg_hap_listen or
+    (_pg_hap_cur.write_port | default(0, true) | int) != (_pg_hap_rw | int) or
+    (_pg_hap_mode == 'split' and
+     (_pg_hap_cur.read_port | default(0, true) | int) != (_pg_hap_ro | int)) or
+    (_pg_hap_cur.stats_port | default(0, true) | int) != (_pg_hap_stats | int) or
+    (_pg_hap_cur.replica_max_lag | default('', true)) != _pg_hap_lag or
+    (_pg_hap_cur.targets | default([])) != _pg_hap_targets

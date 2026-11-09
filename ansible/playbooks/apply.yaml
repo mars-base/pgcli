@@ -57,3 +57,20 @@
       tags: [ha]
       vars:
         pg_ha_converge_only: true
+
+# One HAProxy per namespace in front of both clusters. pg_ha_haproxy_host picks
+# the host (default: first in ha_cluster, see group_vars/ha_cluster); it must
+# carry the pgcli namespace configs. Runs after the serial member plays so the
+# backend list is complete.
+- name: Patroni HA proxy
+  hosts: >-
+    {{ pg_ha_haproxy_host
+       | default((hostvars[groups['ha_cluster'] | first].pg_ha_haproxy_host
+                  | default(groups['ha_cluster'] | first, true))
+                 if ('ha_cluster' in groups and groups['ha_cluster'] | length > 0)
+                 else 'ha_cluster', true) }}
+  gather_facts: false
+  roles:
+    - role: pg_ha_haproxy
+      tags: [ha, haproxy]
+      when: _pg_hap_deployment.enabled | default(false) | bool

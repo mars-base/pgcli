@@ -86,3 +86,29 @@ pg_ha_clusters:
     dcs_endpoints: "{{ _ha_dcs_endpoints }}"
     state: started
     autostart: true
+
+# HAProxy in front of both Patroni clusters, one instance per namespace. The
+# proxy targets every member of ha_cluster via --node (it usually runs on a
+# host that is not a Patroni member, so --ha would be wrong). mode: split gives
+# a read/write listener (leader) and a read-only listener (replicas under
+# max_lag). Both instances share one host network, so their ports must differ.
+# listen defaults to 0.0.0.0 so clients on other hosts can connect; set
+# 127.0.0.1 to keep the listeners loopback-only. Set enabled: false to skip the
+# proxy play.
+pg_ha_haproxy_host: "{{ groups['ha_cluster'] | first }}"
+pg_ha_haproxy:
+  enabled: true
+  mode: split
+  max_lag: 1MB
+  listen: 0.0.0.0
+  clusters:
+    - namespace: ha
+      name: lb-ha
+      rw_port: 5000
+      ro_port: 5001
+      stats_port: 5002
+    - namespace: ha2
+      name: lb-ha2
+      rw_port: 5010
+      ro_port: 5011
+      stats_port: 5012

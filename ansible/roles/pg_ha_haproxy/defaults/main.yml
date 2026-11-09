@@ -1,0 +1,21 @@
+---
+# The deployment knobs live in group_vars/ha_cluster. When pg_ha_haproxy_host
+# is a host outside that group (a dedicated proxy), read the same variables
+# from the first HA member's hostvars instead.
+_pg_hap_cluster_vars: "{{ hostvars[groups['ha_cluster'] | first] }}"
+_pg_hap_deployment: >-
+  {{ pg_ha_haproxy
+     | default(_pg_hap_cluster_vars.pg_ha_haproxy
+               | default({'enabled': false}, true), true) }}
+_pg_hap_clusters_all: >-
+  {{ pg_ha_clusters | default(_pg_hap_cluster_vars.pg_ha_clusters | default([])) }}
+# group_vars/all defines a default pgcli_namespaces entry for every host; on a
+# proxy outside ha_cluster that list has no ha/ha2 entries, so prefer the HA
+# group's view there.
+_pg_hap_namespaces_all: >-
+  {{ pgcli_namespaces
+     if (inventory_hostname in groups['ha_cluster'])
+     else (_pg_hap_cluster_vars.pgcli_namespaces | default(pgcli_namespaces)) }}
+_pg_hap_default_cfg: >-
+  {{ pgcli_config_path
+     | default(_pg_hap_cluster_vars.pgcli_config_path | default('/root/.pgcli/pg.yaml')) }}
