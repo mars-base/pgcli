@@ -3,20 +3,25 @@
 # environment; group_vars/*/main.yml is gitignored.
 #
 # One shared etcd cluster for every pgcli namespace. The first host in
-# [ha_etcd] bootstraps it; the rest join. apply.yaml runs the add-on play with
-# serial: 1 in inventory order, so the bootstrap host must come first.
+# pg_etcd_group bootstraps it; the rest join. apply.yaml runs the add-on play
+# with serial: 1 in inventory order, so the bootstrap host must come first.
+
+# Inventory group that holds this etcd cluster. This makes the file portable
+# across etcd groups: everything below is group-name agnostic, so to adapt it
+# to another group, copy it to group_vars/<group>/ and change only this value.
+pg_etcd_group: ha_etcd
 
 # Node-to-node addresses prefer private_ip (on public clouds ansible_host is
 # often the EIP); fall back to ansible_host when private_ip is not set.
 _ha_etcd_advertise_host: "{{ private_ip | default(hostvars[inventory_hostname].ansible_host | default(inventory_hostname), true) }}"
 # Client endpoint (no scheme; pgcli adds http://) used as a Patroni DCS member.
 _ha_etcd_client_endpoint: "{{ _ha_etcd_advertise_host }}:2379"
-_ha_etcd_bootstrap_endpoint: "http://{{ hostvars[groups['ha_etcd'] | first].private_ip | default(hostvars[groups['ha_etcd'] | first].ansible_host | default(groups['ha_etcd'] | first), true) }}:2379"
+_ha_etcd_bootstrap_endpoint: "http://{{ hostvars[groups[pg_etcd_group] | first].private_ip | default(hostvars[groups[pg_etcd_group] | first].ansible_host | default(groups[pg_etcd_group] | first), true) }}:2379"
 
 # Member names must be unique across the etcd cluster, so derive one from the
-# host's position in [ha_etcd].
+# host's position in pg_etcd_group.
 pgcli_addons:
   - type: etcd
-    name: "etcd-{{ groups['ha_etcd'].index(inventory_hostname) + 1 }}"
+    name: "etcd-{{ groups[pg_etcd_group].index(inventory_hostname) + 1 }}"
     state: present
-    args: "{{ ['--cluster', 'ha', '--advertise-host', _ha_etcd_advertise_host] + (['--join', _ha_etcd_bootstrap_endpoint] if inventory_hostname != (groups['ha_etcd'] | first) else []) }}"
+    args: "{{ ['--cluster', 'ha', '--advertise-host', _ha_etcd_advertise_host] + (['--join', _ha_etcd_bootstrap_endpoint] if inventory_hostname != (groups[pg_etcd_group] | first) else []) }}"
