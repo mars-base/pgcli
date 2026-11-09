@@ -137,9 +137,13 @@ uv run ansible-playbook playbooks/apply.yaml --limit single
 The full play directory (and what each tag runs) is on the
 [Playbooks](./playbooks/) page.
 
-## What is safe to commit
+## Tips
 
-`ansible.cfg`, `hosts.ini`, `group_vars/*/main.yml`, `group_vars/*/secrets.yaml`,
-`host_vars/*/secrets.yaml`, `var/` and `.venv/` are all gitignored. Only the
-`*.example` files are tracked. Keep real passwords, S3 secret keys and
-certificates in `secrets.yaml`, never in a committed example.
+The repository tracks only the `*.example` files; live `main.yml`, `hosts.ini`,
+`ansible.cfg`, `secrets.yaml` and `var/` are gitignored. If you maintain your
+own Ansible project (for example a fork you commit to), keep passwords, S3
+secret keys and certificates in a separate `secrets.yaml` rather than inline in
+`main.yml`. Both `group_vars/<group>/secrets.yaml` and
+`host_vars/<host>/secrets.yaml` are loaded automatically, so the variables
+resolve the same way while the secret file stays out of version control
+(the repository's `.gitignore` already covers this layout).

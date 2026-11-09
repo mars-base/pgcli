@@ -128,9 +128,11 @@ uv run ansible-playbook playbooks/apply.yaml --limit single
 
 完整的 play 顺序与每个 tag 的作用见[剧本](./playbooks/)页面。
 
-## 哪些可以提交
+## Tips
 
-`ansible.cfg`、`hosts.ini`、`group_vars/*/main.yml`、`group_vars/*/secrets.yaml`、
-`host_vars/*/secrets.yaml`、`var/`、`.venv/` 全部被 gitignore，只有 `*.example`
-会入库。真实密码、S3 secret key 和证书请放在 `secrets.yaml`，不要写进已提交的
-示例文件。
+仓库只跟踪 `*.example` 文件；正式的 `main.yml`、`hosts.ini`、`ansible.cfg`、
+`secrets.yaml` 和 `var/` 都被 gitignore。如果你自己管理维护 Ansible 工程
+（例如把配置提交到自己的仓库），推荐把密码、S3 secret key 和证书单独放进
+`secrets.yaml`，而不是直接写在 `main.yml` 里。`group_vars/<group>/secrets.yaml`
+和 `host_vars/<host>/secrets.yaml` 都会被自动加载，变量解析方式不变，同时密钥
+文件不会进入版本库（本仓库的 `.gitignore` 已覆盖该路径）。

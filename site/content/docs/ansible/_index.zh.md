@@ -62,6 +62,7 @@ ansible/
 
 | 页面 | 内容 |
 |------|------|
+| [快速部署](./quick-deploy/) | 可直接粘贴的命令：一台主机、一个单机实例，从 clone 到 `pg list` |
 | [安装与示例文件](./setup/) | 每个 `*.example` 对应哪个实际文件、`hosts.ini` 分组、`group_vars` 字段、首次运行 |
 | [剧本](./playbooks/) | `ping.yaml`、`apply.yaml`、`ha-status.yaml`、`deploy-s3.yaml`：tags、`--limit`、幂等、生命周期顺序 |
 | [实例与副本](./instances/) | `single`/`samehost`/`crosshost` 示例文件与 `pgcli_instances` 全部字段 |

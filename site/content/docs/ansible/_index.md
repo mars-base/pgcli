@@ -64,6 +64,7 @@ ansible/
 
 | Page | What it covers |
 |------|----------------|
+| [Quick deploy](./quick-deploy/) | Copy-paste commands: one host, one standalone instance, from clone to `pg list` |
 | [Setup and example files](./setup/) | Which `*.example` file becomes which live file, `hosts.ini` groups, `group_vars` fields, first run |
 | [Playbooks](./playbooks/) | `ping.yaml`, `apply.yaml`, `ha-status.yaml`, `deploy-s3.yaml`: tags, `--limit`, idempotency, lifecycle orders |
 | [Instances and replicas](./instances/) | The `single`/`samehost`/`crosshost` example files and every `pgcli_instances` field |
