@@ -80,6 +80,11 @@ pgcli_backup_s3_secret_key: "<secret-key>"
 # leader. extension_database selects the target database for
 # CREATE EXTENSION (default: postgres). Removing an entry from the list does
 # not uninstall it; use `pg ha extension remove` for that.
+#
+# state: started | stopped | absent. absent removes this host's local members
+# and clears the DCS scope (serial across ha_cluster); clean_data: true also
+# deletes the member data dirs. etcd, the backup container and the pgBackRest
+# stanza/backups are left intact. Remove the matching HAProxy entry too.
 pg_ha_clusters:
   - namespace: ha
     scope: pgcluster
@@ -88,6 +93,7 @@ pg_ha_clusters:
     dcs_endpoints: "{{ _ha_dcs_endpoints }}"
     state: started
     autostart: true
+    # clean_data: false
     extensions:
       - pg_stat_statements
     # extension_database: postgres
@@ -98,6 +104,7 @@ pg_ha_clusters:
     dcs_endpoints: "{{ _ha_dcs_endpoints }}"
     state: started
     autostart: true
+    # clean_data: false
     extensions:
       - pg_stat_statements
     # extension_database: postgres
@@ -110,6 +117,9 @@ pg_ha_clusters:
 # listen defaults to 0.0.0.0 so clients on other hosts can connect; set
 # 127.0.0.1 to keep the listeners loopback-only. Set enabled: false to skip the
 # proxy play.
+#
+# Each cluster entry takes state: present (default, create/reconcile) or
+# absent (remove the instance from the proxy host and prune its config).
 pg_ha_haproxy_host: "{{ groups['ha_cluster'] | first }}"
 pg_ha_haproxy:
   enabled: true
@@ -122,8 +132,10 @@ pg_ha_haproxy:
       rw_port: 5000
       ro_port: 5001
       stats_port: 5002
+      state: present
     - namespace: ha2
       name: lb-ha2
       rw_port: 5010
       ro_port: 5011
       stats_port: 5012
+      state: present

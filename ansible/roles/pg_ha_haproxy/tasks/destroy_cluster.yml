@@ -1,0 +1,72 @@
+---
+# Removes a proxy instance marked state: absent. Unlike cluster.yml this does
+# not require the Patroni cluster or its ports to still be declared: the proxy
+# is torn down independently of the members.
+
+- name: Resolve the proxy instance
+  ansible.builtin.set_fact:
+    _pg_hap_destroy_namespace: "{{ pg_ha_haproxy_item.namespace | default('', true) }}"
+    _pg_hap_destroy_name: >-
+      {{ pg_ha_haproxy_item.name
+         | default('lb-' ~ (pg_ha_haproxy_item.namespace | default('default', true))) }}
+
+- name: Resolve the namespace config path
+  ansible.builtin.set_fact:
+    _pg_hap_destroy_ns_entry: >-
+      {{ (_pg_hap_namespaces_all | selectattr('name', 'equalto', _pg_hap_destroy_namespace)
+          | list | first | default({}))
+         if (_pg_hap_destroy_namespace | length > 0) else {} }}
+
+- name: Build the namespace config file path
+  ansible.builtin.set_fact:
+    _pg_hap_destroy_cfg: >-
+      {{ ((_pg_hap_destroy_ns_entry.path | regex_replace('/+$', '')) ~ '/pg.yaml')
+         if (_pg_hap_destroy_namespace | length > 0) else _pg_hap_default_cfg }}
+
+- name: Check the namespace config file
+  ansible.builtin.stat:
+    path: "{{ _pg_hap_destroy_cfg }}"
+  register: _pg_hap_destroy_cfg_file
+
+- name: Read the namespace config
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ _pg_hap_destroy_cfg }}"
+      - config
+      - show
+  register: _pg_hap_destroy_cfg_raw
+  changed_when: false
+  when: _pg_hap_destroy_cfg_file.stat.exists
+
+- name: Assume the instance is already gone
+  ansible.builtin.set_fact:
+    _pg_hap_destroy_present: false
+
+- name: Look up the current instance
+  ansible.builtin.set_fact:
+    _pg_hap_destroy_present: >-
+      {{ ((((_pg_hap_destroy_cfg_raw.stdout | from_yaml).get('addons') or {})
+          .get('haproxy') or {}).get(_pg_hap_destroy_name)) is not none }}
+  when: _pg_hap_destroy_cfg_file.stat.exists
+
+- name: Remove the managed HAProxy instance
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ _pg_hap_destroy_cfg }}"
+      - addon
+      - remove
+      - haproxy
+      - --name
+      - "{{ _pg_hap_destroy_name }}"
+  when: _pg_hap_destroy_present | bool
+
+- name: Report the instance state
+  ansible.builtin.debug:
+    msg: >-
+      {{ ('Removed HAProxy ' ~ _pg_hap_destroy_name ~ ' from ' ~ _pg_hap_destroy_cfg)
+         if (_pg_hap_destroy_present | bool)
+         else ('HAProxy ' ~ _pg_hap_destroy_name ~ ' is already absent from ' ~ _pg_hap_destroy_cfg) }}

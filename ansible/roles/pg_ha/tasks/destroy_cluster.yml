@@ -1,0 +1,86 @@
+---
+# Runs on every ha_cluster host (serial: 1 in apply.yaml) for clusters with
+# state: absent. Members only exist on their own host, so each host removes its
+# local members; `pg ha remove --scope-all` also clears the DCS scope, which is
+# a clean no-op once a previous host already removed it.
+# etcd, the backup container and the pgBackRest stanza/backups are left intact:
+# they are shared/final copies, remove them separately if that is the intent.
+
+- name: Resolve the cluster namespace entry
+  ansible.builtin.set_fact:
+    _pg_ha_destroy_namespace: "{{ pg_ha_cluster_item.namespace | default('', true) }}"
+    _pg_ha_destroy_ns_entry: >-
+      {{ (pgcli_namespaces | default([]) | selectattr('name', 'equalto', pg_ha_cluster_item.namespace | default('', true)) | list | first | default({}))
+         if (pg_ha_cluster_item.namespace | default('', true) | length > 0) else {} }}
+
+- name: Resolve the cluster config path
+  ansible.builtin.set_fact:
+    _pg_ha_destroy_cfg_path: >-
+      {{ ((_pg_ha_destroy_ns_entry.path | regex_replace('/+$', '')) ~ '/pg.yaml')
+         if (_pg_ha_destroy_namespace | length > 0) else pgcli_config_path }}
+
+- name: Check the cluster config file
+  ansible.builtin.stat:
+    path: "{{ _pg_ha_destroy_cfg_path }}"
+  register: _pg_ha_destroy_cfg_file
+
+- name: Read the cluster config
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ _pg_ha_destroy_cfg_path }}"
+      - config
+      - show
+  register: _pg_ha_destroy_config_raw
+  changed_when: false
+  when: _pg_ha_destroy_cfg_file.stat.exists
+
+- name: Assume the cluster is already gone
+  ansible.builtin.set_fact:
+    _pg_ha_destroy_cluster: {}
+
+- name: Resolve the cluster entry
+  ansible.builtin.set_fact:
+    _pg_ha_destroy_cluster: >-
+      {{ ((((_pg_ha_destroy_config_raw.stdout | from_yaml).get('addons') or {})
+          .get('patroni') or {}).get(pg_ha_cluster_item.scope)) or {} }}
+  when: _pg_ha_destroy_cfg_file.stat.exists
+
+- name: Disable autostart for the local members
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ _pg_ha_destroy_cfg_path }}"
+      - autostart
+      - disable
+      - --ha
+      - --scope
+      - "{{ pg_ha_cluster_item.scope }}"
+      - --name
+      - "{{ item }}"
+  loop: "{{ (_pg_ha_destroy_cluster.members | default({})).keys() | list }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - _pg_ha_destroy_cluster | length > 0
+    - (_pg_ha_destroy_cluster.members | default({}))[item].autostart | default(false) | bool
+
+- name: Remove the local members and the DCS scope
+  ansible.builtin.command:
+    argv: >-
+      {{ [pgcli_install_path, '-c', _pg_ha_destroy_cfg_path,
+          'ha', 'remove', pg_ha_cluster_item.scope,
+          '--scope-all', '--force']
+         + (['--clean-data'] if (pg_ha_cluster_item.clean_data | default(false) | bool) else []) }}
+  when: _pg_ha_destroy_cluster | length > 0
+
+- name: Report the cluster state
+  ansible.builtin.debug:
+    msg: >-
+      {{ ('Removed ' ~ pg_ha_cluster_item.scope ~ ' on ' ~ inventory_hostname ~
+          ('' if (pg_ha_cluster_item.clean_data | default(false) | bool)
+           else ' (data dirs kept; set clean_data: true to delete them)'))
+         if (_pg_ha_destroy_cluster | length > 0)
+         else (pg_ha_cluster_item.scope ~ ' is already absent from ' ~ _pg_ha_destroy_cfg_path) }}

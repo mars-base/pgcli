@@ -14,6 +14,18 @@
       {{ (pgcli_backup_s3_host | default('', true) | length > 0) or
          (pgcli_backup_s3_endpoint | default('', true) | length > 0) }}
 
+# Split into its own task so the state lists can see _pg_ha_clusters: keys in a
+# single set_fact are templated against the pre-task context.
+- name: Split the HA clusters by lifecycle state
+  ansible.builtin.set_fact:
+    _pg_ha_absent_clusters: >-
+      {{ _pg_ha_clusters | selectattr('state', 'defined')
+         | selectattr('state', 'equalto', 'absent') | list }}
+    _pg_ha_active_clusters: >-
+      {{ (_pg_ha_clusters | rejectattr('state', 'defined') | list)
+         + (_pg_ha_clusters | selectattr('state', 'defined')
+            | rejectattr('state', 'equalto', 'absent') | list) }}
+
 - name: Validate HA inputs
   ansible.builtin.assert:
     that:
@@ -22,9 +34,32 @@
       pg_ha needs pg_ha_clusters (or the legacy single pg_ha_cluster) in
       group_vars/ha_cluster.
 
+- name: Validate the cluster lifecycle states
+  ansible.builtin.assert:
+    that:
+      - (item.state | default('started')) in ['started', 'stopped', 'absent']
+    fail_msg: >-
+      Cluster {{ item.scope | default('<unnamed>') }} has state
+      "{{ item.state | default('') }}"; use started, stopped or absent.
+  loop: "{{ _pg_ha_clusters }}"
+  loop_control:
+    label: "{{ item.scope | default('-') }}"
+
+# state: absent removes this host's local members, their data dirs when
+# clean_data is true, and clears the DCS scope (first host that still has it;
+# later hosts are a clean no-op). It must run before the reconcile loop so a
+# cluster marked absent is never recreated in the same pass.
+- name: Destroy each HA cluster marked absent
+  ansible.builtin.include_tasks: destroy_cluster.yml
+  loop: "{{ _pg_ha_absent_clusters }}"
+  loop_control:
+    loop_var: pg_ha_cluster_item
+    label: "{{ pg_ha_cluster_item.scope | default('-') }}"
+  when: not (pg_ha_converge_only | default(false) | bool)
+
 - name: Reconcile each HA cluster
   ansible.builtin.include_tasks: cluster.yml
-  loop: "{{ _pg_ha_clusters }}"
+  loop: "{{ _pg_ha_active_clusters }}"
   loop_control:
     loop_var: pg_ha_cluster_item
   when: not (pg_ha_converge_only | default(false) | bool)
@@ -37,14 +72,14 @@
 # incomplete for the hosts that run before the last member is created.
 - name: Converge the cluster extensions
   ansible.builtin.include_tasks: extension_converge.yml
-  loop: "{{ _pg_ha_clusters }}"
+  loop: "{{ _pg_ha_active_clusters }}"
   loop_control:
     loop_var: pg_ha_cluster_item
   when: pg_ha_converge_only | default(false) | bool
 
 - name: Converge the S3 backup setup on every host
   ansible.builtin.include_tasks: backup_converge.yml
-  loop: "{{ _pg_ha_clusters }}"
+  loop: "{{ _pg_ha_active_clusters }}"
   loop_control:
     loop_var: pg_ha_cluster_item
   when:

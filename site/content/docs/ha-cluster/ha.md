@@ -724,6 +724,74 @@ pg ha extension remove app pg_cron                        # remove
 > orchestration order, cross-host workflow, `shared_preload_libraries` ordering,
 > and builtin-only fast path.
 
+## Destroying a cluster
+
+Member containers, data dirs, and `pg.yaml` entries live only on their own
+hosts, while the DCS scope is shared. There is no one-host shortcut for a
+cross-host cluster — run this on **every member host**:
+
+```bash
+# --clean-data also deletes the data dir; omit it to keep the data
+pg ha remove pgcluster --scope-all --clean-data --force
+```
+
+- `--scope-all` only handles **local members**: it clears the DCS scope first
+  (a no-op when absent), then stops and removes the local containers and prunes
+  the config entry.
+- Disable auto-start first when it is enabled:
+  `pg autostart disable --ha --scope pgcluster --name ha1`.
+- The scope argument is the bare scope (`pgcluster`); the namespace comes from
+  the config selected with `-c`. With one cluster per namespace, run it once
+  per config.
+- Peers that are still running briefly recreate DCS keys, so the **last host's**
+  cleanup is the final state.
+
+Proxies are not removed with the members; delete them on the proxy host (one
+instance per namespace):
+
+```bash
+pg addon remove haproxy --name lb-ha
+pg addon remove haproxy --name lb-ha2
+```
+
+> **What is left behind:** etcd (possibly shared with other clusters), the
+> backup container, and the pgBackRest stanza and S3 backups — backups are the
+> last copy of the data, so clean them up separately per
+> [Backup and Restore](./ha-backup/) once they are no longer needed. Data dirs
+> are only deleted with `--clean-data`.
+
+### Destroying through Ansible
+
+The `ansible/` deployment expresses desired state through the `state` field.
+Mark the cluster `state: absent` and add `clean_data: true` to also delete the
+data dirs; HAProxy instances take the same `state: absent`:
+
+```yaml
+# ansible/group_vars/ha_cluster/main.yml
+pg_ha_clusters:
+  - namespace: ha
+    scope: pgcluster
+    state: absent
+    clean_data: true   # default false: only containers and the DCS scope go
+    # keep the other fields (host_port, ...) for a later rebuild
+    ...
+
+pg_ha_haproxy:
+  clusters:
+    - namespace: ha
+      name: lb-ha
+      state: absent
+```
+
+```bash
+cd ansible && uv run ansible-playbook playbooks/apply.yaml
+```
+
+The `pg_ha` role runs the same `pg ha remove` flow serially across `ha_cluster`
+and is idempotent — hosts where the cluster is already gone are skipped. To
+rebuild, set the entries back to `state: started` / `state: present` (or drop
+them) and run `apply.yaml` again.
+
 ## Notes
 
 - **Linux only (root or rootless).** Rootless members run as the host user via

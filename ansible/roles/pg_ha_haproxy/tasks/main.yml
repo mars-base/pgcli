@@ -7,8 +7,26 @@
       pg_ha_haproxy.enabled is true but clusters is empty; add one entry per
       Patroni namespace with rw_port/ro_port/stats_port.
 
+- name: Validate the HAProxy lifecycle states
+  ansible.builtin.assert:
+    that:
+      - (item.state | default('present')) in ['present', 'absent']
+    fail_msg: >-
+      HAProxy {{ item.name | default('lb') }} has state
+      "{{ item.state | default('') }}"; use present or absent.
+  loop: "{{ pg_ha_haproxy.clusters | default([]) }}"
+  loop_control:
+    label: "{{ item.namespace | default('-') }}/{{ item.name | default('lb') }}"
+
+# state: absent removes the instance from the proxy host and prunes its config
+# entry. Present entries are reconciled as before. Both run in one pass so the
+# proxy host converges every declared instance.
 - name: Reconcile each HAProxy instance
-  ansible.builtin.include_tasks: cluster.yml
+  ansible.builtin.include_tasks:
+    file: >-
+      {{ 'destroy_cluster.yml'
+         if ((pg_ha_haproxy_item.state | default('present')) == 'absent')
+         else 'cluster.yml' }}
   loop: "{{ pg_ha_haproxy.clusters }}"
   loop_control:
     loop_var: pg_ha_haproxy_item

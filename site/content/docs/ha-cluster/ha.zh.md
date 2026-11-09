@@ -660,6 +660,66 @@ pg ha extension remove app pg_cron                        # 卸载
 > **完整参考：** [HA 集群扩展安装](./ha-extensions/) 涵盖编排顺序、跨主机工作流、
 > `shared_preload_libraries` 排序规则以及纯内置扩展快速路径。
 
+## 销毁集群
+
+成员容器、数据目录和 `pg.yaml` 条目都只存在于成员自己的主机上，DCS scope 则是共享的，
+所以没有“在一台机器上删掉整个跨主机集群”的捷径——要在**每台成员主机**上各执行一次：
+
+```bash
+# --clean-data 一并删除数据目录；不带它则保留数据（便于排查或后续处理）
+pg ha remove pgcluster --scope-all --clean-data --force
+```
+
+- `--scope-all` 只处理**本机成员**：先清 DCS 里的 scope（不存在时是 no-op），
+  再停止并删除本机容器、清理配置。
+- 如果成员启用了开机自启，先关掉：
+  `pg autostart disable --ha --scope pgcluster --name ha1`。
+- scope 参数是裸 scope（`pgcluster`），namespace 由 `-c` 选中的 config 决定；
+  多个 namespace 各有集群时，对各自的 config 分别执行。
+- 仍在运行的其他主机会短暂重建 DCS 键，因此**最后一台主机**的清理才是最终状态。
+
+代理不会随成员一起消失，在代理主机上单独删除（每个 namespace 一个实例）：
+
+```bash
+pg addon remove haproxy --name lb-ha
+pg addon remove haproxy --name lb-ha2
+```
+
+> **不会被删除的内容：** etcd（可能被其他集群共用）、备份容器，以及 pgBackRest
+> stanza 和 S3 里的备份——备份是最后的数据副本，确认不再需要后再按
+> [备份与恢复](./ha-backup/) 的说明单独清理。数据目录只有 `--clean-data` 才会删除。
+
+### 用 Ansible 收敛销毁
+
+本仓库的 `ansible/` 用配置里的 `state` 字段表达期望状态。把要销毁的集群标成
+`state: absent`，需要同时删数据时加 `clean_data: true`；HAProxy 实例用同样的
+`state: absent`：
+
+```yaml
+# ansible/group_vars/ha_cluster/main.yml
+pg_ha_clusters:
+  - namespace: ha
+    scope: pgcluster
+    state: absent
+    clean_data: true   # 默认 false：只删容器和 DCS scope，保留数据目录
+    # 其余字段（host_port 等）保留，供重建时使用
+    ...
+
+pg_ha_haproxy:
+  clusters:
+    - namespace: ha
+      name: lb-ha
+      state: absent
+```
+
+```bash
+cd ansible && uv run ansible-playbook playbooks/apply.yaml
+```
+
+`pg_ha` 角色会按 `ha_cluster` 串行逐台执行上述 `pg ha remove` 流程，幂等：
+已经不存在的主机直接跳过。销毁后把这些条目改回 `state: started` / `state: present`
+（或删除条目），再跑 `apply.yaml` 即可重建。
+
 ## 注意
 
 - **仅 Linux（root 或 rootless）。** rootless 成员通过 `--userns=keep-id`
