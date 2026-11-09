@@ -18,7 +18,8 @@ prometheus、kafka 等）。
 | `name` | 顶层插件实例名（例如本机的 etcd 成员） |
 | `instance` | 与 `name` 二选一：把插件挂到某个 pgcli 实例上 |
 | `state` | `present`（默认）或 `absent` |
-| `args` | 条目级参数，追加在分组公共参数之后 |
+| `params` | 条目级完整参数列表，覆盖该条目的 `addon_<type>_params` |
+| `args` | 条目级额外参数，追加在最终参数之后 |
 | `conf` | 内联配置文件内容，覆盖 `addon_<type>_conf`（仅 nginx、haproxy、prometheus、alertmanager） |
 | `clean_data` | 与 `state: absent` 搭配，在插件支持时一并删除数据（默认 `true`，设为 `false` 保留数据） |
 | `force` | 与 `state: present` 搭配，用 `pg addon install --force` 重建 |
@@ -28,24 +29,40 @@ prometheus、kafka 等）。
 
 ## 公共参数
 
-同一种 add-on 的所有实例共用的参数只需在列表旁声明一次，变量名为
-`addon_<type>_params`，类型是原始的 `pg addon install` 参数列表。角色在安装该
-类型的每个条目时会自动把它拼接到命令里：
+同一种 add-on 的所有实例共用的参数可以在列表旁声明一次，变量名为
+`addon_<type>_params`，类型是原始的 `pg addon install` 参数列表。未设置 `params`
+的条目会继承这份列表。
+
+条目也可以设置自己的 `params`，作为该实例完整的参数列表；它会**整体替换**
+`addon_<type>_params`，因此同类型的多个实例可以使用不同端口、数据目录、内存上限等。
+条目级 `args` 仍然在最终参数之后追加。
 
 ```yaml
-addon_redis_params:
-  - "--data-dir=/data/pg/addon/redis/redis1"
-  - "--aof"
-
 addon_redis_addons:
   - type: redis
-    name: redis1
+    name: cache
     state: present
+    params:
+      - "--port"
+      - "6379"
+      - "--maxmemory"
+      - "256mb"
+  - type: redis
+    name: session
+    state: present
+    params:
+      - "--port"
+      - "6380"
+      - "--maxmemory"
+      - "512mb"
+      - "--listen"
+      - "127.0.0.1"
 ```
 
-拼接顺序在 `name`/`instance` 之后、条目自身的 `args` 之前。逐实例有差异的参数放
-`args`；它最后出现，重复的标量 flag 以后者为准。变量名中的类型会把 `-` 换成 `_`
-（例如 `addon_clickhouse_keeper_params`）。
+同一类型下条目名必须唯一；每个实例在 pgcli 配置中存放在
+`addons.<type>.<name>`。因为 `params` 是整体替换，公共 flag 需要在每个条目里重复
+（可以用 YAML anchor）。变量名中的类型会把 `-` 换成 `_`（例如
+`addon_clickhouse_keeper_params`）。
 
 ## 内联配置文件
 

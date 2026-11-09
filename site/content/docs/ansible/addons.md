@@ -19,7 +19,8 @@ haproxy, minio/silo/rustfs, redis, nginx, prometheus, kafka, and so on).
 | `name` | Top-level add-on instance name (e.g. this etcd member) |
 | `instance` | Instead of `name`: scope the add-on to a pgcli instance |
 | `state` | `present` (default) or `absent` |
-| `args` | Per-entry flags appended verbatim after the group-level parameters |
+| `params` | Complete per-entry flag list; replaces `addon_<type>_params` for this entry |
+| `args` | Per-entry flags appended verbatim after the resolved parameters |
 | `conf` | Inline config content, overriding `addon_<type>_conf` (nginx, haproxy, prometheus, alertmanager only) |
 | `clean_data` | With `state: absent`, delete data where the add-on supports it (default `true`; set `false` to keep it) |
 | `force` | With `state: present`, recreate with `pg addon install --force` |
@@ -30,25 +31,41 @@ asserts this before doing anything.
 
 ## Per-type parameters
 
-Flags shared by every instance of one add-on type are declared once next to the
-list as `addon_<type>_params`: a list of raw `pg addon install` tokens. The role
-appends it to the install command of every entry of that type.
+Flags shared by every instance of one add-on type can be declared once next to
+the list as `addon_<type>_params`: a list of raw `pg addon install` tokens.
+Entries that do not set their own `params` inherit this list.
+
+An entry can set `params` to its own complete flag list. It replaces
+`addon_<type>_params` for that entry, so different instances of the same type
+can use different ports, data directories, memory limits, and so on. Per-entry
+`args` is still appended after the resolved params.
 
 ```yaml
-addon_redis_params:
-  - "--data-dir=/data/pg/addon/redis/redis1"
-  - "--aof"
-
 addon_redis_addons:
   - type: redis
-    name: redis1
+    name: cache
     state: present
+    params:
+      - "--port"
+      - "6379"
+      - "--maxmemory"
+      - "256mb"
+  - type: redis
+    name: session
+    state: present
+    params:
+      - "--port"
+      - "6380"
+      - "--maxmemory"
+      - "512mb"
+      - "--listen"
+      - "127.0.0.1"
 ```
 
-The shared list is combined automatically at install time, after
-`name`/`instance` and before the entry's own `args`. Keep per-instance
-differences in `args`; it comes last, so repeated scalar flags win there. The
-variable uses the type with `-` replaced by `_` (for example
+Entry names must be unique per type; each instance is stored under
+`addons.<type>.<name>` in the pgcli config. Because `params` replaces the shared
+list, repeat any shared flags in each entry (or use YAML anchors). The variable
+name uses the type with `-` replaced by `_` (for example
 `addon_clickhouse_keeper_params`).
 
 ## Inline config files

@@ -1,0 +1,666 @@
+---
+# EXAMPLE ONLY: copy to main.yml (gitignored) and adjust.
+# Secrets and host-specific values are placeholders.
+# Single-node add-on test group. All addon_<type>_* variables live in this
+# file; select one type at runtime with -e addon_type=<type>:
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_single \
+#     --tags addon -e addon_type=haproxy
+#
+# Omitting addon_type makes the add-on play a no-op.
+#
+# Every entry needs type plus exactly one of name (top-level) or instance
+# (instance-scoped). Optional fields:
+#   state       present (default) or absent. To clean a group up, set that
+#               entry to absent and rerun the same command; the role removes
+#               the container and deletes its data by default (clean_data:
+#               false keeps it).
+#   params      complete `pg addon install` flag list for this entry. It
+#               replaces the group-level addon_<type>_params; entries without
+#               params inherit that shared list. Supported for every add-on
+#               type, so multiple instances of the same type can use different
+#               ports, data directories, memory limits, and so on.
+#   args        extra flags appended verbatim after the resolved params.
+#   conf        inline config, overriding the shared addon_<type>_conf
+#               (nginx/haproxy/prometheus/alertmanager only).
+#   clean_data  with state: absent, delete data where supported (default true).
+#   force       with state: present, reinstall with `pg addon install --force`.
+#   autostart   enable boot autostart (default true).
+#
+# Because an entry's params replaces addon_<type>_params, repeat any shared
+# flags in each entry (or use YAML anchors).
+_addon_kind: "{{ addon_type | default('') }}"
+pgcli_addons: "{{ lookup('vars', 'addon_' ~ _addon_kind ~ '_addons', default=[]) }}"
+pgcli_instances: "{{ lookup('vars', 'addon_' ~ _addon_kind ~ '_instances', default=[]) }}"
+
+
+# ===== alertmanager =====
+# Single-node test group for the alertmanager add-on.
+
+# Default flags for alertmanager entries that do not set their own params.
+addon_alertmanager_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/alertmanager/am1"
+#
+# Inline config file, written under <pgcli config dir>/addons/ and
+# passed as --conf-file (mutually exclusive with its rendered-config flags).
+addon_alertmanager_conf: ""
+# Example:
+#   route:
+#     receiver: noop
+#   receivers:
+#     - name: noop
+
+addon_alertmanager_addons:
+  - type: alertmanager
+    state: present
+    name: am1
+
+
+# ===== beegfs =====
+# Single-node test group for the beegfs add-on.
+
+# Default flags for beegfs entries that do not set their own params.
+addon_beegfs_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/beegfs/beegfs1"
+
+addon_beegfs_addons:
+  - type: beegfs
+    state: present
+    name: beegfs1
+
+
+# ===== clickhouse =====
+# Single-node test group for the clickhouse add-on.
+
+# Default flags for clickhouse entries that do not set their own params.
+addon_clickhouse_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/clickhouse/ch1"
+
+addon_clickhouse_addons:
+  - type: clickhouse
+    state: present
+    name: ch1
+
+
+# ===== documentdb =====
+# Single-node test group for the documentdb add-on.
+addon_documentdb_instances:
+  - name: pg_docdb
+    host: "{{ inventory_hostname }}"
+    state: started
+    extensions:
+      - documentdb
+addon_documentdb_params:
+  - "--pg-name"
+  - "pg_docdb"
+
+addon_documentdb_addons:
+  - type: documentdb
+    state: present
+    name: docdb1
+
+
+# ===== duckdb =====
+# Single-node test group for the duckdb add-on.
+
+# Default flags for duckdb entries that do not set their own params.
+addon_duckdb_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/duckdb/duckdb1"
+
+addon_duckdb_addons:
+  - type: duckdb
+    state: present
+    name: duckdb1
+
+
+# ===== etcd =====
+# Single-node test group for the etcd add-on.
+
+# Default flags for etcd entries that do not set their own params.
+addon_etcd_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/etcd/etcd1"
+
+addon_etcd_addons:
+  - type: etcd
+    state: present
+    name: etcd1
+
+
+# ===== garage =====
+# Single-node test group for the garage add-on.
+
+# Default flags for garage entries that do not set their own params.
+addon_garage_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/garage/garage1"
+
+addon_garage_addons:
+  - type: garage
+    state: present
+    name: garage1
+
+
+# ===== gitea =====
+# Single-node test group for the gitea add-on.
+
+# Default flags for gitea entries that do not set their own params.
+addon_gitea_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/gitea/gitea1"
+
+addon_gitea_addons:
+  - type: gitea
+    state: present
+    name: gitea1
+
+
+# ===== grafana =====
+# Single-node test group for the grafana add-on.
+
+# Default flags for grafana entries that do not set their own params.
+addon_grafana_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/grafana/grafana1"
+
+addon_grafana_addons:
+  - type: grafana
+    state: present
+    name: grafana1
+
+
+# ===== haproxy =====
+# Single-node test group for the haproxy add-on.
+#
+# Default list of `pg addon install` flags for entries below that do not set
+# their own params.
+addon_haproxy_params: []
+# Example:
+#   - "--image=docker.io/library/haproxy:3.2.23-alpine"
+#
+# Inline custom config, written to <pgcli config dir>/addons/haproxy-lb1.conf
+# and passed as --conf-file. Use force: true (or remove first) to apply edits.
+addon_haproxy_conf: |
+  global
+      maxconn 1000
+      log stdout format raw local0 info
+
+  defaults
+      log global
+      mode tcp
+      timeout client 30m
+      timeout connect 4s
+      timeout server 30m
+
+  frontend pg_relay
+      bind 0.0.0.0:7000
+      default_backend pg
+
+  backend pg
+      server demo 127.0.0.1:35432 check
+
+  listen webstats
+      mode http
+      bind 0.0.0.0:7001
+      http-request return status 200 content-type text/plain lf-string "haproxy custom proxy alive\n"
+
+# Default flags for haproxy entries that do not set their own params.
+# addon_haproxy_params:
+#   - "--<flag>=<value>"
+
+addon_haproxy_addons:
+  - type: haproxy
+    state: present
+    name: lb1
+
+
+# ===== influx2tsdb =====
+# Single-node test group for the influx2tsdb add-on.
+addon_influx2tsdb_instances:
+  - name: tsdb
+    host: "{{ inventory_hostname }}"
+    state: started
+    extensions:
+      - timescaledb
+addon_influx2tsdb_params:
+  - "--pg-name"
+  - "tsdb"
+
+addon_influx2tsdb_addons:
+  - type: influx2tsdb
+    state: present
+    name: i2t1
+
+
+# ===== influxdb =====
+# Single-node test group for the influxdb add-on.
+
+# Default flags for influxdb entries that do not set their own params.
+addon_influxdb_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/influxdb/influx1"
+
+addon_influxdb_addons:
+  - type: influxdb
+    state: present
+    name: influx1
+
+
+# ===== juicefs =====
+# Single-node test group for the juicefs add-on.
+addon_juicefs_params:
+  - "--s3-endpoint"
+  - "http://127.0.0.1:9000"
+  - "--access-key"
+  - "<secret>"
+  - "--secret-key"
+  - "<secret>"
+  - "--bucket"
+  - "juicefs-data"
+  - "--dsn"
+  - "sqlite3:///var/lib/juicefs/data.db"
+
+addon_juicefs_addons:
+  - type: juicefs
+    state: present
+    name: juicefs1
+
+
+# ===== kafka =====
+# Single-node test group for the kafka add-on.
+
+# Default flags for kafka entries that do not set their own params.
+addon_kafka_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/kafka/kafka1"
+
+addon_kafka_addons:
+  - type: kafka
+    state: present
+    name: kafka1
+
+
+# ===== minio =====
+# Single-node test group for the minio add-on.
+
+# Default flags for minio entries that do not set their own params.
+addon_minio_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/minio/minio1"
+
+addon_minio_addons:
+  - type: minio
+    state: present
+    name: minio1
+
+
+# ===== nginx =====
+# Single-node test group for the nginx add-on.
+addon_nginx_params:
+  - "--upstream"
+  - "name=s3,path=/,backend=192.0.2.10:19800"
+
+# Inline nginx.conf, written under <pgcli config dir>/addons/ and passed as
+# --conf-file (mutually exclusive with the --upstream params above).
+addon_nginx_conf: ""
+# Example:
+#   events {}
+#   http {
+#     server {
+#       listen 8080;
+#       location / { return 200 "ok\n"; }
+#     }
+#   }
+
+addon_nginx_addons:
+  - type: nginx
+    state: present
+    name: nginx1
+
+
+# ===== nodeexporter =====
+# Single-node test group for the nodeexporter add-on.
+
+# Default flags for nodeexporter entries that do not set their own params.
+addon_nodeexporter_params: []
+# Example:
+#   - "--<flag>=<value>"
+
+addon_nodeexporter_addons:
+  - type: nodeexporter
+    state: present
+    name: ne1
+
+
+# ===== pgadmin =====
+# Single-node test group for the pgadmin add-on.
+
+# Default flags for pgadmin entries that do not set their own params.
+addon_pgadmin_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/pgadmin/pgadmin1"
+
+addon_pgadmin_addons:
+  - type: pgadmin
+    state: present
+    name: pgadmin1
+
+
+# ===== pgbouncer =====
+# Single-node test group for the pgbouncer add-on.
+addon_pgbouncer_instances:
+  - name: pg_addon
+    host: "{{ inventory_hostname }}"
+    state: started
+    extensions:
+      - pg_stat_statements
+
+# Default flags for pgbouncer entries that do not set their own params.
+addon_pgbouncer_params: []
+# Example:
+#   - "--<flag>=<value>"
+
+addon_pgbouncer_addons:
+  - type: pgbouncer
+    state: present
+    instance: pg_addon
+
+
+# ===== pgdog =====
+# Single-node test group for the pgdog add-on.
+addon_pgdog_instances:
+  - name: pg_addon
+    host: "{{ inventory_hostname }}"
+    state: started
+    extensions:
+      - pg_stat_statements
+addon_pgdog_params:
+  - "--backend"
+  - "app=127.0.0.1:35432:postgres"
+  - "--user"
+  - "appuser:<secret>:app"
+  - "--sharded-table"
+  - "app:users:id:bigint"
+
+addon_pgdog_addons:
+  - type: pgdog
+    state: present
+    name: pgdog1
+
+
+# ===== pgexporter =====
+# Single-node test group for the pgexporter add-on.
+addon_pgexporter_instances:
+  - name: pg_addon
+    host: "{{ inventory_hostname }}"
+    state: started
+    extensions:
+      - pg_stat_statements
+addon_pgexporter_params:
+  - "--pg-name"
+  - "pg_addon"
+
+addon_pgexporter_addons:
+  - type: pgexporter
+    state: present
+    name: pgex1
+
+
+# ===== postgrest =====
+# Single-node test group for the postgrest add-on.
+addon_postgrest_instances:
+  - name: pg_addon
+    host: "{{ inventory_hostname }}"
+    state: started
+    extensions:
+      - pg_stat_statements
+addon_postgrest_params:
+  - "--schema"
+  - "api"
+  - "--anon-role"
+  - "web_anon"
+
+addon_postgrest_addons:
+  - type: postgrest
+    state: present
+    instance: pg_addon
+
+
+# ===== predixy =====
+# Single-node test group for the predixy add-on.
+addon_predixy_params:
+  - "--backend"
+  - "127.0.0.1:6379"
+  - "--password"
+  - "<secret>"
+
+addon_predixy_addons:
+  - type: predixy
+    state: present
+    name: predixy1
+
+
+# ===== prometheus =====
+# Single-node test group for the prometheus add-on.
+
+# Default flags for prometheus entries that do not set their own params.
+addon_prometheus_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/prometheus/prom1"
+#
+# Inline config file, written under <pgcli config dir>/addons/ and
+# passed as --conf-file (mutually exclusive with its rendered-config flags).
+addon_prometheus_conf: ""
+# Example:
+#   global:
+#     scrape_interval: 15s
+#   scrape_configs: []
+
+addon_prometheus_addons:
+  - type: prometheus
+    state: present
+    name: prom1
+
+
+# ===== rabbitmq =====
+# Single-node test group for the rabbitmq add-on.
+
+# Default flags for rabbitmq entries that do not set their own params.
+addon_rabbitmq_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/rabbitmq/rmq1"
+
+addon_rabbitmq_addons:
+  - type: rabbitmq
+    state: present
+    name: rmq1
+
+
+# ===== redis =====
+# Single-node test group for the redis add-on.
+
+# Shared flags for entries that do not set their own params.
+addon_redis_params: []
+# Per-entry params replace addon_redis_params for that instance.
+
+addon_redis_addons:
+  - type: redis
+    state: present
+    name: cache
+    params:
+      - "--port"
+      - "6379"
+      - "--maxmemory"
+      - "256mb"
+      - "--listen"
+      - "127.0.0.1"
+  - type: redis
+    state: present
+    name: session
+    params:
+      - "--port"
+      - "6380"
+      - "--maxmemory"
+      - "512mb"
+      - "--listen"
+      - "127.0.0.1"
+
+
+# ===== rocketmq =====
+# Single-node test group for the rocketmq add-on.
+
+# Default flags for rocketmq entries that do not set their own params.
+addon_rocketmq_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/rocketmq/rocketmq1"
+
+addon_rocketmq_addons:
+  - type: rocketmq
+    state: present
+    name: rocketmq1
+
+
+# ===== rustfs =====
+# Single-node test group for the rustfs add-on.
+
+# Default flags for rustfs entries that do not set their own params.
+addon_rustfs_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/rustfs/rustfs1"
+
+addon_rustfs_addons:
+  - type: rustfs
+    state: present
+    name: rustfs1
+
+
+# ===== seaweedfs =====
+# Single-node test group for the seaweedfs add-on.
+
+# Default flags for seaweedfs entries that do not set their own params.
+addon_seaweedfs_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/seaweedfs/seaweed1"
+
+addon_seaweedfs_addons:
+  - type: seaweedfs
+    state: present
+    name: seaweed1
+
+
+# ===== silo =====
+# Single-node test group for the silo add-on.
+
+# Default flags for silo entries that do not set their own params.
+addon_silo_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/silo/silo1"
+
+addon_silo_addons:
+  - type: silo
+    state: present
+    name: silo1
+
+
+# ===== victorialogs =====
+# Single-node test group for the victorialogs add-on.
+
+# Default flags for victorialogs entries that do not set their own params.
+addon_victorialogs_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/victorialogs/vl1"
+
+addon_victorialogs_addons:
+  - type: victorialogs
+    state: present
+    name: vl1
+
+
+# ===== victoriametrics =====
+# Single-node test group for the victoriametrics add-on.
+
+# Default flags for victoriametrics entries that do not set their own params.
+addon_victoriametrics_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/victoriametrics/vm1"
+
+addon_victoriametrics_addons:
+  - type: victoriametrics
+    state: present
+    name: vm1
+
+
+# ===== vlagent =====
+# Single-node test group for the vlagent add-on.
+addon_vlagent_params:
+  - "--remote-write-url"
+  - "http://127.0.0.1:9428/insert/native"
+
+addon_vlagent_addons:
+  - type: vlagent
+    state: present
+    name: va1
+
+
+# ===== vlcluster =====
+# Single-node test group for the vlcluster add-on.
+
+# Default flags for vlcluster entries that do not set their own params.
+addon_vlcluster_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/vlcluster/vlc1"
+
+addon_vlcluster_addons:
+  - type: vlcluster
+    state: present
+    name: vlc1
+
+
+# ===== vmalert =====
+# Single-node test group for the vmalert add-on.
+
+# Default flags for vmalert entries that do not set their own params.
+addon_vmalert_params: []
+# Example:
+#   - "--<flag>=<value>"
+
+addon_vmalert_addons:
+  - type: vmalert
+    state: present
+    name: vmalert1
+
+
+# ===== vmcluster =====
+# Single-node test group for the vmcluster add-on.
+
+# Default flags for vmcluster entries that do not set their own params.
+addon_vmcluster_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/vmcluster/vmc1"
+
+addon_vmcluster_addons:
+  - type: vmcluster
+    state: present
+    name: vmc1
+
+
+# ===== zerofs =====
+# Single-node test group for the zerofs add-on.
+addon_zerofs_params:
+  - "--s3-endpoint"
+  - "http://127.0.0.1:9000"
+  - "--access-key"
+  - "<secret>"
+  - "--secret-key"
+  - "<secret>"
+  - "--bucket"
+  - "zerofs-data"
+
+addon_zerofs_addons:
+  - type: zerofs
+    state: present
+    name: zerofs1
