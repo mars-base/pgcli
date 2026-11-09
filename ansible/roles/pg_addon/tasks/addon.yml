@@ -6,18 +6,78 @@
       - addon.type | length > 0
       - (addon.instance is defined) or (addon.name is defined)
       - (addon.state | default('present')) in ['present', 'absent']
+      - addon.args is not defined or (addon.args is sequence and addon.args is not string and addon.args is not mapping)
+      - addon.conf is not defined or addon.conf is string
     fail_msg: >-
       Each pgcli_addons entry needs type plus either name (top-level) or
-      instance (instance-scoped), and state present|absent.
+      instance (instance-scoped), and state present|absent. args must be a list
+      and conf must be a string.
 
 - name: Resolve the add-on key
   ansible.builtin.set_fact:
     _addon_key: "{{ addon.type | replace('-', '_') }}"
+    _addon_key_name: "{{ addon.name | default(addon.instance) }}"
+    _addon_state: "{{ addon.state | default('present') }}"
+    _addon_force: "{{ addon.force | default(false) | bool }}"
+
+# Every group may declare a common list of `pg addon install` flags as
+# addon_<type>_params. It is appended to every entry of that type, so the
+# parameters live in one place and are combined automatically at install time.
+# Per-entry `args` still wins by coming last.
+- name: Resolve the common add-on parameters
+  ansible.builtin.set_fact:
+    _addon_params: "{{ lookup('vars', 'addon_' ~ _addon_key ~ '_params', default=[]) }}"
+
+- name: Validate the common add-on parameters
+  ansible.builtin.assert:
+    that:
+      - _addon_params is sequence
+      - _addon_params is not string
+      - _addon_params is not mapping
+    fail_msg: "addon_{{ _addon_key }}_params must be a list of CLI flags."
+
+# conf may be set per entry, or once per group as addon_<type>_conf for the
+# add-ons that accept --conf-file.
+- name: Resolve the inline add-on config path
+  ansible.builtin.set_fact:
+    _addon_conf_content: >-
+      {{ addon.conf if addon.conf is defined
+         else lookup('vars', 'addon_' ~ _addon_key ~ '_conf', default='') }}
+    _addon_conf_dir: "{{ pgcli_config_path | dirname }}/addons"
+    _addon_conf_path: >-
+      {{ (pgcli_config_path | dirname) ~ '/addons/' ~ addon.type ~ '-'
+         ~ (_addon_key_name | regex_replace('[^A-Za-z0-9_.-]', '_')) ~ '.conf' }}
+
+- name: Validate the inline add-on config
+  ansible.builtin.assert:
+    that:
+      - _addon_conf_content | length == 0 or addon.type in ['nginx', 'haproxy', 'prometheus', 'alertmanager']
+      - _addon_conf_content | length == 0 or ((_addon_params | map('string') | select('match', '^--conf-file') | list) | length) == 0
+      - _addon_conf_content | length == 0 or (((addon.args | default([])) | map('string') | select('match', '^--conf-file') | list) | length) == 0
+    fail_msg: >-
+      conf is only supported by nginx, haproxy, prometheus and alertmanager,
+      and cannot be combined with an explicit --conf-file in params or args.
+
+- name: Create the add-on config directory
+  ansible.builtin.file:
+    path: "{{ _addon_conf_dir }}"
+    state: directory
+    mode: '0700'
+  when:
+    - _addon_state == 'present'
+    - _addon_conf_content | length > 0
+
+- name: Write the inline add-on config
+  ansible.builtin.copy:
+    content: "{{ _addon_conf_content }}"
+    dest: "{{ _addon_conf_path }}"
+    mode: '0600'
+  when:
+    - _addon_state == 'present'
+    - _addon_conf_content | length > 0
 
 - name: Resolve add-on facts
   ansible.builtin.set_fact:
-    _addon_state: "{{ addon.state | default('present') }}"
-    _addon_force: "{{ addon.force | default(false) | bool }}"
     _addon_installed: >-
       {%- if addon.instance is defined -%}
       {{ ((pgcli_cfg.get('instances') or {}).get(addon.instance, {}).get('addons') or {}).get(_addon_key) is not none }}
@@ -25,9 +85,19 @@
       {{ ((pgcli_cfg.get('addons') or {}).get(_addon_key) or {}).get(addon.name) is not none }}
       {%- endif -%}
 
+- name: Build the add-on install command
+  ansible.builtin.set_fact:
+    _addon_install_argv: >-
+      {{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'install', addon.type]
+         + (['-i', addon.instance] if addon.instance is defined else ['--name', addon.name])
+         + (['--force'] if _addon_force | bool else [])
+         + (_addon_params | map('string') | list)
+         + (['--conf-file', _addon_conf_path] if _addon_conf_content | length > 0 else [])
+         + (addon.args | default([]) | map('string') | list) }}
+
 - name: Install the add-on
   ansible.builtin.command:
-    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'install', addon.type] + (['-i', addon.instance] if addon.instance is defined else ['--name', addon.name]) + (['--force'] if _addon_force | bool else []) + (addon.args | default([])) }}"
+    argv: "{{ _addon_install_argv }}"
   register: _addon_install
   when:
     - _addon_state == 'present'
@@ -83,8 +153,8 @@
 - name: Resolve the etcd client port
   ansible.builtin.set_fact:
     _addon_etcd_port: >-
-      {{ ((addon.args | default([]))[(addon.args | default([])).index('--client-port') + 1])
-         if ('--client-port' in (addon.args | default([]))) else 2379 }}
+      {{ _addon_install_argv[_addon_install_argv.index('--client-port') + 1]
+         if '--client-port' in _addon_install_argv else 2379 }}
 
 - name: Wait for the etcd client port
   ansible.builtin.wait_for:

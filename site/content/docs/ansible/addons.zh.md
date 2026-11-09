@@ -18,12 +18,63 @@ prometheus、kafka 等）。
 | `name` | 顶层插件实例名（例如本机的 etcd 成员） |
 | `instance` | 与 `name` 二选一：把插件挂到某个 pgcli 实例上 |
 | `state` | `present`（默认）或 `absent` |
-| `args` | 原样追加到 `pg addon install` 的参数列表 |
+| `args` | 条目级参数，追加在分组公共参数之后 |
+| `conf` | 内联配置文件内容，覆盖 `addon_<type>_conf`（仅 nginx、haproxy、prometheus、alertmanager） |
 | `clean_data` | 与 `state: absent` 搭配，在插件支持时一并删除数据（默认 `true`，设为 `false` 保留数据） |
 | `force` | 与 `state: present` 搭配，用 `pg addon install --force` 重建 |
 | `autostart` | `true`（默认）启用开机自启，`false` 关闭 |
 
 每个条目必须有 `type`，并且 `name`/`instance` 恰好设置一个；角色会在执行前断言。
+
+## 公共参数
+
+同一种 add-on 的所有实例共用的参数只需在列表旁声明一次，变量名为
+`addon_<type>_params`，类型是原始的 `pg addon install` 参数列表。角色在安装该
+类型的每个条目时会自动把它拼接到命令里：
+
+```yaml
+addon_redis_params:
+  - "--data-dir=/data/pg/addon/redis/redis1"
+  - "--aof"
+
+addon_redis_addons:
+  - type: redis
+    name: redis1
+    state: present
+```
+
+拼接顺序在 `name`/`instance` 之后、条目自身的 `args` 之前。逐实例有差异的参数放
+`args`；它最后出现，重复的标量 flag 以后者为准。变量名中的类型会把 `-` 换成 `_`
+（例如 `addon_clickhouse_keeper_params`）。
+
+## 内联配置文件
+
+nginx、haproxy、prometheus、alertmanager 支持 `--conf-file`。把文件内容放到
+`addon_<type>_conf`，不用在目标机上另外维护路径：
+
+```yaml
+addon_haproxy_conf: |
+  global
+      maxconn 1000
+  defaults
+      mode tcp
+      timeout connect 4s
+      timeout client 30m
+      timeout server 30m
+  # ... frontend/backend ...
+
+addon_haproxy_addons:
+  - type: haproxy
+    name: lb1
+    state: present
+```
+
+角色会把内容写到 `<pgcli_config_path 所在目录>/addons/<type>-<name>.conf`
+（权限 `0600`）并传入 `--conf-file`；`pg addon install` 仍会用 `haproxy -c` /
+`nginx -t` 校验。条目级 `conf` 会覆盖分组变量。内联配置不能与显式 `--conf-file`
+或渲染同一文件的 flag 同时使用（nginx `--upstream`、prometheus
+`--scrape`/`--remote-write-url`、alertmanager `--webhook-url`）。修改内容不会自动
+重装已存在的插件：设置 `force: true`（或先移除）才会应用。
 
 ## 单机安装与集群安装
 

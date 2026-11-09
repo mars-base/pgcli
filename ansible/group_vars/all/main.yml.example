@@ -268,6 +268,17 @@ pgcli_instance_defaults:
 pgcli_instances: []
 
 # Add-ons on this host, consumed by the pg_addon role. Every entry accepts
-# type, name or instance, state, args, clean_data, force and autostart;
+# type, name or instance, state, args, conf, clean_data, force and autostart;
 # autostart defaults to true and clean_data defaults to true with state absent.
+#
+# Per-type parameters are declared once in the add-on's group as a list of raw
+# `pg addon install` flags; the role appends them to every entry of that type:
+#
+#   addon_redis_params:
+#     - "--data-dir=/data/pg/addon/redis/redis1"
+#     - "--aof"
+#
+# For nginx, haproxy, prometheus and alertmanager, addon_<type>_conf holds the
+# full config file content. The role writes it under <config dir>/addons/ and
+# passes --conf-file; a per-entry `conf` overrides the group-level variable.
 pgcli_addons: []

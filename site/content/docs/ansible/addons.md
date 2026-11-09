@@ -19,13 +19,68 @@ haproxy, minio/silo/rustfs, redis, nginx, prometheus, kafka, and so on).
 | `name` | Top-level add-on instance name (e.g. this etcd member) |
 | `instance` | Instead of `name`: scope the add-on to a pgcli instance |
 | `state` | `present` (default) or `absent` |
-| `args` | List of flags appended verbatim to `pg addon install` |
+| `args` | Per-entry flags appended verbatim after the group-level parameters |
+| `conf` | Inline config content, overriding `addon_<type>_conf` (nginx, haproxy, prometheus, alertmanager only) |
 | `clean_data` | With `state: absent`, delete data where the add-on supports it (default `true`; set `false` to keep it) |
 | `force` | With `state: present`, recreate with `pg addon install --force` |
 | `autostart` | `true` (default) enables boot autostart, `false` disables it |
 
 Every entry needs `type` and exactly one of `name` or `instance`; the role
 asserts this before doing anything.
+
+## Per-type parameters
+
+Flags shared by every instance of one add-on type are declared once next to the
+list as `addon_<type>_params`: a list of raw `pg addon install` tokens. The role
+appends it to the install command of every entry of that type.
+
+```yaml
+addon_redis_params:
+  - "--data-dir=/data/pg/addon/redis/redis1"
+  - "--aof"
+
+addon_redis_addons:
+  - type: redis
+    name: redis1
+    state: present
+```
+
+The shared list is combined automatically at install time, after
+`name`/`instance` and before the entry's own `args`. Keep per-instance
+differences in `args`; it comes last, so repeated scalar flags win there. The
+variable uses the type with `-` replaced by `_` (for example
+`addon_clickhouse_keeper_params`).
+
+## Inline config files
+
+nginx, haproxy, prometheus and alertmanager accept `--conf-file`. Put the file
+content in `addon_<type>_conf` instead of maintaining a path on the target:
+
+```yaml
+addon_haproxy_conf: |
+  global
+      maxconn 1000
+  defaults
+      mode tcp
+      timeout connect 4s
+      timeout client 30m
+      timeout server 30m
+  # ... frontend/backend ...
+
+addon_haproxy_addons:
+  - type: haproxy
+    name: lb1
+    state: present
+```
+
+The role writes the content to
+`<dir of pgcli_config_path>/addons/<type>-<name>.conf` (mode `0600`) and passes
+`--conf-file`; `pg addon install` still validates it with `haproxy -c` /
+`nginx -t`. A per-entry `conf` overrides the group-level value. Inline config
+cannot be combined with an explicit `--conf-file` or with flags that render the
+same file (nginx `--upstream`, prometheus `--scrape`/`--remote-write-url`,
+alertmanager `--webhook-url`). Editing the content does not reinstall an
+existing add-on: set `force: true` (or remove it first) to apply the change.
 
 ## Standalone vs cluster installation
 
