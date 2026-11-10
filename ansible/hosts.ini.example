@@ -31,10 +31,10 @@
 # hosts. They stay commented out here and while testing add-ons.
 
 [all]
-debian12-01 ansible_host=192.0.2.10 private_ip=192.0.2.10
-debian12-02 ansible_host=192.0.2.11 private_ip=192.0.2.11
-debian12-03 ansible_host=192.0.2.12 private_ip=192.0.2.12
-debian12-04 ansible_host=192.0.2.13 private_ip=192.0.2.13
+node1 ansible_host=192.0.2.10 private_ip=192.0.2.10
+node2 ansible_host=192.0.2.11 private_ip=192.0.2.11
+node3 ansible_host=192.0.2.12 private_ip=192.0.2.12
+node4 ansible_host=192.0.2.13 private_ip=192.0.2.13
 
 [all:vars]
 ansible_user=root
@@ -52,17 +52,17 @@ ansible_port=22
 # child. Keep inactive groups declared but empty so the play pattern still
 # resolves without a warning.
 [minio_s3]
-# debian12-01
+node1
 
 [silo_s3]
-debian12-01
+# node1
 
 [rustfs_s3]
-# debian12-01
+# node1
 
 [s3:children]
-# minio_s3
-silo_s3
+minio_s3
+# silo_s3
 # rustfs_s3
 
 # ── Deployment-mode groups ─────────────────────────────────────────────────
@@ -78,20 +78,20 @@ silo_s3
 # Uncomment the group you want to exercise. Keep it commented while testing
 # add-ons: a mode group's pgcli_instances overrides the --limit selection.
 # [single]
-# debian12-01
+# node1
 #
 # [single:vars]
 # ansible_group_priority=20
 
 # [samehost]
-# debian12-01
+# node1
 #
 # [samehost:vars]
 # ansible_group_priority=20
 
 # [crosshost]
-# debian12-01
-# debian12-02
+# node1
+# node2
 #
 # [crosshost:vars]
 # ansible_group_priority=20
@@ -102,131 +102,131 @@ silo_s3
 # Keep the HA groups commented while testing add-ons: ha_etcd defines
 # pgcli_addons at group level and overrides the --limit selection.
 # [ha_etcd]
-# debian12-02
-# debian12-03
-# debian12-04
+# node2
+# node3
+# node4
 
 # Role marker: hosts that form the Patroni cluster over the etcd DCS from
 # [ha_etcd]. Patroni member names follow the host order below. The DCS group is
 # selected with pg_ha_etcd_group in group_vars/ha_cluster.
 # [ha_cluster]
-# debian12-02
-# debian12-03
-# debian12-04
+# node2
+# node3
+# node4
 
 # ── Add-on groups: standalone (one host) ───────────────────────────────────
 # Variables live in the matching group_vars/addon_<type>_single/main.yml.
 
 [addon_alertmanager_single]
-debian12-01
+node1
 
 [addon_beegfs_single]
-debian12-01
+node1
 
 [addon_clickhouse_single]
-debian12-01
+node1
 
 [addon_documentdb_single]
-debian12-01
+node1
 
 [addon_duckdb_single]
-debian12-01
+node1
 
 [addon_etcd_single]
-debian12-01
+node1
 
 [addon_garage_single]
-debian12-01
+node1
 
 [addon_gitea_single]
-debian12-01
+node1
 
 [addon_grafana_single]
-debian12-01
+node1
 
 [addon_haproxy_single]
-debian12-01
+node1
 
 [addon_influx2tsdb_single]
-debian12-01
+node1
 
 [addon_influxdb_single]
-debian12-01
+node1
 
 [addon_juicefs_single]
-debian12-01
+node1
 
 [addon_kafka_single]
-debian12-01
+node1
 
 [addon_minio_single]
-debian12-01
+node1
 
 [addon_nginx_single]
-debian12-01
+node1
 
 [addon_nodeexporter_single]
-debian12-01
+node1
 
 [addon_pgadmin_single]
-debian12-01
+node1
 
 [addon_pgbouncer_single]
-debian12-01
+node1
 
 [addon_pgdog_single]
-debian12-01
+node1
 
 [addon_pgexporter_single]
-debian12-01
+node1
 
 [addon_postgrest_single]
-debian12-01
+node1
 
 [addon_predixy_single]
-debian12-01
+node1
 
 [addon_prometheus_single]
-debian12-01
+node1
 
 [addon_rabbitmq_single]
-debian12-01
+node1
 
 [addon_redis_single]
-debian12-01
+node1
 
 [addon_rocketmq_single]
-debian12-01
+node1
 
 [addon_rustfs_single]
-debian12-01
+node1
 
 [addon_seaweedfs_single]
-debian12-01
+node1
 
 [addon_silo_single]
-debian12-01
+node1
 
 [addon_victorialogs_single]
-debian12-01
+node1
 
 [addon_victoriametrics_single]
-debian12-01
+node1
 
 [addon_vlagent_single]
-debian12-01
+node1
 
 [addon_vlcluster_single]
-debian12-01
+node1
 
 [addon_vmalert_single]
-debian12-01
+node1
 
 [addon_vmcluster_single]
-debian12-01
+node1
 
 [addon_zerofs_single]
-debian12-01
+node1
 
 # ── Add-on groups: clusters ────────────────────────────────────────────────
 # Variables live in the matching group_vars/addon_<type>_cluster/main.yml.
@@ -235,73 +235,73 @@ debian12-01
 # vmcluster, vlcluster.
 
 [addon_clickhouse_cluster]
-debian12-01
-debian12-02
-debian12-03
-debian12-04
+node1
+node2
+node3
+node4
 
 [addon_clickhouse_keeper_cluster]
-debian12-01
-debian12-02
-debian12-03
+node1
+node2
+node3
 
 [addon_etcd_cluster]
-debian12-01
-debian12-02
-debian12-03
+node1
+node2
+node3
 
 [addon_kafka_cluster]
-debian12-01
-debian12-02
-debian12-03
+node1
+node2
+node3
 
 [addon_minio_cluster]
-debian12-01
-debian12-02
-debian12-03
-debian12-04
+node1
+node2
+node3
+node4
 
 [addon_rabbitmq_cluster]
-debian12-01
-debian12-02
-debian12-03
+node1
+node2
+node3
 
 [addon_redis_cluster]
-debian12-01
-debian12-02
-debian12-03
-debian12-04
+node1
+node2
+node3
+node4
 
 [addon_rocketmq_cluster]
-debian12-01
-debian12-02
-debian12-03
+node1
+node2
+node3
 
 [addon_rustfs_cluster]
-debian12-01
-debian12-02
-debian12-03
-debian12-04
+node1
+node2
+node3
+node4
 
 [addon_seaweedfs_cluster]
-debian12-01
-debian12-02
-debian12-03
+node1
+node2
+node3
 
 [addon_silo_cluster]
-debian12-01
-debian12-02
-debian12-03
-debian12-04
+node1
+node2
+node3
+node4
 
 [addon_vlcluster_cluster]
-debian12-01
-debian12-02
-debian12-03
-debian12-04
+node1
+node2
+node3
+node4
 
 [addon_vmcluster_cluster]
-debian12-01
-debian12-02
-debian12-03
-debian12-04
+node1
+node2
+node3
+node4
