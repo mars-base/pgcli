@@ -5,6 +5,10 @@
 #
 #   uv run ansible-playbook playbooks/apply.yaml --limit instance_addon_mixed
 #
+# On hosts that already have pgcli installed, add --tags instance,addon to skip
+# the install and unrelated plays; the validation play (tagged always) still
+# runs.
+#
 # `host` must match the bare host name listed in the inventory group. The
 # instance play runs before the add-on play, so a local add-on can reference
 # an instance created in the same run.
