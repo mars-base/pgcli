@@ -83,7 +83,7 @@ pgcli_instances:
 | `autostart` | 全部 | 开机自启（`pg autostart enable`） |
 | `backup_target` | 主库 | `local`（默认）或 `s3`；创建时固定 |
 | `password_length` | 主库 | 生成的 admin 密码长度（默认 16） |
-| `extensions` | 主库 | 扩展列表；设置后会整体替换默认列表 |
+| `extensions` | 主库 | 扩展列表（默认 `pg_stat_statements`）；设置后会整体替换默认列表 |
 | `clean_data` | 全部 | 仅与 `state: absent` 搭配；同时删除数据/WAL 目录和 stanza |
 | `replica_of` | 副本 | 主库实例名 |
 | `replica_of_host` | 副本 | 跨机主库所在的 inventory 主机 |
@@ -99,7 +99,8 @@ pgcli_instance_defaults:
   autostart: false
   backup_target: local
   password_length: 16
-  extensions: []
+  extensions:
+    - pg_stat_statements
   clean_data: false
 ```
 

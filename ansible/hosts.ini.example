@@ -80,6 +80,12 @@ silo_s3
 #   uv run ansible-playbook playbooks/apply.yaml --limit addon_single \
 #     --tags addon -e addon_type=haproxy
 #
+# Types that define addon_<type>_instances (documentdb, influx2tsdb,
+# pgbouncer, pgdog, pgexporter, postgrest) also need the instance tag:
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_single \
+#     --tags instance,addon -e addon_type=documentdb
+#
 # [addon_single]
 # debian12-01 ansible_host=192.0.2.10 private_ip=192.0.2.10 ansible_user=root ansible_port=22
 

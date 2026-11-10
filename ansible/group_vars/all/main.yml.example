@@ -224,8 +224,9 @@ pgcli_config: "{{ pgcli_config_defaults | combine(pgcli_config_overrides) }}"
 # autostart:       enable the instance at boot (`pg autostart enable`)
 # backup_target:   local | s3; fixed at creation time, later changes only warn
 # password_length: generated admin password length used by `pg create`
-# extensions:      PostgreSQL extensions to install; an entry that sets this
-#                  list replaces the default list entirely (no append)
+# extensions:      PostgreSQL extensions to install; defaults to
+#                  pg_stat_statements. An entry that sets this list replaces
+#                  the default list entirely (no append)
 # clean_data:      only used with state absent; true also deletes the data and
 #                  WAL directories and the pgBackRest stanza. Default false
 #                  keeps the host data so a later create reuses it. Fully
@@ -236,7 +237,8 @@ pgcli_instance_defaults:
   autostart: false
   backup_target: local
   password_length: 16
-  extensions: []
+  extensions:
+    - pg_stat_statements
   clean_data: false
 
 # Desired instances are consumed by the pg_instance role. Each deployment-mode

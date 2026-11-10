@@ -87,7 +87,7 @@ reading the primary password from that host's `pg.yaml`.
 | `autostart` | all | Enable the instance at boot (`pg autostart enable`) |
 | `backup_target` | primary | `local` (default) or `s3`; fixed at creation time |
 | `password_length` | primary | Generated admin password length (default 16) |
-| `extensions` | primary | Extension list; setting it replaces the default list |
+| `extensions` | primary | Extension list (default `pg_stat_statements`); setting it replaces the default list |
 | `clean_data` | all | Only with `state: absent`; also deletes data/WAL dirs and the stanza |
 | `replica_of` | replica | Name of the primary |
 | `replica_of_host` | replica | Inventory host of a cross-host primary |
@@ -104,7 +104,8 @@ pgcli_instance_defaults:
   autostart: false
   backup_target: local
   password_length: 16
-  extensions: []
+  extensions:
+    - pg_stat_statements
   clean_data: false
 ```
 

@@ -7,6 +7,13 @@
 #   uv run ansible-playbook playbooks/apply.yaml --limit addon_single \
 #     --tags addon -e addon_type=haproxy
 #
+# Add-ons that need a PostgreSQL instance (documentdb, influx2tsdb, pgbouncer,
+# pgdog, pgexporter, postgrest) define addon_<type>_instances; include the
+# instance tag so the instance play creates it before the add-on play:
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_single \
+#     --tags instance,addon -e addon_type=documentdb
+#
 # Omitting addon_type makes the add-on play a no-op.
 #
 # Every entry needs type plus exactly one of name (top-level) or instance
@@ -93,6 +100,7 @@ addon_documentdb_instances:
     state: started
     extensions:
       - documentdb
+      - pg_stat_statements
 addon_documentdb_params:
   - "--pg-name"
   - "pg_docdb"
