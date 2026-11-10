@@ -1,6 +1,6 @@
 ---
 title: "Playbooks"
-description: "How to run apply.yaml, deploy-s3.yaml, ha-status.yaml and ping.yaml — play order, tags, limits, idempotency and lifecycle orders"
+description: "How to run apply.yaml, ping.yaml, resources.yaml, deploy-s3.yaml, ha-status.yaml and passwords.yaml — play order, tags, limits, idempotency and lifecycle orders"
 weight: 20
 ---
 
@@ -117,6 +117,44 @@ uv run ansible-playbook playbooks/ha-status.yaml -l ha_cluster
 uv run ansible-playbook playbooks/ha-status.yaml -l db-02
 ```
 
+## `resources.yaml`
+
+Read-only. Reports CPU, load, memory, swap, filesystems and the top memory
+processes, plus the pgcli version and, for every namespace in
+`pgcli_namespaces`, its instances, add-ons and Patroni status. Hosts without
+the pgcli binary at `pgcli_install_path` are skipped with a short message.
+
+```bash
+uv run ansible-playbook playbooks/resources.yaml
+uv run ansible-playbook playbooks/resources.yaml -e HOSTS=db-01
+uv run ansible-playbook playbooks/resources.yaml -l addon_etcd_single
+```
+
+## `passwords.yaml`
+
+Read-only. Prints the stored credentials for the selected hosts:
+
+- the admin DSN of each instance, read from `pg status -i`;
+  `127.0.0.1`/`localhost` in the DSN is rewritten to the host's `private_ip`
+  (falling back to `ansible_host`) so the DSN can be used from another machine;
+- each Patroni cluster's stored password set (`pg ha passwords <scope>`);
+- the add-on credentials (`pg addon list --show-password`).
+
+Every namespace in `pgcli_namespaces` is reported separately, using that
+namespace's own config.
+
+The output is plaintext credentials, so the playbook **refuses to run unless
+Ansible logging is disabled**. Pass `ANSIBLE_LOG_PATH=/dev/null` explicitly:
+
+```bash
+ANSIBLE_LOG_PATH=/dev/null uv run ansible-playbook playbooks/passwords.yaml
+ANSIBLE_LOG_PATH=/dev/null uv run ansible-playbook playbooks/passwords.yaml -e HOSTS=db-01
+ANSIBLE_LOG_PATH=/dev/null uv run ansible-playbook playbooks/passwords.yaml -e HOSTS=ha_cluster
+```
+
+Do not redirect its stdout to a world-readable file; write any copy to a
+`0600` file or a password manager.
+
 ## Idempotency
 
 Re-running any playbook is safe. Every state-changing task checks the current
@@ -144,4 +182,6 @@ S3 stores are deploy-only in this playbook; remove one with
 
 `ansible.cfg` writes the run log to `var/ansible.log` and caches facts under
 `var/facts/`. Both are gitignored, as are all live `main.yml` and
-`secrets.yaml` files.
+`secrets.yaml` files. `passwords.yaml` overrides the log with
+`ANSIBLE_LOG_PATH=/dev/null` because its output contains plaintext
+credentials.

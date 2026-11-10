@@ -1,6 +1,6 @@
 ---
 title: "剧本"
-description: "apply.yaml、deploy-s3.yaml、ha-status.yaml、ping.yaml 的用法 —— play 顺序、tags、limit、幂等与生命周期顺序"
+description: "apply.yaml、ping.yaml、resources.yaml、deploy-s3.yaml、ha-status.yaml、passwords.yaml 的用法 —— play 顺序、tags、limit、幂等与生命周期顺序"
 weight: 20
 ---
 
@@ -108,6 +108,41 @@ uv run ansible-playbook playbooks/ha-status.yaml -l ha_cluster
 uv run ansible-playbook playbooks/ha-status.yaml -l db-02
 ```
 
+## `resources.yaml`
+
+只读。输出 CPU、负载、内存、swap、文件系统与内存占用最高的进程，以及 pgcli
+版本和 `pgcli_namespaces` 中每个 namespace 的实例、插件与 Patroni 状态。未在
+`pgcli_install_path` 找到 pgcli 的主机会被跳过并给出提示。
+
+```bash
+uv run ansible-playbook playbooks/resources.yaml
+uv run ansible-playbook playbooks/resources.yaml -e HOSTS=db-01
+uv run ansible-playbook playbooks/resources.yaml -l addon_etcd_single
+```
+
+## `passwords.yaml`
+
+只读。输出选中主机上保存的凭据：
+
+- 每个实例的 admin DSN，取自 `pg status -i`；DSN 中的
+  `127.0.0.1`/`localhost` 会替换为主机的 `private_ip`（未定义时回退
+  `ansible_host`），便于从其它机器直接使用；
+- 每个 Patroni 集群保存的密码集（`pg ha passwords <scope>`）；
+- 插件凭据（`pg addon list --show-password`）。
+
+`pgcli_namespaces` 中的每个 namespace 都会用各自的配置独立输出。
+
+输出是明文凭据，因此剧本**要求先关闭 Ansible 日志**，否则拒绝运行。必须显式
+传入 `ANSIBLE_LOG_PATH=/dev/null`：
+
+```bash
+ANSIBLE_LOG_PATH=/dev/null uv run ansible-playbook playbooks/passwords.yaml
+ANSIBLE_LOG_PATH=/dev/null uv run ansible-playbook playbooks/passwords.yaml -e HOSTS=db-01
+ANSIBLE_LOG_PATH=/dev/null uv run ansible-playbook playbooks/passwords.yaml -e HOSTS=ha_cluster
+```
+
+不要把 stdout 重定向到所有人可读的文件；需要留存时写入 `0600` 文件或密码管理器。
+
 ## 幂等
 
 任何 playbook 都可以安全重跑。每个变更任务都会先检查当前 pgcli 配置与容器状态，
@@ -132,3 +167,5 @@ HA 的销毁顺序：HAProxy → Patroni 集群 → etcd。etcd 是插件条目
 
 `ansible.cfg` 将运行日志写到 `var/ansible.log`，facts 缓存在 `var/facts/`。
 两者都被 gitignore，连同所有正式的 `main.yml` 与 `secrets.yaml`。
+`passwords.yaml` 的输出包含明文凭据，运行时必须用
+`ANSIBLE_LOG_PATH=/dev/null` 覆盖日志路径。

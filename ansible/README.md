@@ -57,6 +57,129 @@ uv run ansible single -m command -a 'pg exec pg_single -c "SELECT version();"'
 
 Re-running `apply.yaml` is idempotent.
 
+## Playbooks
+
+Run every playbook from the repository root with `uv run`.
+
+| Playbook | What it does | Modifies hosts |
+|---|---|---|
+| `ping.yaml` | Verifies SSH/Ansible connectivity to every selected host | No |
+| `apply.yaml` | Installs pgcli and reconciles instances, extensions, add-ons and HA clusters | Yes |
+| `deploy-s3.yaml` | Deploys a standalone minio/silo/rustfs store as a pgBackRest S3 target | Yes |
+| `ha-status.yaml` | Shows the live Patroni topology and HAProxy endpoints | No |
+| `resources.yaml` | Shows host resources and, per namespace, instances, add-ons and HA status | No |
+| `passwords.yaml` | Shows the stored credentials of instances, HA clusters and add-ons | No |
+
+### ping.yaml
+
+Checks that the control node can reach the selected hosts over SSH and run
+Ansible modules. It changes nothing and is the quickest way to validate a new
+inventory. Targets every host in the inventory, or a subset with `--limit`:
+
+```bash
+uv run ansible-playbook playbooks/ping.yaml
+uv run ansible-playbook playbooks/ping.yaml --limit debian12-01
+```
+
+### apply.yaml
+
+The main playbook. It performs the actual deployment: installs pgcli and its
+images, initializes the host config, then reconciles `pgcli_instances`,
+`pgcli_addons` and the HA cluster declarations for each selected host. Enable
+exactly one scenario group at a time and select it with `--limit`:
+
+```bash
+uv run ansible-playbook playbooks/apply.yaml --limit single
+uv run ansible-playbook playbooks/apply.yaml --limit instance_addon_mixed
+uv run ansible-playbook playbooks/apply.yaml --limit ha_cluster
+```
+
+Tags allow running only part of it: `pgcli`, `instance`, `addon`, `ha`
+(the validation play is tagged `always`). On hosts that already have pgcli
+installed, skip the install play:
+
+```bash
+uv run ansible-playbook playbooks/apply.yaml --limit instance_addon_mixed --tags instance,addon
+uv run ansible-playbook playbooks/apply.yaml --limit debian12-01 --tags instance
+```
+
+Add-ons are selected by their exact inventory group name — `--limit
+addon_<type>_<single|cluster>` — not by a separate type variable:
+
+```bash
+uv run ansible-playbook playbooks/apply.yaml --limit addon_etcd_single --tags addon
+uv run ansible-playbook playbooks/apply.yaml --limit addon_redis_cluster --tags addon
+```
+
+Wildcards and comma-separated limits are rejected by the validation play.
+Set `state: absent` in the corresponding `group_vars` entry to remove
+resources; `clean_data: true` also deletes the data directory.
+
+### deploy-s3.yaml
+
+Deploys one of the pgcli-managed object stores (minio, silo, rustfs) for the
+`pgBackRest` `s3` backup target: it prepares the data drives, writes the TLS
+material and starts the store containers. The store type comes from the active
+`*_s3` inventory group (`minio_s3`, `silo_s3`, `rustfs_s3`); the layout is
+derived from the selected node count and `pgcli_s3_drives`.
+
+```bash
+uv run ansible-playbook playbooks/deploy-s3.yaml -e pgcli_s3_group=minio_s3
+uv run ansible-playbook playbooks/deploy-s3.yaml -e pgcli_s3_nodes=debian12-01
+uv run ansible-playbook playbooks/deploy-s3.yaml -e pgcli_s3_nodes=debian12-01,debian12-02,debian12-03,debian12-04
+uv run ansible-playbook playbooks/deploy-s3.yaml -e pgcli_s3_type=rustfs
+uv run ansible-playbook playbooks/deploy-s3.yaml -e pgcli_s3_force=true
+```
+
+`pgcli_s3_nodes` defaults to the whole `pgcli_s3_group` (the `[s3]` parent
+unless overridden). `pgcli_s3_type` is optional when the group name already
+encodes the type. See the `*_s3` `main.yml.example` files for drives, TLS and
+endpoint options.
+
+### ha-status.yaml
+
+Targets the `ha_cluster` group (or any single member; all members share the
+same DCS view) and prints the Patroni topology plus the HAProxy endpoints in
+front of it. Read-only; it does not change cluster state:
+
+```bash
+uv run ansible-playbook playbooks/ha-status.yaml
+uv run ansible-playbook playbooks/ha-status.yaml -l ha_cluster
+uv run ansible-playbook playbooks/ha-status.yaml -l debian12-02
+```
+
+### resources.yaml
+
+Reports CPU, load, memory, filesystems, the pgcli version, and per-namespace
+instances, add-ons and HA status. Hosts without the pgcli binary at
+`pgcli_install_path` are skipped. Read-only:
+
+```bash
+uv run ansible-playbook playbooks/resources.yaml
+uv run ansible-playbook playbooks/resources.yaml -e HOSTS=debian12-01
+uv run ansible-playbook playbooks/resources.yaml -l addon_nodeexporter_single
+```
+
+### passwords.yaml
+
+Prints the admin DSN of every instance (read from `pg status -i`, with
+`127.0.0.1`/`localhost` rewritten to the host's `private_ip`, falling back to
+`ansible_host`), each HA cluster's stored password set (`pg ha passwords`),
+and the add-on credentials (`pg addon list --show-password`). Read-only; it
+only queries the existing state.
+
+The output is plaintext credentials, so the playbook **refuses to run unless
+Ansible logging is disabled**. Pass `ANSIBLE_LOG_PATH=/dev/null` explicitly:
+
+```bash
+ANSIBLE_LOG_PATH=/dev/null uv run ansible-playbook playbooks/passwords.yaml
+ANSIBLE_LOG_PATH=/dev/null uv run ansible-playbook playbooks/passwords.yaml -e HOSTS=debian12-01
+ANSIBLE_LOG_PATH=/dev/null uv run ansible-playbook playbooks/passwords.yaml -e HOSTS=ha_cluster
+```
+
+Do not redirect its stdout to a world-readable file; write any copy to a
+`0600` file or a password manager.
+
 ## PostgreSQL extensions
 
 The base image ships 45 built-in extensions (contrib) that only need
@@ -138,7 +261,7 @@ created in the same run. Enable only one scenario group at a time.
 
 | Path | Description |
 |---|---|
-| `playbooks/` | Entry points: `apply.yaml`, `ping.yaml`, `resources.yaml`, `deploy-s3.yaml`, `ha-status.yaml` |
+| `playbooks/` | Entry points: `apply.yaml`, `ping.yaml`, `resources.yaml`, `deploy-s3.yaml`, `ha-status.yaml`, `passwords.yaml` |
 | `roles/` | `pgcli`, `pg_instance`, `pg_addon`, `pg_ha`, `pg_ha_haproxy`, `pg_s3`, `addon_cluster_shared` |
 | `group_vars/` | Per-scenario and per-add-on settings; only `main.yml.example` files are tracked |
 | `hosts.ini.example` | Inventory template (`hosts.ini` is gitignored) |
