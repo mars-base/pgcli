@@ -1,0 +1,26 @@
+---
+# prometheus standalone add-on group (addon_prometheus_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_prometheus_single --tags addon
+
+# Single-node test group for the prometheus add-on.
+
+# Default flags for prometheus entries that do not set their own params.
+addon_prometheus_single_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/prometheus/prom1"
+#
+# Inline config file, written under <pgcli config dir>/addons/ and
+# passed as --conf-file (mutually exclusive with its rendered-config flags).
+addon_prometheus_single_conf: ""
+# Example:
+#   global:
+#     scrape_interval: 15s
+#   scrape_configs: []
+
+addon_prometheus_single_addons:
+  - type: prometheus
+    state: present
+    name: prom1
+
+

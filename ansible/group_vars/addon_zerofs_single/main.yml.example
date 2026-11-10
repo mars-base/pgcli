@@ -1,0 +1,20 @@
+---
+# zerofs standalone add-on group (addon_zerofs_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_zerofs_single --tags addon
+
+# Single-node test group for the zerofs add-on.
+addon_zerofs_single_params:
+  - "--s3-endpoint"
+  - "http://127.0.0.1:9000"
+  - "--access-key"
+  - "<secret>"
+  - "--secret-key"
+  - "<secret>"
+  - "--bucket"
+  - "zerofs-data"
+
+addon_zerofs_single_addons:
+  - type: zerofs
+    state: present
+    name: zerofs1

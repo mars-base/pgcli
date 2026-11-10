@@ -34,8 +34,8 @@ pgcli 仓库的 `ansible/` 目录把 CLI 变成声明式部署工具。不必在
 `changed`。
 
 不同业务场景通过 inventory 分组和 `group_vars` 文件隔离：单机、同机副本、跨机
-副本、Patroni HA、S3 存储。一次只启用一种场景分组；对应关系见
-[安装与示例文件](./setup/)。
+副本、Patroni HA、S3 存储，以及按类型拆分的插件分组。一次只启用一种场景分组；
+对应关系见[安装与示例文件](./setup/)。
 
 ## 仓库结构
 
@@ -48,7 +48,8 @@ ansible/
 │   ├── all/main.yml.example        # 全局默认：安装、配置、实例默认值
 │   ├── single/ samehost/ crosshost/  # 每种部署模式一个分组
 │   ├── minio_s3/ silo_s3/ rustfs_s3/ # S3 存储类型
-│   ├── addon_single/ addon_cluster/  # 单机与多主机插件测试分组
+│   ├── addon_<type>_single/         # 每种单机插件一个分组
+│   ├── addon_<type>_cluster/        # 每种多主机插件集群一个分组
 │   └── ha_etcd/ ha_cluster/          # 共享 DCS 与 Patroni 成员
 ├── host_vars/               # 可选的单主机覆盖
 ├── playbooks/
@@ -67,7 +68,7 @@ ansible/
 | [安装与示例文件](./setup/) | 每个 `*.example` 对应哪个实际文件、`hosts.ini` 分组、`group_vars` 字段、首次运行 |
 | [剧本](./playbooks/) | `ping.yaml`、`apply.yaml`、`ha-status.yaml`、`deploy-s3.yaml`：tags、`--limit`、幂等、生命周期顺序 |
 | [实例与副本](./instances/) | `single`/`samehost`/`crosshost` 示例文件与 `pgcli_instances` 全部字段 |
-| [插件](./addons/) | `pgcli_addons` 条目：安装/移除、实例级插件、etcd |
-| [插件集群](./addon-cluster/) | 多主机插件集群：按类型的配置段落、共享密钥/CA、法定人数布局、生命周期 |
+| [插件](./addons/) | `addon_<type>_<mode>` 条目：安装/移除、实例级插件、etcd |
+| [插件集群](./addon-cluster/) | 多主机插件集群：每种类型一个 inventory 分组、共享密钥/CA、法定人数布局、生命周期 |
 | [HA 集群](./ha/) | `ha_etcd`/`ha_cluster` 示例文件、`pg_ha_clusters`、HAProxy、基于 state 的销毁 |
 | [S3 存储](./s3/) | 存储类型示例文件、`deploy-s3.yaml` 选项、作为备份目标使用 |

@@ -1,0 +1,31 @@
+---
+# pgexporter standalone add-on group (addon_pgexporter_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_pgexporter_single --tags addon
+#
+# The PostgreSQL instance this add-on needs is declared below; create it first:
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_pgexporter_single --tags instance,addon
+
+# Single-node test group for the pgexporter add-on.
+#
+# Leave addon_pgexporter_single_remote_dsn empty to scrape the local instance
+# named your_pg_ins01; set it to a remote DSN to scrape that server instead. The remote
+# mode is dial-as-is: no local instance is created and pgcli runs no SQL on
+# the target, so the DSN's own role must have pg_monitor rights.
+#   addon_pgexporter_single_remote_dsn: "postgres://monitor:<secret>@db.example.com:5432/app"
+addon_pgexporter_single_remote_dsn: ""
+addon_pgexporter_single_instances: >-
+  {{ [] if addon_pgexporter_single_remote_dsn | length > 0 else
+     [{'name': 'your_pg_ins01', 'host': inventory_hostname, 'state': 'started',
+       'extensions': ['pg_stat_statements']}] }}
+addon_pgexporter_single_params: >-
+  {{ [] if addon_pgexporter_single_remote_dsn | length > 0 else ['--pg-name', 'your_pg_ins01'] }}
+
+addon_pgexporter_single_addons: >-
+  {{ [{'type': 'pgexporter', 'state': 'present', 'name': 'pgex1',
+       'dsn': addon_pgexporter_single_remote_dsn}]
+     if addon_pgexporter_single_remote_dsn | length > 0 else
+     [{'type': 'pgexporter', 'state': 'present', 'name': 'pgex1'}] }}
+
+

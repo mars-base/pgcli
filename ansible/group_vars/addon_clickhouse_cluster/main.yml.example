@@ -1,0 +1,55 @@
+---
+# clickhouse cluster add-on group (addon_clickhouse_cluster).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_clickhouse_cluster --tags addon
+
+# 4 members: 2 shards x 2 replicas, using the 3-member Keeper above.
+# ClickHouse TLS is terminated by a fronting proxy, not by this cluster.
+_addon_cluster_clickhouse_hosts: "{{ groups['addon_clickhouse_cluster'] }}"
+_addon_cluster_clickhouse_index: "{{ _addon_cluster_clickhouse_hosts.index(inventory_hostname) | int }}"
+_addon_cluster_clickhouse_ip: "{{ hostvars[inventory_hostname]['private_ip'] }}"
+_addon_cluster_ch_shard: "{{ (((_addon_cluster_clickhouse_index | int) / 2) | int) + 1 }}"
+_addon_cluster_ch_replica: "{{ ((_addon_cluster_clickhouse_index | int) % 2) + 1 }}"
+_addon_cluster_clickhouse_peer_args: >-
+  {%- set out = [] -%}
+  {%- for host in _addon_cluster_clickhouse_hosts -%}
+  {%- if host != inventory_hostname -%}
+  {%- set i = _addon_cluster_clickhouse_hosts.index(host) | int -%}
+  {%- set shard = ((i / 2) | int) + 1 -%}
+  {%- set replica = (i % 2) + 1 -%}
+  {%- set _ = out.extend(['--peer', ((shard | string) ~ '/' ~ (replica | string) ~ '@' ~ hostvars[host].private_ip ~ ':9000')]) -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {{ out }}
+_addon_cluster_clickhouse_keeper_endpoint_args: >-
+  {%- set out = [] -%}
+  {%- for host in groups['addon_clickhouse_keeper_cluster'] -%}
+  {%- set _ = out.extend(['--keeper', hostvars[host].private_ip ~ ':9181']) -%}
+  {%- endfor -%}
+  {{ out }}
+_addon_cluster_clickhouse_admin_password: ""
+
+addon_clickhouse_cluster_addons:
+  - type: clickhouse
+    state: present
+    name: clickhouse-cluster
+    params:
+      - "--cluster"
+      - "pgcli-chcluster"
+      - "--shard"
+      - "{{ _addon_cluster_ch_shard }}"
+      - "--replica"
+      - "{{ _addon_cluster_ch_replica }}"
+      - "--advertise-host"
+      - "{{ _addon_cluster_clickhouse_ip }}"
+      - "--listen"
+      - "0.0.0.0"
+      - "--interserver-port"
+      - "9009"
+      - "--admin-password"
+      - "{{ _addon_cluster_clickhouse_admin_password }}"
+      - "--data-dir"
+      - "/data/pg/addon/clickhouse/cluster"
+    args: "{{ _addon_cluster_clickhouse_peer_args + _addon_cluster_clickhouse_keeper_endpoint_args }}"
+
+

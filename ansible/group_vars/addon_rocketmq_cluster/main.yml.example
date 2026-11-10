@@ -1,0 +1,41 @@
+---
+# rocketmq cluster add-on group (addon_rocketmq_cluster).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_rocketmq_cluster --tags addon
+
+# 3 controllers / brokers. Reduced heaps keep the 2 GiB VMs usable.
+_addon_cluster_rocketmq_hosts: "{{ groups['addon_rocketmq_cluster'] }}"
+_addon_cluster_rocketmq_index: "{{ _addon_cluster_rocketmq_hosts.index(inventory_hostname) | int }}"
+_addon_cluster_rocketmq_ip: "{{ hostvars[inventory_hostname]['private_ip'] }}"
+_addon_cluster_rocketmq_peer_args: >-
+  {%- set out = [] -%}
+  {%- set members = _addon_cluster_rocketmq_hosts -%}
+  {%- for host in members -%}
+  {%- if host != inventory_hostname -%}
+  {%- set _ = out.extend(['--peer', ('n' ~ (members.index(host) | string) ~ '@' ~ hostvars[host].private_ip)]) -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {{ out }}
+
+addon_rocketmq_cluster_addons:
+  - type: rocketmq
+    state: present
+    name: rocketmq-cluster
+    params:
+      - "--cluster"
+      - "pgcli-rocketmq"
+      - "--controller-id"
+      - "n{{ _addon_cluster_rocketmq_index }}"
+      - "--advertise-host"
+      - "{{ _addon_cluster_rocketmq_ip }}"
+      - "--heap"
+      - "384m"
+      - "--namesrv-heap"
+      - "192m"
+      - "--proxy-heap"
+      - "192m"
+      - "--data-dir"
+      - "/data/pg/addon/rocketmq/cluster"
+    args: "{{ _addon_cluster_rocketmq_peer_args }}"
+
+

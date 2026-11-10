@@ -1,0 +1,18 @@
+---
+# beegfs standalone add-on group (addon_beegfs_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_beegfs_single --tags addon
+
+# Single-node test group for the beegfs add-on.
+
+# Default flags for beegfs entries that do not set their own params.
+addon_beegfs_single_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/beegfs/beegfs1"
+
+addon_beegfs_single_addons:
+  - type: beegfs
+    state: present
+    name: beegfs1
+
+

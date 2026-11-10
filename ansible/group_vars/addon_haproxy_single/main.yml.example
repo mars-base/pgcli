@@ -1,0 +1,49 @@
+---
+# haproxy standalone add-on group (addon_haproxy_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_haproxy_single --tags addon
+
+# Single-node test group for the haproxy add-on.
+#
+# Default list of `pg addon install` flags for entries below that do not set
+# their own params.
+addon_haproxy_single_params: []
+# Example:
+#   - "--image=docker.io/library/haproxy:3.2.23-alpine"
+#
+# Inline custom config, written to <pgcli config dir>/addons/haproxy-lb1.conf
+# and passed as --conf-file. Use force: true (or remove first) to apply edits.
+addon_haproxy_single_conf: |
+  global
+      maxconn 1000
+      log stdout format raw local0 info
+
+  defaults
+      log global
+      mode tcp
+      timeout client 30m
+      timeout connect 4s
+      timeout server 30m
+
+  frontend pg_relay
+      bind 0.0.0.0:7000
+      default_backend pg
+
+  backend pg
+      server demo 127.0.0.1:35432 check
+
+  listen webstats
+      mode http
+      bind 0.0.0.0:7001
+      http-request return status 200 content-type text/plain lf-string "haproxy custom proxy alive\n"
+
+# Default flags for haproxy entries that do not set their own params.
+# addon_haproxy_single_params:
+#   - "--<flag>=<value>"
+
+addon_haproxy_single_addons:
+  - type: haproxy
+    state: present
+    name: lb1
+
+

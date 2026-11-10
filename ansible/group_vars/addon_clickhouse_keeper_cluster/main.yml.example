@@ -1,0 +1,39 @@
+---
+# clickhouse-keeper cluster add-on group (addon_clickhouse_keeper_cluster).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_clickhouse_keeper_cluster --tags addon
+
+# 3-member Raft quorum; the group has exactly three hosts.
+_addon_cluster_clickhouse_keeper_hosts: "{{ groups['addon_clickhouse_keeper_cluster'] }}"
+_addon_cluster_clickhouse_keeper_index: "{{ _addon_cluster_clickhouse_keeper_hosts.index(inventory_hostname) | int }}"
+_addon_cluster_clickhouse_keeper_ip: "{{ hostvars[inventory_hostname]['private_ip'] }}"
+_addon_cluster_clickhouse_keeper_peer_args: >-
+  {%- set out = [] -%}
+  {%- set members = _addon_cluster_clickhouse_keeper_hosts -%}
+  {%- for host in members -%}
+  {%- if host != inventory_hostname -%}
+  {%- set _ = out.extend(['--peer', (((members.index(host) + 1) | string) ~ '@' ~ hostvars[host].private_ip)]) -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {{ out }}
+
+addon_clickhouse_keeper_cluster_addons:
+  - type: clickhouse-keeper
+    state: present
+    name: keeper-cluster
+    params:
+      - "--server-id"
+      - "{{ (_addon_cluster_clickhouse_keeper_index | int) + 1 }}"
+      - "--advertise-host"
+      - "{{ _addon_cluster_clickhouse_keeper_ip }}"
+      - "--listen"
+      - "0.0.0.0"
+      - "--client-port"
+      - "9181"
+      - "--raft-port"
+      - "9234"
+      - "--data-dir"
+      - "/data/pg/addon/clickhouse-keeper/cluster"
+    args: "{{ _addon_cluster_clickhouse_keeper_peer_args }}"
+
+

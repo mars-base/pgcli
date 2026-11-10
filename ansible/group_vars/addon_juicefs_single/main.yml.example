@@ -1,0 +1,24 @@
+---
+# juicefs standalone add-on group (addon_juicefs_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_juicefs_single --tags addon
+
+# Single-node test group for the juicefs add-on.
+addon_juicefs_single_params:
+  - "--s3-endpoint"
+  - "http://127.0.0.1:9000"
+  - "--access-key"
+  - "<secret>"
+  - "--secret-key"
+  - "<secret>"
+  - "--bucket"
+  - "juicefs-data"
+  - "--dsn"
+  - "sqlite3:///var/lib/juicefs/data.db"
+
+addon_juicefs_single_addons:
+  - type: juicefs
+    state: present
+    name: juicefs1
+
+

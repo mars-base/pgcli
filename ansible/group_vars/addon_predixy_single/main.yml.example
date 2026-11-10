@@ -1,0 +1,18 @@
+---
+# predixy standalone add-on group (addon_predixy_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_predixy_single --tags addon
+
+# Single-node test group for the predixy add-on.
+addon_predixy_single_params:
+  - "--backend"
+  - "127.0.0.1:6379"
+  - "--password"
+  - "<secret>"
+
+addon_predixy_single_addons:
+  - type: predixy
+    state: present
+    name: predixy1
+
+

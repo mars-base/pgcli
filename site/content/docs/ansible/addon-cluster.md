@@ -1,30 +1,47 @@
 ---
 title: "Add-on clusters"
-description: "Deploy multi-host add-on clusters with the addon_cluster group — per-type sections, shared secrets and TLS material, quorum layouts and lifecycle"
+description: "Deploy multi-host add-on clusters with one inventory group per type — shared secrets and TLS material, quorum layouts and lifecycle"
 weight: 45
 ---
 
-`addon_cluster` deploys one cluster-capable add-on across several hosts. It is
-the multi-host companion of [Add-ons](./addons/): the entry fields (`type`,
-`name`, `state`, `params`, `args`, `clean_data`, `force`, `autostart`) are the
-same, but the host lists, peer arguments and shared secrets are derived from
-the inventory instead of being written per host.
+The `addon_<type>_cluster` inventory groups deploy one cluster-capable add-on
+across several hosts. They are the multi-host companion of
+[Add-ons](./addons/): the entry fields (`type`, `name`, `state`, `params`,
+`args`, `clean_data`, `force`, `autostart`) are the same, but the host lists,
+peer arguments and shared secrets are derived from the inventory instead of
+being written per host.
 
-The group is deliberately not a "deploy everything" group. The reference VMs
+The groups are deliberately not a "deploy everything" group. The reference VMs
 are small, so one add-on type is reconciled per run and every command selects
-it with `-e addon_type=<type>`.
+its group with `--limit addon_<type>_cluster`.
 
 ## Inventory and variables
 
-`hosts.ini` declares four hosts. MinIO/silo MNSD need at least four endpoints;
-etcd, Kafka, Keeper, RabbitMQ and RocketMQ use the first three as a quorum:
+`hosts.ini` defines the four hosts once in `[all]`, then selects them by bare
+name into one group per add-on type. Quorum add-ons use three hosts;
+MinIO/silo MNSD and the other four-member layouts use all four:
 
 ```ini
-[addon_cluster]
-node1 ansible_host=192.0.2.10 private_ip=192.0.2.10 ansible_user=root ansible_port=22
-node2 ansible_host=192.0.2.11 private_ip=192.0.2.11 ansible_user=root ansible_port=22
-node3 ansible_host=192.0.2.12 private_ip=192.0.2.12 ansible_user=root ansible_port=22
-node4 ansible_host=192.0.2.13 private_ip=192.0.2.13 ansible_user=root ansible_port=22
+[all]
+node1 ansible_host=192.0.2.10 private_ip=192.0.2.10
+node2 ansible_host=192.0.2.11 private_ip=192.0.2.11
+node3 ansible_host=192.0.2.12 private_ip=192.0.2.12
+node4 ansible_host=192.0.2.13 private_ip=192.0.2.13
+
+[all:vars]
+ansible_user=root
+ansible_port=22
+
+[addon_etcd_cluster]
+node1
+node2
+node3
+
+[addon_minio_cluster]
+node1
+node2
+node3
+node4
 ```
 
 `private_ip` is required: peer arguments, advertised addresses and the shared
@@ -32,58 +49,63 @@ certificate SANs all use it. Host order matters — the add-on play runs with
 `serial: 1` in inventory order, so the first host bootstraps the quorum before
 the others join.
 
-Copy the template and edit it:
+Each group has its own self-contained `group_vars` directory. Copy the ones you
+use and edit them:
 
 ```bash
 cd ansible
-cp group_vars/addon_cluster/main.yml.example group_vars/addon_cluster/main.yml
+cp group_vars/addon_etcd_cluster/main.yml.example \
+   group_vars/addon_etcd_cluster/main.yml
 ```
 
 `main.yml` is gitignored; it holds the environment-specific values (the
-SeaweedFS metadata DSN, any explicit passwords). The file is organized as one
-`===== <type> =====` section per add-on, so a reader can open it at a section
-and see everything that add-on needs.
-
-Every section begins with the inventory group it targets:
+SeaweedFS metadata DSN, any explicit passwords). Each file declares its topology
+variables and one `addon_<group>_addons` list, so a reader sees everything that
+add-on needs in one place:
 
 ```yaml
-_addon_cluster_etcd_group: addon_cluster
-_addon_cluster_etcd_hosts: "{{ groups[_addon_cluster_etcd_group] }}"
+_addon_cluster_etcd_hosts: "{{ groups['addon_etcd_cluster'] }}"
+_addon_cluster_etcd_index: "{{ _addon_cluster_etcd_hosts.index(inventory_hostname) | int }}"
+
+addon_etcd_cluster_addons:
+  - type: etcd
+    state: present
+    name: "etcd-{{ (_addon_cluster_etcd_index | int) + 1 }}"
 ```
 
-The group is per add-on: point `_addon_cluster_<type>_group` at another
-inventory group to run that type on a different set of hosts (a larger etcd
-quorum, a dedicated Kafka group, ...). The shared-material pre-task and the
-certificate SAN list resolve the same variable, and types without a section
-fall back to `addon_cluster`. The type name uses `-` replaced by `_`:
-`clickhouse-keeper` → `_addon_cluster_clickhouse_keeper_group` and
-`addon_clickhouse_keeper_addons`.
+The type name uses `-` replaced by `_` in group and variable names:
+`addon_clickhouse_keeper_cluster_addons` targets clickhouse-keeper.
 
-Each section ends with an `addon_<type>_addons` list. The entry fields are
-documented on [Add-ons](./addons/); `state` is set directly on each entry:
+Each list entry follows the fields documented on [Add-ons](./addons/); `state`
+is set directly on each entry:
 
 - `present` installs the member, or keeps it if it already exists.
 - `absent` removes the member. Its data is deleted too unless the entry sets
   `clean_data: false`.
 
-Sections whose topology uses only the first three hosts express this with an
-expression instead of a literal:
+The runtime selector is playbook plumbing, not add-on configuration
+(`group_vars/all/main.yml`):
 
 ```yaml
-state: "{{ 'present' if inventory_hostname in _addon_cluster_etcd_hosts[:3] else 'absent' }}"
+_addon_limit: "{{ ansible_limit | default('', true) }}"
+_addon_group: >-
+  {{ _addon_limit
+     if (_addon_limit is match('^addon_[A-Za-z0-9_]+$') and _addon_limit in groups)
+     else '' }}
+_addon_kind: "{{ _addon_group | regex_replace('^addon_', '') }}"
+_addon_type: "{{ _addon_kind | regex_replace('_(single|cluster)$', '') }}"
+_addon_mode: >-
+  {{ 'cluster' if _addon_kind is match('.*_cluster$')
+     else ('single' if _addon_kind is match('.*_single$') else '') }}
+pgcli_addons: >-
+  {{ lookup('vars', 'addon_' ~ _addon_kind ~ '_addons', default=[])
+     if _addon_group | length > 0 else [] }}
 ```
 
-The fourth host then reconciles to `absent` without any edit.
-
-The runtime selector is playbook plumbing, not add-on configuration:
-
-```yaml
-_addon_kind: "{{ addon_type | default('') | replace('-', '_') }}"
-pgcli_addons: "{{ lookup('vars', 'addon_' ~ _addon_kind ~ '_addons', default=[]) }}"
-```
-
-`-e addon_type=etcd` expands `pgcli_addons` to `addon_etcd_addons`; an unset
-`addon_type` yields an empty list, so the play is a no-op.
+`--limit addon_etcd_cluster` expands `pgcli_addons` to
+`addon_etcd_cluster_addons` on those three hosts; without an add-on limit the
+list is empty, so the play is a no-op. `apply.yaml` rejects wildcards,
+comma-separated lists and `addon_<type>` names without a mode suffix.
 
 ## Shared material
 
@@ -99,7 +121,8 @@ certificate. `roles/addon_cluster_shared` generates this once on the controller
 
 On the members the files land under `/data/pg/addon/shared/` (`ca.crt`,
 `server-chain.crt`, `server.key`, `server.pem`; private files are `0600`). The
-server certificate covers every `private_ip` of the add-on's inventory group.
+server certificate covers every `private_ip` of the selected
+`addon_<type>_cluster` group.
 
 Password values are loaded into the matching `_addon_cluster_<type>_*` variables
 with `set_fact` during the run, so the templates keep them empty:
@@ -131,7 +154,7 @@ in `_addon_cluster_rabbitmq_etcd_endpoints`.
 | `silo` | 4 | 9200 API, 9201 console | MNSD |
 | `rustfs` | 4 | 9300 API, 9301 console | MNMD; one drive per node. Raw SigV4 requests need an `x-amz-content-sha256` header |
 | `seaweedfs` | first 3 | 8400 master, 8401 volume, 8402 filer, 8403 S3 | masters must be an odd count; the filer metadata database must exist in PostgreSQL first |
-| `redis` | 4 | 6379 (+ cluster bus 16379) | installs four cluster-enabled members; slots are assembled once afterwards |
+| `redis` | 4 | 6379 (+ cluster bus 16379) | installs four cluster-enabled members; `apply.yaml` assembles the slots and waits for a healthy cluster afterwards |
 | `clickhouse-keeper` | first 3 | 9181 client, 9234 Raft | 3-member Raft quorum; `--server-id` = host index + 1 |
 | `clickhouse` | 4 | 8123 HTTP, 9000 native, 9009 interserver | 2 shards × 2 replicas over the Keeper above; deploy Keeper first |
 | `kafka` | first 3 | 9092 broker, 19093 controller | KRaft quorum; 512 MiB heap fits the reference VMs |
@@ -140,10 +163,12 @@ in `_addon_cluster_rabbitmq_etcd_endpoints`.
 | `vmcluster` | 4 | 8480 insert, 8481 select, 8482 storage, 8483/8484 internal | first host runs storage+insert+select, the rest storage only |
 | `vlcluster` | 4 | 9430 insert, 9431 select, 9432 storage | same access/storage split; storage is sharded without replication |
 
-The SeaweedFS section assigns only the first three hosts to
-`_addon_cluster_seaweedfs_members`; the fourth gets `state: absent`. ClickHouse
-Keeper, Kafka, RabbitMQ and RocketMQ sections use the same `[:3]` pattern.
-MinIO, silo, RustFS, Redis, vmcluster and vlcluster use all four.
+The three-node layouts (`addon_etcd_cluster`, `addon_seaweedfs_cluster`,
+`addon_clickhouse_keeper_cluster`, `addon_kafka_cluster`,
+`addon_rabbitmq_cluster`, `addon_rocketmq_cluster`) list only the first three
+hosts in `hosts.ini`, so their group files need no `[:3]` slices or `state`
+expressions. The four-member layouts list all four hosts. MinIO/silo MNSD needs
+at least four endpoints; Redis, vmcluster and vlcluster also use all four.
 
 ## Create, verify, destroy
 
@@ -151,8 +176,8 @@ Run one type at a time:
 
 ```bash
 cd ansible
-uv run ansible-playbook playbooks/apply.yaml --limit addon_cluster \
-  --tags addon -e addon_type=etcd
+uv run ansible-playbook playbooks/apply.yaml --limit addon_etcd_cluster \
+  --tags addon
 ```
 
 The play is `serial: 1` and follows inventory order. For quorum add-ons, the
@@ -166,7 +191,7 @@ Run these on a member unless noted otherwise.
 |------|---------|
 | `etcd` | `pg etcdctl endpoint health` and `pg etcdctl member list` |
 | `minio` / `silo` / `rustfs` / `seaweedfs` | `pg mc` against the API port, then read the object back through a second member (see below) |
-| `redis` | `pg redis-cli -- --cluster check 192.0.2.10:6379` after assembling slots |
+| `redis` | `pg redis-cli -- --cluster check 192.0.2.10:6379` (the play runs the equivalent check after assembly) |
 | `clickhouse-keeper` | `pg addon clickhouse-keeper status --name keeper-cluster` |
 | `clickhouse` | `pg addon clickhouse cluster status --name clickhouse-cluster` |
 | `kafka` | `pg addon kafka cluster status --name kafka-cluster`; `pg addon kafka topic list --name kafka-cluster` |
@@ -187,15 +212,26 @@ pg mc cat n2/demo/hostname
 ```
 
 Use port 9200 for silo, 9300 for rustfs and 8403 for seaweedfs (and the
-matching password file). For Redis, assemble the slots once after all four
-members are up:
+matching password file).
+
+Redis needs no manual step: `apply.yaml` waits for every member, runs
+`--cluster create ... --cluster-yes` once when the cluster has not been
+assembled yet (passing `--cluster-replicas` from the add-on params, default
+`0`), then waits until `cluster_state:ok` reports all 16384 slots across the
+expected number of nodes. A rerun skips the create step once the cluster is
+healthy. A partially joined cluster is not reset automatically: the play stops
+and asks you to reset the members and rerun. The equivalent commands for
+installs driven by `pg addon` alone:
 
 ```bash
 pg redis-cli -- --cluster create \
   192.0.2.10:6379 192.0.2.11:6379 192.0.2.12:6379 192.0.2.13:6379 \
-  --cluster-replicas 0
+  --cluster-replicas 0 --cluster-yes
 pg redis-cli -- --cluster check 192.0.2.10:6379
 ```
+
+`--cluster-yes` is required in non-interactive runs: without it `redis-cli`
+prompts for confirmation and exits without applying the plan.
 
 VictoriaMetrics cluster:
 
@@ -222,14 +258,10 @@ return `200` while silently dropping the payload.
 
 ### Destroy
 
-Set the section's `state` to `absent` and re-run the same command. Data is
-removed with the member unless the entry sets `clean_data: false`; for
-SeaweedFS this includes the rendered `s3.json` and `filer.toml`.
-
-For sections that use a `state` expression (etcd, seaweedfs, keeper, kafka,
-rabbitmq, rocketmq), replace the expression with the literal `absent`, or add a
-variable that selects it. With `serial: 1`, quorum members are removed one host
-at a time.
+Set each entry's `state` in the group file to `absent` and re-run the same
+command. Data is removed with the member unless the entry sets
+`clean_data: false`; for SeaweedFS this includes the rendered `s3.json` and
+`filer.toml`. With `serial: 1`, members are removed one host at a time.
 
 Dependency order:
 

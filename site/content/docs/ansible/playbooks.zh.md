@@ -5,7 +5,8 @@ weight: 20
 ---
 
 所有命令都在 `ansible/` 目录下通过固定的 `uv` 环境执行。不指定 `--limit` 时，
-`apply.yaml` 作用于 inventory 中的全部主机；实际使用中通常选择某个部署模式分组。
+`apply.yaml` 作用于 inventory 中的全部主机；实际使用中通常选择某个部署模式分组，
+或用 `--limit addon_<type>_<single|cluster>` 选择一个插件分组。
 
 ```bash
 cd ansible
@@ -27,15 +28,26 @@ uv run ansible-playbook playbooks/ping.yaml --limit crosshost
 
 | # | Play | 主机 | serial | Tag |
 |---|------|------|--------|-----|
-| 1 | 安装并配置 pgcli | `all` | – | `pgcli` |
-| 2 | PostgreSQL 实例 | `all` | 1 | `instance` |
-| 3 | 插件 | `all` | 1 | `addon` |
-| 4 | Patroni HA 成员 | `ha_cluster` | 1 | `ha` |
-| 5 | Patroni HA 备份收敛 | `ha_cluster` | – | `ha` |
-| 6 | Patroni HA 代理 | 代理主机 | – | `ha`、`haproxy` |
+| 1 | 校验插件选择 | `all` | – | `always` |
+| 2 | 安装并配置 pgcli | `all` | – | `pgcli` |
+| 3 | PostgreSQL 实例 | `all` | 1 | `instance` |
+| 4 | 插件 | `all` | 1 | `addon` |
+| 5 | 组建 Redis 集群 | `all` | – | `addon` |
+| 6 | Patroni HA 成员 | `ha_cluster` | 1 | `ha` |
+| 7 | Patroni HA 备份收敛 | `ha_cluster` | – | `ha` |
+| 8 | Patroni HA 代理 | 代理主机 | – | `ha`、`haproxy` |
 
 `serial: 1` 是刻意的：首台主机先安装插件或 bootstrap etcd，下一台再加入；
 跨机副本也要求主库先存在。
+
+插件用 `--limit addon_<type>_<single|cluster>` 选择；`group_vars/all` 会把该分组的
+`addon_<kind>_addons` 列表读入 `pgcli_addons`。以 `addon_` 开头但不是“存在且带模式
+后缀的精确分组名”的 limit 会在校验 play 失败；不存在的分组会在 Ansible 匹配
+limit 的阶段报错。不带这类 limit 时列表为空，插件 play 是 no-op。
+
+Redis 组建 play 在所有成员都存在之后运行（插件 play 是 serial）。只有
+`--limit addon_redis_cluster` 且条目为 present 时才生效：等待所有成员应答，
+必要时执行一次集群组建，然后等待全部 16384 个 slot 分配完成。重跑会跳过组建步骤。
 
 ```bash
 # 完整部署某个模式
@@ -47,8 +59,8 @@ uv run ansible-playbook playbooks/apply.yaml --limit single --tags instance
 # 全新主机：一次完成安装与创建
 uv run ansible-playbook playbooks/apply.yaml --limit single --tags pgcli,instance
 
-# 只操作插件（例如把 etcd 分组切换为 absent）
-uv run ansible-playbook playbooks/apply.yaml --tags addon
+# 只操作插件的一个分组（把条目改成 absent 即可移除）
+uv run ansible-playbook playbooks/apply.yaml --limit addon_etcd_cluster --tags addon
 
 # HA 成员 + 收敛；HAProxy 有独立 tag
 uv run ansible-playbook playbooks/apply.yaml --tags ha

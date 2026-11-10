@@ -1,0 +1,43 @@
+---
+# pgdog standalone add-on group (addon_pgdog_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_pgdog_single --tags addon
+#
+# The PostgreSQL instance this add-on needs is declared below; create it first:
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_pgdog_single --tags instance,addon
+
+# Single-node test group for the pgdog add-on.
+#
+# Leave addon_pgdog_single_remote_dsn empty to proxy a local instance named
+# your_pg_ins01; set
+# it to a remote DSN to proxy that server instead (no local instance is
+# created). pgdog has no --dsn flag, so the DSN is decomposed into
+# --backend app=HOST:PORT:DB and --user USER:PASSWORD.
+#   addon_pgdog_single_remote_dsn: "postgres://appuser:<secret>@db.example.com:5432/app"
+addon_pgdog_single_remote_dsn: ""
+_addon_pgdog_single_remote: "{{ addon_pgdog_single_remote_dsn | urlsplit }}"
+addon_pgdog_single_instances: >-
+  {{ [] if addon_pgdog_single_remote_dsn | length > 0 else
+     [{'name': 'your_pg_ins01', 'host': inventory_hostname, 'state': 'started',
+       'extensions': ['pg_stat_statements']}] }}
+addon_pgdog_single_params: >-
+  {{ ['--backend',
+      'app=' ~ (_addon_pgdog_single_remote.hostname | default('127.0.0.1', true)) ~ ':'
+             ~ (_addon_pgdog_single_remote.port | default(5432, true)) ~ ':'
+             ~ (_addon_pgdog_single_remote.path | default('/postgres', true) | regex_replace('^/', '')),
+      '--user',
+      (_addon_pgdog_single_remote.username | default('appuser', true)) ~ ':'
+      ~ (_addon_pgdog_single_remote.password | default('', true)),
+      '--sharded-table', 'app:users:id:bigint']
+     if addon_pgdog_single_remote_dsn | length > 0 else
+     ['--backend', 'app=127.0.0.1:35432:postgres',
+      '--user', 'appuser:<secret>:app',
+      '--sharded-table', 'app:users:id:bigint'] }}
+
+addon_pgdog_single_addons:
+  - type: pgdog
+    state: present
+    name: pgdog1
+
+

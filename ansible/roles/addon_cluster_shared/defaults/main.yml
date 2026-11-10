@@ -9,11 +9,9 @@ addon_cluster_shared_server_key: "{{ addon_cluster_shared_remote_dir }}/server.k
 addon_cluster_shared_server_pem: "{{ addon_cluster_shared_remote_dir }}/server.pem"
 addon_cluster_shared_ca_days: 3650
 addon_cluster_shared_cert_days: 825
-# Inventory group targeted by the selected add-on. Each add-on section in
-# group_vars/addon_cluster names it with _addon_cluster_<type>_group; types
-# without such a section fall back to addon_cluster.
-addon_cluster_shared_group: >-
-  {{ lookup('vars', '_addon_cluster_' ~ (addon_type | default('') | replace('-', '_')) ~ '_group', default='addon_cluster') }}
+# Inventory group selected by --limit (addon_<type>_cluster). Its members are
+# the add-on cluster the shared material belongs to.
+addon_cluster_shared_group: "{{ _addon_group }}"
 # SANs for the shared server certificate: every member's private address.
 addon_cluster_shared_cert_san: >-
   {%- set out = [] -%}

@@ -1,0 +1,34 @@
+---
+# redis standalone add-on group (addon_redis_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_redis_single --tags addon
+
+# Single-node test group for the redis add-on.
+
+# Shared flags for entries that do not set their own params.
+addon_redis_single_params: []
+# Per-entry params replace addon_redis_single_params for that instance.
+
+addon_redis_single_addons:
+  - type: redis
+    state: present
+    name: cache
+    params:
+      - "--port"
+      - "6379"
+      - "--maxmemory"
+      - "256mb"
+      - "--listen"
+      - "127.0.0.1"
+  - type: redis
+    state: present
+    name: session
+    params:
+      - "--port"
+      - "6380"
+      - "--maxmemory"
+      - "512mb"
+      - "--listen"
+      - "127.0.0.1"
+
+

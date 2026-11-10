@@ -264,23 +264,52 @@ pgcli_instance_defaults:
 # pg_hba), then creates the replica with --primary-dsn, reading the primary
 # password from that host's pg.yaml.
 
-# Empty default; each deployment-mode group overrides it with its own list in
-# group_vars/<mode>/main.yml. Enable one mode group at a time so every
-# selected host reconciles that group's list.
-pgcli_instances: []
+# ── Scenario selection ─────────────────────────────────────────────────────
+# pgcli_instances and pgcli_addons are read from the inventory group named by
+# --limit. Deployment-mode and add-on runs are selected this way instead of
+# per-mode plays.
+#
+# Add-ons: --limit addon_<type>_<single|cluster> selects that group's list
+# (addon_<kind>_addons) and, for the pg_addon role, the matching
+# addon_<kind>_params / addon_<kind>_conf variables. Without such a --limit
+# both lists stay empty and the add-on play is a no-op.
+#
+# Enable one scenario at a time: the single/samehost/crosshost mode groups and
+# ha_etcd also define pgcli_instances / pgcli_addons at group level, and group
+# vars override this file for their hosts. Keep them disabled in hosts.ini
+# while running add-ons.
+_addon_limit: "{{ ansible_limit | default('', true) }}"
+_addon_group: >-
+  {{ _addon_limit
+     if (_addon_limit is match('^addon_[A-Za-z0-9_]+$') and _addon_limit in groups)
+     else '' }}
+_addon_kind: "{{ _addon_group | regex_replace('^addon_', '') }}"
+_addon_type: "{{ _addon_kind | regex_replace('_(single|cluster)$', '') }}"
+_addon_mode: >-
+  {{ 'cluster' if _addon_kind is match('.*_cluster$')
+     else ('single' if _addon_kind is match('.*_single$') else '') }}
+_addon_limit_is_addon_like: "{{ _addon_limit is match('^addon_') }}"
 
-# Add-ons on this host, consumed by the pg_addon role. Every entry accepts
-# type, name or instance, state, args, conf, clean_data, force and autostart;
-# autostart defaults to true and clean_data defaults to true with state absent.
+pgcli_instances: >-
+  {{ lookup('vars', 'addon_' ~ _addon_kind ~ '_instances', default=[])
+     if _addon_group | length > 0 else [] }}
+
+# Add-ons on this host. The selected group's list is addon_<kind>_addons; every
+# entry accepts type, name or instance, state, args, conf, clean_data, force
+# and autostart.
 #
-# Per-type parameters are declared once in the add-on's group as a list of raw
-# `pg addon install` flags; the role appends them to every entry of that type:
+# Per-type parameters are declared next to that list in group_vars/all or in
+# the add-on's own group file as addon_<kind>_params, a list of raw
+# `pg addon install` flags; the role uses it for every entry of that type
+# without its own params:
 #
-#   addon_redis_params:
+#   addon_redis_single_params:
 #     - "--data-dir=/data/pg/addon/redis/redis1"
 #     - "--aof"
 #
-# For nginx, haproxy, prometheus and alertmanager, addon_<type>_conf holds the
+# For nginx, haproxy, prometheus and alertmanager, addon_<kind>_conf holds the
 # full config file content. The role writes it under <config dir>/addons/ and
 # passes --conf-file; a per-entry `conf` overrides the group-level variable.
-pgcli_addons: []
+pgcli_addons: >-
+  {{ lookup('vars', 'addon_' ~ _addon_kind ~ '_addons', default=[])
+     if _addon_group | length > 0 else [] }}

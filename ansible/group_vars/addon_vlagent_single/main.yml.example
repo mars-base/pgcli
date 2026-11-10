@@ -1,0 +1,16 @@
+---
+# vlagent standalone add-on group (addon_vlagent_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_vlagent_single --tags addon
+
+# Single-node test group for the vlagent add-on.
+addon_vlagent_single_params:
+  - "--remote-write-url"
+  - "http://127.0.0.1:9428/insert/native"
+
+addon_vlagent_single_addons:
+  - type: vlagent
+    state: present
+    name: va1
+
+

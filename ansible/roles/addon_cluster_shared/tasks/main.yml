@@ -130,5 +130,5 @@
 
 - name: Load add-on specific shared material
   tags: [addon]
-  ansible.builtin.include_tasks: "{{ addon_type | replace('-', '_') }}.yml"
-  when: (addon_type | replace('-', '_')) in addon_cluster_shared_types
+  ansible.builtin.include_tasks: "{{ _addon_type }}.yml"
+  when: _addon_type in addon_cluster_shared_types

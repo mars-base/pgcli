@@ -37,12 +37,15 @@ playbook，确保使用固定的环境。
 | `group_vars/ha_etcd/main.yml.example` | `group_vars/ha_etcd/main.yml` | 共享 etcd DCS |
 | `group_vars/ha_cluster/main.yml.example` | `group_vars/ha_cluster/main.yml` | Patroni 集群 + HAProxy |
 | `group_vars/{minio,silo,rustfs}_s3/main.yml.example` | 对应的正式文件 | S3 兼容存储部署 |
+| `group_vars/addon_<type>_single/main.yml.example` | 对应的正式文件 | 一种单机插件（1 台主机） |
+| `group_vars/addon_<type>_cluster/main.yml.example` | 对应的正式文件 | 一种多主机插件集群（3–4 台主机） |
 
 ```bash
 cp ansible.cfg.example ansible.cfg
 cp hosts.ini.example hosts.ini
 cp group_vars/all/main.yml.example group_vars/all/main.yml
 cp group_vars/single/main.yml.example group_vars/single/main.yml
+cp group_vars/addon_nginx_single/main.yml.example group_vars/addon_nginx_single/main.yml
 # 其他用到的分组同理
 ```
 
@@ -52,32 +55,54 @@ cp group_vars/single/main.yml.example group_vars/single/main.yml
 
 ## Inventory：`hosts.ini`
 
-主机按**部署模式**分组，而不是按环境分组。play 始终作用于 `all`，用
-`--limit <group>` 选择本次要操作的模式。
+主机在 `[all]` 中定义一次（含连接变量），其他分组只写裸主机名；
+`--limit <group>` 选择本次要操作的场景：
 
 ```ini
+[all]
+db-01 ansible_host=192.0.2.10 private_ip=192.0.2.10
+db-02 ansible_host=192.0.2.11 private_ip=192.0.2.11
+db-03 ansible_host=192.0.2.12 private_ip=192.0.2.12
+db-04 ansible_host=192.0.2.13 private_ip=192.0.2.13
+
+[all:vars]
+ansible_user=root
+ansible_port=22
+
 [single]
-db-01 ansible_host=192.0.2.10 private_ip=192.0.2.10 ansible_user=root ansible_port=22
+db-01
 
 [crosshost]
-db-01 ansible_host=192.0.2.10 private_ip=192.0.2.10 ansible_user=root ansible_port=22
-db-02 ansible_host=192.0.2.11 private_ip=192.0.2.11 ansible_user=root ansible_port=22
+db-01
+db-02
 
 [single:vars]
 ansible_group_priority=20
 [crosshost:vars]
 ansible_group_priority=20
+
+[addon_pgbouncer_single]
+db-01
+
+[addon_etcd_cluster]
+db-01
+db-02
+db-03
 ```
 
 - **一次只启用一种模式分组**；每种模式维护自己的 `pgcli_instances`。模式分组带
   `ansible_group_priority=20`，其变量优先于 `all` 的默认值。
 - **顺序很重要。** 实例 play 使用 `serial: 1`；主库要列在依赖它的跨机副本主机之前。
+  插件分组同理：首台主机负责 bootstrap。
 - 节点间通信（复制、etcd、备份 SSH）用 `private_ip`；SSH 仍走 `ansible_host`，
   公有云上后者通常是 EIP。
 - S3 部分在 `[s3]` 下只激活**一个**存储类型子组（`minio_s3`、`silo_s3` 或
   `rustfs_s3`）。
 - `[ha_etcd]` 与 `[ha_cluster]` 是角色标记分组。etcd 首台负责 bootstrap；
   Patroni 成员名按 `[ha_cluster]` 顺序对应。
+- 插件分组命名为 `addon_<type>_single`（1 台）与 `addon_<type>_cluster`
+  （3 或 4 台）。可以同时声明全部插件分组——变量名互不冲突，每次用 `--limit`
+  选择一个。
 
 ## 按业务类型选择分组
 
@@ -91,10 +116,16 @@ ansible_group_priority=20
 | 主库 + 跨机副本 | `[crosshost]` | `group_vars/crosshost/main.yml` | `apply.yaml --limit crosshost` |
 | Patroni HA 集群 | `[ha_etcd]` + `[ha_cluster]` | `group_vars/ha_etcd/main.yml` + `group_vars/ha_cluster/main.yml` | `apply.yaml --tags addon,ha` |
 | S3 兼容备份存储 | `[s3]` 下的 `[minio_s3]` / `[silo_s3]` / `[rustfs_s3]` 之一 | 对应的 `group_vars/<type>_s3/main.yml` | `deploy-s3.yaml` |
+| 单机插件（一种类型） | `[addon_<type>_single]` | `group_vars/addon_<type>_single/main.yml` | `apply.yaml --limit addon_<type>_single --tags addon` |
+| 多主机插件集群 | `[addon_<type>_cluster]` | `group_vars/addon_<type>_cluster/main.yml` | `apply.yaml --limit addon_<type>_cluster --tags addon` |
 
 前三种是互斥的部署模式：各模式的主机经常重叠，而每种启用的模式都会提供自己的
 `pgcli_instances` 列表，同时启用可能混合实例列表。HA 与 S3 是带独立分组和 play
 选择的支撑部署；主机属于 HA 集群时，不要再把它列进已激活的模式分组。
+
+插件分组不同：可以同时声明全部插件分组，因为每组变量名互不冲突，由 `--limit`
+选择一个。运行插件时仍要保持模式分组和 HA 分组关闭——它们组级的
+`pgcli_instances` / `pgcli_addons` 会覆盖插件 `--limit` 选中的列表。
 
 ## 全局变量：`group_vars/all/main.yml`
 
@@ -111,8 +142,9 @@ ansible_group_priority=20
 | `pgcli_config_defaults` | `pg config init` 的初始值：namespace、`base_dir`、`backup_dir`、端口段 |
 | `pgcli_config_overrides` | 分组级 namespace 覆盖（各模式示例里设置） |
 | `pgcli_instance_defaults` | 实例默认 `state`、`autostart`、`backup_target`、`password_length`、`extensions`、`clean_data` |
-| `pgcli_instances` | 期望实例列表（通常放在各模式分组里） |
-| `pgcli_addons` | 主机期望的插件列表 |
+| `pgcli_instances` | 期望实例列表（通常放在各模式分组；插件分组也可声明，由 `--limit` 选中） |
+| `pgcli_addons` | `--limit` 所选插件分组的列表（`addon_<kind>_addons`） |
+| `_addon_limit`、`_addon_group`、`_addon_type`、`_addon_mode` | 由 `--limit addon_<type>_<single\|cluster>` 推导的插件选择器 |
 
 `pgcli_config_defaults` 只在首次 `pg config init` 时生效；之后修改不会重写已有的
 `pg.yaml`。

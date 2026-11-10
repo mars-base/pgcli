@@ -1,0 +1,29 @@
+---
+# vmcluster cluster add-on group (addon_vmcluster_cluster).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_vmcluster_cluster --tags addon
+
+# First host runs storage + insert + select; the other three are storage-only.
+_addon_cluster_vmcluster_hosts: "{{ groups['addon_vmcluster_cluster'] }}"
+_addon_cluster_vmcluster_index: "{{ _addon_cluster_vmcluster_hosts.index(inventory_hostname) | int }}"
+_addon_cluster_vmcluster_storage_args: >-
+  {%- set out = [] -%}
+  {%- for host in _addon_cluster_vmcluster_hosts -%}
+  {%- set _ = out.extend(['--storage-node', hostvars[host].private_ip ~ ':8483:8484']) -%}
+  {%- endfor -%}
+  {{ out }}
+
+addon_vmcluster_cluster_addons:
+  - type: vmcluster
+    state: present
+    name: vmcluster-cluster
+    params:
+      - "--roles"
+      - "{{ 'storage,insert,select' if (_addon_cluster_vmcluster_index | int) == 0 else 'storage' }}"
+      - "--listen"
+      - "0.0.0.0"
+      - "--data-dir"
+      - "/data/pg/addon/vmcluster/cluster"
+    args: "{{ (_addon_cluster_vmcluster_storage_args + ['--replication-factor', '2']) if (_addon_cluster_vmcluster_index | int) == 0 else [] }}"
+
+

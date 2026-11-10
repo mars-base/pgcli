@@ -1,0 +1,18 @@
+---
+# influxdb standalone add-on group (addon_influxdb_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_influxdb_single --tags addon
+
+# Single-node test group for the influxdb add-on.
+
+# Default flags for influxdb entries that do not set their own params.
+addon_influxdb_single_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/influxdb/influx1"
+
+addon_influxdb_single_addons:
+  - type: influxdb
+    state: present
+    name: influx1
+
+

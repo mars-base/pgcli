@@ -1,0 +1,36 @@
+---
+# postgrest standalone add-on group (addon_postgrest_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_postgrest_single --tags addon
+#
+# The PostgreSQL instance this add-on needs is declared below; create it first:
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_postgrest_single --tags instance,addon
+
+# Single-node test group for the postgrest add-on.
+#
+# Leave addon_postgrest_single_remote_dsn empty to serve a local instance named
+# your_pg_ins01;
+# set it to a remote DSN to serve that server instead (no local instance is
+# created). addon_postgrest_single_pg_name is the config key for the remote target.
+#   addon_postgrest_single_remote_dsn: "postgres://api:<secret>@db.example.com:5432/app"
+addon_postgrest_single_remote_dsn: ""
+addon_postgrest_single_pg_name: your_pg_ins01
+addon_postgrest_single_instances: >-
+  {{ [] if addon_postgrest_single_remote_dsn | length > 0 else
+     [{'name': 'your_pg_ins01', 'host': inventory_hostname, 'state': 'started',
+       'extensions': ['pg_stat_statements']}] }}
+addon_postgrest_single_params:
+  - "--schema"
+  - "api"
+  - "--anon-role"
+  - "web_anon"
+
+addon_postgrest_single_addons: >-
+  {{ [{'type': 'postgrest', 'state': 'present',
+       'pg_name': addon_postgrest_single_pg_name,
+       'dsn': addon_postgrest_single_remote_dsn}]
+     if addon_postgrest_single_remote_dsn | length > 0 else
+     [{'type': 'postgrest', 'state': 'present', 'instance': 'your_pg_ins01'}] }}
+
+

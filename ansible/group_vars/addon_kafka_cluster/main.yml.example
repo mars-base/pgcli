@@ -1,0 +1,50 @@
+---
+# kafka cluster add-on group (addon_kafka_cluster).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_kafka_cluster --tags addon
+
+# 3-node KRaft quorum, 512 MiB heap to fit the 2 GiB VMs. TLS is additive:
+# --tls-pem installs the shared combined PEM as an extra SSL listener while
+# controller and inter-broker traffic stay plaintext.
+_addon_cluster_kafka_hosts: "{{ groups['addon_kafka_cluster'] }}"
+_addon_cluster_kafka_index: "{{ _addon_cluster_kafka_hosts.index(inventory_hostname) | int }}"
+_addon_cluster_kafka_ip: "{{ hostvars[inventory_hostname]['private_ip'] }}"
+_addon_cluster_kafka_peer_args: >-
+  {%- set out = [] -%}
+  {%- set members = _addon_cluster_kafka_hosts -%}
+  {%- for host in members -%}
+  {%- if host != inventory_hostname -%}
+  {%- set _ = out.extend(['--peer', (((members.index(host) + 1) | string) ~ '@' ~ hostvars[host].private_ip ~ ':19093')]) -%}
+  {%- endif -%}
+  {%- endfor -%}
+  {{ out }}
+_addon_cluster_kafka_tls: false
+_addon_cluster_kafka_tls_pem: "{{ addon_cluster_shared_server_pem }}"
+_addon_cluster_kafka_tls_args: >-
+  {{ ['--tls-pem', _addon_cluster_kafka_tls_pem]
+     if _addon_cluster_kafka_tls else [] }}
+
+addon_kafka_cluster_addons:
+  - type: kafka
+    state: present
+    name: kafka-cluster
+    params:
+      - "--cluster"
+      - "pgcli-kafka"
+      - "--node-id"
+      - "{{ (_addon_cluster_kafka_index | int) + 1 }}"
+      - "--advertise-host"
+      - "{{ _addon_cluster_kafka_ip }}"
+      - "--listen"
+      - "0.0.0.0"
+      - "--broker-port"
+      - "9092"
+      - "--controller-port"
+      - "19093"
+      - "--heap"
+      - "512m"
+      - "--data-dir"
+      - "/data/pg/addon/kafka/cluster"
+    args: "{{ _addon_cluster_kafka_peer_args + _addon_cluster_kafka_tls_args }}"
+
+

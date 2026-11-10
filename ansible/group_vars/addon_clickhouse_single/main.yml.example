@@ -1,0 +1,18 @@
+---
+# clickhouse standalone add-on group (addon_clickhouse_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_clickhouse_single --tags addon
+
+# Single-node test group for the clickhouse add-on.
+
+# Default flags for clickhouse entries that do not set their own params.
+addon_clickhouse_single_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/clickhouse/ch1"
+
+addon_clickhouse_single_addons:
+  - type: clickhouse
+    state: present
+    name: ch1
+
+

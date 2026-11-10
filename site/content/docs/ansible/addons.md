@@ -1,13 +1,24 @@
 ---
 title: "Add-ons"
-description: "Configure pgcli_addons — install and remove top-level or instance-scoped add-ons, and manage the shared etcd group"
+description: "Configure addon_<type>_<mode> groups — install and remove top-level or instance-scoped add-ons, and manage the shared etcd group"
 weight: 40
 ---
 
-Add-ons are declared in `pgcli_addons` (empty by default in
-`group_vars/all/main.yml`). A deployment-mode group adds its own list; the
-`ha_etcd` group uses the same mechanism for the shared etcd DCS. `type` takes
-any add-on accepted by `pg addon install` — see the
+Add-ons are declared as `addon_<group>_addons` lists in
+`group_vars/addon_<type>_<mode>/main.yml`. `group_vars/all` reads the list of
+the group named by `--limit` into `pgcli_addons`, so one run selects one
+add-on group:
+
+```bash
+uv run ansible-playbook playbooks/apply.yaml \
+  --limit addon_pgbouncer_single --tags addon
+```
+
+The repository ships one group per add-on type and installation form:
+`addon_<type>_single` (one host) and `addon_<type>_cluster` (three or four
+hosts). See [Add-on clusters](./addon-cluster/) for the cluster form. The
+`ha_etcd` and S3 groups define `pgcli_addons` directly and keep working the
+same way. `type` takes any add-on accepted by `pg addon install` — see the
 [add-on reference](../../addon/) for the full list (pgbouncer, pgdog, etcd,
 haproxy, minio/silo/rustfs, redis, nginx, prometheus, kafka, and so on).
 
@@ -21,9 +32,9 @@ haproxy, minio/silo/rustfs, redis, nginx, prometheus, kafka, and so on).
 | `dsn` | Remote PostgreSQL DSN (`--dsn`; pgbouncer, postgrest, pgexporter only) |
 | `instance` | Instead of `name`: scope the add-on to a pgcli instance |
 | `state` | `present` (default) or `absent` |
-| `params` | Complete per-entry flag list; replaces `addon_<type>_params` for this entry |
+| `params` | Complete per-entry flag list; replaces `addon_<group>_params` for this entry |
 | `args` | Per-entry flags appended verbatim after the resolved parameters |
-| `conf` | Inline config content, overriding `addon_<type>_conf` (nginx, haproxy, prometheus, alertmanager only) |
+| `conf` | Inline config content, overriding `addon_<group>_conf` (nginx, haproxy, prometheus, alertmanager only) |
 | `clean_data` | With `state: absent`, delete data where the add-on supports it (default `true`; set `false` to keep it) |
 | `force` | With `state: present`, recreate with `pg addon install --force` |
 | `autostart` | `true` (default) enables boot autostart, `false` disables it |
@@ -33,17 +44,17 @@ the role asserts this before doing anything.
 
 ## Per-type parameters
 
-Flags shared by every instance of one add-on type can be declared once next to
-the list as `addon_<type>_params`: a list of raw `pg addon install` tokens.
-Entries that do not set their own `params` inherit this list.
+Flags shared by every entry in one group can be declared once next to the list
+as `addon_<group>_params`: a list of raw `pg addon install` tokens. Entries
+that do not set their own `params` inherit this list.
 
 An entry can set `params` to its own complete flag list. It replaces
-`addon_<type>_params` for that entry, so different instances of the same type
+`addon_<group>_params` for that entry, so different instances of the same type
 can use different ports, data directories, memory limits, and so on. Per-entry
 `args` is still appended after the resolved params.
 
 ```yaml
-addon_redis_addons:
+addon_redis_single_addons:
   - type: redis
     name: cache
     state: present
@@ -67,16 +78,17 @@ addon_redis_addons:
 Entry names must be unique per type; each instance is stored under
 `addons.<type>.<name>` in the pgcli config. Because `params` replaces the shared
 list, repeat any shared flags in each entry (or use YAML anchors). The variable
-name uses the type with `-` replaced by `_` (for example
-`addon_clickhouse_keeper_params`).
+name is `addon_<group>_params`, where `<group>` is the selected inventory group
+(for example `addon_redis_single_params` or `addon_clickhouse_keeper_cluster_params`).
+Groups that define `pgcli_addons` directly fall back to `addon_<type>_params`.
 
 ## Inline config files
 
 nginx, haproxy, prometheus and alertmanager accept `--conf-file`. Put the file
-content in `addon_<type>_conf` instead of maintaining a path on the target:
+content in `addon_<group>_conf` instead of maintaining a path on the target:
 
 ```yaml
-addon_haproxy_conf: |
+addon_haproxy_single_conf: |
   global
       maxconn 1000
   defaults
@@ -86,7 +98,7 @@ addon_haproxy_conf: |
       timeout server 30m
   # ... frontend/backend ...
 
-addon_haproxy_addons:
+addon_haproxy_single_addons:
   - type: haproxy
     name: lb1
     state: present
@@ -111,11 +123,12 @@ cluster — not whether several independent copies can run on different hosts:
 - **Standalone + cluster**: installable either standalone or in cluster mode.
 - **Cluster only**: only installable as a cluster (a quorum is required).
 
-This repository's `group_vars` examples exercise both forms: `addon_single`
-covers standalone add-ons and [Add-on clusters](./addon-cluster/) covers the
-multi-host `addon_cluster` group. The cluster form of each [add-on
-page](../../addon/) documents the product flags; the S3 and HA groups are
-covered in their own pages here.
+This repository ships one standalone group per type — `addon_<type>_single`,
+one host each — and, for types that support it, one cluster group —
+`addon_<type>_cluster`, three or four hosts. Run one group per invocation with
+`--limit addon_<type>_<mode>`; [Add-on clusters](./addon-cluster/) covers the
+cluster layouts. The cluster form of each [add-on page](../../addon/) documents
+the product flags; the S3 and HA groups are covered in their own pages here.
 
 | Add-on | Installation | Notes |
 |--------|--------------|-------|
@@ -160,6 +173,20 @@ covered in their own pages here.
 
 ## Top-level add-on example
 
+`group_vars/addon_nodeexporter_single/main.yml.example` declares a top-level
+add-on in its group list:
+
+```yaml
+addon_nodeexporter_single_addons:
+  - type: nodeexporter
+    name: ne1
+    state: present
+```
+
+`--limit addon_nodeexporter_single` makes `group_vars/all` read that list into
+`pgcli_addons` for the single host in the group.
+
+Groups that set `pgcli_addons` directly use the same entry format.
 `group_vars/ha_etcd/main.yml.example` builds one etcd member per host:
 
 ```yaml
@@ -180,45 +207,54 @@ is always ready before the next host joins.
 ## Instance-scoped example
 
 Use `instance` instead of `name` for add-ons that belong to a PostgreSQL
-instance:
+instance. `group_vars/addon_pgbouncer_single/main.yml.example` declares the
+instance and the add-on in the same group:
 
 ```yaml
-pgcli_addons:
+addon_pgbouncer_single_instances:
+  - name: your_pg_ins01
+    host: "{{ inventory_hostname }}"
+    state: started
+
+addon_pgbouncer_single_addons:
   - type: pgbouncer
-    instance: pg01
+    instance: your_pg_ins01
     state: present
 ```
 
-The role runs `pg addon install pgbouncer -i pg01`, so the instance must exist
-in the same `pgcli_instances` reconcile (the add-on play runs after the
-instance play in `apply.yaml`).
+Run both plays so the instance exists first:
+`--limit addon_pgbouncer_single --tags instance,addon`. The role then runs
+`pg addon install pgbouncer -i your_pg_ins01`.
 
 ## Remote PostgreSQL example
 
 Set `dsn` to target a PostgreSQL server that pgcli does not manage. PgBouncer
 and PostgREST also need `pg_name`, the name the remote target is stored under;
-pgexporter keeps its `name`:
+pgexporter keeps its `name`. The pgbouncer group ships the remote variant
+behind `addon_pgbouncer_single_remote_dsn`: leave it empty to pool the local
+`your_pg_ins01` instance, or set it to skip the instance and pool that server:
 
 ```yaml
-pgcli_addons:
+addon_pgbouncer_single_addons:
   - type: pgbouncer
     pg_name: remote-proj01
     dsn: postgres://admin:secret@db.example.com:5432/proj01
     state: present
-  - type: pgexporter
-    name: pgex1
-    dsn: postgres://monitor:secret@db.example.com:5432/proj01
-    state: present
 ```
+
+pgexporter is declared the same way in `addon_pgexporter_single_addons`, but
+uses `name` instead of `pg_name`:
 
 These entries are top-level (`addons.<type>.<name>`), so `state: absent` and
 autostart use `--pg-name` (remote pgbouncer/postgrest) or `--name` (pgexporter).
 pgdog has no `--dsn` flag; pass `--backend NAME=HOST:PORT:DB` and
 `--user NAME:PASSWORD` in `params` instead.
 
-## Multiple add-ons
+## Multiple entries
 
-`pgcli_addons` is a list; each item is reconciled in order:
+Every group list is a YAML list; each item is reconciled in order. The redis
+example above declares two instances of the same type. Groups that set
+`pgcli_addons` directly (for example `ha_etcd`) can also mix types in one list:
 
 ```yaml
 pgcli_addons:
@@ -233,10 +269,13 @@ pgcli_addons:
 ## Install and remove
 
 ```bash
-# Reconcile add-ons on every host that declares pgcli_addons
-uv run ansible-playbook playbooks/apply.yaml --tags addon
+# Reconcile one standalone add-on group
+uv run ansible-playbook playbooks/apply.yaml --limit addon_nginx_single --tags addon
 
-# Only the etcd group
+# Reconcile one cluster group
+uv run ansible-playbook playbooks/apply.yaml --limit addon_etcd_cluster --tags addon
+
+# The shared etcd DCS group, which defines pgcli_addons directly
 uv run ansible-playbook playbooks/apply.yaml --tags addon --limit ha_etcd
 ```
 
@@ -248,8 +287,9 @@ uv run ansible-playbook playbooks/apply.yaml --tags addon --limit ha_etcd
   <pg_name>` for remote pgbouncer/postgrest, or `-i <instance>`; data is
   deleted by default, and `clean_data: false` keeps it where the add-on
   supports that. The etcd remove path always deletes its data directory.
-- A host with `pgcli_addons: []` is a no-op, so the play is safe to run with
-  `--tags addon` on the whole inventory.
+- Running `--tags addon` without an `addon_*` limit leaves `pgcli_addons`
+  empty for the add-on groups, so the run is a no-op there; groups that define
+  `pgcli_addons` directly (ha_etcd, S3) still reconcile.
 
 ## etcd lifecycle
 

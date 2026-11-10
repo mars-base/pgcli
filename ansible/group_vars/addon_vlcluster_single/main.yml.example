@@ -1,0 +1,18 @@
+---
+# vlcluster standalone add-on group (addon_vlcluster_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_vlcluster_single --tags addon
+
+# Single-node test group for the vlcluster add-on.
+
+# Default flags for vlcluster entries that do not set their own params.
+addon_vlcluster_single_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/vlcluster/vlc1"
+
+addon_vlcluster_single_addons:
+  - type: vlcluster
+    state: present
+    name: vlc1
+
+

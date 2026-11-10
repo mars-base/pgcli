@@ -1,0 +1,18 @@
+---
+# victoriametrics standalone add-on group (addon_victoriametrics_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_victoriametrics_single --tags addon
+
+# Single-node test group for the victoriametrics add-on.
+
+# Default flags for victoriametrics entries that do not set their own params.
+addon_victoriametrics_single_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/victoriametrics/vm1"
+
+addon_victoriametrics_single_addons:
+  - type: victoriametrics
+    state: present
+    name: vm1
+
+

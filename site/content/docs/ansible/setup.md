@@ -40,12 +40,15 @@ through `uv run` so the pinned environment is used.
 | `group_vars/ha_etcd/main.yml.example` | `group_vars/ha_etcd/main.yml` | Shared etcd DCS |
 | `group_vars/ha_cluster/main.yml.example` | `group_vars/ha_cluster/main.yml` | Patroni clusters + HAProxy |
 | `group_vars/{minio,silo,rustfs}_s3/main.yml.example` | matching live file | S3-compatible store deployment |
+| `group_vars/addon_<type>_single/main.yml.example` | matching live file | One standalone add-on type (1 host) |
+| `group_vars/addon_<type>_cluster/main.yml.example` | matching live file | One multi-host add-on cluster (3–4 hosts) |
 
 ```bash
 cp ansible.cfg.example ansible.cfg
 cp hosts.ini.example hosts.ini
 cp group_vars/all/main.yml.example group_vars/all/main.yml
 cp group_vars/single/main.yml.example group_vars/single/main.yml
+cp group_vars/addon_nginx_single/main.yml.example group_vars/addon_nginx_single/main.yml
 # ...and the same for every group you use
 ```
 
@@ -55,34 +58,56 @@ yourself; every `secrets.yaml` and every live `main.yml` is gitignored.
 
 ## Inventory: `hosts.ini`
 
-Hosts are grouped by **deployment mode**, not by environment. The plays target
-`all`, and `--limit <group>` selects the mode to exercise.
+Hosts are defined once in `[all]` with their connection variables. Every other
+group selects them by bare name, and `--limit <group>` chooses the scenario:
 
 ```ini
+[all]
+db-01 ansible_host=192.0.2.10 private_ip=192.0.2.10
+db-02 ansible_host=192.0.2.11 private_ip=192.0.2.11
+db-03 ansible_host=192.0.2.12 private_ip=192.0.2.12
+db-04 ansible_host=192.0.2.13 private_ip=192.0.2.13
+
+[all:vars]
+ansible_user=root
+ansible_port=22
+
 [single]
-db-01 ansible_host=192.0.2.10 private_ip=192.0.2.10 ansible_user=root ansible_port=22
+db-01
 
 [crosshost]
-db-01 ansible_host=192.0.2.10 private_ip=192.0.2.10 ansible_user=root ansible_port=22
-db-02 ansible_host=192.0.2.11 private_ip=192.0.2.11 ansible_user=root ansible_port=22
+db-01
+db-02
 
 [single:vars]
 ansible_group_priority=20
 [crosshost:vars]
 ansible_group_priority=20
+
+[addon_pgbouncer_single]
+db-01
+
+[addon_etcd_cluster]
+db-01
+db-02
+db-03
 ```
 
 - Enable **one mode group at a time**; each mode owns its own
   `pgcli_instances` list. The mode groups carry `ansible_group_priority=20`
   so their variables win over the `all` defaults.
 - **Order matters.** The instance play runs with `serial: 1`; list the primary
-  before hosts that create replicas from it.
+  before hosts that create replicas from it. Add-on groups use the same rule:
+  the first host bootstraps a quorum.
 - Set `private_ip` for node-to-node traffic (replication, etcd, backup SSH).
   `ansible_host` remains the SSH address; on public clouds it is often the EIP.
 - The S3 section activates exactly **one** store-type child under `[s3]`
   (`minio_s3`, `silo_s3` or `rustfs_s3`).
 - `[ha_etcd]` and `[ha_cluster]` are role marker groups. The first etcd host
   bootstraps the DCS; Patroni member names follow `[ha_cluster]` order.
+- Add-on groups are named `addon_<type>_single` (one host) and
+  `addon_<type>_cluster` (three or four hosts). Declare them all at once —
+  their variables are uniquely named and `--limit` picks one group per run.
 
 ## Choose the group by business type
 
@@ -97,12 +122,19 @@ but empty so the play patterns still resolve.
 | Primary + cross-host replica | `[crosshost]` | `group_vars/crosshost/main.yml` | `apply.yaml --limit crosshost` |
 | Patroni HA cluster | `[ha_etcd]` + `[ha_cluster]` | `group_vars/ha_etcd/main.yml` + `group_vars/ha_cluster/main.yml` | `apply.yaml --tags addon,ha` |
 | S3-compatible backup store | one of `[minio_s3]` / `[silo_s3]` / `[rustfs_s3]` under `[s3]` | matching `group_vars/<type>_s3/main.yml` | `deploy-s3.yaml` |
+| Standalone add-on (one type) | `[addon_<type>_single]` | `group_vars/addon_<type>_single/main.yml` | `apply.yaml --limit addon_<type>_single --tags addon` |
+| Multi-host add-on cluster | `[addon_<type>_cluster]` | `group_vars/addon_<type>_cluster/main.yml` | `apply.yaml --limit addon_<type>_cluster --tags addon` |
 
 The first three are mutually exclusive deployment modes: their hosts often
 overlap, and each enabled mode supplies its own `pgcli_instances` list, so
 enabling two at once can mix them. HA and S3 are supporting deployments with
 their own groups and play selection; when a host is part of an HA cluster, do
 not also list it in an active mode group.
+
+Add-on groups are different: they can all stay declared at once because every
+variable is uniquely named and `--limit` selects one group. Keep the mode and
+HA groups disabled while running add-ons — their group-level `pgcli_instances`
+and `pgcli_addons` override the list selected by the add-on `--limit`.
 
 ## Global variables: `group_vars/all/main.yml`
 
@@ -119,8 +151,9 @@ The example file is commented field by field. The blocks that matter most:
 | `pgcli_config_defaults` | `pg config init` values: namespace, `base_dir`, `backup_dir`, port ranges |
 | `pgcli_config_overrides` | Per-group namespace override (set by each mode example) |
 | `pgcli_instance_defaults` | Default `state`, `autostart`, `backup_target`, `password_length`, `extensions`, `clean_data` |
-| `pgcli_instances` | Desired instances (normally set per mode group) |
-| `pgcli_addons` | Desired add-ons for the host |
+| `pgcli_instances` | Desired instances (normally set per mode group; add-on groups declare their own, selected by `--limit`) |
+| `pgcli_addons` | The selected add-on group's list (`addon_<kind>_addons`) |
+| `_addon_limit`, `_addon_group`, `_addon_type`, `_addon_mode` | Add-on selector derived from `--limit addon_<type>_<single\|cluster>` |
 
 `pgcli_config_defaults` is consumed only on the first `pg config init`; editing
 it later does not rewrite an existing `pg.yaml`.

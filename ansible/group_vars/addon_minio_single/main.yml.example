@@ -1,0 +1,18 @@
+---
+# minio standalone add-on group (addon_minio_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_minio_single --tags addon
+
+# Single-node test group for the minio add-on.
+
+# Default flags for minio entries that do not set their own params.
+addon_minio_single_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/minio/minio1"
+
+addon_minio_single_addons:
+  - type: minio
+    state: present
+    name: minio1
+
+

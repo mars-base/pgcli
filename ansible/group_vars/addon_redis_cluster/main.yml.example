@@ -1,0 +1,29 @@
+---
+# redis cluster add-on group (addon_redis_cluster).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_redis_cluster --tags addon
+
+# 4 cluster-enabled members. apply.yaml assembles the slots after every member
+# is up, then waits for cluster_state:ok and full 16384-slot coverage.
+_addon_cluster_redis_ip: "{{ hostvars[inventory_hostname]['private_ip'] }}"
+_addon_cluster_redis_password: ""
+
+addon_redis_cluster_addons:
+  - type: redis
+    state: present
+    name: redis-cluster
+    params:
+      - "--cluster"
+      - "pgcli-cluster"
+      - "--advertise-host"
+      - "{{ _addon_cluster_redis_ip }}"
+      - "--port"
+      - "6379"
+      - "--password"
+      - "{{ _addon_cluster_redis_password }}"
+      - "--listen"
+      - "0.0.0.0"
+      - "--data-dir"
+      - "/data/pg/addon/redis/cluster"
+
+

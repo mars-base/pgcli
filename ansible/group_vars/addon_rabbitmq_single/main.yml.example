@@ -1,0 +1,18 @@
+---
+# rabbitmq standalone add-on group (addon_rabbitmq_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_rabbitmq_single --tags addon
+
+# Single-node test group for the rabbitmq add-on.
+
+# Default flags for rabbitmq entries that do not set their own params.
+addon_rabbitmq_single_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/rabbitmq/rmq1"
+
+addon_rabbitmq_single_addons:
+  - type: rabbitmq
+    state: present
+    name: rmq1
+
+

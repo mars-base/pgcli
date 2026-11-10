@@ -1,0 +1,33 @@
+---
+# etcd cluster add-on group (addon_etcd_cluster).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_etcd_cluster --tags addon
+
+# 3-member etcd DCS. The first host bootstraps, the others join it; the
+# serial:1 add-on play guarantees the bootstrap member is ready first.
+_addon_cluster_etcd_hosts: "{{ groups['addon_etcd_cluster'] }}"
+_addon_cluster_etcd_index: "{{ _addon_cluster_etcd_hosts.index(inventory_hostname) | int }}"
+_addon_cluster_etcd_ip: "{{ hostvars[inventory_hostname]['private_ip'] }}"
+_addon_cluster_etcd_first_ip: "{{ hostvars[_addon_cluster_etcd_hosts[0]]['private_ip'] }}"
+_addon_cluster_etcd_join_args: >-
+  {{ [] if (_addon_cluster_etcd_index | int) == 0
+     else ['--join', 'http://' ~ _addon_cluster_etcd_first_ip ~ ':2379'] }}
+
+addon_etcd_cluster_addons:
+  - type: etcd
+    state: present
+    name: "etcd-{{ (_addon_cluster_etcd_index | int) + 1 }}"
+    params:
+      - "--cluster"
+      - "pgcli-cluster"
+      - "--advertise-host"
+      - "{{ _addon_cluster_etcd_ip }}"
+      - "--client-port"
+      - "2379"
+      - "--peer-port"
+      - "2380"
+      - "--data-dir"
+      - "/data/pg/addon/etcd/cluster"
+    args: "{{ _addon_cluster_etcd_join_args }}"
+
+

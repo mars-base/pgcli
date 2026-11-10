@@ -1,0 +1,18 @@
+---
+# seaweedfs standalone add-on group (addon_seaweedfs_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_seaweedfs_single --tags addon
+
+# Single-node test group for the seaweedfs add-on.
+
+# Default flags for seaweedfs entries that do not set their own params.
+addon_seaweedfs_single_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/seaweedfs/seaweed1"
+
+addon_seaweedfs_single_addons:
+  - type: seaweedfs
+    state: present
+    name: seaweed1
+
+

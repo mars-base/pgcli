@@ -1,0 +1,44 @@
+---
+# silo cluster add-on group (addon_silo_cluster).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_silo_cluster --tags addon
+
+# Same 4-node MNSD layout on a separate port pair.
+_addon_cluster_silo_hosts: "{{ groups['addon_silo_cluster'] }}"
+_addon_cluster_silo_root_user: admin
+_addon_cluster_silo_root_password: ""
+_addon_cluster_silo_tls: false
+_addon_cluster_silo_tls_cert: "{{ addon_cluster_shared_server_chain_cert }}"
+_addon_cluster_silo_tls_key: "{{ addon_cluster_shared_server_key }}"
+_addon_cluster_silo_scheme: "{{ 'https' if _addon_cluster_silo_tls else 'http' }}"
+_addon_cluster_silo_tls_args: >-
+  {{ ['--tls-cert', _addon_cluster_silo_tls_cert,
+      '--tls-key', _addon_cluster_silo_tls_key]
+     if _addon_cluster_silo_tls else [] }}
+_addon_cluster_silo_endpoint_args: >-
+  {%- set out = [] -%}
+  {%- for host in _addon_cluster_silo_hosts -%}
+  {%- set _ = out.extend(['--endpoint', _addon_cluster_silo_scheme ~ '://' ~ hostvars[host].private_ip ~ ':9200/data']) -%}
+  {%- endfor -%}
+  {{ out }}
+
+addon_silo_cluster_addons:
+  - type: silo
+    state: present
+    name: silo-cluster
+    params:
+      - "--listen"
+      - "0.0.0.0"
+      - "--api-port"
+      - "9200"
+      - "--console-port"
+      - "9201"
+      - "--root-user"
+      - "{{ _addon_cluster_silo_root_user }}"
+      - "--root-password"
+      - "{{ _addon_cluster_silo_root_password }}"
+      - "--data-dir"
+      - "/data/pg/addon/silo/cluster"
+    args: "{{ _addon_cluster_silo_endpoint_args + _addon_cluster_silo_tls_args }}"
+
+

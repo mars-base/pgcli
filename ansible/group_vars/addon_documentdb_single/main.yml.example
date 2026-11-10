@@ -1,0 +1,27 @@
+---
+# documentdb standalone add-on group (addon_documentdb_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_documentdb_single --tags addon
+#
+# The PostgreSQL instance this add-on needs is declared below; create it first:
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_documentdb_single --tags instance,addon
+
+# Single-node test group for the documentdb add-on.
+addon_documentdb_single_instances:
+  - name: pg_docdb
+    host: "{{ inventory_hostname }}"
+    state: started
+    extensions:
+      - documentdb
+      - pg_stat_statements
+addon_documentdb_single_params:
+  - "--pg-name"
+  - "pg_docdb"
+
+addon_documentdb_single_addons:
+  - type: documentdb
+    state: present
+    name: docdb1
+
+

@@ -36,8 +36,9 @@ Every mutating task is guarded by the current pgcli config and container
 state, so an unchanged host reports `ok` rather than `changed`.
 
 Business scenarios are separated by inventory group and `group_vars` file:
-standalone, same-host replica, cross-host replica, Patroni HA, and S3 storage.
-Enable one scenario group at a time; [Setup](./setup/) has the mapping table.
+standalone, same-host replica, cross-host replica, Patroni HA, S3 storage, and
+per-type add-on groups. Enable one scenario group at a time; [Setup](./setup/)
+has the mapping table.
 
 ## Repository layout
 
@@ -50,7 +51,8 @@ ansible/
 │   ├── all/main.yml.example        # global defaults: install, config, instance defaults
 │   ├── single/ samehost/ crosshost/  # one deployment mode per group
 │   ├── minio_s3/ silo_s3/ rustfs_s3/ # S3 store types
-│   ├── addon_single/ addon_cluster/  # standalone and multi-host add-on tests
+│   ├── addon_<type>_single/         # one group per standalone add-on
+│   ├── addon_<type>_cluster/        # one group per multi-host add-on cluster
 │   └── ha_etcd/ ha_cluster/          # shared DCS and Patroni members
 ├── host_vars/               # optional per-host overrides
 ├── playbooks/
@@ -69,7 +71,7 @@ ansible/
 | [Setup and example files](./setup/) | Which `*.example` file becomes which live file, `hosts.ini` groups, `group_vars` fields, first run |
 | [Playbooks](./playbooks/) | `ping.yaml`, `apply.yaml`, `ha-status.yaml`, `deploy-s3.yaml`: tags, `--limit`, idempotency, lifecycle orders |
 | [Instances and replicas](./instances/) | The `single`/`samehost`/`crosshost` example files and every `pgcli_instances` field |
-| [Add-ons](./addons/) | `pgcli_addons` entries: install/remove, instance-scoped add-ons, etcd |
-| [Add-on clusters](./addon-cluster/) | Multi-host add-on clusters: per-type group sections, shared secrets/CA, quorum layouts, lifecycle |
+| [Add-ons](./addons/) | `addon_<type>_<mode>` entries: install/remove, instance-scoped add-ons, etcd |
+| [Add-on clusters](./addon-cluster/) | Multi-host add-on clusters: one inventory group per type, shared secrets/CA, quorum layouts, lifecycle |
 | [HA clusters](./ha/) | `ha_etcd`/`ha_cluster` example files, `pg_ha_clusters`, HAProxy, state-driven destroy |
 | [S3 storage](./s3/) | Store-type example files, `deploy-s3.yaml` options, using the store as a backup target |

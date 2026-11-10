@@ -1,14 +1,24 @@
 ---
 title: "插件"
-description: "配置 pgcli_addons —— 安装/移除顶层或实例级插件，并管理共享 etcd 分组"
+description: "配置 addon_<type>_<mode> 分组 —— 安装/移除顶层或实例级插件，并管理共享 etcd 分组"
 weight: 40
 ---
 
-插件在 `pgcli_addons` 中声明（`group_vars/all/main.yml` 默认为空列表）。各部署
-模式分组添加自己的列表；`ha_etcd` 分组用同一机制管理共享 etcd DCS。`type` 接受
-`pg addon install` 支持的所有插件——完整列表见[插件参考](../../addon/)
-（pgbouncer、pgdog、etcd、haproxy、minio/silo/rustfs、redis、nginx、
-prometheus、kafka 等）。
+插件在 `group_vars/addon_<type>_<mode>/main.yml` 中以 `addon_<group>_addons`
+列表声明。`group_vars/all` 会把 `--limit` 所选分组的列表读入 `pgcli_addons`，
+因此一次运行只选择一组插件：
+
+```bash
+uv run ansible-playbook playbooks/apply.yaml \
+  --limit addon_pgbouncer_single --tags addon
+```
+
+仓库为每种插件类型和安装形态各提供一个分组：`addon_<type>_single`（1 台主机）
+与 `addon_<type>_cluster`（3 或 4 台主机）。集群形态见
+[插件集群](./addon-cluster/)。`ha_etcd` 与 S3 分组直接定义 `pgcli_addons`，
+用法不变。`type` 接受 `pg addon install` 支持的所有插件——完整列表见
+[插件参考](../../addon/)（pgbouncer、pgdog、etcd、haproxy、
+minio/silo/rustfs、redis、nginx、prometheus、kafka 等）。
 
 ## 条目字段
 
@@ -20,9 +30,9 @@ prometheus、kafka 等）。
 | `dsn` | 远程 PostgreSQL DSN（`--dsn`；仅 pgbouncer、postgrest、pgexporter） |
 | `instance` | 与 `name` 二选一：把插件挂到某个 pgcli 实例上 |
 | `state` | `present`（默认）或 `absent` |
-| `params` | 条目级完整参数列表，覆盖该条目的 `addon_<type>_params` |
+| `params` | 条目级完整参数列表，覆盖该条目的 `addon_<group>_params` |
 | `args` | 条目级额外参数，追加在最终参数之后 |
-| `conf` | 内联配置文件内容，覆盖 `addon_<type>_conf`（仅 nginx、haproxy、prometheus、alertmanager） |
+| `conf` | 内联配置文件内容，覆盖 `addon_<group>_conf`（仅 nginx、haproxy、prometheus、alertmanager） |
 | `clean_data` | 与 `state: absent` 搭配，在插件支持时一并删除数据（默认 `true`，设为 `false` 保留数据） |
 | `force` | 与 `state: present` 搭配，用 `pg addon install --force` 重建 |
 | `autostart` | `true`（默认）启用开机自启，`false` 关闭 |
@@ -31,16 +41,16 @@ prometheus、kafka 等）。
 
 ## 公共参数
 
-同一种 add-on 的所有实例共用的参数可以在列表旁声明一次，变量名为
-`addon_<type>_params`，类型是原始的 `pg addon install` 参数列表。未设置 `params`
-的条目会继承这份列表。
+同一分组内所有条目共用的参数可以在列表旁声明一次，变量名为
+`addon_<group>_params`，类型是原始的 `pg addon install` 参数列表。未设置
+`params` 的条目会继承这份列表。
 
 条目也可以设置自己的 `params`，作为该实例完整的参数列表；它会**整体替换**
-`addon_<type>_params`，因此同类型的多个实例可以使用不同端口、数据目录、内存上限等。
+`addon_<group>_params`，因此同类型的多个实例可以使用不同端口、数据目录、内存上限等。
 条目级 `args` 仍然在最终参数之后追加。
 
 ```yaml
-addon_redis_addons:
+addon_redis_single_addons:
   - type: redis
     name: cache
     state: present
@@ -63,16 +73,18 @@ addon_redis_addons:
 
 同一类型下条目名必须唯一；每个实例在 pgcli 配置中存放在
 `addons.<type>.<name>`。因为 `params` 是整体替换，公共 flag 需要在每个条目里重复
-（可以用 YAML anchor）。变量名中的类型会把 `-` 换成 `_`（例如
-`addon_clickhouse_keeper_params`）。
+（可以用 YAML anchor）。变量名是 `addon_<group>_params`，`<group>` 为 `--limit`
+所选分组（例如 `addon_redis_single_params` 或
+`addon_clickhouse_keeper_cluster_params`）。直接定义 `pgcli_addons` 的分组回退到
+`addon_<type>_params`。
 
 ## 内联配置文件
 
 nginx、haproxy、prometheus、alertmanager 支持 `--conf-file`。把文件内容放到
-`addon_<type>_conf`，不用在目标机上另外维护路径：
+`addon_<group>_conf`，不用在目标机上另外维护路径：
 
 ```yaml
-addon_haproxy_conf: |
+addon_haproxy_single_conf: |
   global
       maxconn 1000
   defaults
@@ -82,7 +94,7 @@ addon_haproxy_conf: |
       timeout server 30m
   # ... frontend/backend ...
 
-addon_haproxy_addons:
+addon_haproxy_single_addons:
   - type: haproxy
     name: lb1
     state: present
@@ -104,9 +116,11 @@ addon_haproxy_addons:
 - **单机 + 集群**：既可以单机安装，也可以按集群模式安装。
 - **仅集群**：只能以集群方式安装（需要法定人数）。
 
-本仓库 `group_vars` 的示例覆盖两种形态：`addon_single` 对应单机安装，
-[插件集群](./addon-cluster/) 对应多主机的 `addon_cluster` 分组。各[插件
-页面](../../addon/)记录集群模式的产品参数；S3 与 HA 分组见本站的对应页面。
+本仓库为每种类型各提供一个单机分组 `addon_<type>_single`（各 1 台主机），
+支持的类型另有集群分组 `addon_<type>_cluster`（3 或 4 台主机）。每次用
+`--limit addon_<type>_<mode>` 只运行一个分组；集群布局见
+[插件集群](./addon-cluster/)。各[插件页面](../../addon/)记录集群模式的产品参数；
+S3 与 HA 分组见本站的对应页面。
 
 | 插件 | 安装形态 | 说明 |
 |------|----------|------|
@@ -151,6 +165,20 @@ addon_haproxy_addons:
 
 ## 顶层插件示例
 
+`group_vars/addon_nodeexporter_single/main.yml.example` 在分组列表中声明一个
+顶层插件：
+
+```yaml
+addon_nodeexporter_single_addons:
+  - type: nodeexporter
+    name: ne1
+    state: present
+```
+
+`--limit addon_nodeexporter_single` 会让 `group_vars/all` 把该列表读入分组的
+`pgcli_addons`（该组只有一台主机）。
+
+直接设置 `pgcli_addons` 的分组使用相同的条目格式。
 `group_vars/ha_etcd/main.yml.example` 为每台主机生成一个 etcd 成员：
 
 ```yaml
@@ -169,43 +197,53 @@ pgcli_addons:
 
 ## 实例级插件示例
 
-属于某个 PostgreSQL 实例的插件改用 `instance` 而不是 `name`：
+属于某个 PostgreSQL 实例的插件改用 `instance` 而不是 `name`。
+`group_vars/addon_pgbouncer_single/main.yml.example` 在同一个分组里同时声明
+实例与插件：
 
 ```yaml
-pgcli_addons:
+addon_pgbouncer_single_instances:
+  - name: your_pg_ins01
+    host: "{{ inventory_hostname }}"
+    state: started
+
+addon_pgbouncer_single_addons:
   - type: pgbouncer
-    instance: pg01
+    instance: your_pg_ins01
     state: present
 ```
 
-角色执行 `pg addon install pgbouncer -i pg01`，因此该实例必须已在同一轮
-`pgcli_instances` 中收敛（`apply.yaml` 中插件 play 位于实例 play 之后）。
+用 `--limit addon_pgbouncer_single --tags instance,addon` 先创建实例再装插件。
+角色最终执行 `pg addon install pgbouncer -i your_pg_ins01`。
 
 ## 远程 PostgreSQL 示例
 
 设置 `dsn` 即可指向 pgcli 不管理的 PostgreSQL 服务器。PgBouncer 和 PostgREST
-还需要 `pg_name`，即远程目标在配置中的名字；pgexporter 仍用 `name`：
+还需要 `pg_name`，即远程目标在配置中的名字；pgexporter 仍用 `name`。pgbouncer
+分组把远程形态放在 `addon_pgbouncer_single_remote_dsn` 后面：留空时连接本地
+`your_pg_ins01` 实例，设置后不再创建本地实例，改为连接该服务器：
 
 ```yaml
-pgcli_addons:
+addon_pgbouncer_single_addons:
   - type: pgbouncer
     pg_name: remote-proj01
     dsn: postgres://admin:secret@db.example.com:5432/proj01
     state: present
-  - type: pgexporter
-    name: pgex1
-    dsn: postgres://monitor:secret@db.example.com:5432/proj01
-    state: present
 ```
+
+pgexporter 同样声明在 `addon_pgexporter_single_addons` 中，但用 `name` 而不是
+`pg_name`：
 
 这些条目属于顶层（`addons.<type>.<name>`），因此 `state: absent` 和开机自启
 分别走 `--pg-name`（远程 pgbouncer/postgrest）或 `--name`（pgexporter）。
 pgdog 没有 `--dsn` 参数；请改用 `params` 传递
 `--backend NAME=HOST:PORT:DB` 与 `--user NAME:PASSWORD`。
 
-## 多个插件
+## 多个条目
 
-`pgcli_addons` 是列表，按顺序逐个收敛：
+每个分组列表都是 YAML 列表，按顺序逐个收敛。上面的 redis 示例就在一个分组里
+声明了两个同类型实例。直接设置 `pgcli_addons` 的分组（例如 `ha_etcd`）还可以在
+同一列表里混合类型：
 
 ```yaml
 pgcli_addons:
@@ -220,10 +258,13 @@ pgcli_addons:
 ## 安装与移除
 
 ```bash
-# 在所有声明了 pgcli_addons 的主机上收敛
-uv run ansible-playbook playbooks/apply.yaml --tags addon
+# 收敛一个单机插件分组
+uv run ansible-playbook playbooks/apply.yaml --limit addon_nginx_single --tags addon
 
-# 只操作 etcd 分组
+# 收敛一个集群分组
+uv run ansible-playbook playbooks/apply.yaml --limit addon_etcd_cluster --tags addon
+
+# 共享 etcd DCS 分组（直接定义 pgcli_addons）
 uv run ansible-playbook playbooks/apply.yaml --tags addon --limit ha_etcd
 ```
 
@@ -234,8 +275,8 @@ uv run ansible-playbook playbooks/apply.yaml --tags addon --limit ha_etcd
   pgbouncer/postgrest 用 `--pg-name <pg_name>`，实例级插件用 `-i
   <instance>`；默认一并删除数据，插件支持时可用 `clean_data: false` 保留。
   etcd 的移除路径总会删除其数据目录。
-- 未声明插件的 `pgcli_addons: []` 主机是 no-op，所以对整个 inventory 执行
-  `--tags addon` 是安全的。
+- 不带 `addon_*` limit 运行 `--tags addon` 时，插件组的 `pgcli_addons` 为空，
+  这些主机是 no-op；直接定义 `pgcli_addons` 的分组（ha_etcd、S3）仍会收敛。
 
 ## etcd 生命周期
 

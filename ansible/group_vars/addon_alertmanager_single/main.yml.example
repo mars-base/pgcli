@@ -1,0 +1,27 @@
+---
+# alertmanager standalone add-on group (addon_alertmanager_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_alertmanager_single --tags addon
+
+# Single-node test group for the alertmanager add-on.
+
+# Default flags for alertmanager entries that do not set their own params.
+addon_alertmanager_single_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/alertmanager/am1"
+#
+# Inline config file, written under <pgcli config dir>/addons/ and
+# passed as --conf-file (mutually exclusive with its rendered-config flags).
+addon_alertmanager_single_conf: ""
+# Example:
+#   route:
+#     receiver: noop
+#   receivers:
+#     - name: noop
+
+addon_alertmanager_single_addons:
+  - type: alertmanager
+    state: present
+    name: am1
+
+

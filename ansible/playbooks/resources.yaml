@@ -2,7 +2,7 @@
 # Usage:
 #   cd ansible
 #   uv run ansible-playbook playbooks/resources.yaml
-#   uv run ansible-playbook playbooks/resources.yaml -l addon_single
+#   uv run ansible-playbook playbooks/resources.yaml -l addon_nodeexporter_single
 #   uv run ansible-playbook playbooks/resources.yaml -e HOSTS=debian12-01
 #
 # Shows live host resources (CPU, load, memory, swap, filesystems and the top

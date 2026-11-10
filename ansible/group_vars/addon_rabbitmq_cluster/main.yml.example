@@ -1,0 +1,45 @@
+---
+# rabbitmq cluster add-on group (addon_rabbitmq_cluster).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_rabbitmq_cluster --tags addon
+
+# 3 members. Shared cookie and admin password are published to etcd once by
+# roles/addon_cluster_shared; every member reads them with --secrets-from-etcd.
+# The shared material requires a running 3-member etcd cluster.
+_addon_cluster_rabbitmq_hosts: "{{ groups['addon_rabbitmq_cluster'] }}"
+_addon_cluster_rabbitmq_first_host: "{{ _addon_cluster_rabbitmq_hosts[0] }}"
+_addon_cluster_rabbitmq_ip: "{{ hostvars[inventory_hostname]['private_ip'] }}"
+_addon_cluster_rabbitmq_cluster_name: pgcli-rabbitmq
+_addon_cluster_rabbitmq_etcd_endpoints: >-
+  {%- set out = [] -%}
+  {%- for host in _addon_cluster_rabbitmq_hosts -%}
+  {%- set _ = out.extend([hostvars[host].private_ip ~ ':2379']) -%}
+  {%- endfor -%}
+  {{ out | join(',') }}
+_addon_cluster_rabbitmq_tls: false
+_addon_cluster_rabbitmq_tls_cert: "{{ addon_cluster_shared_server_chain_cert }}"
+_addon_cluster_rabbitmq_tls_key: "{{ addon_cluster_shared_server_key }}"
+_addon_cluster_rabbitmq_tls_args: >-
+  {{ ['--tls-cert', _addon_cluster_rabbitmq_tls_cert,
+      '--tls-key', _addon_cluster_rabbitmq_tls_key]
+     if _addon_cluster_rabbitmq_tls else [] }}
+
+addon_rabbitmq_cluster_addons:
+  - type: rabbitmq
+    state: present
+    name: rabbitmq-cluster
+    params:
+      - "--cluster"
+      - "{{ _addon_cluster_rabbitmq_cluster_name }}"
+      - "--node-name"
+      - "rabbit@{{ _addon_cluster_rabbitmq_ip }}"
+      - "--etcd-endpoints"
+      - "{{ _addon_cluster_rabbitmq_etcd_endpoints }}"
+      - "--secrets-from-etcd"
+      - "--listen"
+      - "0.0.0.0"
+      - "--data-dir"
+      - "/data/pg/addon/rabbitmq/cluster"
+    args: "{{ _addon_cluster_rabbitmq_tls_args }}"
+
+

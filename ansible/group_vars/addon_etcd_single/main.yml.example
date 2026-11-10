@@ -1,0 +1,18 @@
+---
+# etcd standalone add-on group (addon_etcd_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_etcd_single --tags addon
+
+# Single-node test group for the etcd add-on.
+
+# Default flags for etcd entries that do not set their own params.
+addon_etcd_single_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/etcd/etcd1"
+
+addon_etcd_single_addons:
+  - type: etcd
+    state: present
+    name: etcd1
+
+

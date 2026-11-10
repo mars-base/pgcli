@@ -33,14 +33,16 @@
     _addon_force: "{{ addon.force | default(false) | bool }}"
 
 # An entry may set `params` to its own complete list of `pg addon install`
-# flags; that replaces the group-level addon_<type>_params for the entry.
-# Entries without params inherit the group-level list. Per-entry `args` is
-# always appended last.
+# flags; that replaces the group-level list for the entry. The group-level
+# variable is addon_<group>_params for a group selected by --limit (for
+# example addon_redis_cluster_params), falling back to addon_<type>_params
+# used by ha_etcd and pg_s3. Per-entry `args` is always appended last.
 - name: Resolve the add-on parameters
   ansible.builtin.set_fact:
     _addon_params: >-
       {{ addon.params if addon.params is defined
-         else lookup('vars', 'addon_' ~ _addon_key ~ '_params', default=[]) }}
+         else lookup('vars', 'addon_' ~ (_addon_kind | default('')) ~ '_params',
+                     default=lookup('vars', 'addon_' ~ _addon_key ~ '_params', default=[])) }}
 
 - name: Validate the resolved add-on parameters
   ansible.builtin.assert:
@@ -48,15 +50,18 @@
       - _addon_params is sequence
       - _addon_params is not string
       - _addon_params is not mapping
-    fail_msg: "params and addon_{{ _addon_key }}_params must be lists of CLI flags."
+    fail_msg: >-
+      params and the group-level addon_<group>_params (or addon_<type>_params)
+      must be lists of CLI flags.
 
-# conf may be set per entry, or once per group as addon_<type>_conf for the
-# add-ons that accept --conf-file.
+# conf may be set per entry, or once per group as addon_<group>_conf for the
+# add-ons that accept --conf-file (addon_<type>_conf is the fallback).
 - name: Resolve the inline add-on config path
   ansible.builtin.set_fact:
     _addon_conf_content: >-
       {{ addon.conf if addon.conf is defined
-         else lookup('vars', 'addon_' ~ _addon_key ~ '_conf', default='') }}
+         else lookup('vars', 'addon_' ~ (_addon_kind | default('')) ~ '_conf',
+                     default=lookup('vars', 'addon_' ~ _addon_key ~ '_conf', default='')) }}
     _addon_conf_dir: "{{ pgcli_config_path | dirname }}/addons"
     _addon_conf_path: >-
       {{ (pgcli_config_path | dirname) ~ '/addons/' ~ addon.type ~ '-'

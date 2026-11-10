@@ -1,0 +1,28 @@
+---
+# nginx standalone add-on group (addon_nginx_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_nginx_single --tags addon
+
+# Single-node test group for the nginx add-on.
+addon_nginx_single_params:
+  - "--upstream"
+  - "name=s3,path=/,backend=192.0.2.10:19800"
+
+# Inline nginx.conf, written under <pgcli config dir>/addons/ and passed as
+# --conf-file (mutually exclusive with the --upstream params above).
+addon_nginx_single_conf: ""
+# Example:
+#   events {}
+#   http {
+#     server {
+#       listen 8080;
+#       location / { return 200 "ok\n"; }
+#     }
+#   }
+
+addon_nginx_single_addons:
+  - type: nginx
+    state: present
+    name: nginx1
+
+

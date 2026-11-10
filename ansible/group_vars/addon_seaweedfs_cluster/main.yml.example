@@ -1,0 +1,53 @@
+---
+# seaweedfs cluster add-on group (addon_seaweedfs_cluster).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_seaweedfs_cluster --tags addon
+
+# 3 members with one shared PostgreSQL filer-metadata database. The group
+# has exactly three hosts (weed requires an odd number of masters).
+_addon_cluster_seaweedfs_hosts: "{{ groups['addon_seaweedfs_cluster'] }}"
+_addon_cluster_seaweedfs_members: "{{ _addon_cluster_seaweedfs_hosts }}"
+_addon_cluster_seaweedfs_ip: "{{ hostvars[inventory_hostname]['private_ip'] }}"
+_addon_cluster_seaweedfs_root_user: SWaddoncluster
+_addon_cluster_seaweedfs_root_password: ""
+# Cluster mode needs one PostgreSQL metadata database reachable from every
+# member. Pre-create the database, then point this at it.
+_addon_cluster_seaweedfs_meta_dsn: "postgres://admin:<pg-password>@192.0.2.10:35432/seaweed_store"
+_addon_cluster_seaweedfs_tls: false
+_addon_cluster_seaweedfs_tls_cert: "{{ addon_cluster_shared_server_chain_cert }}"
+_addon_cluster_seaweedfs_tls_key: "{{ addon_cluster_shared_server_key }}"
+_addon_cluster_seaweedfs_tls_args: >-
+  {{ ['--tls-cert', _addon_cluster_seaweedfs_tls_cert,
+      '--tls-key', _addon_cluster_seaweedfs_tls_key]
+     if _addon_cluster_seaweedfs_tls else [] }}
+_addon_cluster_seaweedfs_peer_args: >-
+  {%- set out = [] -%}
+  {%- for host in _addon_cluster_seaweedfs_members -%}
+  {%- set _ = out.extend(['--peer', hostvars[host].private_ip ~ ':8400']) -%}
+  {%- endfor -%}
+  {{ out }}
+
+addon_seaweedfs_cluster_addons:
+  - type: seaweedfs
+    state: present
+    name: seaweedfs-cluster
+    params:
+      - "--cluster"
+      - "pgcli-cluster"
+      - "--advertise-host"
+      - "{{ _addon_cluster_seaweedfs_ip }}"
+      - "--replication"
+      - "001"
+      - "--root-user"
+      - "{{ _addon_cluster_seaweedfs_root_user }}"
+      - "--root-password"
+      - "{{ _addon_cluster_seaweedfs_root_password }}"
+      - "--dsn"
+      - "{{ _addon_cluster_seaweedfs_meta_dsn }}"
+      - "--listen"
+      - "0.0.0.0"
+      - "--data-dir"
+      - "/data/pg/addon/seaweedfs/cluster"
+    args: "{{ _addon_cluster_seaweedfs_peer_args + _addon_cluster_seaweedfs_tls_args }}"
+
+

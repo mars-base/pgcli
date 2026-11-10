@@ -1,0 +1,36 @@
+---
+# pgbouncer standalone add-on group (addon_pgbouncer_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_pgbouncer_single --tags addon
+#
+# The PostgreSQL instance this add-on needs is declared below; create it first:
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_pgbouncer_single --tags instance,addon
+
+# Single-node test group for the pgbouncer add-on.
+#
+# Leave addon_pgbouncer_single_remote_dsn empty to pool a local instance named
+# your_pg_ins01;
+# set it to a remote DSN to pool that server instead (no local instance is
+# created). addon_pgbouncer_single_pg_name is the config key for the remote target.
+#   addon_pgbouncer_single_remote_dsn: "postgres://admin:<secret>@db.example.com:5432/app"
+addon_pgbouncer_single_remote_dsn: ""
+addon_pgbouncer_single_pg_name: your_pg_ins01
+addon_pgbouncer_single_instances: >-
+  {{ [] if addon_pgbouncer_single_remote_dsn | length > 0 else
+     [{'name': 'your_pg_ins01', 'host': inventory_hostname, 'state': 'started',
+       'extensions': ['pg_stat_statements']}] }}
+
+# Default flags for pgbouncer entries that do not set their own params.
+addon_pgbouncer_single_params: []
+# Example:
+#   - "--<flag>=<value>"
+
+addon_pgbouncer_single_addons: >-
+  {{ [{'type': 'pgbouncer', 'state': 'present',
+       'pg_name': addon_pgbouncer_single_pg_name,
+       'dsn': addon_pgbouncer_single_remote_dsn}]
+     if addon_pgbouncer_single_remote_dsn | length > 0 else
+     [{'type': 'pgbouncer', 'state': 'present', 'instance': 'your_pg_ins01'}] }}
+
+

@@ -1,0 +1,18 @@
+---
+# rustfs standalone add-on group (addon_rustfs_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_rustfs_single --tags addon
+
+# Single-node test group for the rustfs add-on.
+
+# Default flags for rustfs entries that do not set their own params.
+addon_rustfs_single_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/rustfs/rustfs1"
+
+addon_rustfs_single_addons:
+  - type: rustfs
+    state: present
+    name: rustfs1
+
+

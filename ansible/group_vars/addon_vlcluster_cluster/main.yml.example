@@ -1,0 +1,27 @@
+---
+# vlcluster cluster add-on group (addon_vlcluster_cluster).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_vlcluster_cluster --tags addon
+
+# Same storage/access split for VictoriaLogs.
+_addon_cluster_vlcluster_hosts: "{{ groups['addon_vlcluster_cluster'] }}"
+_addon_cluster_vlcluster_index: "{{ _addon_cluster_vlcluster_hosts.index(inventory_hostname) | int }}"
+_addon_cluster_vlcluster_storage_args: >-
+  {%- set out = [] -%}
+  {%- for host in _addon_cluster_vlcluster_hosts -%}
+  {%- set _ = out.extend(['--storage-node', hostvars[host].private_ip ~ ':9432']) -%}
+  {%- endfor -%}
+  {{ out }}
+
+addon_vlcluster_cluster_addons:
+  - type: vlcluster
+    state: present
+    name: vlcluster-cluster
+    params:
+      - "--roles"
+      - "{{ 'storage,insert,select' if (_addon_cluster_vlcluster_index | int) == 0 else 'storage' }}"
+      - "--listen"
+      - "0.0.0.0"
+      - "--data-dir"
+      - "/data/pg/addon/vlcluster/cluster"
+    args: "{{ _addon_cluster_vlcluster_storage_args if (_addon_cluster_vlcluster_index | int) == 0 else [] }}"

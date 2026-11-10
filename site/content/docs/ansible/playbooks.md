@@ -6,7 +6,8 @@ weight: 20
 
 All commands run from the `ansible/` directory through the pinned `uv`
 environment. Without `--limit`, `apply.yaml` targets every host in the
-inventory; in practice you select a deployment-mode group.
+inventory; in practice you select a deployment-mode group or one add-on group
+with `--limit addon_<type>_<single|cluster>`.
 
 ```bash
 cd ansible
@@ -29,16 +30,30 @@ whatever the selected hosts declare in `group_vars/`.
 
 | # | Play | Hosts | Serial | Tag |
 |---|------|-------|--------|-----|
-| 1 | Install and configure pgcli | `all` | – | `pgcli` |
-| 2 | PostgreSQL instances | `all` | 1 | `instance` |
-| 3 | Add-ons | `all` | 1 | `addon` |
-| 4 | Patroni HA members | `ha_cluster` | 1 | `ha` |
-| 5 | Patroni HA backup convergence | `ha_cluster` | – | `ha` |
-| 6 | Patroni HA proxy | proxy host | – | `ha`, `haproxy` |
+| 1 | Validate the add-on selection | `all` | – | `always` |
+| 2 | Install and configure pgcli | `all` | – | `pgcli` |
+| 3 | PostgreSQL instances | `all` | 1 | `instance` |
+| 4 | Add-ons | `all` | 1 | `addon` |
+| 5 | Assemble the Redis cluster | `all` | – | `addon` |
+| 6 | Patroni HA members | `ha_cluster` | 1 | `ha` |
+| 7 | Patroni HA backup convergence | `ha_cluster` | – | `ha` |
+| 8 | Patroni HA proxy | proxy host | – | `ha`, `haproxy` |
 
 `serial: 1` is deliberate: the first host installs the add-ons or bootstraps
 etcd, then the next host joins; cross-host replicas need their primary to
 exist first.
+
+Add-ons are selected with `--limit addon_<type>_<single|cluster>`;
+`group_vars/all` reads that group's `addon_<kind>_addons` list into
+`pgcli_addons`. A limit that starts with `addon_` but is not one exact
+existing group with a mode suffix fails the validation play, and a group name
+that does not exist fails while Ansible matches the limit. Without such a
+limit the list is empty and the add-on play is a no-op.
+
+The Redis assembly play runs after all members exist (the add-on play is
+serial). It only acts when `--limit addon_redis_cluster` selects present
+entries: it waits for every member, creates the cluster once if needed, and
+waits until all 16384 slots are assigned. Reruns skip the create step.
 
 ```bash
 # Full stack for one deployment mode
@@ -50,8 +65,8 @@ uv run ansible-playbook playbooks/apply.yaml --limit single --tags instance
 # Fresh host: install and create in one pass
 uv run ansible-playbook playbooks/apply.yaml --limit single --tags pgcli,instance
 
-# Add-ons only (e.g. flip the etcd group to absent)
-uv run ansible-playbook playbooks/apply.yaml --tags addon
+# Add-ons only, one group (set its entries to absent to remove them)
+uv run ansible-playbook playbooks/apply.yaml --limit addon_etcd_cluster --tags addon
 
 # HA members + converge; HAProxy has its own tag
 uv run ansible-playbook playbooks/apply.yaml --tags ha

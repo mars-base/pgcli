@@ -1,0 +1,18 @@
+---
+# grafana standalone add-on group (addon_grafana_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_grafana_single --tags addon
+
+# Single-node test group for the grafana add-on.
+
+# Default flags for grafana entries that do not set their own params.
+addon_grafana_single_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/grafana/grafana1"
+
+addon_grafana_single_addons:
+  - type: grafana
+    state: present
+    name: grafana1
+
+

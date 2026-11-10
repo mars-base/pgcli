@@ -20,6 +20,27 @@
 # Hosts are grouped by deployment mode; each host reconciles its own
 # pgcli_instances list, scoped by each entry's `host:`.
 
+# Add-on runs select their inventory group with --limit. Accept only an exact
+# addon_<type>_<single|cluster> group name: wildcards and comma-separated
+# patterns would make the selected list ambiguous. A group that does not exist
+# is rejected by Ansible while matching the limit, before any play runs.
+- name: Validate the add-on selection
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Require --limit to name one add-on group
+      ansible.builtin.assert:
+        that:
+          - not (_addon_limit_is_addon_like | bool) or
+            (_addon_group | length > 0 and _addon_mode | length > 0)
+        fail_msg: >-
+          Select one add-on group with --limit addon_<type>_<single|cluster>,
+          for example --limit addon_haproxy_single or
+          --limit addon_etcd_cluster. Wildcards, comma-separated lists and
+          group names without a mode suffix are not supported.
+      run_once: true
+      tags: [always]
+
 - name: Install and configure pgcli
   hosts: all
   gather_facts: false
@@ -47,22 +68,183 @@
   serial: 1
   environment:
     PGCLI_DOWNLOAD_MIRROR: "{{ pgcli_download_mirror | default('') }}"
+  vars:
+    # Cluster add-ons that need shared secrets and/or TLS material. Generated
+    # once on the controller and published as host facts before pg_addon
+    # renders any install command. The list is play-local because every host
+    # belongs to every add-on group: a group-level flag would merge on all
+    # hosts regardless of --limit. kafka uses the shared PEM but has no
+    # per-type task file; etcd, clickhouse-keeper, rocketmq, vmcluster and
+    # vlcluster need no shared material.
+    addon_cluster_shared_required_types:
+      - minio
+      - silo
+      - rustfs
+      - seaweedfs
+      - redis
+      - clickhouse
+      - rabbitmq
+      - kafka
   pre_tasks:
-    # Multi-host clusters need shared secrets and TLS material. Generate them
-    # once on the controller and publish them as host facts before pg_addon
-    # renders any install command. Each add-on section names its target group
-    # with _addon_cluster_<type>_group; types without a section fall back to
-    # the default addon_cluster group.
     - name: Prepare shared add-on cluster material
       ansible.builtin.include_role:
         name: addon_cluster_shared
       when:
-        - addon_type | default('') | length > 0
-        - inventory_hostname in groups[lookup('vars', '_addon_cluster_' ~ (addon_type | replace('-', '_')) ~ '_group', default='addon_cluster')]
+        - _addon_mode == 'cluster'
+        - _addon_type in addon_cluster_shared_required_types
       tags: [addon]
   roles:
     - role: pg_addon
       tags: [addon]
+
+- name: Assemble the Redis cluster
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  tags: [addon]
+  vars:
+    _redis_cluster_addons: >-
+      {{ addon_redis_cluster_addons | default([], true)
+         | selectattr('type', 'equalto', 'redis') | list }}
+    _redis_cluster_addon: >-
+      {{ _redis_cluster_addons[0] if _redis_cluster_addons | length > 0 else {} }}
+    _redis_cluster_enabled: >-
+      {{ (_addon_group == 'addon_redis_cluster')
+         and (_redis_cluster_addons | length > 0)
+         and (_redis_cluster_addon.state | default('present') == 'present') }}
+    _redis_cluster_port: >-
+      {{ (_redis_cluster_addon.params[_redis_cluster_addon.params.index('--port') + 1])
+         if ('--port' in (_redis_cluster_addon.params | default([])))
+         else 6379 }}
+    _redis_cluster_replicas: >-
+      {{ (_redis_cluster_addon.params[_redis_cluster_addon.params.index('--cluster-replicas') + 1])
+         if ('--cluster-replicas' in (_redis_cluster_addon.params | default([])))
+         else 0 }}
+    _redis_cluster_members: >-
+      {{ groups['addon_redis_cluster']
+         | map('extract', hostvars, 'private_ip')
+         | map('regex_replace', '$', ':' ~ (_redis_cluster_port | string))
+         | list }}
+  tasks:
+    # serial: 1 in the Add-ons play installs one member at a time; this play
+    # starts after all of them, so every member should answer here.
+    - name: Wait for every Redis member to answer
+      ansible.builtin.command:
+        argv:
+          - "{{ pgcli_install_path }}"
+          - "-c"
+          - "{{ pgcli_config_path }}"
+          - "redis-cli"
+          - "--name"
+          - "{{ _redis_cluster_addon.name | default('redis-cluster') }}"
+          - "ping"
+      register: _redis_cluster_ping
+      until:
+        - _redis_cluster_ping.rc == 0
+        - _redis_cluster_ping.stdout is search('PONG')
+      retries: 30
+      delay: 2
+      changed_when: false
+      when: _redis_cluster_enabled | bool
+
+    - name: Read the Redis cluster state
+      ansible.builtin.command:
+        argv:
+          - "{{ pgcli_install_path }}"
+          - "-c"
+          - "{{ pgcli_config_path }}"
+          - "redis-cli"
+          - "--name"
+          - "{{ _redis_cluster_addon.name | default('redis-cluster') }}"
+          - "cluster"
+          - "info"
+      register: _redis_cluster_info
+      until:
+        - _redis_cluster_info.rc == 0
+        - _redis_cluster_info.stdout is search('cluster_state:')
+      retries: 10
+      delay: 2
+      changed_when: false
+      run_once: true
+      when: _redis_cluster_enabled | bool
+
+    - name: Record the Redis cluster state
+      ansible.builtin.set_fact:
+        _redis_cluster_state: >-
+          {{ _redis_cluster_info.stdout_lines
+             | select('match', '^cluster_state:') | first
+             | default('cluster_state:unknown', true)
+             | regex_replace('^cluster_state:', '') }}
+        _redis_cluster_known_nodes: >-
+          {{ _redis_cluster_info.stdout_lines
+             | select('match', '^cluster_known_nodes:') | first
+             | default('cluster_known_nodes:0', true)
+             | regex_replace('^cluster_known_nodes:', '') | int }}
+      when:
+        - _redis_cluster_enabled | bool
+        - not (_redis_cluster_info is skipped)
+
+    # A partly joined group (more than one known node but no slot coverage)
+    # cannot be repaired by --cluster create; resetting is destructive, so stop
+    # and let the operator decide.
+    - name: Refuse to assemble a partially formed Redis cluster
+      ansible.builtin.fail:
+        msg: >-
+          {{ _redis_cluster_members | first }} reports
+          cluster_state={{ _redis_cluster_state }} with
+          cluster_known_nodes={{ _redis_cluster_known_nodes }}. Expected either
+          a healthy cluster or {{ _redis_cluster_members | length }} unassembled
+          members (known_nodes=1). Reset the members manually, then rerun.
+      when:
+        - _redis_cluster_enabled | bool
+        - _redis_cluster_state != 'ok'
+        - _redis_cluster_known_nodes | int != 1
+
+    - name: Assemble the Redis cluster
+      ansible.builtin.command:
+        argv: >-
+          {{ [pgcli_install_path, '-c', pgcli_config_path,
+              'redis-cli', '--name', _redis_cluster_addon.name, '--',
+              '--cluster', 'create']
+             + _redis_cluster_members
+             + ['--cluster-replicas', _redis_cluster_replicas | string,
+                '--cluster-yes'] }}
+      register: _redis_cluster_create
+      run_once: true
+      when:
+        - _redis_cluster_enabled | bool
+        - _redis_cluster_state != 'ok'
+
+    - name: Wait for the Redis cluster to become healthy
+      ansible.builtin.command:
+        argv:
+          - "{{ pgcli_install_path }}"
+          - "-c"
+          - "{{ pgcli_config_path }}"
+          - "redis-cli"
+          - "--name"
+          - "{{ _redis_cluster_addon.name | default('redis-cluster') }}"
+          - "cluster"
+          - "info"
+      register: _redis_cluster_verify
+      until:
+        - _redis_cluster_verify.rc == 0
+        - _redis_cluster_verify.stdout is search('cluster_state:ok')
+        - _redis_cluster_verify.stdout is search('cluster_slots_assigned:16384')
+        - _redis_cluster_verify.stdout is search('cluster_known_nodes:' ~ (_redis_cluster_members | length | string))
+      retries: 30
+      delay: 2
+      changed_when: false
+      run_once: true
+      when: _redis_cluster_enabled | bool
+
+    - name: Report the Redis cluster state
+      ansible.builtin.debug:
+        msg: >-
+          Redis cluster {{ 'assembled' if _redis_cluster_create is changed else 'already healthy' }}:
+          {{ _redis_cluster_members | join(', ') }} (replicas={{ _redis_cluster_replicas }})
+      run_once: true
+      when: _redis_cluster_enabled | bool
 
 - name: Patroni HA members
   hosts: ha_cluster

@@ -1,0 +1,45 @@
+---
+# rustfs cluster add-on group (addon_rustfs_cluster).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_rustfs_cluster --tags addon
+
+# 4-node MNMD; each node contributes one drive, so no extra VM disks are
+# needed (/data is a separate block device).
+_addon_cluster_rustfs_hosts: "{{ groups['addon_rustfs_cluster'] }}"
+_addon_cluster_rustfs_root_user: admin
+_addon_cluster_rustfs_root_password: ""
+_addon_cluster_rustfs_tls: false
+_addon_cluster_rustfs_tls_cert: "{{ addon_cluster_shared_server_chain_cert }}"
+_addon_cluster_rustfs_tls_key: "{{ addon_cluster_shared_server_key }}"
+_addon_cluster_rustfs_scheme: "{{ 'https' if _addon_cluster_rustfs_tls else 'http' }}"
+_addon_cluster_rustfs_tls_args: >-
+  {{ ['--tls-cert', _addon_cluster_rustfs_tls_cert,
+      '--tls-key', _addon_cluster_rustfs_tls_key]
+     if _addon_cluster_rustfs_tls else [] }}
+_addon_cluster_rustfs_endpoint_args: >-
+  {%- set out = [] -%}
+  {%- for host in _addon_cluster_rustfs_hosts -%}
+  {%- set _ = out.extend(['--endpoint', _addon_cluster_rustfs_scheme ~ '://' ~ hostvars[host].private_ip ~ ':9300']) -%}
+  {%- endfor -%}
+  {{ out }}
+
+addon_rustfs_cluster_addons:
+  - type: rustfs
+    state: present
+    name: rustfs-cluster
+    params:
+      - "--listen"
+      - "0.0.0.0"
+      - "--api-port"
+      - "9300"
+      - "--console-port"
+      - "9301"
+      - "--root-user"
+      - "{{ _addon_cluster_rustfs_root_user }}"
+      - "--root-password"
+      - "{{ _addon_cluster_rustfs_root_password }}"
+      - "--drive"
+      - "/data/pg/addon/rustfs/cluster/d1"
+    args: "{{ _addon_cluster_rustfs_endpoint_args + _addon_cluster_rustfs_tls_args }}"
+
+

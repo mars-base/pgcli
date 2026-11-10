@@ -1,0 +1,18 @@
+---
+# victorialogs standalone add-on group (addon_victorialogs_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_victorialogs_single --tags addon
+
+# Single-node test group for the victorialogs add-on.
+
+# Default flags for victorialogs entries that do not set their own params.
+addon_victorialogs_single_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/victorialogs/vl1"
+
+addon_victorialogs_single_addons:
+  - type: victorialogs
+    state: present
+    name: vl1
+
+

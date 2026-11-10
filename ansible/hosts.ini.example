@@ -6,40 +6,41 @@
 #   uv run ansible-playbook playbooks/apply.yaml
 #   uv run ansible-playbook playbooks/apply.yaml --limit crosshost
 #
-# Hosts are grouped by the deployment mode they exercise, not by environment:
-#   single    one stand-alone instance
-#   samehost  primary + same-host replica
-#   crosshost primary and replica on different hosts
-#   s3        standalone S3-compatible store for the pgBackRest s3 target
-#   addon_single   single-host add-on test group (commented out)
-#   addon_cluster  multi-host add-on test group (4 nodes)
-#   ha_etcd     hosts running the shared etcd DCS (role marker group)
-#   ha_cluster  Patroni cluster over that DCS (role marker group)
-# Each mode group defines its own pgcli_instances in group_vars/<group>/ and
-# is responsible only for that mode, so enable one mode group at a time.
-# The implicit `all` group still contains every host, so plays target `all`
-# and --limit selects the mode to exercise. ansible_group_priority keeps the
-# mode groups ahead of the role marker group. Host order inside a group
-# matters: list the primary host before the hosts that create cross-host
-# replicas from it, because the instance play runs with serial: 1.
+# [all] is the host pool: every VM is declared here exactly once with its
+# connection variables. Every other group only lists bare hostnames.
+#
+# Add-on testing: each add-on type has its own group, named
+# addon_<type>_single (one host) or addon_<type>_cluster (cluster members).
+# Select exactly one with --limit; the add-on play derives the type and mode
+# from that group name, for example:
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_haproxy_single --tags addon
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_etcd_cluster --tags addon
+#
+# Add-ons that need a PostgreSQL instance (documentdb, influx2tsdb, pgbouncer,
+# pgdog, pgexporter, postgrest) also need the instance tag:
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_pgbouncer_single --tags instance,addon
+#
+# Host order inside a cluster group is the bootstrap order: the first host
+# starts the cluster and the rest join it (the add-on play runs serial: 1).
+#
+# Enable one scenario group set at a time. The single/samehost/crosshost mode
+# groups define pgcli_instances, and ha_etcd defines pgcli_addons, at group
+# level; any active mode/HA group would override the add-on selection for its
+# hosts. They stay commented out here and while testing add-ons.
 
-[single]
-debian12-01 ansible_host=192.0.2.10 private_ip=192.0.2.10 ansible_user=root ansible_port=22
+[all]
+debian12-01 ansible_host=192.0.2.10 private_ip=192.0.2.10
+debian12-02 ansible_host=192.0.2.11 private_ip=192.0.2.11
+debian12-03 ansible_host=192.0.2.12 private_ip=192.0.2.12
+debian12-04 ansible_host=192.0.2.13 private_ip=192.0.2.13
 
-[samehost]
-debian12-01 ansible_host=192.0.2.10 private_ip=192.0.2.10 ansible_user=root ansible_port=22
+[all:vars]
+ansible_user=root
+ansible_port=22
 
-[crosshost]
-debian12-01 ansible_host=192.0.2.10 private_ip=192.0.2.10 ansible_user=root ansible_port=22
-debian12-02 ansible_host=192.0.2.11 private_ip=192.0.2.11 ansible_user=root ansible_port=22
-
-[single:vars]
-ansible_group_priority=20
-[samehost:vars]
-ansible_group_priority=20
-[crosshost:vars]
-ansible_group_priority=20
-
+# ── S3 store groups ────────────────────────────────────────────────────────
 # Standalone S3-compatible object store (minio/silo/rustfs) for the pgBackRest
 # s3 backup target; deploy with playbooks/deploy-s3.yaml. Store-type groups
 # are mutually exclusive: activate exactly ONE of [minio_s3] / [silo_s3] /
@@ -51,77 +52,256 @@ ansible_group_priority=20
 # child. Keep inactive groups declared but empty so the play pattern still
 # resolves without a warning.
 [minio_s3]
-# s3-01 ansible_host=192.0.2.20 private_ip=192.0.2.20 ansible_user=root ansible_port=22
-# s3-02 ansible_host=192.0.2.21 private_ip=192.0.2.21 ansible_user=root ansible_port=22
-# s3-03 ansible_host=192.0.2.22 private_ip=192.0.2.22 ansible_user=root ansible_port=22
-# s3-04 ansible_host=192.0.2.23 private_ip=192.0.2.23 ansible_user=root ansible_port=22
+# debian12-01
 
 [silo_s3]
-s3-01 ansible_host=192.0.2.20 private_ip=192.0.2.20 ansible_user=root ansible_port=22
-# s3-02 ansible_host=192.0.2.21 private_ip=192.0.2.21 ansible_user=root ansible_port=22
-# s3-03 ansible_host=192.0.2.22 private_ip=192.0.2.22 ansible_user=root ansible_port=22
-# s3-04 ansible_host=192.0.2.23 private_ip=192.0.2.23 ansible_user=root ansible_port=22
+debian12-01
 
 [rustfs_s3]
-# s3-01 ansible_host=192.0.2.20 private_ip=192.0.2.20 ansible_user=root ansible_port=22
-# s3-02 ansible_host=192.0.2.21 private_ip=192.0.2.21 ansible_user=root ansible_port=22
-# s3-03 ansible_host=192.0.2.22 private_ip=192.0.2.22 ansible_user=root ansible_port=22
-# s3-04 ansible_host=192.0.2.23 private_ip=192.0.2.23 ansible_user=root ansible_port=22
+# debian12-01
 
 [s3:children]
 # minio_s3
 silo_s3
 # rustfs_s3
 
-# Single-node add-on test group (paused). One host runs every standalone
-# add-on; all addon_<type>_* variables live in group_vars/addon_single/main.yml.
-# Select one type at runtime:
+# ── Deployment-mode groups ─────────────────────────────────────────────────
+# Hosts are grouped by the deployment mode they exercise, not by environment:
+#   single    one stand-alone instance
+#   samehost  primary + same-host replica
+#   crosshost primary and replica on different hosts
+# Each mode group defines pgcli_instances in group_vars/<group>/ and is
+# responsible only for that mode, so enable one mode group at a time.
+# ansible_group_priority keeps the mode groups ahead of the role marker group.
+# Host order inside a group matters: list the primary host first.
 #
-#   uv run ansible-playbook playbooks/apply.yaml --limit addon_single \
-#     --tags addon -e addon_type=haproxy
+# Uncomment the group you want to exercise. Keep it commented while testing
+# add-ons: a mode group's pgcli_instances overrides the --limit selection.
+# [single]
+# debian12-01
 #
-# Types that define addon_<type>_instances (documentdb, influx2tsdb,
-# pgbouncer, pgdog, pgexporter, postgrest) also need the instance tag:
-#
-#   uv run ansible-playbook playbooks/apply.yaml --limit addon_single \
-#     --tags instance,addon -e addon_type=documentdb
-#
-# [addon_single]
-# debian12-01 ansible_host=192.0.2.10 private_ip=192.0.2.10 ansible_user=root ansible_port=22
+# [single:vars]
+# ansible_group_priority=20
 
-# Multi-host add-on test group. The full group has four nodes because MinIO
-# and silo MNSD need at least four endpoints; etcd, Kafka, Keeper, RabbitMQ
-# and RocketMQ use the first three as a quorum. All addon_<type>_* variables
-# live in group_vars/addon_cluster/main.yml; each add-on section names its
-# target group with _addon_cluster_<type>_group (all currently point at
-# addon_cluster), and the play targets that same group. Select one type at
-# runtime:
+# [samehost]
+# debian12-01
 #
-#   uv run ansible-playbook playbooks/apply.yaml --limit addon_cluster \
-#     --tags addon -e addon_type=etcd
+# [samehost:vars]
+# ansible_group_priority=20
+
+# [crosshost]
+# debian12-01
+# debian12-02
 #
-# Each entry's state field controls the lifecycle: present installs/keeps the
-# member, absent removes it (and its data, unless clean_data: false). Shared
-# passwords and TLS material are generated on the controller under
-# var/addon_cluster/shared and pushed to every member.
-[addon_cluster]
-debian12-01 ansible_host=192.0.2.10 private_ip=192.0.2.10 ansible_user=root ansible_port=22
-debian12-02 ansible_host=192.0.2.11 private_ip=192.0.2.11 ansible_user=root ansible_port=22
-debian12-03 ansible_host=192.0.2.12 private_ip=192.0.2.12 ansible_user=root ansible_port=22
-debian12-04 ansible_host=192.0.2.13 private_ip=192.0.2.13 ansible_user=root ansible_port=22
+# [crosshost:vars]
+# ansible_group_priority=20
 
 # DCS role: hosts that run the shared etcd cluster. Order matters: the first
 # host bootstraps etcd; the rest join it in apply.yaml's serial: 1 add-on play.
 # In the co-located layout these hosts also appear in [ha_cluster] below.
-[ha_etcd]
-debian12-02 ansible_host=192.0.2.11 private_ip=192.0.2.11 ansible_user=root ansible_port=22
-debian12-03 ansible_host=192.0.2.12 private_ip=192.0.2.12 ansible_user=root ansible_port=22
-debian12-04 ansible_host=192.0.2.13 private_ip=192.0.2.13 ansible_user=root ansible_port=22
+# Keep the HA groups commented while testing add-ons: ha_etcd defines
+# pgcli_addons at group level and overrides the --limit selection.
+# [ha_etcd]
+# debian12-02
+# debian12-03
+# debian12-04
 
 # Role marker: hosts that form the Patroni cluster over the etcd DCS from
 # [ha_etcd]. Patroni member names follow the host order below. The DCS group is
 # selected with pg_ha_etcd_group in group_vars/ha_cluster.
-[ha_cluster]
-debian12-02 ansible_host=192.0.2.11 private_ip=192.0.2.11 ansible_user=root ansible_port=22
-debian12-03 ansible_host=192.0.2.12 private_ip=192.0.2.12 ansible_user=root ansible_port=22
-debian12-04 ansible_host=192.0.2.13 private_ip=192.0.2.13 ansible_user=root ansible_port=22
+# [ha_cluster]
+# debian12-02
+# debian12-03
+# debian12-04
+
+# ── Add-on groups: standalone (one host) ───────────────────────────────────
+# Variables live in the matching group_vars/addon_<type>_single/main.yml.
+
+[addon_alertmanager_single]
+debian12-01
+
+[addon_beegfs_single]
+debian12-01
+
+[addon_clickhouse_single]
+debian12-01
+
+[addon_documentdb_single]
+debian12-01
+
+[addon_duckdb_single]
+debian12-01
+
+[addon_etcd_single]
+debian12-01
+
+[addon_garage_single]
+debian12-01
+
+[addon_gitea_single]
+debian12-01
+
+[addon_grafana_single]
+debian12-01
+
+[addon_haproxy_single]
+debian12-01
+
+[addon_influx2tsdb_single]
+debian12-01
+
+[addon_influxdb_single]
+debian12-01
+
+[addon_juicefs_single]
+debian12-01
+
+[addon_kafka_single]
+debian12-01
+
+[addon_minio_single]
+debian12-01
+
+[addon_nginx_single]
+debian12-01
+
+[addon_nodeexporter_single]
+debian12-01
+
+[addon_pgadmin_single]
+debian12-01
+
+[addon_pgbouncer_single]
+debian12-01
+
+[addon_pgdog_single]
+debian12-01
+
+[addon_pgexporter_single]
+debian12-01
+
+[addon_postgrest_single]
+debian12-01
+
+[addon_predixy_single]
+debian12-01
+
+[addon_prometheus_single]
+debian12-01
+
+[addon_rabbitmq_single]
+debian12-01
+
+[addon_redis_single]
+debian12-01
+
+[addon_rocketmq_single]
+debian12-01
+
+[addon_rustfs_single]
+debian12-01
+
+[addon_seaweedfs_single]
+debian12-01
+
+[addon_silo_single]
+debian12-01
+
+[addon_victorialogs_single]
+debian12-01
+
+[addon_victoriametrics_single]
+debian12-01
+
+[addon_vlagent_single]
+debian12-01
+
+[addon_vlcluster_single]
+debian12-01
+
+[addon_vmalert_single]
+debian12-01
+
+[addon_vmcluster_single]
+debian12-01
+
+[addon_zerofs_single]
+debian12-01
+
+# ── Add-on groups: clusters ────────────────────────────────────────────────
+# Variables live in the matching group_vars/addon_<type>_cluster/main.yml.
+# 3-member groups: etcd, seaweedfs, clickhouse-keeper, kafka, rabbitmq,
+# rocketmq. 4-member groups: minio, silo, rustfs, redis, clickhouse,
+# vmcluster, vlcluster.
+
+[addon_clickhouse_cluster]
+debian12-01
+debian12-02
+debian12-03
+debian12-04
+
+[addon_clickhouse_keeper_cluster]
+debian12-01
+debian12-02
+debian12-03
+
+[addon_etcd_cluster]
+debian12-01
+debian12-02
+debian12-03
+
+[addon_kafka_cluster]
+debian12-01
+debian12-02
+debian12-03
+
+[addon_minio_cluster]
+debian12-01
+debian12-02
+debian12-03
+debian12-04
+
+[addon_rabbitmq_cluster]
+debian12-01
+debian12-02
+debian12-03
+
+[addon_redis_cluster]
+debian12-01
+debian12-02
+debian12-03
+debian12-04
+
+[addon_rocketmq_cluster]
+debian12-01
+debian12-02
+debian12-03
+
+[addon_rustfs_cluster]
+debian12-01
+debian12-02
+debian12-03
+debian12-04
+
+[addon_seaweedfs_cluster]
+debian12-01
+debian12-02
+debian12-03
+
+[addon_silo_cluster]
+debian12-01
+debian12-02
+debian12-03
+debian12-04
+
+[addon_vlcluster_cluster]
+debian12-01
+debian12-02
+debian12-03
+debian12-04
+
+[addon_vmcluster_cluster]
+debian12-01
+debian12-02
+debian12-03
+debian12-04

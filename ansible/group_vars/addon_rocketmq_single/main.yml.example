@@ -1,0 +1,18 @@
+---
+# rocketmq standalone add-on group (addon_rocketmq_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_rocketmq_single --tags addon
+
+# Single-node test group for the rocketmq add-on.
+
+# Default flags for rocketmq entries that do not set their own params.
+addon_rocketmq_single_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/rocketmq/rocketmq1"
+
+addon_rocketmq_single_addons:
+  - type: rocketmq
+    state: present
+    name: rocketmq1
+
+

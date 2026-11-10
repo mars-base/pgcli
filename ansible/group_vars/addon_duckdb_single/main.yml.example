@@ -1,0 +1,18 @@
+---
+# duckdb standalone add-on group (addon_duckdb_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_duckdb_single --tags addon
+
+# Single-node test group for the duckdb add-on.
+
+# Default flags for duckdb entries that do not set their own params.
+addon_duckdb_single_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/duckdb/duckdb1"
+
+addon_duckdb_single_addons:
+  - type: duckdb
+    state: present
+    name: duckdb1
+
+

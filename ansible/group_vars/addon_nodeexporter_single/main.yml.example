@@ -1,0 +1,18 @@
+---
+# nodeexporter standalone add-on group (addon_nodeexporter_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_nodeexporter_single --tags addon
+
+# Single-node test group for the nodeexporter add-on.
+
+# Default flags for nodeexporter entries that do not set their own params.
+addon_nodeexporter_single_params: []
+# Example:
+#   - "--<flag>=<value>"
+
+addon_nodeexporter_single_addons:
+  - type: nodeexporter
+    state: present
+    name: ne1
+
+

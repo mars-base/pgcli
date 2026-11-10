@@ -1,0 +1,18 @@
+---
+# garage standalone add-on group (addon_garage_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_garage_single --tags addon
+
+# Single-node test group for the garage add-on.
+
+# Default flags for garage entries that do not set their own params.
+addon_garage_single_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/garage/garage1"
+
+addon_garage_single_addons:
+  - type: garage
+    state: present
+    name: garage1
+
+
