@@ -9,6 +9,18 @@
 addon_alertmanager_single_params: []
 # Example:
 #   - "--data-dir=/data/pg/addon/alertmanager/am1"
+#   - "--webhook-url"
+#   - "http://10.0.0.5:5001/"                # full URL; one web.hook receiver target
+#   # fan-out to several webhooks (repeat the flag; all land in one receiver):
+#   # - "--webhook-url"
+#   # - "http://10.0.0.6:5001/"
+#   - "--listen"
+#   - "127.0.0.1"                            # default 0.0.0.0; no auth, silences are dangerous
+#
+# Prometheus forwards alerts here via --alertmanager-url (see
+# addon_prometheus_single). --conf-file replaces the rendered alertmanager.yml
+# and is mutually exclusive with --webhook-url. Changed params apply to an
+# already-installed add-on only when the entry sets force: true.
 #
 # Inline config file, written under <pgcli config dir>/addons/ and
 # passed as --conf-file (mutually exclusive with its rendered-config flags).

@@ -9,6 +9,30 @@
 addon_prometheus_single_params: []
 # Example:
 #   - "--data-dir=/data/pg/addon/prometheus/prom1"
+#   - "--scrape"
+#   - "app=10.0.0.5:9100"                    # JOB=HOST:PORT[,HOST:PORT...]; /metrics is implied
+#   - "--scrape"
+#   - "node=10.0.0.5:9100,10.0.0.6:9100"
+#   - "--alertmanager-url"
+#   - "10.0.0.5:9093"                        # bare HOST[:PORT]; port defaults to 9093
+#   # HA pair (repeat the flag; all entries must share one scheme):
+#   # - "--alertmanager-url"
+#   # - "10.0.0.6:9093"
+#
+# --alertmanager-url renders an alerting: section plus an Alertmanager scrape
+# job; alerts still need rules loaded via --rule-file.
+#   - "--remote-write-url"
+#   - "http://10.0.0.5:8428/api/v1/write"    # VictoriaMetrics single node
+#   # vmcluster (through vminsert):
+#   # - "--remote-write-url"
+#   # - "http://10.0.0.5:8480/insert/0/prometheus/api/v1/write"
+#
+# --remote-write-url needs a full http(s) URL and is mutually exclusive with
+# --conf-file; repeat it to fan out to several stores.
+#
+# --scrape declares the full job set (replaces the stored list). Changed
+# params apply to an already-installed add-on only when the entry sets
+# force: true.
 #
 # Inline config file, written under <pgcli config dir>/addons/ and
 # passed as --conf-file (mutually exclusive with its rendered-config flags).
@@ -22,5 +46,9 @@ addon_prometheus_single_addons:
   - type: prometheus
     state: present
     name: prom1
+    # Recreate the container with --force on every run, so changed params
+    # (--scrape, --alertmanager-url, ...) take effect. Remove it once the
+    # config is settled: without force an existing container is left untouched.
+    force: true
 
 
