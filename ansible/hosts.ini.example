@@ -26,9 +26,10 @@
 # starts the cluster and the rest join it (the add-on play runs serial: 1).
 #
 # Enable one scenario group set at a time. The single/samehost/crosshost mode
-# groups define pgcli_instances, and ha_etcd defines pgcli_addons, at group
-# level; any active mode/HA group would override the add-on selection for its
-# hosts. They stay commented out here and while testing add-ons.
+# groups and instance_addon_mixed define pgcli_instances at group level;
+# instance_addon_mixed and ha_etcd can also define pgcli_addons. Any active
+# scenario/HA group would override the add-on selection for its hosts. The
+# scenario groups stay commented out here and while testing add-on groups.
 
 [all]
 node1 ansible_host=192.0.2.10 private_ip=192.0.2.10
@@ -66,17 +67,18 @@ minio_s3
 # rustfs_s3
 
 # ── Deployment-mode groups ─────────────────────────────────────────────────
-# Hosts are grouped by the deployment mode they exercise, not by environment:
-#   single    one stand-alone instance
-#   samehost  primary + same-host replica
-#   crosshost primary and replica on different hosts
-# Each mode group defines pgcli_instances in group_vars/<group>/ and is
-# responsible only for that mode, so enable one mode group at a time.
-# ansible_group_priority keeps the mode groups ahead of the role marker group.
-# Host order inside a group matters: list the primary host first.
+# Hosts are grouped by the scenario they exercise, not by environment:
+#   single                 one stand-alone instance
+#   samehost               primary + same-host replica
+#   crosshost              primary and replica on different hosts
+#   instance_addon_mixed   one instance plus add-ons (for example pgbouncer)
+# Each scenario group defines pgcli_instances (instance_addon_mixed can also
+# define pgcli_addons) in group_vars/<group>/; enable one at a time.
+# ansible_group_priority keeps the scenario groups ahead of the role marker
+# group. Host order inside a group matters: list the primary host first.
 #
 # Uncomment the group you want to exercise. Keep it commented while testing
-# add-ons: a mode group's pgcli_instances overrides the --limit selection.
+# add-ons: a scenario group's pgcli_instances overrides the --limit selection.
 # [single]
 # node1
 #
@@ -94,6 +96,12 @@ minio_s3
 # node2
 #
 # [crosshost:vars]
+# ansible_group_priority=20
+
+# [instance_addon_mixed]
+# node1
+#
+# [instance_addon_mixed:vars]
 # ansible_group_priority=20
 
 # DCS role: hosts that run the shared etcd cluster. Order matters: the first

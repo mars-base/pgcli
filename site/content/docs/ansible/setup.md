@@ -37,6 +37,7 @@ through `uv run` so the pinned environment is used.
 | `group_vars/single/main.yml.example` | `group_vars/single/main.yml` | Standalone instance mode |
 | `group_vars/samehost/main.yml.example` | `group_vars/samehost/main.yml` | Primary + same-host replica mode |
 | `group_vars/crosshost/main.yml.example` | `group_vars/crosshost/main.yml` | Primary + cross-host replica mode, S3 backup vars |
+| `group_vars/instance_addon_mixed/main.yml.example` | `group_vars/instance_addon_mixed/main.yml` | One instance plus add-ons in the same run |
 | `group_vars/ha_etcd/main.yml.example` | `group_vars/ha_etcd/main.yml` | Shared etcd DCS |
 | `group_vars/ha_cluster/main.yml.example` | `group_vars/ha_cluster/main.yml` | Patroni clusters + HAProxy |
 | `group_vars/{minio,silo,rustfs}_s3/main.yml.example` | matching live file | S3-compatible store deployment |
@@ -120,21 +121,29 @@ but empty so the play patterns still resolve.
 | Standalone instance, no replicas | `[single]` | `group_vars/single/main.yml` | `apply.yaml --limit single` |
 | Primary + same-host replica | `[samehost]` | `group_vars/samehost/main.yml` | `apply.yaml --limit samehost` |
 | Primary + cross-host replica | `[crosshost]` | `group_vars/crosshost/main.yml` | `apply.yaml --limit crosshost` |
+| Standalone instance + add-ons | `[instance_addon_mixed]` | `group_vars/instance_addon_mixed/main.yml` | `apply.yaml --limit instance_addon_mixed` |
 | Patroni HA cluster | `[ha_etcd]` + `[ha_cluster]` | `group_vars/ha_etcd/main.yml` + `group_vars/ha_cluster/main.yml` | `apply.yaml --tags addon,ha` |
 | S3-compatible backup store | one of `[minio_s3]` / `[silo_s3]` / `[rustfs_s3]` under `[s3]` | matching `group_vars/<type>_s3/main.yml` | `deploy-s3.yaml` |
 | Standalone add-on (one type) | `[addon_<type>_single]` | `group_vars/addon_<type>_single/main.yml` | `apply.yaml --limit addon_<type>_single --tags addon` |
 | Multi-host add-on cluster | `[addon_<type>_cluster]` | `group_vars/addon_<type>_cluster/main.yml` | `apply.yaml --limit addon_<type>_cluster --tags addon` |
 
-The first three are mutually exclusive deployment modes: their hosts often
-overlap, and each enabled mode supplies its own `pgcli_instances` list, so
-enabling two at once can mix them. HA and S3 are supporting deployments with
-their own groups and play selection; when a host is part of an HA cluster, do
-not also list it in an active mode group.
+The four scenario groups (`single`, `samehost`, `crosshost`,
+`instance_addon_mixed`) are mutually exclusive deployment modes: their hosts
+often overlap, and each enabled group supplies its own `pgcli_instances` list,
+so enabling two at once can mix them. HA and S3 are supporting deployments
+with their own groups and play selection; when a host is part of an HA
+cluster, do not also list it in an active scenario group.
 
-Add-on groups are different: they can all stay declared at once because every
-variable is uniquely named and `--limit` selects one group. Keep the mode and
-HA groups disabled while running add-ons — their group-level `pgcli_instances`
-and `pgcli_addons` override the list selected by the add-on `--limit`.
+For a normal deployment, declare the instances and add-ons together in the
+scenario group's file and run `apply.yaml --limit <scenario>`. The
+`addon_<type>_<mode>` groups are for isolated add-on testing: their variable
+files are not merged into a scenario group automatically, so copy the entries
+(and their `params`) into the scenario group when you want them there.
+
+Add-on groups can all stay declared at once because every variable is uniquely
+named and `--limit` selects one group. Keep the scenario and HA groups disabled
+while running add-on groups — their group-level `pgcli_instances` and
+`pgcli_addons` override the list selected by the add-on `--limit`.
 
 ## Global variables: `group_vars/all/main.yml`
 

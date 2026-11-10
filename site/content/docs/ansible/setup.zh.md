@@ -34,6 +34,7 @@ playbook，确保使用固定的环境。
 | `group_vars/single/main.yml.example` | `group_vars/single/main.yml` | 单机实例模式 |
 | `group_vars/samehost/main.yml.example` | `group_vars/samehost/main.yml` | 主库 + 同机副本模式 |
 | `group_vars/crosshost/main.yml.example` | `group_vars/crosshost/main.yml` | 主库 + 跨机副本模式、S3 备份变量 |
+| `group_vars/instance_addon_mixed/main.yml.example` | `group_vars/instance_addon_mixed/main.yml` | 一次运行同时创建实例与插件 |
 | `group_vars/ha_etcd/main.yml.example` | `group_vars/ha_etcd/main.yml` | 共享 etcd DCS |
 | `group_vars/ha_cluster/main.yml.example` | `group_vars/ha_cluster/main.yml` | Patroni 集群 + HAProxy |
 | `group_vars/{minio,silo,rustfs}_s3/main.yml.example` | 对应的正式文件 | S3 兼容存储部署 |
@@ -114,17 +115,24 @@ db-03
 | 单机实例，无副本 | `[single]` | `group_vars/single/main.yml` | `apply.yaml --limit single` |
 | 主库 + 同机副本 | `[samehost]` | `group_vars/samehost/main.yml` | `apply.yaml --limit samehost` |
 | 主库 + 跨机副本 | `[crosshost]` | `group_vars/crosshost/main.yml` | `apply.yaml --limit crosshost` |
+| 单机实例 + 插件 | `[instance_addon_mixed]` | `group_vars/instance_addon_mixed/main.yml` | `apply.yaml --limit instance_addon_mixed` |
 | Patroni HA 集群 | `[ha_etcd]` + `[ha_cluster]` | `group_vars/ha_etcd/main.yml` + `group_vars/ha_cluster/main.yml` | `apply.yaml --tags addon,ha` |
 | S3 兼容备份存储 | `[s3]` 下的 `[minio_s3]` / `[silo_s3]` / `[rustfs_s3]` 之一 | 对应的 `group_vars/<type>_s3/main.yml` | `deploy-s3.yaml` |
 | 单机插件（一种类型） | `[addon_<type>_single]` | `group_vars/addon_<type>_single/main.yml` | `apply.yaml --limit addon_<type>_single --tags addon` |
 | 多主机插件集群 | `[addon_<type>_cluster]` | `group_vars/addon_<type>_cluster/main.yml` | `apply.yaml --limit addon_<type>_cluster --tags addon` |
 
-前三种是互斥的部署模式：各模式的主机经常重叠，而每种启用的模式都会提供自己的
-`pgcli_instances` 列表，同时启用可能混合实例列表。HA 与 S3 是带独立分组和 play
-选择的支撑部署；主机属于 HA 集群时，不要再把它列进已激活的模式分组。
+四种场景分组（`single`、`samehost`、`crosshost`、`instance_addon_mixed`）是互斥的
+部署模式：各组主机经常重叠，而每种启用的分组都会提供自己的 `pgcli_instances`
+列表，同时启用可能混合实例列表。HA 与 S3 是带独立分组和 play 选择的支撑部署；
+主机属于 HA 集群时，不要再把它列进已激活的场景分组。
 
-插件分组不同：可以同时声明全部插件分组，因为每组变量名互不冲突，由 `--limit`
-选择一个。运行插件时仍要保持模式分组和 HA 分组关闭——它们组级的
+正常部署时，把实例和插件一起声明在场景分组的文件里，跑
+`apply.yaml --limit <scenario>` 即可。`addon_<type>_<mode>` 分组只用于单独测试
+插件：它们的变量文件不会自动合并进场景分组，需要时把条目（连同 `params`）复制
+到场景分组中。
+
+插件分组可以同时声明全部类型，因为每组变量名互不冲突，由 `--limit` 选择一个。
+运行插件分组时仍要保持场景分组和 HA 分组关闭——它们组级的
 `pgcli_instances` / `pgcli_addons` 会覆盖插件 `--limit` 选中的列表。
 
 ## 全局变量：`group_vars/all/main.yml`

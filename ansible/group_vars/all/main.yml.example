@@ -3,11 +3,12 @@
 # environment; group_vars/*/main.yml is gitignored.
 #
 # Shared defaults for every pgcli host.
-# Deployment-mode groups (single, samehost, crosshost) override the defaults
-# in their own group_vars and each define their own pgcli_instances; the role
-# marker groups (ha_etcd for the DCS, ha_cluster for Patroni members) do the
-# same for the HA stack. Mode groups take precedence over the role marker
-# groups (ansible_group_priority).
+# Scenario groups (single, samehost, crosshost, instance_addon_mixed) override
+# the defaults in their own group_vars and define their own pgcli_instances
+# (instance_addon_mixed also defines pgcli_addons); the role marker groups
+# (ha_etcd for the DCS, ha_cluster for Patroni members) do the same for the HA
+# stack. Scenario groups take precedence over the role marker groups
+# (ansible_group_priority).
 
 # Installation goes through scripts/install.sh (GitHub release, not a local
 # build). The installer only runs when pg is missing or force is true.
@@ -274,10 +275,10 @@ pgcli_instance_defaults:
 # addon_<kind>_params / addon_<kind>_conf variables. Without such a --limit
 # both lists stay empty and the add-on play is a no-op.
 #
-# Enable one scenario at a time: the single/samehost/crosshost mode groups and
-# ha_etcd also define pgcli_instances / pgcli_addons at group level, and group
-# vars override this file for their hosts. Keep them disabled in hosts.ini
-# while running add-ons.
+# Enable one scenario at a time: the single/samehost/crosshost mode groups,
+# instance_addon_mixed and ha_etcd also define pgcli_instances / pgcli_addons
+# at group level, and group vars override this file for their hosts. Keep them
+# disabled in hosts.ini while running add-on groups.
 _addon_limit: "{{ ansible_limit | default('', true) }}"
 _addon_group: >-
   {{ _addon_limit

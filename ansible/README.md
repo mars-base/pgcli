@@ -127,6 +127,13 @@ data as well. Per-type flags go in the entry's `params` list (or the group's
 common ones. See the [add-on reference](https://pgcli.pages.dev/docs/addon/)
 and [deploying add-ons with Ansible](https://pgcli.pages.dev/docs/ansible/addons/).
 
+To create a PostgreSQL instance and its add-ons in one run, use the mixed
+scenario group: declare both `pgcli_instances` and `pgcli_addons` in
+`group_vars/instance_addon_mixed/main.yml`, enable `[instance_addon_mixed]` in
+the inventory, and run `apply.yaml --limit instance_addon_mixed`. The instance
+play runs before the add-on play, so a local pgbouncer can pool an instance
+created in the same run. Enable only one scenario group at a time.
+
 ## Layout
 
 | Path | Description |

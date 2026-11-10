@@ -1,0 +1,49 @@
+---
+# Mixed scenario: one PostgreSQL instance plus add-ons created in the same
+# playbook run. Mutually exclusive with single/samehost/crosshost; enable only
+# one scenario group at a time in hosts.ini.
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit instance_addon_mixed
+#
+# `host` must match the bare host name listed in the inventory group. The
+# instance play runs before the add-on play, so a local add-on can reference
+# an instance created in the same run.
+#
+# Keep only the images this scenario needs. The pgcli role checks each entry
+# and downloads/loads only the missing ones from pgcli_images_http_url; the
+# offline pre-check validates exactly this list. pgcli-backup is required
+# because pgcli_instance_defaults.backup_target defaults to local.
+pgcli_images:
+  - image: ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0
+    archive: pgcli-pg_18-2.58.0.tar
+  - image: ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0
+    archive: pgcli-backup_2.58.0.tar
+  - image: docker.io/edoburu/pgbouncer:v1.25.2-p0
+    archive: pgbouncer_v1.25.2-p0.tar
+
+pgcli_config_overrides:
+  namespace: dev
+
+pgcli_instances:
+  - name: pg_single
+    host: debian12-01
+    state: started
+    autostart: true
+
+pgcli_addons:
+  # Local pgbouncer pooling pg_single. Put flags on the entry's `params` list;
+  # with a scenario --limit the add-on play does not select
+  # group_vars/addon_pgbouncer_single/main.yml (only --limit
+  # addon_pgbouncer_single does). For per-type defaults, define
+  # addon_pgbouncer_params in this file instead.
+  - type: pgbouncer
+    state: present
+    instance: pg_single
+    # params:
+    #   - "--max-client-conn=1000"
+    #   - "--default-pool-size=20"
+
+  # Any other add-on can be appended the same way, for example:
+  # - type: pgadmin
+  #   state: present
+  #   name: pgadmin1

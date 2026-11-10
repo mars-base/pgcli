@@ -36,9 +36,9 @@ Every mutating task is guarded by the current pgcli config and container
 state, so an unchanged host reports `ok` rather than `changed`.
 
 Business scenarios are separated by inventory group and `group_vars` file:
-standalone, same-host replica, cross-host replica, Patroni HA, S3 storage, and
-per-type add-on groups. Enable one scenario group at a time; [Setup](./setup/)
-has the mapping table.
+standalone, same-host replica, cross-host replica, instance plus add-ons,
+Patroni HA, S3 storage, and per-type add-on groups. Enable one scenario group
+at a time; [Setup](./setup/) has the mapping table.
 
 ## Repository layout
 
