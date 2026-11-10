@@ -9,6 +9,10 @@
 addon_silo_single_params: []
 # Example:
 #   - "--data-dir=/data/pg/addon/silo/silo1"
+#   - "--api-port=9200"
+#   - "--console-port=9201"
+#   - "--root-user=admin"
+#   - "--tls"
 
 addon_silo_single_addons:
   - type: silo

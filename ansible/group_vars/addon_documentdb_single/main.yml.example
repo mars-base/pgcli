@@ -19,6 +19,12 @@ addon_documentdb_single_params:
   - "--pg-name"
   - "pg_docdb"
 
+# Additional flags, for example:
+#   - "--database=app"
+#   - "--username=docdb_admin"
+#   - "--port=10260"
+#   - "--listen=127.0.0.1"
+
 addon_documentdb_single_addons:
   - type: documentdb
     state: present

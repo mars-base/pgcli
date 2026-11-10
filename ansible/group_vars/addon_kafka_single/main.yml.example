@@ -9,6 +9,10 @@
 addon_kafka_single_params: []
 # Example:
 #   - "--data-dir=/data/pg/addon/kafka/kafka1"
+#   - "--broker-port=9092"
+#   - "--controller-port=19093"
+#   - "--config-option=num.partitions=3"
+#   - "--tls"
 
 addon_kafka_single_addons:
   - type: kafka

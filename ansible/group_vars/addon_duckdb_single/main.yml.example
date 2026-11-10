@@ -9,6 +9,9 @@
 addon_duckdb_single_params: []
 # Example:
 #   - "--data-dir=/data/pg/addon/duckdb/duckdb1"
+#   - "--version=1.5.6"
+#   - "--install-dir=/usr/local/bin"
+#   - "--no-extensions"
 
 addon_duckdb_single_addons:
   - type: duckdb

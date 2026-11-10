@@ -8,7 +8,9 @@
 # Default flags for nodeexporter entries that do not set their own params.
 addon_nodeexporter_single_params: []
 # Example:
-#   - "--<flag>=<value>"
+#   - "--port=9100"
+#   - "--listen=127.0.0.1"
+#   - "--extra-arg=--collector.systemd"
 
 addon_nodeexporter_single_addons:
   - type: nodeexporter

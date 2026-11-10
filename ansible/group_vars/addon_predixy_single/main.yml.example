@@ -10,6 +10,11 @@ addon_predixy_single_params:
   - "--password"
   - "<secret>"
 
+# Additional flags, for example:
+#   - "--port=7617"
+#   - "--workers=4"
+#   - "--listen=127.0.0.1"
+
 addon_predixy_single_addons:
   - type: predixy
     state: present

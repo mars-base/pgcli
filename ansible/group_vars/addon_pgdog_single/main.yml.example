@@ -35,6 +35,12 @@ addon_pgdog_single_params: >-
       '--user', 'appuser:<secret>:app',
       '--sharded-table', 'app:users:id:bigint'] }}
 
+# Additional flags, for example:
+#   - "--port=6432"
+#   - "--pool-mode=transaction"
+#   - "--workers=4"
+#   - "--default-pool-size=10"
+
 addon_pgdog_single_addons:
   - type: pgdog
     state: present

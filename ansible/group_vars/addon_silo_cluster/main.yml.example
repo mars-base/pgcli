@@ -22,6 +22,10 @@ _addon_cluster_silo_endpoint_args: >-
   {%- endfor -%}
   {{ out }}
 
+# Set _addon_cluster_silo_tls: true above to use the shared certificate.
+# Member endpoints come from the group; listen and API/console ports are
+# already set below. Add other flags to each entry's params as needed.
+
 addon_silo_cluster_addons:
   - type: silo
     state: present

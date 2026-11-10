@@ -9,6 +9,10 @@
 addon_rabbitmq_single_params: []
 # Example:
 #   - "--data-dir=/data/pg/addon/rabbitmq/rmq1"
+#   - "--amqp-port=5672"
+#   - "--management-port=15672"
+#   - "--admin-user=admin"
+#   - "--tls"
 
 addon_rabbitmq_single_addons:
   - type: rabbitmq

@@ -23,6 +23,10 @@ _addon_cluster_rustfs_endpoint_args: >-
   {%- endfor -%}
   {{ out }}
 
+# Set _addon_cluster_rustfs_tls: true above to use the shared certificate.
+# Listen and API/console ports are already set below; add other flags to
+# each entry's params as needed.
+
 addon_rustfs_cluster_addons:
   - type: rustfs
     state: present

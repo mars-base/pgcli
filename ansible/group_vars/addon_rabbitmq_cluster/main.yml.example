@@ -24,6 +24,12 @@ _addon_cluster_rabbitmq_tls_args: >-
       '--tls-key', _addon_cluster_rabbitmq_tls_key]
      if _addon_cluster_rabbitmq_tls else [] }}
 
+# Set _addon_cluster_rabbitmq_tls: true above to add the shared TLS listener.
+# Other flags can be appended to each entry's params, for example:
+#   - "--amqp-port=5672"
+#   - "--management-port=15672"
+#   - "--config-option=vm_memory_high_watermark.absolute=512MiB"
+
 addon_rabbitmq_cluster_addons:
   - type: rabbitmq
     state: present

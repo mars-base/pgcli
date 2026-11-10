@@ -9,6 +9,10 @@
 addon_rocketmq_single_params: []
 # Example:
 #   - "--data-dir=/data/pg/addon/rocketmq/rocketmq1"
+#   - "--namesrv-port=9876"
+#   - "--broker-port=10911"
+#   - "--proxy-port=8080"
+#   - "--heap=512m"
 
 addon_rocketmq_single_addons:
   - type: rocketmq

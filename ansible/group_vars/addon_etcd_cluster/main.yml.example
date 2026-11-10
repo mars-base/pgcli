@@ -13,6 +13,11 @@ _addon_cluster_etcd_join_args: >-
   {{ [] if (_addon_cluster_etcd_index | int) == 0
      else ['--join', 'http://' ~ _addon_cluster_etcd_first_ip ~ ':2379'] }}
 
+# Optional extra flags can be appended to each entry's params, for example:
+#   - "--auth"
+#   - "--root-user=root"
+#   - "--tls"
+
 addon_etcd_cluster_addons:
   - type: etcd
     state: present

@@ -9,6 +9,10 @@
 addon_clickhouse_single_params: []
 # Example:
 #   - "--data-dir=/data/pg/addon/clickhouse/ch1"
+#   - "--http-port=8123"
+#   - "--tcp-port=9000"
+#   - "--config-option=max_server_memory_usage=2147483648"
+#   - "--listen=127.0.0.1"
 
 addon_clickhouse_single_addons:
   - type: clickhouse

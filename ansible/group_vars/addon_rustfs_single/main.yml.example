@@ -9,6 +9,10 @@
 addon_rustfs_single_params: []
 # Example:
 #   - "--data-dir=/data/pg/addon/rustfs/rustfs1"
+#   - "--api-port=9300"
+#   - "--console-port=9301"
+#   - "--root-user=admin"
+#   - "--tls"
 
 addon_rustfs_single_addons:
   - type: rustfs

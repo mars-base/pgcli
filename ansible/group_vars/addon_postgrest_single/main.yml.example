@@ -26,6 +26,12 @@ addon_postgrest_single_params:
   - "--anon-role"
   - "web_anon"
 
+# Additional flags, for example:
+#   - "--db-pool=10"
+#   - "--port=3000"
+#   - "--listen=127.0.0.1"
+#   - "--jwt-secret=<secret>"
+
 addon_postgrest_single_addons: >-
   {{ [{'type': 'postgrest', 'state': 'present',
        'pg_name': addon_postgrest_single_pg_name,

@@ -24,6 +24,11 @@ _addon_cluster_kafka_tls_args: >-
   {{ ['--tls-pem', _addon_cluster_kafka_tls_pem]
      if _addon_cluster_kafka_tls else [] }}
 
+# Set _addon_cluster_kafka_tls: true above for the shared TLS listener.
+# Other flags can be appended to each entry's params, for example:
+#   - "--config-option=num.partitions=3"
+#   - "--config-option=log.retention.hours=168"
+
 addon_kafka_cluster_addons:
   - type: kafka
     state: present

@@ -8,6 +8,13 @@ addon_nginx_single_params:
   - "--upstream"
   - "name=s3,path=/,backend=192.0.2.10:19800"
 
+# Additional flags, for example:
+#   - "--http-port=8080"
+#   - "--https-port=8443"
+#   - "--listen=0.0.0.0"
+#   - "--worker-connections=1024"
+#   - "--tls"
+
 # Inline nginx.conf, written under <pgcli config dir>/addons/ and passed as
 # --conf-file (mutually exclusive with the --upstream params above).
 addon_nginx_single_conf: ""

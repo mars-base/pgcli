@@ -9,6 +9,10 @@
 addon_garage_single_params: []
 # Example:
 #   - "--data-dir=/data/pg/addon/garage/garage1"
+#   - "--api-port=3900"
+#   - "--listen=0.0.0.0"
+#   - "--drive=/mnt/d1/garage"
+#   - "--tls"
 
 addon_garage_single_addons:
   - type: garage

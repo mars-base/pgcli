@@ -8,7 +8,10 @@
 # Default flags for vmalert entries that do not set their own params.
 addon_vmalert_single_params: []
 # Example:
-#   - "--<flag>=<value>"
+#   - "--datasource-url=http://10.0.0.5:8428"
+#   - "--notifier-url=http://10.0.0.5:9093"
+#   - "--remote-write-url=http://10.0.0.5:8428"
+#   - "--external-label=env=prod"
 
 addon_vmalert_single_addons:
   - type: vmalert

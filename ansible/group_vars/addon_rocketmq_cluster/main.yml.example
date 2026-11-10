@@ -17,6 +17,12 @@ _addon_cluster_rocketmq_peer_args: >-
   {%- endfor -%}
   {{ out }}
 
+# Optional extra flags can be appended to each entry's params, for example:
+#   - "--namesrv-port=9876"
+#   - "--broker-port=10911"
+#   - "--proxy-port=8080"
+#   - "--config-option=flushDiskType=SYNC_FLUSH"
+
 addon_rocketmq_cluster_addons:
   - type: rocketmq
     state: present

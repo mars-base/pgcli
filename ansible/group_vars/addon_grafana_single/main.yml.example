@@ -9,6 +9,9 @@
 addon_grafana_single_params: []
 # Example:
 #   - "--data-dir=/data/pg/addon/grafana/grafana1"
+#   - "--port=3000"
+#   - "--listen=127.0.0.1"
+#   - "--admin-user=admin"
 
 addon_grafana_single_addons:
   - type: grafana

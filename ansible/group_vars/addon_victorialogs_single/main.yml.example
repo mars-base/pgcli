@@ -9,6 +9,9 @@
 addon_victorialogs_single_params: []
 # Example:
 #   - "--data-dir=/data/pg/addon/victorialogs/vl1"
+#   - "--port=9428"
+#   - "--listen=127.0.0.1"
+#   - "--retention=30d"
 
 addon_victorialogs_single_addons:
   - type: victorialogs

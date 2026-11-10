@@ -24,6 +24,10 @@ _addon_cluster_minio_endpoint_args: >-
   {%- endfor -%}
   {{ out }}
 
+# Set _addon_cluster_minio_tls: true above to switch all endpoints to https://.
+# Member endpoints come from _addon_cluster_minio_endpoint_args; keep the
+# API port in sync if you override it in the params below.
+
 addon_minio_cluster_addons:
   - type: minio
     state: present

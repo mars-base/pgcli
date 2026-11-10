@@ -14,6 +14,13 @@ addon_zerofs_single_params:
   - "--bucket"
   - "zerofs-data"
 
+# Additional flags, for example:
+#   - "--mount-point=/mnt/zerofs"
+#   - "--cache-dir=/data/pg/addon/zerofs/cache"
+#   - "--server-cache-gb=50"
+#   - "--redis-dsn=redis://:change-me@10.0.0.5:6379/0"
+#   - "--no-mount"
+
 addon_zerofs_single_addons:
   - type: zerofs
     state: present

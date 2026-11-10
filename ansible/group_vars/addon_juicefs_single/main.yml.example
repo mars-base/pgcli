@@ -16,6 +16,12 @@ addon_juicefs_single_params:
   - "--dsn"
   - "sqlite3:///var/lib/juicefs/data.db"
 
+# Additional flags, for example:
+#   - "--mount-point=/mnt/juicefs"
+#   - "--cache-dir=/data/pg/addon/juicefs/cache"
+#   - "--install-dir=/usr/local/bin"
+#   - "--no-mount"
+
 addon_juicefs_single_addons:
   - type: juicefs
     state: present

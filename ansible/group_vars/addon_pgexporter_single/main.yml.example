@@ -22,6 +22,12 @@ addon_pgexporter_single_instances: >-
 addon_pgexporter_single_params: >-
   {{ [] if addon_pgexporter_single_remote_dsn | length > 0 else ['--pg-name', 'your_pg_ins01'] }}
 
+# Additional flags, for example:
+#   - "--port=9630"
+#   - "--listen=127.0.0.1"
+#   - "--monitor-user=pgexporter"
+#   - "--config-file=/etc/pgexporter/custom.yml"
+
 addon_pgexporter_single_addons: >-
   {{ [{'type': 'pgexporter', 'state': 'present', 'name': 'pgex1',
        'dsn': addon_pgexporter_single_remote_dsn}]

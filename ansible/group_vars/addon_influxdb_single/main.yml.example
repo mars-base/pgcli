@@ -9,6 +9,10 @@
 addon_influxdb_single_params: []
 # Example:
 #   - "--data-dir=/data/pg/addon/influxdb/influx1"
+#   - "--http-port=8086"
+#   - "--rpc-port=8088"
+#   - "--admin-user=admin"
+#   - "--config-option=reporting-disabled=true"
 
 addon_influxdb_single_addons:
   - type: influxdb

@@ -8,6 +8,12 @@ addon_vlagent_single_params:
   - "--remote-write-url"
   - "http://127.0.0.1:9428/insert/native"
 
+# Additional flags, for example:
+#   - "--log-path=/var/log/app"
+#   - "--include=*.log"
+#   - "--exclude=*.gz"
+#   - "--port=9429"
+
 addon_vlagent_single_addons:
   - type: vlagent
     state: present

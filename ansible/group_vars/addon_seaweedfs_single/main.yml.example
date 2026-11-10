@@ -9,6 +9,9 @@
 addon_seaweedfs_single_params: []
 # Example:
 #   - "--data-dir=/data/pg/addon/seaweedfs/seaweed1"
+#   - "--port=8400"
+#   - "--root-user=admin"
+#   - "--tls"
 
 addon_seaweedfs_single_addons:
   - type: seaweedfs

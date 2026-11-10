@@ -9,6 +9,9 @@
 addon_pgadmin_single_params: []
 # Example:
 #   - "--data-dir=/data/pg/addon/pgadmin/pgadmin1"
+#   - "--email=admin@pgcli.lan"
+#   - "--port=5050"
+#   - "--listen=127.0.0.1"
 
 addon_pgadmin_single_addons:
   - type: pgadmin

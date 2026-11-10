@@ -29,6 +29,11 @@ _addon_cluster_clickhouse_keeper_endpoint_args: >-
   {{ out }}
 _addon_cluster_clickhouse_admin_password: ""
 
+# Optional extra flags can be appended to each entry's params, for example:
+#   - "--http-port=8123"
+#   - "--tcp-port=9000"
+#   - "--config-option=max_server_memory_usage=2147483648"
+
 addon_clickhouse_cluster_addons:
   - type: clickhouse
     state: present

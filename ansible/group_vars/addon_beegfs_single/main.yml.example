@@ -9,6 +9,10 @@
 addon_beegfs_single_params: []
 # Example:
 #   - "--data-dir=/data/pg/addon/beegfs/beegfs1"
+#   - "--mgmtd-host=10.0.0.5"
+#   - "--roles=meta,storage"
+#   - "--node-id=2"
+#   - "--license-file=/etc/beegfs/beegfs-license.txt"
 
 addon_beegfs_single_addons:
   - type: beegfs

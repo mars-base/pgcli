@@ -13,6 +13,12 @@ _addon_cluster_vlcluster_storage_args: >-
   {%- endfor -%}
   {{ out }}
 
+# Optional extra flags can be appended to each entry's params, for example:
+#   - "--retention=30d"
+#   - "--insert-port=9430"
+#   - "--select-port=9431"
+#   - "--storage-port=9432"
+
 addon_vlcluster_cluster_addons:
   - type: vlcluster
     state: present

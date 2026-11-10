@@ -17,6 +17,10 @@ _addon_cluster_clickhouse_keeper_peer_args: >-
   {%- endfor -%}
   {{ out }}
 
+# Optional extra flags can be appended to each entry's params, for example:
+#   - "--log-dir=/data/pg/addon/clickhouse-keeper/logs"
+#   - "--config-dir=/data/pg/addon/clickhouse-keeper/config"
+
 addon_clickhouse_keeper_cluster_addons:
   - type: clickhouse-keeper
     state: present

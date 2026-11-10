@@ -9,6 +9,10 @@
 addon_vlcluster_single_params: []
 # Example:
 #   - "--data-dir=/data/pg/addon/vlcluster/vlc1"
+#   - "--insert-port=9430"
+#   - "--select-port=9431"
+#   - "--storage-port=9432"
+#   - "--retention=30d"
 
 addon_vlcluster_single_addons:
   - type: vlcluster

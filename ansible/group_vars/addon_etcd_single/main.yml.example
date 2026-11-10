@@ -9,6 +9,9 @@
 addon_etcd_single_params: []
 # Example:
 #   - "--data-dir=/data/pg/addon/etcd/etcd1"
+#   - "--client-port=2379"
+#   - "--peer-port=2380"
+#   - "--auth"
 
 addon_etcd_single_addons:
   - type: etcd

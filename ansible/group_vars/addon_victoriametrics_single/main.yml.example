@@ -9,6 +9,9 @@
 addon_victoriametrics_single_params: []
 # Example:
 #   - "--data-dir=/data/pg/addon/victoriametrics/vm1"
+#   - "--port=8428"
+#   - "--listen=127.0.0.1"
+#   - "--retention-months=6"
 
 addon_victoriametrics_single_addons:
   - type: victoriametrics

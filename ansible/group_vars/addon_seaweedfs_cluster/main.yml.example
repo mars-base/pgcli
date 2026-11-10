@@ -27,6 +27,12 @@ _addon_cluster_seaweedfs_peer_args: >-
   {%- endfor -%}
   {{ out }}
 
+# Set _addon_cluster_seaweedfs_tls: true above to use the shared certificate;
+# --tls alone would generate a self-signed one instead. Extra flags can be
+# appended to each entry's params, for example:
+#   - "--replication=001"
+#   - "--port=8400"                # must match the peer port above
+
 addon_seaweedfs_cluster_addons:
   - type: seaweedfs
     state: present

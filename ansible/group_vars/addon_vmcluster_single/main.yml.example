@@ -9,6 +9,10 @@
 addon_vmcluster_single_params: []
 # Example:
 #   - "--data-dir=/data/pg/addon/vmcluster/vmc1"
+#   - "--insert-port=8480"
+#   - "--select-port=8481"
+#   - "--storage-port=8482"
+#   - "--retention-months=6"
 
 addon_vmcluster_single_addons:
   - type: vmcluster

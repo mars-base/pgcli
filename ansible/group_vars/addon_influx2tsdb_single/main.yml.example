@@ -18,6 +18,12 @@ addon_influx2tsdb_single_params:
   - "--pg-name"
   - "tsdb"
 
+# Additional flags, for example:
+#   - "--database=metrics"
+#   - "--port=8087"
+#   - "--pool-size=10"
+#   - "--verbose"
+
 addon_influx2tsdb_single_addons:
   - type: influx2tsdb
     state: present

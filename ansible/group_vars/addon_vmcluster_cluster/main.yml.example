@@ -13,6 +13,13 @@ _addon_cluster_vmcluster_storage_args: >-
   {%- endfor -%}
   {{ out }}
 
+# Optional extra flags can be appended to each entry's params, for example:
+#   - "--retention-months=6"
+#   - "--replication-factor=2"
+#   - "--insert-port=8480"
+#   - "--select-port=8481"
+#   - "--storage-port=8482"
+
 addon_vmcluster_cluster_addons:
   - type: vmcluster
     state: present

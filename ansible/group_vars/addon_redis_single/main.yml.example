@@ -9,6 +9,14 @@
 addon_redis_single_params: []
 # Per-entry params replace addon_redis_single_params for that instance.
 
+# Example:
+#   - "--data-dir=/data/pg/addon/redis/redis1"
+#   - "--port=6379"
+#   - "--maxmemory=256mb"
+#   - "--maxmemory-policy=allkeys-lru"
+#   - "--aof"
+#   - "--appendfsync=everysec"
+
 addon_redis_single_addons:
   - type: redis
     state: present

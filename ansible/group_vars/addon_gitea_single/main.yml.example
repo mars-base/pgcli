@@ -9,6 +9,10 @@
 addon_gitea_single_params: []
 # Example:
 #   - "--data-dir=/data/pg/addon/gitea/gitea1"
+#   - "--ssh-port=2222"
+#   - "--admin-user=gitea"
+#   - "--allow-registration"
+#   - "--listen=127.0.0.1"
 
 addon_gitea_single_addons:
   - type: gitea

@@ -8,6 +8,13 @@
 _addon_cluster_redis_ip: "{{ hostvars[inventory_hostname]['private_ip'] }}"
 _addon_cluster_redis_password: ""
 
+# apply.yaml assembles the slots and reads --cluster-replicas from each
+# entry's params (default 0 = masters only). Other useful flags:
+#   - "--cluster-replicas=0"
+#   - "--maxmemory=256mb"
+#   - "--maxmemory-policy=allkeys-lru"
+#   - "--aof"
+
 addon_redis_cluster_addons:
   - type: redis
     state: present

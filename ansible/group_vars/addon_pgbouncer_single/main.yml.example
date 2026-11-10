@@ -24,7 +24,10 @@ addon_pgbouncer_single_instances: >-
 # Default flags for pgbouncer entries that do not set their own params.
 addon_pgbouncer_single_params: []
 # Example:
-#   - "--<flag>=<value>"
+#   - "--max-client-conn=1000"
+#   - "--default-pool-size=20"
+#   - "--reserve-pool-size=5"
+#   - "--query-timeout=30"
 
 addon_pgbouncer_single_addons: >-
   {{ [{'type': 'pgbouncer', 'state': 'present',
