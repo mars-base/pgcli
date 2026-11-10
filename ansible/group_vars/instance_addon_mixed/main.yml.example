@@ -59,13 +59,15 @@ pgcli_instances:
     host: debian12-01
     state: started
     autostart: true
-    # 覆盖 pgcli_instance_defaults.extensions，默认列表不会自动叠加。
+    # Overrides pgcli_instance_defaults.extensions; the default list is
+    # replaced, not extended.
     extensions:
       - pg_stat_statements
       - pgcrypto
       - pg_trgm
-      - timescaledb          # influx2tsdb 目标所需
-      # documentdb 网关的前置扩展（仅 PG 18；安装会重建镜像并重启实例）
+      - timescaledb          # required by the influx2tsdb target
+      # documentdb gateway prerequisite (PG 18 only; install rebuilds the
+      # image and restarts the instance)
       # - documentdb
 
 pgcli_addons:
@@ -77,31 +79,32 @@ pgcli_addons:
   - type: pgbouncer
     state: present
     instance: pg_single
-    # params 变更不会作用于已安装的容器，force 让每次运行都重新 install。
+    # Changed params do not apply to an installed container; force reinstalls
+    # on every run.
     force: true
     params:
       - "--max-client-conn=100"
       - "--default-pool-size=20"
-      # 其余可选参数（括号内为默认值）：
+      # Other optional flags (defaults in parentheses):
       # - "--min-pool-size=0"
       # - "--reserve-pool-size=0"
       # - "--reserve-pool-timeout=5"
-      # - "--max-db-connections=50"        # 0 = 不限制
-      # - "--max-user-connections=0"       # 0 = 不限制
+      # - "--max-db-connections=50"        # 0 = unlimited
+      # - "--max-user-connections=0"       # 0 = unlimited
       # - "--server-idle-timeout=600"
       # - "--server-lifetime=3600"
       # - "--server-connect-timeout=15"
-      # - "--query-timeout=0"              # 0 = 不限制
+      # - "--query-timeout=0"              # 0 = disabled
       # - "--query-wait-timeout=120"
-      # - "--idle-transaction-timeout=0"   # 0 = 不限制
-      # - "--transaction-timeout=0"        # 0 = 不限制
+      # - "--idle-transaction-timeout=0"   # 0 = disabled
+      # - "--transaction-timeout=0"        # 0 = disabled
       # - "--admin-users=admin"
       # - "--stats-users=stats"
       # - "--log-connections=1"
       # - "--log-disconnections=1"
 
-  # 以下是配合 pg_single 的实例级 add-on 样例，按需取消注释。
-  # postgrest：把 PostgreSQL schema 暴露为 REST API。
+  # Instance-scoped add-on examples for pg_single; uncomment as needed.
+  # postgrest: expose a PostgreSQL schema as a REST API.
   # - type: postgrest
   #   state: present
   #   instance: pg_single
@@ -110,27 +113,30 @@ pgcli_addons:
   #     - "--anon-role=web_anon"
   #     - "--db-pool=20"
 
-  # pgadmin：Web 管理界面；--pg-name 指向本地实例。
-  # 默认只监听 127.0.0.1，需要远程访问时再加 --listen=0.0.0.0。
+  # pgadmin: web UI; --pg-name points at the local instance.
+  # Binds 127.0.0.1 by default; add --listen=0.0.0.0 for remote access.
   # - type: pgadmin
   #   state: present
   #   pg_name: pg_single
 
-  # pgexporter：Prometheus 指标导出；--pg-name 指向本地实例。
+  # pgexporter: Prometheus metrics exporter; --pg-name points at the local
+  # instance.
   # - type: pgexporter
   #   state: present
   #   pg_name: pg_single
   #   params:
   #     - "--monitor-user=pgexporter"
 
-  # documentdb：MongoDB 线协议网关（实例需已启用 documentdb 扩展）。
+  # documentdb: MongoDB wire-protocol gateway (the instance must have the
+  # documentdb extension).
   # - type: documentdb
   #   state: present
   #   pg_name: pg_single
   #   params:
   #     - "--username=docdb_admin"
 
-  # influx2tsdb：把本地 TimescaleDB 作为 InfluxDB 兼容写入端。
+  # influx2tsdb: expose the local TimescaleDB as an InfluxDB-compatible write
+  # endpoint.
   # - type: influx2tsdb
   #   state: present
   #   pg_name: pg_single
