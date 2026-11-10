@@ -16,6 +16,8 @@ prometheus、kafka 等）。
 |------|------|
 | `type` | `pg addon install` 支持的插件类型（见[插件参考](../../addon/)） |
 | `name` | 顶层插件实例名（例如本机的 etcd 成员） |
+| `pg_name` | 与 `name` 二选一：远程 PgBouncer/PostgREST 的目标名（`--pg-name`） |
+| `dsn` | 远程 PostgreSQL DSN（`--dsn`；仅 pgbouncer、postgrest、pgexporter） |
 | `instance` | 与 `name` 二选一：把插件挂到某个 pgcli 实例上 |
 | `state` | `present`（默认）或 `absent` |
 | `params` | 条目级完整参数列表，覆盖该条目的 `addon_<type>_params` |
@@ -25,7 +27,7 @@ prometheus、kafka 等）。
 | `force` | 与 `state: present` 搭配，用 `pg addon install --force` 重建 |
 | `autostart` | `true`（默认）启用开机自启，`false` 关闭 |
 
-每个条目必须有 `type`，并且 `name`/`instance` 恰好设置一个；角色会在执行前断言。
+每个条目必须有 `type`，并且 `name`/`pg_name`/`instance` 恰好设置一个；角色会在执行前断言。
 
 ## 公共参数
 
@@ -179,6 +181,28 @@ pgcli_addons:
 角色执行 `pg addon install pgbouncer -i pg01`，因此该实例必须已在同一轮
 `pgcli_instances` 中收敛（`apply.yaml` 中插件 play 位于实例 play 之后）。
 
+## 远程 PostgreSQL 示例
+
+设置 `dsn` 即可指向 pgcli 不管理的 PostgreSQL 服务器。PgBouncer 和 PostgREST
+还需要 `pg_name`，即远程目标在配置中的名字；pgexporter 仍用 `name`：
+
+```yaml
+pgcli_addons:
+  - type: pgbouncer
+    pg_name: remote-proj01
+    dsn: postgres://admin:secret@db.example.com:5432/proj01
+    state: present
+  - type: pgexporter
+    name: pgex1
+    dsn: postgres://monitor:secret@db.example.com:5432/proj01
+    state: present
+```
+
+这些条目属于顶层（`addons.<type>.<name>`），因此 `state: absent` 和开机自启
+分别走 `--pg-name`（远程 pgbouncer/postgrest）或 `--name`（pgexporter）。
+pgdog 没有 `--dsn` 参数；请改用 `params` 传递
+`--backend NAME=HOST:PORT:DB` 与 `--user NAME:PASSWORD`。
+
 ## 多个插件
 
 `pgcli_addons` 是列表，按顺序逐个收敛：
@@ -206,8 +230,9 @@ uv run ansible-playbook playbooks/apply.yaml --tags addon --limit ha_etcd
 - `state: present`：仅当配置中缺少该 name/instance 时才安装；设置
   `force: true` 会强制重建。同时按 `autostart` 调用
   `pg autostart enable|disable --<type> ...` 收敛开机自启；未设置时默认开启。
-- `state: absent`：执行 `pg addon remove <type> --name <name>`（或 `-i
-  <instance>`）；默认一并删除数据，插件支持时可用 `clean_data: false` 保留。
+- `state: absent`：执行 `pg addon remove <type> --name <name>`；远程
+  pgbouncer/postgrest 用 `--pg-name <pg_name>`，实例级插件用 `-i
+  <instance>`；默认一并删除数据，插件支持时可用 `clean_data: false` 保留。
   etcd 的移除路径总会删除其数据目录。
 - 未声明插件的 `pgcli_addons: []` 主机是 no-op，所以对整个 inventory 执行
   `--tags addon` 是安全的。

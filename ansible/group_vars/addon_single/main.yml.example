@@ -16,8 +16,10 @@
 #
 # Omitting addon_type makes the add-on play a no-op.
 #
-# Every entry needs type plus exactly one of name (top-level) or instance
-# (instance-scoped). Optional fields:
+# Every entry needs type plus exactly one of name (top-level), pg_name
+# (remote pgbouncer/postgrest), or instance (instance-scoped). Optional fields:
+#   dsn         remote PostgreSQL DSN passed as --dsn (pgbouncer, postgrest,
+#               pgexporter only; mutually exclusive with instance).
 #   state       present (default) or absent. To clean a group up, set that
 #               entry to absent and rerun the same command; the role removes
 #               the container and deletes its data by default (clean_data:
@@ -360,39 +362,58 @@ addon_pgadmin_addons:
 
 # ===== pgbouncer =====
 # Single-node test group for the pgbouncer add-on.
-addon_pgbouncer_instances:
-  - name: pg_addon
-    host: "{{ inventory_hostname }}"
-    state: started
-    extensions:
-      - pg_stat_statements
+#
+# Leave addon_pgbouncer_remote_dsn empty to pool a local pg_addon instance;
+# set it to a remote DSN to pool that server instead (no local instance is
+# created). addon_pgbouncer_pg_name is the config key for the remote target.
+#   addon_pgbouncer_remote_dsn: "postgres://admin:<secret>@db.example.com:5432/app"
+addon_pgbouncer_remote_dsn: ""
+addon_pgbouncer_pg_name: remote_pg
+addon_pgbouncer_instances: >-
+  {{ [] if addon_pgbouncer_remote_dsn | length > 0 else
+     [{'name': 'pg_addon', 'host': inventory_hostname, 'state': 'started',
+       'extensions': ['pg_stat_statements']}] }}
 
 # Default flags for pgbouncer entries that do not set their own params.
 addon_pgbouncer_params: []
 # Example:
 #   - "--<flag>=<value>"
 
-addon_pgbouncer_addons:
-  - type: pgbouncer
-    state: present
-    instance: pg_addon
+addon_pgbouncer_addons: >-
+  {{ [{'type': 'pgbouncer', 'state': 'present',
+       'pg_name': addon_pgbouncer_pg_name,
+       'dsn': addon_pgbouncer_remote_dsn}]
+     if addon_pgbouncer_remote_dsn | length > 0 else
+     [{'type': 'pgbouncer', 'state': 'present', 'instance': 'pg_addon'}] }}
 
 
 # ===== pgdog =====
 # Single-node test group for the pgdog add-on.
-addon_pgdog_instances:
-  - name: pg_addon
-    host: "{{ inventory_hostname }}"
-    state: started
-    extensions:
-      - pg_stat_statements
-addon_pgdog_params:
-  - "--backend"
-  - "app=127.0.0.1:35432:postgres"
-  - "--user"
-  - "appuser:<secret>:app"
-  - "--sharded-table"
-  - "app:users:id:bigint"
+#
+# Leave addon_pgdog_remote_dsn empty to proxy the local pg_addon instance; set
+# it to a remote DSN to proxy that server instead (no local instance is
+# created). pgdog has no --dsn flag, so the DSN is decomposed into
+# --backend app=HOST:PORT:DB and --user USER:PASSWORD.
+#   addon_pgdog_remote_dsn: "postgres://appuser:<secret>@db.example.com:5432/app"
+addon_pgdog_remote_dsn: ""
+_pgdog_remote: "{{ addon_pgdog_remote_dsn | urlsplit }}"
+addon_pgdog_instances: >-
+  {{ [] if addon_pgdog_remote_dsn | length > 0 else
+     [{'name': 'pg_addon', 'host': inventory_hostname, 'state': 'started',
+       'extensions': ['pg_stat_statements']}] }}
+addon_pgdog_params: >-
+  {{ ['--backend',
+      'app=' ~ (_pgdog_remote.hostname | default('127.0.0.1', true)) ~ ':'
+             ~ (_pgdog_remote.port | default(5432, true)) ~ ':'
+             ~ (_pgdog_remote.path | default('/postgres', true) | regex_replace('^/', '')),
+      '--user',
+      (_pgdog_remote.username | default('appuser', true)) ~ ':'
+      ~ (_pgdog_remote.password | default('', true)),
+      '--sharded-table', 'app:users:id:bigint']
+     if addon_pgdog_remote_dsn | length > 0 else
+     ['--backend', 'app=127.0.0.1:35432:postgres',
+      '--user', 'appuser:<secret>:app',
+      '--sharded-table', 'app:users:id:bigint'] }}
 
 addon_pgdog_addons:
   - type: pgdog
@@ -402,40 +423,52 @@ addon_pgdog_addons:
 
 # ===== pgexporter =====
 # Single-node test group for the pgexporter add-on.
-addon_pgexporter_instances:
-  - name: pg_addon
-    host: "{{ inventory_hostname }}"
-    state: started
-    extensions:
-      - pg_stat_statements
-addon_pgexporter_params:
-  - "--pg-name"
-  - "pg_addon"
+#
+# Leave addon_pgexporter_remote_dsn empty to scrape the local pg_addon
+# instance; set it to a remote DSN to scrape that server instead. The remote
+# mode is dial-as-is: no local instance is created and pgcli runs no SQL on
+# the target, so the DSN's own role must have pg_monitor rights.
+#   addon_pgexporter_remote_dsn: "postgres://monitor:<secret>@db.example.com:5432/app"
+addon_pgexporter_remote_dsn: ""
+addon_pgexporter_instances: >-
+  {{ [] if addon_pgexporter_remote_dsn | length > 0 else
+     [{'name': 'pg_addon', 'host': inventory_hostname, 'state': 'started',
+       'extensions': ['pg_stat_statements']}] }}
+addon_pgexporter_params: >-
+  {{ [] if addon_pgexporter_remote_dsn | length > 0 else ['--pg-name', 'pg_addon'] }}
 
-addon_pgexporter_addons:
-  - type: pgexporter
-    state: present
-    name: pgex1
+addon_pgexporter_addons: >-
+  {{ [{'type': 'pgexporter', 'state': 'present', 'name': 'pgex1',
+       'dsn': addon_pgexporter_remote_dsn}]
+     if addon_pgexporter_remote_dsn | length > 0 else
+     [{'type': 'pgexporter', 'state': 'present', 'name': 'pgex1'}] }}
 
 
 # ===== postgrest =====
 # Single-node test group for the postgrest add-on.
-addon_postgrest_instances:
-  - name: pg_addon
-    host: "{{ inventory_hostname }}"
-    state: started
-    extensions:
-      - pg_stat_statements
+#
+# Leave addon_postgrest_remote_dsn empty to serve a local pg_addon instance;
+# set it to a remote DSN to serve that server instead (no local instance is
+# created). addon_postgrest_pg_name is the config key for the remote target.
+#   addon_postgrest_remote_dsn: "postgres://api:<secret>@db.example.com:5432/app"
+addon_postgrest_remote_dsn: ""
+addon_postgrest_pg_name: remote_pg
+addon_postgrest_instances: >-
+  {{ [] if addon_postgrest_remote_dsn | length > 0 else
+     [{'name': 'pg_addon', 'host': inventory_hostname, 'state': 'started',
+       'extensions': ['pg_stat_statements']}] }}
 addon_postgrest_params:
   - "--schema"
   - "api"
   - "--anon-role"
   - "web_anon"
 
-addon_postgrest_addons:
-  - type: postgrest
-    state: present
-    instance: pg_addon
+addon_postgrest_addons: >-
+  {{ [{'type': 'postgrest', 'state': 'present',
+       'pg_name': addon_postgrest_pg_name,
+       'dsn': addon_postgrest_remote_dsn}]
+     if addon_postgrest_remote_dsn | length > 0 else
+     [{'type': 'postgrest', 'state': 'present', 'instance': 'pg_addon'}] }}
 
 
 # ===== predixy =====

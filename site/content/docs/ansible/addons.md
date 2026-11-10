@@ -17,6 +17,8 @@ haproxy, minio/silo/rustfs, redis, nginx, prometheus, kafka, and so on).
 |-------|---------|
 | `type` | Add-on type accepted by `pg addon install` (see the [add-on reference](../../addon/)) |
 | `name` | Top-level add-on instance name (e.g. this etcd member) |
+| `pg_name` | Instead of `name`: remote PgBouncer/PostgREST target name (`--pg-name`) |
+| `dsn` | Remote PostgreSQL DSN (`--dsn`; pgbouncer, postgrest, pgexporter only) |
 | `instance` | Instead of `name`: scope the add-on to a pgcli instance |
 | `state` | `present` (default) or `absent` |
 | `params` | Complete per-entry flag list; replaces `addon_<type>_params` for this entry |
@@ -26,8 +28,8 @@ haproxy, minio/silo/rustfs, redis, nginx, prometheus, kafka, and so on).
 | `force` | With `state: present`, recreate with `pg addon install --force` |
 | `autostart` | `true` (default) enables boot autostart, `false` disables it |
 
-Every entry needs `type` and exactly one of `name` or `instance`; the role
-asserts this before doing anything.
+Every entry needs `type` and exactly one of `name`, `pg_name`, or `instance`;
+the role asserts this before doing anything.
 
 ## Per-type parameters
 
@@ -191,6 +193,29 @@ The role runs `pg addon install pgbouncer -i pg01`, so the instance must exist
 in the same `pgcli_instances` reconcile (the add-on play runs after the
 instance play in `apply.yaml`).
 
+## Remote PostgreSQL example
+
+Set `dsn` to target a PostgreSQL server that pgcli does not manage. PgBouncer
+and PostgREST also need `pg_name`, the name the remote target is stored under;
+pgexporter keeps its `name`:
+
+```yaml
+pgcli_addons:
+  - type: pgbouncer
+    pg_name: remote-proj01
+    dsn: postgres://admin:secret@db.example.com:5432/proj01
+    state: present
+  - type: pgexporter
+    name: pgex1
+    dsn: postgres://monitor:secret@db.example.com:5432/proj01
+    state: present
+```
+
+These entries are top-level (`addons.<type>.<name>`), so `state: absent` and
+autostart use `--pg-name` (remote pgbouncer/postgrest) or `--name` (pgexporter).
+pgdog has no `--dsn` flag; pass `--backend NAME=HOST:PORT:DB` and
+`--user NAME:PASSWORD` in `params` instead.
+
 ## Multiple add-ons
 
 `pgcli_addons` is a list; each item is reconciled in order:
@@ -219,10 +244,10 @@ uv run ansible-playbook playbooks/apply.yaml --tags addon --limit ha_etcd
   config, unless `force: true` is set. It also reconciles `autostart` with
   `pg autostart enable|disable --<type> ...`; leaving it unset enables boot
   autostart for the add-on.
-- `state: absent` calls `pg addon remove <type> --name <name>` (or `-i
-  <instance>`); data is deleted by default, and `clean_data: false` keeps it
-  where the add-on supports that. The etcd remove path always deletes its data
-  directory.
+- `state: absent` calls `pg addon remove <type> --name <name>`, `--pg-name
+  <pg_name>` for remote pgbouncer/postgrest, or `-i <instance>`; data is
+  deleted by default, and `clean_data: false` keeps it where the add-on
+  supports that. The etcd remove path always deletes its data directory.
 - A host with `pgcli_addons: []` is a no-op, so the play is safe to run with
   `--tags addon` on the whole inventory.
 

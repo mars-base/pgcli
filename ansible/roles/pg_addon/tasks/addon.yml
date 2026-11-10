@@ -4,20 +4,31 @@
     that:
       - addon.type is defined
       - addon.type | length > 0
-      - (addon.instance is defined) or (addon.name is defined)
+      - (addon.instance is defined) or (addon.name is defined) or (addon.pg_name is defined)
+      - addon.pg_name is not defined or addon.pg_name is string
+      - addon.dsn is not defined or addon.dsn is string
       - (addon.state | default('present')) in ['present', 'absent']
       - addon.params is not defined or (addon.params is sequence and addon.params is not string and addon.params is not mapping)
       - addon.args is not defined or (addon.args is sequence and addon.args is not string and addon.args is not mapping)
       - addon.conf is not defined or addon.conf is string
     fail_msg: >-
-      Each pgcli_addons entry needs type plus either name (top-level) or
-      instance (instance-scoped), and state present|absent. params and args
-      must be lists and conf must be a string.
+      Each pgcli_addons entry needs type plus either name (top-level),
+      instance (instance-scoped), or pg_name (remote PgBouncer/PostgREST),
+      and state present|absent. params and args must be lists and conf must be
+      a string.
 
 - name: Resolve the add-on key
   ansible.builtin.set_fact:
     _addon_key: "{{ addon.type | replace('-', '_') }}"
-    _addon_key_name: "{{ addon.name | default(addon.instance) }}"
+    _addon_key_name: >-
+      {{ addon.instance if addon.instance is defined
+         else addon.name if addon.name is defined
+         else addon.pg_name }}
+    _addon_selector: >-
+      {{ ['-i', addon.instance] if addon.instance is defined
+         else ['--pg-name', addon.pg_name] if addon.pg_name is defined
+         else ['--name', addon.name] }}
+    _addon_dsn_args: "{{ ['--dsn', addon.dsn] if addon.dsn is defined else [] }}"
     _addon_state: "{{ addon.state | default('present') }}"
     _addon_force: "{{ addon.force | default(false) | bool }}"
 
@@ -91,14 +102,15 @@
       {%- if addon.instance is defined -%}
       {{ ((pgcli_cfg.get('instances') or {}).get(addon.instance, {}).get('addons') or {}).get(_addon_key) is not none }}
       {%- else -%}
-      {{ ((pgcli_cfg.get('addons') or {}).get(_addon_key) or {}).get(addon.name) is not none }}
+      {{ ((pgcli_cfg.get('addons') or {}).get(_addon_key) or {}).get(_addon_key_name) is not none }}
       {%- endif -%}
 
 - name: Build the add-on install command
   ansible.builtin.set_fact:
     _addon_install_argv: >-
       {{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'install', addon.type]
-         + (['-i', addon.instance] if addon.instance is defined else ['--name', addon.name])
+         + _addon_selector
+         + _addon_dsn_args
          + (['--force'] if _addon_force | bool else [])
          + (_addon_params | map('string') | list)
          + (['--conf-file', _addon_conf_path] if _addon_conf_content | length > 0 else [])
@@ -134,13 +146,13 @@
     _addon_cfg: >-
       {{ ( ((pgcli_cfg.get('instances') or {}).get(addon.instance, {}).get('addons') or {}).get(_addon_key)
            if addon.instance is defined else
-           ((pgcli_cfg.get('addons') or {}).get(_addon_key) or {}).get(addon.name) )
+           ((pgcli_cfg.get('addons') or {}).get(_addon_key) or {}).get(_addon_key_name) )
          | default({}, true) }}
     _addon_autostart: "{{ addon.autostart | default(true) | bool }}"
 
 - name: Enable add-on autostart
   ansible.builtin.command:
-    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'autostart', 'enable'] + (['-i', addon.instance] if addon.instance is defined else ['--name', addon.name]) + ['--' + (addon.type | replace('_', '-'))] }}"
+    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'autostart', 'enable'] + _addon_selector + ['--' + (addon.type | replace('_', '-'))] }}"
   when:
     - _addon_state == 'present'
     - _addon_cfg | length > 0
@@ -149,7 +161,7 @@
 
 - name: Disable add-on autostart
   ansible.builtin.command:
-    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'autostart', 'disable'] + (['-i', addon.instance] if addon.instance is defined else ['--name', addon.name]) + ['--' + (addon.type | replace('_', '-'))] }}"
+    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'autostart', 'disable'] + _addon_selector + ['--' + (addon.type | replace('_', '-'))] }}"
   when:
     - _addon_state == 'present'
     - _addon_cfg | length > 0
@@ -188,7 +200,7 @@
 
 - name: Remove the add-on
   ansible.builtin.command:
-    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'remove', addon.type] + (['-i', addon.instance] if addon.instance is defined else ['--name', addon.name]) + (['--clean-data'] if addon.clean_data | default(true) else []) }}"
+    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'remove', addon.type] + _addon_selector + (['--clean-data'] if addon.clean_data | default(true) else []) }}"
   when:
     - _addon_state == 'absent'
     - _addon_installed | bool
