@@ -6,11 +6,11 @@
 #   uv run ansible-playbook playbooks/resources.yaml -e HOSTS=debian12-01
 #
 # Shows live host resources (CPU, load, memory, swap, filesystems and the top
-# memory consumers) plus the pgcli version, configured instances, installed
-# add-ons and Patroni cluster status. Only hosts that carry the pgcli binary at
-# pgcli_install_path are reported; other selected hosts are skipped with a
-# short message. Override the
-# path with -e pgcli_install_path=/path/to/pg if it is installed elsewhere.
+# memory consumers) plus the pgcli version and, for every namespace in
+# pgcli_namespaces, its configured instances, installed add-ons and Patroni
+# cluster status. Only hosts that carry the pgcli binary at pgcli_install_path
+# are reported; other selected hosts are skipped with a short message. Override
+# the path with -e pgcli_install_path=/path/to/pg if it is installed elsewhere.
 
 - name: Host and pgcli resources
   hosts: "{{ HOSTS | default('all') }}"
@@ -57,43 +57,39 @@
       failed_when: false
       when: _resources_pgcli_bin.stat.exists
 
-    - name: List the pgcli instances
-      ansible.builtin.command:
-        argv:
-          - "{{ pgcli_install_path }}"
-          - "-c"
-          - "{{ pgcli_config_path }}"
-          - list
-      register: _resources_instances
-      changed_when: false
-      failed_when: false
+    - name: Check namespace config files
+      ansible.builtin.stat:
+        path: "{{ (item.path | regex_replace('/+$', '')) ~ '/pg.yaml' }}"
+      loop: >-
+        {{ (pgcli_namespaces | default([]) | selectattr('path', 'defined') | selectattr('path', 'ne', '') | list)
+           or [{'name': pgcli_config.namespace | default('default'),
+                'path': pgcli_config_path | dirname}] }}
+      loop_control:
+        label: "{{ item.name }}"
+      register: _resources_namespace_configs
       when: _resources_pgcli_bin.stat.exists
 
-    - name: List the pgcli add-ons
-      ansible.builtin.command:
-        argv:
-          - "{{ pgcli_install_path }}"
-          - "-c"
-          - "{{ pgcli_config_path }}"
-          - addon
-          - list
-      register: _resources_addons
+    - name: Read per-namespace resources
+      ansible.builtin.shell:
+        cmd: |
+          printf 'instances:\n'
+          {{ pgcli_install_path | quote }} -c {{ _resources_cfg | quote }} list 2>&1 || true
+          printf '\nadd-ons:\n'
+          {{ pgcli_install_path | quote }} -c {{ _resources_cfg | quote }} addon list 2>&1 || true
+          printf '\nha:\n'
+          {{ pgcli_install_path | quote }} -c {{ _resources_cfg | quote }} ha status 2>&1 || true
+        executable: /bin/bash
+      vars:
+        _resources_cfg: "{{ (item.item.path | regex_replace('/+$', '')) ~ '/pg.yaml' }}"
+      loop: "{{ _resources_namespace_configs.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      register: _resources_namespace_output
       changed_when: false
       failed_when: false
-      when: _resources_pgcli_bin.stat.exists
-
-    - name: Read the HA cluster status
-      ansible.builtin.command:
-        argv:
-          - "{{ pgcli_install_path }}"
-          - "-c"
-          - "{{ pgcli_config_path }}"
-          - ha
-          - status
-      register: _resources_ha
-      changed_when: false
-      failed_when: false
-      when: _resources_pgcli_bin.stat.exists
+      when:
+        - _resources_pgcli_bin.stat.exists
+        - item.stat.exists
 
     - name: Normalize the pgcli output
       ansible.builtin.set_fact:
@@ -101,18 +97,20 @@
           {{ (_resources_version.stdout | trim)
              if (_resources_version.stdout | trim | length > 0)
              else (_resources_version.stderr | trim | default('unknown', true)) }}
-        _resources_instances_text: >-
-          {{ (_resources_instances.stdout | trim)
-             if (_resources_instances.stdout | trim | length > 0)
-             else (_resources_instances.stderr | trim | default('(none)', true)) }}
-        _resources_addons_text: >-
-          {{ (_resources_addons.stdout | trim)
-             if (_resources_addons.stdout | trim | length > 0)
-             else (_resources_addons.stderr | trim | default('(none)', true)) }}
-        _resources_ha_text: >-
-          {{ (_resources_ha.stdout | trim)
-             if (_resources_ha.stdout | trim | length > 0)
-             else (_resources_ha.stderr | trim | default('(none)', true)) }}
+        _resources_namespaces_text: >-
+          {%- set ns = namespace(text='') -%}
+          {%- for result in _resources_namespace_output.results if not (result.skipped | default(false)) -%}
+            {%- set cfg = (result.item.item.path | regex_replace('/+$', '')) ~ '/pg.yaml' -%}
+            {%- set ns.text = ns.text ~ (('\n\n' if not loop.first else '') ~ 'namespace: ' ~ result.item.item.name ~ ' (' ~ cfg ~ ')' ~ '\n' ~ (result.stdout | trim)) -%}
+          {%- endfor -%}
+          {%- set missing = [] -%}
+          {%- for result in _resources_namespace_configs.results if not result.stat.exists -%}
+            {%- set _ = missing.append(result.item.name) -%}
+          {%- endfor -%}
+          {%- if missing | length > 0 -%}
+            {%- set ns.text = ns.text ~ '\n\nnot initialized: ' ~ (missing | join(', ')) -%}
+          {%- endif -%}
+          {{ ns.text }}
       when: _resources_pgcli_bin.stat.exists
 
     - name: Show the resource report
@@ -120,10 +118,6 @@
         msg:
           - "{{ _resources_host.stdout }}"
           - "pgcli: {{ _resources_version_text }}"
-          - "instances:"
-          - "{{ _resources_instances_text }}"
-          - "add-ons:"
-          - "{{ _resources_addons_text }}"
-          - "ha:"
-          - "{{ _resources_ha_text }}"
+          - "namespaces:"
+          - "{{ _resources_namespaces_text }}"
       when: _resources_pgcli_bin.stat.exists
