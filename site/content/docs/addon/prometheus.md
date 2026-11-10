@@ -270,15 +270,15 @@ scrape_configs:
   - job_name: nodes
     static_configs:
       - targets:
-          - 10.246.36.2:9100
+          - 10.0.0.5:9100
         labels:
           nodename: lhcloud1
       - targets:
-          - 10.246.36.3:9100
+          - 10.0.0.6:9100
         labels:
           nodename: lhcloud2
       - targets:
-          - 10.246.36.4:9100
+          - 10.0.0.7:9100
         labels:
           nodename: lhcloud3
 ```
