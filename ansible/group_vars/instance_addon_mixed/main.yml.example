@@ -59,6 +59,14 @@ pgcli_instances:
     host: debian12-01
     state: started
     autostart: true
+    # 覆盖 pgcli_instance_defaults.extensions，默认列表不会自动叠加。
+    extensions:
+      - pg_stat_statements
+      - pgcrypto
+      - pg_trgm
+      - timescaledb          # influx2tsdb 目标所需
+      # documentdb 网关的前置扩展（仅 PG 18；安装会重建镜像并重启实例）
+      # - documentdb
 
 pgcli_addons:
   # Local pgbouncer pooling pg_single. Put flags on the entry's `params` list;
@@ -69,11 +77,60 @@ pgcli_addons:
   - type: pgbouncer
     state: present
     instance: pg_single
-    # params:
-    #   - "--max-client-conn=1000"
-    #   - "--default-pool-size=20"
+    # params 变更不会作用于已安装的容器，force 让每次运行都重新 install。
+    force: true
+    params:
+      - "--max-client-conn=100"
+      - "--default-pool-size=20"
+      # 其余可选参数（括号内为默认值）：
+      # - "--min-pool-size=0"
+      # - "--reserve-pool-size=0"
+      # - "--reserve-pool-timeout=5"
+      # - "--max-db-connections=50"        # 0 = 不限制
+      # - "--max-user-connections=0"       # 0 = 不限制
+      # - "--server-idle-timeout=600"
+      # - "--server-lifetime=3600"
+      # - "--server-connect-timeout=15"
+      # - "--query-timeout=0"              # 0 = 不限制
+      # - "--query-wait-timeout=120"
+      # - "--idle-transaction-timeout=0"   # 0 = 不限制
+      # - "--transaction-timeout=0"        # 0 = 不限制
+      # - "--admin-users=admin"
+      # - "--stats-users=stats"
+      # - "--log-connections=1"
+      # - "--log-disconnections=1"
 
-  # Any other add-on can be appended the same way, for example:
+  # 以下是配合 pg_single 的实例级 add-on 样例，按需取消注释。
+  # postgrest：把 PostgreSQL schema 暴露为 REST API。
+  # - type: postgrest
+  #   state: present
+  #   instance: pg_single
+  #   params:
+  #     - "--schema=api"
+  #     - "--anon-role=web_anon"
+  #     - "--db-pool=20"
+
+  # pgadmin：Web 管理界面；--pg-name 指向本地实例。
+  # 默认只监听 127.0.0.1，需要远程访问时再加 --listen=0.0.0.0。
   # - type: pgadmin
   #   state: present
-  #   name: pgadmin1
+  #   pg_name: pg_single
+
+  # pgexporter：Prometheus 指标导出；--pg-name 指向本地实例。
+  # - type: pgexporter
+  #   state: present
+  #   pg_name: pg_single
+  #   params:
+  #     - "--monitor-user=pgexporter"
+
+  # documentdb：MongoDB 线协议网关（实例需已启用 documentdb 扩展）。
+  # - type: documentdb
+  #   state: present
+  #   pg_name: pg_single
+  #   params:
+  #     - "--username=docdb_admin"
+
+  # influx2tsdb：把本地 TimescaleDB 作为 InfluxDB 兼容写入端。
+  # - type: influx2tsdb
+  #   state: present
+  #   pg_name: pg_single
