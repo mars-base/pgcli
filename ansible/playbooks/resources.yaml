@@ -6,10 +6,11 @@
 #   uv run ansible-playbook playbooks/resources.yaml -e HOSTS=debian12-01
 #
 # Shows live host resources (CPU, load, memory, swap, filesystems and the top
-# memory consumers) plus the pgcli version and configured instances. Only
-# hosts that carry the pgcli binary at pgcli_install_path are reported; other
-# selected hosts are skipped with a short message. Override the path with
-# -e pgcli_install_path=/path/to/pg if it is installed elsewhere.
+# memory consumers) plus the pgcli version, configured instances, installed
+# add-ons, Patroni cluster status and the CPU/memory usage of running
+# containers. Only hosts that carry the pgcli binary at pgcli_install_path are
+# reported; other selected hosts are skipped with a short message. Override the
+# path with -e pgcli_install_path=/path/to/pg if it is installed elsewhere.
 
 - name: Host and pgcli resources
   hosts: "{{ HOSTS | default('all') }}"
@@ -68,6 +69,43 @@
       failed_when: false
       when: _resources_pgcli_bin.stat.exists
 
+    - name: List the pgcli add-ons
+      ansible.builtin.command:
+        argv:
+          - "{{ pgcli_install_path }}"
+          - "-c"
+          - "{{ pgcli_config_path }}"
+          - addon
+          - list
+      register: _resources_addons
+      changed_when: false
+      failed_when: false
+      when: _resources_pgcli_bin.stat.exists
+
+    - name: Read the HA cluster status
+      ansible.builtin.command:
+        argv:
+          - "{{ pgcli_install_path }}"
+          - "-c"
+          - "{{ pgcli_config_path }}"
+          - ha
+          - status
+      register: _resources_ha
+      changed_when: false
+      failed_when: false
+      when: _resources_pgcli_bin.stat.exists
+
+    - name: Collect the running container resources
+      ansible.builtin.command:
+        argv:
+          - podman
+          - stats
+          - --no-stream
+      register: _resources_containers
+      changed_when: false
+      failed_when: false
+      when: _resources_pgcli_bin.stat.exists
+
     - name: Normalize the pgcli output
       ansible.builtin.set_fact:
         _resources_version_text: >-
@@ -78,6 +116,20 @@
           {{ (_resources_instances.stdout | trim)
              if (_resources_instances.stdout | trim | length > 0)
              else (_resources_instances.stderr | trim | default('(none)', true)) }}
+        _resources_addons_text: >-
+          {{ (_resources_addons.stdout | trim)
+             if (_resources_addons.stdout | trim | length > 0)
+             else (_resources_addons.stderr | trim | default('(none)', true)) }}
+        _resources_ha_text: >-
+          {{ (_resources_ha.stdout | trim)
+             if (_resources_ha.stdout | trim | length > 0)
+             else (_resources_ha.stderr | trim | default('(none)', true)) }}
+        _resources_containers_text: >-
+          {{ (_resources_containers.stdout | trim)
+             if (_resources_containers.stdout_lines | default([]) | length > 1)
+             else ((_resources_containers.stderr | trim)
+                   if (_resources_containers.stderr | trim | length > 0)
+                   else '(no running containers)') }}
       when: _resources_pgcli_bin.stat.exists
 
     - name: Show the resource report
@@ -87,4 +139,10 @@
           - "pgcli: {{ _resources_version_text }}"
           - "instances:"
           - "{{ _resources_instances_text }}"
+          - "add-ons:"
+          - "{{ _resources_addons_text }}"
+          - "ha:"
+          - "{{ _resources_ha_text }}"
+          - "running containers (podman stats):"
+          - "{{ _resources_containers_text }}"
       when: _resources_pgcli_bin.stat.exists
