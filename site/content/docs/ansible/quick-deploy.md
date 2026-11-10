@@ -8,10 +8,7 @@ Replace `myproj`, `db-01` and the SSH address, then run on the control node:
 
 ```bash
 myproj=xx
-git clone --depth 1 --filter=blob:none --sparse https://github.com/mars-base/pgcli.git pgcli-src
-git -C pgcli-src sparse-checkout set ansible
-mv pgcli-src/ansible ansible-${myproj}
-rm -rf pgcli-src
+git clone --depth 1 https://github.com/mars-base/pgcli-ansible.git ansible-${myproj}
 cd ansible-${myproj}
 uv sync
 cp ansible.cfg.example ansible.cfg
