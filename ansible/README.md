@@ -2,7 +2,8 @@
 
 Ansible playbooks for deploying [pgcli](https://github.com/mars-base/pgcli)-managed
 PostgreSQL instances, Patroni HA clusters and add-ons on most mainstream Linux
-distributions.
+distributions. With this repository you can declaratively orchestrate PostgreSQL
+databases, extensions, and the surrounding database and storage infrastructure.
 
 This repository is the standalone subtree of the `ansible/` directory in
 [mars-base/pgcli](https://github.com/mars-base/pgcli). The full documentation
