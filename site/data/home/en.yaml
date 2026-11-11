@@ -5,8 +5,7 @@ hero:
   eyebrow: PostgreSQL instance manager
   title_lines:
     - words: [{ text: pgcli }]
-    - words: [{ text: A powerful, flexible Swiss Army knife }]
-    - words: [{ text: for PostgreSQL databases and storage infrastructure }]
+    - words: [{ text: Easily build your PostgreSQL and storage stack }]
   lead: "Using PostgreSQL databases as naturally as breathing — and extending them just as naturally, with a rich catalog of PostgreSQL extensions and companion infrastructure around your database and storage. pgcli is your Swiss Army knife: powerful and flexible, letting you forge your database and storage foundation with ease."
   actions:
     - { label: Read the docs, url: docs/, icon: fa-solid fa-book, style: primary }
