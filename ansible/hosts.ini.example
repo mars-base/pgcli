@@ -17,6 +17,9 @@
 #   uv run ansible-playbook playbooks/apply.yaml --limit addon_haproxy_single --tags addon
 #   uv run ansible-playbook playbooks/apply.yaml --limit addon_etcd_cluster --tags addon
 #
+# The add-on groups at the end of this file are commented out; uncomment the
+# group you want to use and select it with --limit <group>.
+#
 # Add-ons that need a PostgreSQL instance (documentdb, influx2tsdb, pgbouncer,
 # pgdog, pgexporter, postgrest) also need the instance tag:
 #
@@ -158,116 +161,116 @@ minio_s3
 # ── Add-on groups: standalone (one host) ───────────────────────────────────
 # Variables live in the matching group_vars/addon_<type>_single/main.yml.
 
-[addon_alertmanager_single]
-node1
+# [addon_alertmanager_single]
+# node1
 
-[addon_beegfs_single]
-node1
+# [addon_beegfs_single]
+# node1
 
-[addon_clickhouse_single]
-node1
+# [addon_clickhouse_single]
+# node1
 
-[addon_documentdb_single]
-node1
+# [addon_documentdb_single]
+# node1
 
-[addon_duckdb_single]
-node1
+# [addon_duckdb_single]
+# node1
 
-[addon_etcd_single]
-node1
+# [addon_etcd_single]
+# node1
 
-[addon_garage_single]
-node1
+# [addon_garage_single]
+# node1
 
-[addon_gitea_single]
-node1
+# [addon_gitea_single]
+# node1
 
-[addon_grafana_single]
-node1
+# [addon_grafana_single]
+# node1
 
-[addon_haproxy_single]
-node1
+# [addon_haproxy_single]
+# node1
 
-[addon_influx2tsdb_single]
-node1
+# [addon_influx2tsdb_single]
+# node1
 
-[addon_influxdb_single]
-node1
+# [addon_influxdb_single]
+# node1
 
-[addon_juicefs_single]
-node1
+# [addon_juicefs_single]
+# node1
 
-[addon_kafka_single]
-node1
+# [addon_kafka_single]
+# node1
 
-[addon_minio_single]
-node1
+# [addon_minio_single]
+# node1
 
-[addon_nginx_single]
-node1
+# [addon_nginx_single]
+# node1
 
-[addon_nodeexporter_single]
-node1
+# [addon_nodeexporter_single]
+# node1
 
-[addon_pgadmin_single]
-node1
+# [addon_pgadmin_single]
+# node1
 
-[addon_pgbouncer_single]
-node1
+# [addon_pgbouncer_single]
+# node1
 
-[addon_pgdog_single]
-node1
+# [addon_pgdog_single]
+# node1
 
-[addon_pgexporter_single]
-node1
+# [addon_pgexporter_single]
+# node1
 
-[addon_postgrest_single]
-node1
+# [addon_postgrest_single]
+# node1
 
-[addon_predixy_single]
-node1
+# [addon_predixy_single]
+# node1
 
-[addon_prometheus_single]
-node1
+# [addon_prometheus_single]
+# node1
 
-[addon_rabbitmq_single]
-node1
+# [addon_rabbitmq_single]
+# node1
 
-[addon_redis_single]
-node1
+# [addon_redis_single]
+# node1
 
-[addon_rocketmq_single]
-node1
+# [addon_rocketmq_single]
+# node1
 
-[addon_rustfs_single]
-node1
+# [addon_rustfs_single]
+# node1
 
-[addon_seaweedfs_single]
-node1
+# [addon_seaweedfs_single]
+# node1
 
-[addon_silo_single]
-node1
+# [addon_silo_single]
+# node1
 
-[addon_victorialogs_single]
-node1
+# [addon_victorialogs_single]
+# node1
 
-[addon_victoriametrics_single]
-node1
+# [addon_victoriametrics_single]
+# node1
 
-[addon_vlagent_single]
-node1
+# [addon_vlagent_single]
+# node1
 
-[addon_vlcluster_single]
-node1
+# [addon_vlcluster_single]
+# node1
 
-[addon_vmalert_single]
-node1
+# [addon_vmalert_single]
+# node1
 
-[addon_vmcluster_single]
-node1
+# [addon_vmcluster_single]
+# node1
 
-[addon_zerofs_single]
-node1
+# [addon_zerofs_single]
+# node1
 
 # ── Add-on groups: clusters ────────────────────────────────────────────────
 # Variables live in the matching group_vars/addon_<type>_cluster/main.yml.
@@ -275,74 +278,74 @@ node1
 # rocketmq. 4-member groups: minio, silo, rustfs, redis, clickhouse,
 # vmcluster, vlcluster.
 
-[addon_clickhouse_cluster]
-node1
-node2
-node3
-node4
+# [addon_clickhouse_cluster]
+# node1
+# node2
+# node3
+# node4
 
-[addon_clickhouse_keeper_cluster]
-node1
-node2
-node3
+# [addon_clickhouse_keeper_cluster]
+# node1
+# node2
+# node3
 
-[addon_etcd_cluster]
-node1
-node2
-node3
+# [addon_etcd_cluster]
+# node1
+# node2
+# node3
 
-[addon_kafka_cluster]
-node1
-node2
-node3
+# [addon_kafka_cluster]
+# node1
+# node2
+# node3
 
-[addon_minio_cluster]
-node1
-node2
-node3
-node4
+# [addon_minio_cluster]
+# node1
+# node2
+# node3
+# node4
 
-[addon_rabbitmq_cluster]
-node1
-node2
-node3
+# [addon_rabbitmq_cluster]
+# node1
+# node2
+# node3
 
-[addon_redis_cluster]
-node1
-node2
-node3
-node4
+# [addon_redis_cluster]
+# node1
+# node2
+# node3
+# node4
 
-[addon_rocketmq_cluster]
-node1
-node2
-node3
+# [addon_rocketmq_cluster]
+# node1
+# node2
+# node3
 
-[addon_rustfs_cluster]
-node1
-node2
-node3
-node4
+# [addon_rustfs_cluster]
+# node1
+# node2
+# node3
+# node4
 
-[addon_seaweedfs_cluster]
-node1
-node2
-node3
+# [addon_seaweedfs_cluster]
+# node1
+# node2
+# node3
 
-[addon_silo_cluster]
-node1
-node2
-node3
-node4
+# [addon_silo_cluster]
+# node1
+# node2
+# node3
+# node4
 
-[addon_vlcluster_cluster]
-node1
-node2
-node3
-node4
+# [addon_vlcluster_cluster]
+# node1
+# node2
+# node3
+# node4
 
-[addon_vmcluster_cluster]
-node1
-node2
-node3
-node4
+# [addon_vmcluster_cluster]
+# node1
+# node2
+# node3
+# node4
