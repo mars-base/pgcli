@@ -1,20 +1,25 @@
 # pgcli
 
-**Easy-to-use PostgreSQL instance manager**
+**Easily build your PostgreSQL and storage stack**
 
 [![Release](https://img.shields.io/github/v/release/mars-base/pgcli)](https://github.com/mars-base/pgcli/releases)
 [![Docs](https://img.shields.io/badge/docs-pgcli.pages.dev-blue)](https://pgcli.pages.dev)
 [![License](https://img.shields.io/github/license/mars-base/pgcli)](https://github.com/mars-base/pgcli/blob/main/LICENSE)
 [![Platform](https://img.shields.io/badge/platform-linux%20|%20macOS-blue)]()
 
-Create, manage, and backup PostgreSQL databases with ease. pgcli provides a simple CLI to launch isolated PostgreSQL instances in containers — one command to spin up a database, automatic backups, and point-in-time recovery when you need it.
+pgcli is a single binary for building and operating the whole stack around PostgreSQL: isolated instances in containers, backups and point-in-time recovery, physical replicas, Patroni HA clusters, 440+ extensions, and the storage and companion services around them — PgBouncer, etcd, MinIO / silo / rustfs, Redis, Kafka and more.
 
-Whether you're running multiple dev databases, managing staging environments, or need reliable backup strategies, pgcli handles the complexity so you can focus on your application.
+One command spins up a database; the same tool keeps backups, failover, extensions and infrastructure reproducible, so you can focus on your application instead of the plumbing.
 
 **Key capabilities:**
-- One-command to manage multiple database instances
-- Advanced features such as: replica/backup/restore/extensions/psql/shell/import-export/clone/dsn-connection
+- One-command lifecycle for isolated PostgreSQL instances (create/start/stop/destroy)
+- Backup and PITR, physical replicas, manual failover, and Patroni HA clusters
+- 440+ PostgreSQL extensions baked into container images
+- Storage and add-on ecosystem: pooling, DCS, S3, caches, messaging, observability
+- Multi-instance, multi-namespace, remote `--dsn` connections, plus Ansible playbooks for fleets
 - Cross-platform support (Linux and macOS)
+
+If pgcli helps you, please consider giving the project a [star](https://github.com/mars-base/pgcli) — it helps others discover it.
 
 ## Documentation
 
