@@ -10,6 +10,13 @@
 #
 # Observability group vars define pgcli_instances at group level, so keep the
 # single/samehost/crosshost/instance_addon_mixed scenario groups disabled.
+#
+# Rootless deployment: pgcli and podman run as the unprivileged pgcli account.
+# All derived paths (home, data, backup, image cache, namespaces) follow
+# pgcli_deploy_home automatically.
+pgcli_deploy_rootless: true
+pgcli_deploy_user: pgcli
+
 pgcli_config_overrides:
   namespace: dev
 
