@@ -136,6 +136,8 @@ rootless 容器使用 host 网络。绑定低于 `net.ipv4.ip_unprivileged_port_
 `/etc/sysctl.d/99-pgcli-rootless.conf`，并写入 `/etc/sudoers.d/pgcli-deploy`，
 只授权部署账号执行一条命令：
 `sysctl -w net.ipv4.ip_unprivileged_port_start=0`。除此之外没有任何 sudo 权限。
+若该账号本身已有免密 sudo（以该账号执行 `sudo -n true` 成功），则规则冗余，
+跳过该文件。
 
 配置、镜像缓存、数据与备份会移到该账号的 home 下：
 

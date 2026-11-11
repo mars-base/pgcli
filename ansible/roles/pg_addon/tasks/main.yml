@@ -14,9 +14,16 @@
   ansible.builtin.set_fact:
     pgcli_cfg: "{{ pgcli_addon_config_raw.stdout | from_yaml }}"
 
+# Like pgcli_instances, an entry may set host: <inventory host> to limit it to
+# that host; entries without host run everywhere. Without the filter, a
+# multi-host group (for example [rootless]) would try to pool an instance that
+# only exists on the host that owns it.
 - name: Reconcile add-ons
   ansible.builtin.include_tasks: addon.yml
-  loop: "{{ pgcli_addons }}"
+  loop: >-
+    {{ (pgcli_addons | selectattr('host', 'defined')
+        | selectattr('host', 'equalto', inventory_hostname) | list)
+       + (pgcli_addons | rejectattr('host', 'defined') | list) }}
   loop_control:
     loop_var: addon
     label: "{{ addon.type }}{{ ('/' + addon.name) if addon.name is defined else '' }}"

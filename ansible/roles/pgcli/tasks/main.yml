@@ -77,7 +77,18 @@
     # Rootless containers on Linux use host networking. Binding ports below
     # net.ipv4.ip_unprivileged_port_start still needs privilege, so lower the
     # floor for the host. The sudoers rule grants exactly that one command and
-    # nothing else.
+    # nothing else, but only when the account cannot already run sudo without
+    # a password. sudo -n is the ground truth: it fails both when sudo is
+    # denied and when a password is required.
+    - name: Check whether the deployment account has passwordless sudo
+      ansible.builtin.command:
+        argv: [sudo, -n, true]
+      become: true
+      become_user: "{{ pgcli_deploy_user }}"
+      register: _pgcli_deploy_sudo
+      changed_when: false
+      failed_when: false
+
     - name: Persist the rootless privileged-port floor
       ansible.builtin.copy:
         dest: /etc/sysctl.d/99-pgcli-rootless.conf
@@ -114,6 +125,7 @@
         group: root
         mode: "0440"
         validate: "visudo -cf %s"
+      when: _pgcli_deploy_sudo.rc | default(1) != 0
 
     - name: Enable lingering for the deployment account
       ansible.builtin.command: "loginctl enable-linger {{ pgcli_deploy_user }}"

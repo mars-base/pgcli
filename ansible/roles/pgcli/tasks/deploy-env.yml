@@ -7,8 +7,10 @@
   ansible.builtin.command: "getent passwd {{ pgcli_deploy_user }}"
   register: _pgcli_deploy_passwd
   changed_when: false
+  tags: [always]
 
 - name: Record the deployment account identity
   ansible.builtin.set_fact:
     pgcli_deploy_home: "{{ _pgcli_deploy_passwd.stdout.split(':')[5] }}"
     pgcli_deploy_run_dir: "/run/user/{{ _pgcli_deploy_passwd.stdout.split(':')[2] }}"
+  tags: [always]

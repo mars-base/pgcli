@@ -90,6 +90,8 @@ persists `net.ipv4.ip_unprivileged_port_start=0` in
 `/etc/sysctl.d/99-pgcli-rootless.conf` and writes `/etc/sudoers.d/pgcli-deploy`
 granting the deployment account exactly one command:
 `sysctl -w net.ipv4.ip_unprivileged_port_start=0`. It gets no other sudo rights.
+When the account already has passwordless sudo (`sudo -n true` succeeds as that
+account), the rule is redundant and the file is skipped.
 
 Run with `--limit rootless`. Config, image cache, data and backups move under
 the account's home (`~/.pgcli`, `~/.cache/pgcli/images`, `~/pg/data`,

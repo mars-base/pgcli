@@ -1,14 +1,23 @@
 ---
 # Rootless podman deployments for hosts in the [rootless] inventory group.
 #
+# Run the whole scenario (install, instances and add-ons):
+#
+#   cd ansible
+#   uv run ansible-playbook playbooks/apply.yaml --limit rootless
+#
+# Reconcile only the instance and add-on state on already-installed hosts:
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit rootless --tags instance,addon
+#
 # ansible_user in hosts.ini is only the SSH connection account and must have
 # sudo. pgcli_deploy_user is the account that owns pgcli's state and runs
 # rootless podman; the two may be different accounts. A missing deployment
 # account is created automatically with a nologin shell, locked password,
-# subordinate UID/GID ranges and systemd lingering. The play grants it exactly
-# one sudoers.d command (lowering net.ipv4.ip_unprivileged_port_start) so
-# rootless host-networking containers can bind privileged ports; it has no
-# general sudo.
+# subordinate UID/GID ranges and systemd lingering. Unless the account already
+# has passwordless sudo, the play grants it exactly one sudoers.d command
+# (lowering net.ipv4.ip_unprivileged_port_start) so rootless host-networking
+# containers can bind privileged ports; it has no general sudo.
 #
 # Config, image cache, data and backups live under the account's home:
 #   ~/.pgcli/pg.yaml, ~/.cache/pgcli/images, ~/pg/data, ~/pg/backup
@@ -24,4 +33,15 @@ pgcli_instances:
   - name: pg_single
     host: node1
     state: started
+    autostart: true
+
+# Pool connections to pg_single. The instance above is created first by the
+# same run. pgbouncer is an instance-scoped add-on; its image is marked
+# auto_load in pgcli_images, so it is pulled from the offline server only when
+# this add-on is first created.
+pgcli_addons:
+  - type: pgbouncer
+    host: node1
+    instance: pg_single
+    state: present
     autostart: true
