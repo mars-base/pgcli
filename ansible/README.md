@@ -13,9 +13,9 @@ lives at <https://pgcli.pages.dev/docs/ansible/>.
 
 - Control node: Python 3.11+ and [uv](https://docs.astral.sh/uv/)
 - Managed hosts: most mainstream Linux distributions, reachable over SSH. The
-  examples connect as `root`; rootless deployments keep the SSH account
-  separate from the unprivileged deployment account (see
-  [Rootless deployment](#rootless-deployment)).
+  examples connect as `root`; any sudo-capable account works, and rootless
+  deployments keep the SSH account separate from the unprivileged deployment
+  account (see [Rootless deployment](#rootless-deployment)).
 - The playbooks install pgcli and its podman dependency; no manual setup is
   needed on a fresh host
 
@@ -84,6 +84,23 @@ and systemd lingering. Packages, the podman launcher and host preparation
 (uidmap, `/etc/containers/policy.json`, userns, SELinux) still run through
 `become` as the SSH account.
 
+The SSH account does not have to be root. Any account that can `become` root
+works, including a dedicated operator account:
+
+```ini
+[all:vars]
+ansible_user=ops
+ansible_port=22
+```
+
+All plays run with `become: true`, so a sudo password is required unless the
+account has `NOPASSWD`; pass it once with `-K` (`--ask-become-pass`) when
+running a playbook. `ansible_become_password` can also be set in an encrypted
+`host_vars` file, but do not commit it in plaintext.
+
+The deployment account (`pgcli` above) does not need SSH access or a shell; the
+plays switch to it with `become_user`.
+
 Rootless containers use host networking. Binding ports below
 `net.ipv4.ip_unprivileged_port_start` (1024 by default) would fail, so the play
 persists `net.ipv4.ip_unprivileged_port_start=0` in
@@ -97,6 +114,29 @@ Run with `--limit rootless`. Config, image cache, data and backups move under
 the account's home (`~/.pgcli`, `~/.cache/pgcli/images`, `~/pg/data`,
 `~/pg/backup`); `pg` stays in `/usr/local/bin/pg`. Hosts outside `[rootless]`
 keep the rootful layout.
+
+### Operating a rootless deployment
+
+The config, podman storage and containers belong to the deployment account, so
+`pg` must run as that account with its systemd user runtime. The account has a
+nologin shell, so open a shell with `sh` rather than `sudo -i`:
+
+```bash
+uid=$(id -u pgcli)
+sudo -u pgcli env HOME=/home/pgcli \
+  XDG_RUNTIME_DIR=/run/user/$uid \
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus \
+  sh -c 'cd && pg list'
+```
+
+The read-only playbooks resolve this environment automatically and are the
+easiest way to inspect a rootless deployment from the control node:
+
+```bash
+uv run ansible-playbook playbooks/resources.yaml -e HOSTS=rootless
+uv run ansible-playbook playbooks/ha-status.yaml -l rootless_ha
+ANSIBLE_LOG_PATH=/dev/null uv run ansible-playbook playbooks/passwords.yaml -e HOSTS=rootless
+```
 
 ### Rootless HA
 
