@@ -218,6 +218,7 @@ The example file is commented field by field. The blocks that matter most:
 | `pgcli_install_version` | Release tag to install; empty means latest |
 | `pgcli_install_force` | Re-run the installer even when `pg` exists |
 | `pgcli_install_binary_url`, `pgcli_images_http_url`, `pgcli_download_mirror` | Offline/air-gapped install source (the last covers juicefs/zerofs/duckdb binaries and DocumentDB DEBs); see [Offline and air-gapped installs](./offline/) |
+| `pgcli_sqlite_install` | Run `pg sqlite install` during the install play (sqlite3 plus the pinned Litestream; not an add-on type) |
 | `pgcli_install_path` | Binary path, default `/usr/local/bin/pg` |
 | `pgcli_deploy_rootless`, `pgcli_deploy_user` | Non-root deployment for `[rootless]` hosts (see [Rootless deployment](#rootless-deployment)); defaults stay in `all` |
 | `pgcli_namespace_path` | Host-default namespace directory; empty uses `<deployment home>/.pgcli/pg.yaml` (`/root` rootful, the account's home rootless) |

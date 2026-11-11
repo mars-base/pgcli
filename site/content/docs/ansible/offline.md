@@ -169,10 +169,10 @@ Place the upstream assets under their original file names:
 
 | Consumer | Asset basename |
 |----------|----------------|
-| `pg addon install juicefs` | `juicefs-<version>-linux-<arch>.tar.gz` |
+| `pg addon install juicefs` | `juicefs-1.4.1-linux-amd64.tar.gz` / `juicefs-1.4.1-linux-arm64.tar.gz` |
 | `pg addon install zerofs` | `zerofs-pgo-multiplatform.tar.gz` |
-| `pg addon install duckdb` | `duckdb-cli-linux-amd64.tar.gz` (2.x) or `duckdb_cli-linux-amd64.zip` (older) |
-| sqlite add-on (Litestream) | `litestream-0.5.17-linux-<arch>.tar.gz` |
+| `pg addon install duckdb` | `duckdb_cli-linux-amd64.zip` (1.x, default 1.5.6) or `duckdb-cli-linux-amd64.tar.gz` (2.x, pinned 2.0.0); amd64 only |
+| `pg sqlite install` (Litestream) | `litestream-0.5.17-linux-x86_64.tar.gz` (amd64) / `litestream-0.5.17-linux-arm64.tar.gz` |
 | `pg extension install documentdb` | `ubuntu24.04-postgresql-18-documentdb_1.0-0_<arch>.deb` and `libicu74_74.2-1ubuntu3.1_<arch>.deb` |
 
 Behavior and caveats:
@@ -188,16 +188,23 @@ Behavior and caveats:
   air-gapped network, pre-build the derived `-ext` image on a connected host
   (or mirror the Pigsty repository and point apt at it on the build host) and
   distribute the image through `pgcli_images`.
+- Litestream is not an add-on: `pg sqlite install` provisions sqlite3 and the
+  pinned Litestream binary. Set `pgcli_sqlite_install: true` on the hosts or
+  groups that use SQLite and the `pgcli` role runs it during the install play,
+  with the same mirror redirect. sqlite3 itself comes from the distribution
+  package manager, so air-gapped hosts need that package preinstalled (or a
+  local distro mirror).
 - Outside Ansible, export `PGCLI_DOWNLOAD_MIRROR` yourself before running
-  manual `pg addon install` / `pg extension install` commands.
+  manual `pg addon install` / `pg extension install` / `pg sqlite install`
+  commands.
 
 ## Reference file list
 
 The current LAN server is a complete mirror of the default `pgcli_images`
-manifest (43 image tarballs) plus the install binaries and the runtime assets
-used so far. Use it as the authoritative checklist when building a new server;
-regenerate the image names with `make container-images-export` whenever image
-tags change.
+manifest (43 image tarballs) plus the install binaries and every runtime asset
+at the versions pgcli pins. Use it as the authoritative checklist when building
+a new server; regenerate the image names with `make container-images-export`
+whenever image tags change.
 
 Each line is `<sha256>  <filename>` (`sha256sum` format), so a downloaded
 directory can be verified with `sha256sum -c`.
@@ -253,17 +260,25 @@ e8dd5799352cea82bdb326448bf2ab6748d3a3d28ca9e5ea3ae47a86f444c9d7  vlagent_v1.53.
 689c841cb5e9f86dec84b095b7cc2581b2af51e7ee3bb3e8067b92487b312b1d  podman-launcher-linux_amd64
 
 # Runtime mirror assets
-367b2e79e05167af8409b28322f21b1ae5de033fc40820a3c27684a9974a56f2  zerofs-pgo-multiplatform.tar.gz
-cc26f8225af13233f901f86292d5a8373276654454c671316cd603d20378fdbf  ubuntu24.04-postgresql-18-documentdb_1.0-0_amd64.deb
-6afc91e21b72990d1d43421b79e4484d7cd55366c1d0436fa71f4cc2f119d6eb  ubuntu24.04-postgresql-18-documentdb_1.0-0_arm64.deb
+c6507206baf7793c6013dbd82368469a45f20dc0e17a6f92f204602f652ed2bc  duckdb-cli-linux-amd64.tar.gz
+6e89deac1ebbc36eed0291caf8b567b030c7b86ac35998f71854e22b3c5d5e2f  duckdb_cli-linux-amd64.zip
+01ee09a21a9351a465e09906f113845e1c6a19bea70f530e5e2b2125b2dd3b82  juicefs-1.4.1-linux-amd64.tar.gz
+1015ade83a7a93180a29f6c93ee5780a3eda52522331934ef2ef0cc0921995fd  juicefs-1.4.1-linux-arm64.tar.gz
 c9a70989678660eed9a1e904c74fa043da8bec8e2036856fc16e31ced79b04f8  libicu74_74.2-1ubuntu3.1_amd64.deb
 48f93acf50dcf237a8d58ce366730a28438ce52d3f06d7a2a88b51261dd791f7  libicu74_74.2-1ubuntu3.1_arm64.deb
+f8ca4a050095c1efbda2c4365172e61bf9d955ea0d9ac42f448b52e51819baa5  litestream-0.5.17-linux-arm64.tar.gz
+cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d  litestream-0.5.17-linux-x86_64.tar.gz
+cc26f8225af13233f901f86292d5a8373276654454c671316cd603d20378fdbf  ubuntu24.04-postgresql-18-documentdb_1.0-0_amd64.deb
+6afc91e21b72990d1d43421b79e4484d7cd55366c1d0436fa71f4cc2f119d6eb  ubuntu24.04-postgresql-18-documentdb_1.0-0_arm64.deb
+367b2e79e05167af8409b28322f21b1ae5de033fc40820a3c27684a9974a56f2  zerofs-pgo-multiplatform.tar.gz
 ```
 
-The list covers every add-on type except the ones that download at create time
-through `pgcli_download_mirror`: add the juicefs, duckdb and Litestream assets
-from the table above before using those add-ons. Architecture-specific files
-are only needed for the architectures you deploy.
+The runtime assets cover every create-time download through
+`pgcli_download_mirror`, at the versions pgcli pins: juicefs 1.4.1
+(amd64/arm64), duckdb 1.5.6 and 2.0.0 (amd64 only), Litestream 0.5.17
+(x86_64/arm64), zerofs, and the DocumentDB DEBs. Other versions fail the
+pinned SHA-256 check, so update the pin in pgcli before mirroring a new
+release.
 
 ## Verifying the setup
 

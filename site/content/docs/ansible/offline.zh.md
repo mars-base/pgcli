@@ -115,10 +115,10 @@ rootless podman 使用部署账号独立的镜像存储，root 已加载的镜�
 
 | 使用方 | 资源 basename |
 |--------|---------------|
-| `pg addon install juicefs` | `juicefs-<version>-linux-<arch>.tar.gz` |
+| `pg addon install juicefs` | `juicefs-1.4.1-linux-amd64.tar.gz` / `juicefs-1.4.1-linux-arm64.tar.gz` |
 | `pg addon install zerofs` | `zerofs-pgo-multiplatform.tar.gz` |
-| `pg addon install duckdb` | `duckdb-cli-linux-amd64.tar.gz`（2.x）或 `duckdb_cli-linux-amd64.zip`（更早版本） |
-| sqlite add-on（Litestream） | `litestream-0.5.17-linux-<arch>.tar.gz` |
+| `pg addon install duckdb` | `duckdb_cli-linux-amd64.zip`（1.x，默认 1.5.6）或 `duckdb-cli-linux-amd64.tar.gz`（2.x，固定 2.0.0）；仅 amd64 |
+| `pg sqlite install`（Litestream） | `litestream-0.5.17-linux-x86_64.tar.gz`（amd64）/`litestream-0.5.17-linux-arm64.tar.gz` |
 | `pg extension install documentdb` | `ubuntu24.04-postgresql-18-documentdb_1.0-0_<arch>.deb` 与 `libicu74_74.2-1ubuntu3.1_<arch>.deb` |
 
 行为与注意事项：
@@ -127,11 +127,16 @@ rootless podman 使用部署账号独立的镜像存储，root 已加载的镜�
 - 使用固定版本。`--version latest` 会访问 GitHub API，这条请求不会被 mirror 重定向。
 - DocumentDB 的两个 DEB 会被复制进派生扩展镜像并在其中安装；mirror 覆盖的正是这两个包。
 - 其他扩展目录中的扩展在 `podman build` 阶段从 Pigsty DEB 仓库安装，`pgcli_download_mirror` 不会重定向这一步。隔离网络中应先在联网主机上构建好派生的 `-ext` 镜像（或镜像 Pigsty 仓库并在构建主机上配置 apt），再通过 `pgcli_images` 分发该镜像。
-- 在 Ansible 之外手动执行 `pg addon install` / `pg extension install` 时，需要自行导出 `PGCLI_DOWNLOAD_MIRROR`。
+- Litestream 不是 add-on：`pg sqlite install` 负责安装 sqlite3 与固定版本的
+  Litestream。在用到 SQLite 的主机或分组上设置 `pgcli_sqlite_install: true`，
+  `pgcli` 角色会在安装 play 中执行该命令，下载同样走 mirror。sqlite3 本身来自
+  发行版包管理器，隔离主机需预装该包（或提供本地发行版镜像源）。
+- 在 Ansible 之外手动执行 `pg addon install` / `pg extension install` /
+  `pg sqlite install` 时，需要自行导出 `PGCLI_DOWNLOAD_MIRROR`。
 
 ## 参考文件清单
 
-当前局域网服务器是默认 `pgcli_images` 清单的完整镜像（43 个镜像 tar 包），另含安装二进制和目前已用到的运行时资源。搭建新服务器时可以把它当作权威清单；镜像 tag 变化后，用 `make container-images-export` 重新生成文件名。
+当前局域网服务器是默认 `pgcli_images` 清单的完整镜像（43 个镜像 tar 包），另含安装二进制，以及 pgcli 固定版本对应的全部运行时 mirror 资源。搭建新服务器时可以把它当作权威清单；镜像 tag 变化后，用 `make container-images-export` 重新生成文件名。
 
 每行格式为 `<sha256>  <文件名>`（`sha256sum` 格式），下载后可直接用 `sha256sum -c` 校验。
 
@@ -186,14 +191,20 @@ e8dd5799352cea82bdb326448bf2ab6748d3a3d28ca9e5ea3ae47a86f444c9d7  vlagent_v1.53.
 689c841cb5e9f86dec84b095b7cc2581b2af51e7ee3bb3e8067b92487b312b1d  podman-launcher-linux_amd64
 
 # 运行时 mirror 资源
-367b2e79e05167af8409b28322f21b1ae5de033fc40820a3c27684a9974a56f2  zerofs-pgo-multiplatform.tar.gz
-cc26f8225af13233f901f86292d5a8373276654454c671316cd603d20378fdbf  ubuntu24.04-postgresql-18-documentdb_1.0-0_amd64.deb
-6afc91e21b72990d1d43421b79e4484d7cd55366c1d0436fa71f4cc2f119d6eb  ubuntu24.04-postgresql-18-documentdb_1.0-0_arm64.deb
+c6507206baf7793c6013dbd82368469a45f20dc0e17a6f92f204602f652ed2bc  duckdb-cli-linux-amd64.tar.gz
+6e89deac1ebbc36eed0291caf8b567b030c7b86ac35998f71854e22b3c5d5e2f  duckdb_cli-linux-amd64.zip
+01ee09a21a9351a465e09906f113845e1c6a19bea70f530e5e2b2125b2dd3b82  juicefs-1.4.1-linux-amd64.tar.gz
+1015ade83a7a93180a29f6c93ee5780a3eda52522331934ef2ef0cc0921995fd  juicefs-1.4.1-linux-arm64.tar.gz
 c9a70989678660eed9a1e904c74fa043da8bec8e2036856fc16e31ced79b04f8  libicu74_74.2-1ubuntu3.1_amd64.deb
 48f93acf50dcf237a8d58ce366730a28438ce52d3f06d7a2a88b51261dd791f7  libicu74_74.2-1ubuntu3.1_arm64.deb
+f8ca4a050095c1efbda2c4365172e61bf9d955ea0d9ac42f448b52e51819baa5  litestream-0.5.17-linux-arm64.tar.gz
+cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d  litestream-0.5.17-linux-x86_64.tar.gz
+cc26f8225af13233f901f86292d5a8373276654454c671316cd603d20378fdbf  ubuntu24.04-postgresql-18-documentdb_1.0-0_amd64.deb
+6afc91e21b72990d1d43421b79e4484d7cd55366c1d0436fa71f4cc2f119d6eb  ubuntu24.04-postgresql-18-documentdb_1.0-0_arm64.deb
+367b2e79e05167af8409b28322f21b1ae5de033fc40820a3c27684a9974a56f2  zerofs-pgo-multiplatform.tar.gz
 ```
 
-这份清单覆盖了除“创建时通过 `pgcli_download_mirror` 下载”之外的全部 add-on 类型：使用 juicefs、duckdb 或 Litestream 之前，需要按上面的表格补入对应资源。按实际部署的架构准备架构相关文件即可。
+运行时资源已覆盖所有在创建时通过 `pgcli_download_mirror` 下载的资源，版本与 pgcli 固定的版本一致：juicefs 1.4.1（amd64/arm64）、duckdb 1.5.6 与 2.0.0（仅 amd64）、Litestream 0.5.17（x86_64/arm64）、zerofs 与 DocumentDB DEB。其他版本无法通过固定 SHA-256 校验，需要先在 pgcli 中更新固定值再镜像新版本。
 
 ## 验证配置
 

@@ -68,6 +68,15 @@ pgcli_podman_binary_url: ""
 # pgcli_download_mirror: "http://192.0.2.10:18080"
 pgcli_download_mirror: ""
 
+# Host SQLite tooling: `pg sqlite` runs sqlite3 and Litestream directly on the
+# host, and Litestream is not an add-on type, so it has no `pg addon install`
+# path. When true, the pgcli role runs `pg sqlite install` during the install
+# play: sqlite3 comes from the distribution package manager and the pinned
+# Litestream 0.5.x binary is downloaded and sha256-verified.
+# pgcli_download_mirror redirects that download like the other runtime assets.
+# Leave false when SQLite is not used on the host.
+pgcli_sqlite_install: false
+
 # ── Offline container images ────────────────────────────────────────────────
 # The image tarballs are large, so hosts can load them from a LAN static HTTP
 # server instead of pulling from public registries.

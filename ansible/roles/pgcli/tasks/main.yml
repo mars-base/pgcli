@@ -346,6 +346,25 @@
       The install script did not produce {{ pgcli_install_path }}.
       Check its output and the INSTALL_DIR environment it received.
 
+# `pg sqlite` runs sqlite3 and Litestream directly on the host, and Litestream
+# is not an add-on type, so it has no `pg addon install` path. Opt in per host
+# or group; pgcli_download_mirror then redirects the Litestream download like
+# the other runtime assets.
+- name: Install the SQLite host tooling (sqlite3 and Litestream)
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - sqlite
+      - install
+  environment:
+    PGCLI_DOWNLOAD_MIRROR: "{{ pgcli_download_mirror | default('') }}"
+  become: true
+  register: _pgcli_sqlite_install
+  changed_when: >-
+    '-> installing sqlite3' in _pgcli_sqlite_install.stdout or
+    '-> downloading Litestream' in _pgcli_sqlite_install.stdout
+  when: pgcli_sqlite_install | default(false) | bool
+
 - name: Load container images from the offline HTTP server
   become: true
   become_user: "{{ pgcli_deploy_become_user }}"
