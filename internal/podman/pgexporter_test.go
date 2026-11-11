@@ -150,6 +150,24 @@ func TestRedactExporterArgs(t *testing.T) {
 	}
 }
 
+// TestMonitorRoleSetupSQL: a pinned password is caller-supplied, so it must be
+// escaped as a SQL literal rather than injected verbatim into the DO blocks.
+func TestMonitorRoleSetupSQL(t *testing.T) {
+	sql := monitorRoleSetupSQL("pgexporter", "pa'ss")
+	if got := strings.Count(sql, "PASSWORD 'pa''ss'"); got != 2 {
+		t.Errorf("expected CREATE and ALTER to carry the escaped password, got %d: %s", got, sql)
+	}
+	if strings.Contains(sql, "PASSWORD 'pa'ss'") {
+		t.Errorf("raw single quote leaked into the SQL literal: %s", sql)
+	}
+	if !strings.Contains(sql, `GRANT pg_monitor TO "pgexporter"`) {
+		t.Errorf("missing pg_monitor grant: %s", sql)
+	}
+	if !strings.Contains(sql, `GRANT SELECT (oid) ON pg_catalog.pg_subscription TO "pgexporter"`) {
+		t.Errorf("missing pg_subscription grant: %s", sql)
+	}
+}
+
 // TestValidMonitorUser: the name is embedded in SQL, so anything that is not a
 // plain identifier must be rejected.
 func TestValidMonitorUser(t *testing.T) {

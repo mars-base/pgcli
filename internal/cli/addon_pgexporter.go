@@ -33,6 +33,50 @@ func stripDSNCredentials(targetDSN string) (string, error) {
 	return u.String(), nil
 }
 
+// readPGExporterPasswordFile reads a pinned monitor password from disk. Only
+// trailing newlines are stripped so the password may contain interior spaces.
+func readPGExporterPasswordFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("reading password file %s: %w", path, err)
+	}
+	value := strings.TrimRight(string(data), "\r\n")
+	if value == "" {
+		return "", fmt.Errorf("password file %s is empty", path)
+	}
+	if strings.ContainsRune(value, '\x00') {
+		return "", fmt.Errorf("password file %s must not contain NUL bytes", path)
+	}
+	return value, nil
+}
+
+// resolvePGExporterMonitorPassword resolves the optional pinned monitor-role
+// password. set reports whether the caller supplied one; when false,
+// SetupMonitorRole generates a random password.
+func resolvePGExporterMonitorPassword(cmd *cobra.Command) (password string, set bool, err error) {
+	value, _ := cmd.Flags().GetString("monitor-password")
+	path, _ := cmd.Flags().GetString("monitor-password-file")
+	valueSet := cmd.Flags().Changed("monitor-password")
+	fileSet := cmd.Flags().Changed("monitor-password-file")
+	if valueSet && fileSet {
+		return "", false, fmt.Errorf("pass either --monitor-password or --monitor-password-file, not both")
+	}
+	if fileSet {
+		pw, err := readPGExporterPasswordFile(path)
+		if err != nil {
+			return "", false, fmt.Errorf("--monitor-password-file: %w", err)
+		}
+		return pw, true, nil
+	}
+	if valueSet {
+		if value == "" {
+			return "", false, fmt.Errorf("--monitor-password must not be empty (omit it to generate one)")
+		}
+		return value, true, nil
+	}
+	return "", false, nil
+}
+
 // pgexporterTargetDSN resolves the monitored target's address right now — the
 // URL whose host/port/database the exporter dials. In local mode it is
 // re-derived from pg.yaml (so a rotated password or changed port never goes
@@ -113,9 +157,10 @@ func pgexporterTargetSummary(pc config.PGExporterConfig) string {
 //     pgcli runs NO SQL on the target (use it when a suitable role already
 //     exists, or when pgcli must not touch the database at all).
 //
-// In local and --admin-dsn modes the admin URL is never persisted; the
-// generated monitor password is printed ONCE and retrievable via
-// `pg addon password pgexporter`.
+// In local and --admin-dsn modes the admin URL is never persisted; the monitor
+// password is generated and printed ONCE unless --monitor-password or
+// --monitor-password-file pins it, and is retrievable via
+// `pg addon password pgexporter` either way.
 //
 // Like node_exporter the container is stateless and needs no rendered config
 // (the default collector set is baked into the binary); a custom collector YAML
@@ -136,6 +181,10 @@ func runAddonInstallPGExporter(cmd *cobra.Command) error {
 	adminDSN, _ := cmd.Flags().GetString("admin-dsn")
 	monitorUser, _ := cmd.Flags().GetString("monitor-user")
 	configFile, _ := cmd.Flags().GetString("config-file")
+	monitorPassword, monitorPasswordSet, err := resolvePGExporterMonitorPassword(cmd)
+	if err != nil {
+		return err
+	}
 
 	path := cfgPath
 	if path == "" {
@@ -183,6 +232,11 @@ func runAddonInstallPGExporter(cmd *cobra.Command) error {
 		existing.DSN, existing.TargetInstance, existing.AdminDSN = dsn, "", ""
 	case existing.TargetInstance == "" && existing.DSN == "" && existing.AdminDSN == "":
 		return fmt.Errorf("a target is required: pass --pg-name <local-instance>, --admin-dsn postgres://... (creates a monitor role), or --dsn postgres://... (dial as given)")
+	}
+	// Dial-as-is uses the URL's own credentials; a pinned monitor password only
+	// makes sense where pgcli runs the role setup SQL.
+	if monitorPasswordSet && existing.DSN != "" {
+		return fmt.Errorf("--monitor-password/--monitor-password-file only apply when pgcli creates the monitor role (--pg-name or --admin-dsn); --dsn uses the URL's own credentials")
 	}
 	if cmd.Flags().Changed("port") {
 		existing.HostPort = port
@@ -254,9 +308,11 @@ func runAddonInstallPGExporter(cmd *cobra.Command) error {
 	// dropped). The local and --admin-dsn modes create/rotate the role
 	// idempotently — local with the re-derived admin DSN, remote with the
 	// --admin-dsn the user just passed (the only moment pgcli asks for admin
-	// rights, and those credentials are never stored). A --force reinstall of an
-	// --admin-dsn instance WITHOUT a fresh --admin-dsn has no admin rights by
-	// design, so it reuses the stored monitor password rather than rotating.
+	// rights, and those credentials are never stored). A pinned
+	// --monitor-password replaces the generated value; it is still written to
+	// pg.yaml but never echoed. A --force reinstall of an --admin-dsn instance
+	// WITHOUT a fresh --admin-dsn has no admin rights by design, so it reuses
+	// the stored monitor password rather than rotating.
 	passwordPrinted := ""
 	switch {
 	case pc.DSN != "":
@@ -271,14 +327,19 @@ func runAddonInstallPGExporter(cmd *cobra.Command) error {
 			}
 		}
 		fmt.Printf("-> Creating monitor role %q on the target (pg_monitor)...\n", pc.MonitorUser)
-		pw, err := pm.SetupMonitorRole(setupDSN, pc.MonitorUser)
+		pw, err := pm.SetupMonitorRole(setupDSN, pc.MonitorUser, monitorPassword)
 		if err != nil {
 			return err
 		}
 		pc.MonitorPassword = pw
-		passwordPrinted = pw
+		if !monitorPasswordSet {
+			passwordPrinted = pw
+		}
 		fmt.Println("  [OK] monitor role ready")
 	default:
+		if monitorPasswordSet {
+			return fmt.Errorf("--monitor-password needs an admin path: pass --pg-name or --admin-dsn so pgcli can set the role's password")
+		}
 		if pc.MonitorPassword == "" {
 			return fmt.Errorf("pgexporter %q has an admin_dsn target but no stored monitor password — re-pass --admin-dsn so pgcli can create the role", name)
 		}

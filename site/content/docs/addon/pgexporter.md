@@ -14,7 +14,7 @@ Its reason to exist alongside node_exporter is **unified collection**: the targe
 >
 > `--dsn` and `--admin-dsn` never appear together — there's no second URL to give, because the target's host/port/database come from whichever one you pass.
 
-> **The exporter never dials as an admin** in the local and `--admin-dsn` modes: pgcli creates the **low-privilege monitor role** (a `pg_monitor` member, `CONNECTION LIMIT 5`) and hands the container *that* role's URL. To create it, pgcli needs admin rights **once**: for `--pg-name` the admin credentials are derived automatically; for `--admin-dsn` you supply an admin URL that runs the single `CREATE ROLE`/`GRANT` batch and is **never stored in `pg.yaml`**. The generated monitor password is printed once and retrievable via `pg addon password pgexporter`. In the dial-as-is `--dsn` mode pgcli creates nothing — it is your job (or a prior `--admin-dsn` install) that the role already exists.
+> **The exporter never dials as an admin** in the local and `--admin-dsn` modes: pgcli creates the **low-privilege monitor role** (a `pg_monitor` member, `CONNECTION LIMIT 5`) and hands the container *that* role's URL. To create it, pgcli needs admin rights **once**: for `--pg-name` the admin credentials are derived automatically; for `--admin-dsn` you supply an admin URL that runs the single `CREATE ROLE`/`GRANT` batch and is **never stored in `pg.yaml`**. The monitor password is generated and printed once unless you pin it with `--monitor-password`/`--monitor-password-file`; either way it is retrievable via `pg addon password pgexporter`. In the dial-as-is `--dsn` mode pgcli creates nothing — it is your job (or a prior `--admin-dsn` install) that the role already exists.
 
 > **There is NO authentication and no TLS on the exporter endpoint**, and pg_exporter also serves **admin endpoints** (`/reload`, `/explain`, `/stat`) on the same port — anyone who can reach it can scrape metrics *and* trigger reloads. Because a Prometheus scraping it is usually on another host, `Listen` defaults to `0.0.0.0`; the only protection is the network boundary. Restrict it to your monitoring network, or `--listen 127.0.0.1` for a same-host Prometheus.
 
@@ -29,6 +29,8 @@ Its reason to exist alongside node_exporter is **unified collection**: the targe
 | `--admin-dsn` | — | Remote, **create-role** mode: an **admin-privileged** URL for a server pgcli does not manage. Used **once** to create the monitor role, then discarded — only its credential-free address (host/port/database) is stored, and **never** in a form carrying the admin password. The exporter connects as the monitor role. Mutually exclusive with `--dsn` and `--pg-name` |
 | `--dsn` | — | Remote, **dial-as-is** mode: the exporter connects with THIS URL's own credentials and pgcli runs **no** SQL on the target — for a role that already exists or a database pgcli must not touch. Mutually exclusive with `--admin-dsn` and `--pg-name` |
 | `--monitor-user` | `pgexporter` | Name of the low-privilege role pgcli creates (`pg_monitor` member; plain identifier only). Use a **distinct value per instance** when several exporters monitor the same target |
+| `--monitor-password` | generated | Pin the monitor role's password instead of generating one. Only valid with `--pg-name`/`--admin-dsn` (which run the role-setup SQL); the value is stored in `pg.yaml` and never echoed. Useful when several installs must share one credential, such as a primary and a standby's `--dsn` exporter. Prefer `--monitor-password-file` so it stays out of `argv`/`ps` |
+| `--monitor-password-file` | — | Read the pinned monitor password from FILE (a trailing newline is ignored); mutually exclusive with `--monitor-password` |
 | `--image` | `docker.io/pgsty/pg_exporter:1.5.0` | Image override |
 | `--port` | auto (base 9630) | Host port; auto-allocated from `pgexporter_start_port` |
 | `--listen` | `0.0.0.0` | Bind address — every interface by default (cross-host Prometheus); use `127.0.0.1` for loopback-only |
@@ -59,6 +61,14 @@ The command derives the local admin DSN, creates the monitor role on `demo`, pul
   Monitor password: pgx_3f9a…            # printed ONCE
   (printed once — retrieve it later with `pg addon password pgexporter --name pgexporter`)
 ```
+
+To pin the monitor password — for example so a primary and a standby's dial-as-is exporter agree without a post-install fetch — pass a file (recommended) or the value:
+
+```bash
+pg addon install pgexporter --pg-name demo --monitor-password-file /srv/secrets/pgexporter.pw
+```
+
+A pinned password is written to `pg.yaml` so the container can reconnect after restarts, but it is not printed back; `pg addon password pgexporter` still retrieves it.
 
 Monitor a database **outside** pgcli's management, letting pgcli create the monitor role — pass an **admin URL alone**; the target's host/port/database come from it:
 
@@ -255,7 +265,7 @@ pg logs addon pgexporter -n 200     # last 200 lines (also -i / --tail)
 ## Troubleshooting
 
 - **`pg_up 0` / no `pg_*` metrics** — the monitor role can't connect. Check `/up` returns 200, that the target's `pg_hba.conf` admits the container's source address, and that the stored password matches the role (`pg addon password pgexporter`; if they diverged, reinstall to rotate it). On a `--dsn` target, confirm the DSN's host/port is reachable *from the exporter host* (a `127.0.0.1` DSN means the target is local to the exporter).
-- **`pg_up` went 0 right after installing a *second* exporter on the same target** — both share the default `pgexporter` role, and the second install rotated its password, staling the first. Recreate the first (`install … --force`) to re-sync it, or give each instance its own `--monitor-user` (see *Repeated installs and one monitor user*).
+- **`pg_up` went 0 right after installing a *second* exporter on the same target** — both share the default `pgexporter` role, and the second install rotated its password, staling the first. Recreate the first (`install … --force`) to re-sync it, give each instance its own `--monitor-user`, or pin the same `--monitor-password` on both installs (see *Repeated installs and one monitor user*).
 - **Metrics present but thin/empty** — a missing `GRANT pg_monitor` yields a connected exporter with partial collectors. Reinstall (the role setup is idempotent) and confirm membership: `pg exec <inst> -c "SELECT r.rolname, m.rolname FROM pg_auth_members a JOIN pg_roles r ON r.oid=a.member JOIN pg_roles m ON m.oid=a.roleid WHERE r.rolname='pgexporter'"`.
 - **Prometheus shows the target DOWN** — the exporter is running (`pg addon list`), but the scrape address/port don't match (`--scrape pg=<host>:<port>`), or a loopback `--listen 127.0.0.1` exporter is being scraped from another host.
 - **`--dsn and --admin-dsn are mutually exclusive`** — you passed two remote URLs; give exactly one: `--admin-dsn` to have pgcli create the monitor role (its host/port/database become the target), or `--dsn` to dial a URL with credentials you already manage.

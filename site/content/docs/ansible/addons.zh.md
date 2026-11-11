@@ -232,7 +232,10 @@ addon_pgbouncer_single_addons:
 ```
 
 pgexporter 同样声明在 `addon_pgexporter_single_addons` 中，但用 `name` 而不是
-`pg_name`：
+`pg_name`。本地模式（不带 `dsn`）的条目可以在 `params` 里用
+`--monitor-password-file FILE`（或 `--monitor-password VALUE`）固定监控角色密码，
+这样副本上以 `dsn` 原样拨号的条目可复用同一凭据，无需安装后再取密码。
+角色会对携带 `--monitor-password` 的任务设置 `no_log`。
 
 这些条目属于顶层（`addons.<type>.<name>`），因此 `state: absent` 和开机自启
 分别走 `--pg-name`（远程 pgbouncer/postgrest）或 `--name`（pgexporter）。

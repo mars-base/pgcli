@@ -14,7 +14,7 @@ weight: 62
 >
 > `--dsn` 与 `--admin-dsn` 从不同时出现——不需要第二个 URL，因为目标的 host/port/database 都来自你传的那一个。
 
-> **本地与 `--admin-dsn` 两种模式下，导出器从不用 admin 身份连库**：pgcli 创建一个**低权限监控角色**（`pg_monitor` 成员、`CONNECTION LIMIT 5`），并把*该*角色的 URL 交给容器。要建这个角色，pgcli 需要**一次** admin 权限：`--pg-name` 时 admin 凭据自动派生；`--admin-dsn` 时你给出一个 admin URL，它只用于那一批 `CREATE ROLE`/`GRANT` SQL、**绝不落进 `pg.yaml`**。生成的监控密码只打印一次，之后用 `pg addon password pgexporter` 取回。在原样拨号的 `--dsn` 模式下 pgcli 什么都不建——角色已存在是你（或某次先前的 `--admin-dsn` 安装）的事。
+> **本地与 `--admin-dsn` 两种模式下，导出器从不用 admin 身份连库**：pgcli 创建一个**低权限监控角色**（`pg_monitor` 成员、`CONNECTION LIMIT 5`），并把*该*角色的 URL 交给容器。要建这个角色，pgcli 需要**一次** admin 权限：`--pg-name` 时 admin 凭据自动派生；`--admin-dsn` 时你给出一个 admin URL，它只用于那一批 `CREATE ROLE`/`GRANT` SQL、**绝不落进 `pg.yaml`**。监控密码默认随机生成并只打印一次；也可以用 `--monitor-password`/`--monitor-password-file` 固定它。两种方式都可用 `pg addon password pgexporter` 取回。在原样拨号的 `--dsn` 模式下 pgcli 什么都不建——角色已存在是你（或某次先前的 `--admin-dsn` 安装）的事。
 
 > **导出器端点没有鉴权、没有 TLS**，且 pg_exporter 在同一端口上还服务**管理端点**（`/reload`、`/explain`、`/stat`）——任何能连到端口的人既能抓指标、也能触发重载。因为抓取它的 Prometheus 通常在另一台主机，`Listen` 默认 `0.0.0.0`，唯一保护是网络边界。请把它限制在监控网段内，或对同机 Prometheus 传 `--listen 127.0.0.1`。
 
@@ -29,6 +29,8 @@ weight: 62
 | `--admin-dsn` | — | 远程**建角色**模式：一个 **admin 权限** URL。pgcli 用它**一次性**建监控角色后即**丢弃**——只保留其不含凭据的地址（host/port/database），绝不含 admin 密码；此后导出器以监控角色连接。与 `--dsn`、`--pg-name` 互斥 |
 | `--dsn` | — | 远程**原样拨号**模式：导出器就用这个 URL 自带的凭据连接，pgcli **绝不**在目标上跑 SQL——适合角色已存在、或不想让 pgcli 碰库。与 `--admin-dsn`、`--pg-name` 互斥 |
 | `--monitor-user` | `pgexporter` | pgcli 在目标上创建的低权限角色名（`pg_monitor` 成员；仅限普通标识符）。多个 exporter 监控同一目标时，每个实例传**不同的值** |
+| `--monitor-password` | 自动生成 | 固定监控角色的密码，而不是随机生成。仅在与 `--pg-name`/`--admin-dsn`（会执行建角色 SQL）时有效；密码会存进 `pg.yaml`，且不会回显。适合多个安装共享同一凭据的场景，例如主库与副本上用 `--dsn` 的 exporter。建议改用 `--monitor-password-file`，避免密码出现在 `argv`/`ps` |
+| `--monitor-password-file` | — | 从 FILE 读取固定的监控密码（忽略行尾换行）；与 `--monitor-password` 互斥 |
 | `--image` | `docker.io/pgsty/pg_exporter:1.5.0` | 覆盖镜像 |
 | `--port` | 自动（基址 9630） | 宿主端口；自 `pgexporter_start_port` 自动分配 |
 | `--listen` | `0.0.0.0` | 绑定地址——默认开放全部网卡（跨主机 Prometheus）；`127.0.0.1` 收紧为仅回环 |
@@ -59,6 +61,14 @@ pg addon install pgexporter --pg-name demo
   Monitor password: pgx_3f9a…            # 只打印一次
   (printed once — retrieve it later with `pg addon password pgexporter --name pgexporter`)
 ```
+
+要固定监控密码——例如让主库和副本上 `--dsn` 的 exporter 使用同一个密码、免去安装后再取密码——可以传文件（推荐）或直接传值：
+
+```bash
+pg addon install pgexporter --pg-name demo --monitor-password-file /srv/secrets/pgexporter.pw
+```
+
+固定后的密码会写进 `pg.yaml` 供容器重启后重连，但不会回显；仍可用 `pg addon password pgexporter` 取回。
 
 监控一个 pgcli **不托管**的库、并让 pgcli 建监控角色——**只**给一个 admin URL；目标的 host/port/database 就取自它：
 
@@ -255,7 +265,7 @@ pg logs addon pgexporter -n 200     # 最近 200 行（也支持 -i / --tail）
 ## 排障
 
 - **`pg_up 0` / 没有 `pg_*` 指标** —— 监控角色连不上。确认 `/up` 返回 200、目标的 `pg_hba.conf` 放行容器的来源地址、已存密码与角色一致（`pg addon password pgexporter`；若已偏离，重装来轮换它）。对 `--dsn` 目标，确认该 DSN 的 host/port *从导出器所在主机*可达（一个 `127.0.0.1` 的 DSN 意味着目标在导出器本机）。
-- **刚装完同目标的*第二个* exporter，第一个就掉成 `pg_up 0`** —— 两者共用默认的 `pgexporter` 角色，第二个安装轮换掉了它的密码、让第一个手里那份过期。给第一个做 `install … --force` 重建即可重新同步，或给每个实例配各自的 `--monitor-user`（见「重复安装与共享的监控用户」）。
+- **刚装完同目标的*第二个* exporter，第一个就掉成 `pg_up 0`** —— 两者共用默认的 `pgexporter` 角色，第二个安装轮换掉了它的密码、让第一个手里那份过期。给第一个做 `install … --force` 重建即可重新同步，或给每个实例配各自的 `--monitor-user`，或两次安装都固定同一个 `--monitor-password`（见「重复安装与共享的监控用户」）。
 - **指标有但很稀疏/偏空** —— 漏了 `GRANT pg_monitor` 会得到一个已连上但采集器不全的导出器。重装（建角色是幂等的）并确认成员关系：`pg exec <inst> -c "SELECT r.rolname, m.rolname FROM pg_auth_members a JOIN pg_roles r ON r.oid=a.member JOIN pg_roles m ON m.oid=a.roleid WHERE r.rolname='pgexporter'"`。
 - **Prometheus 显示 target DOWN** —— 导出器在跑（`pg addon list`），但抓取地址/端口对不上（`--scrape pg=<host>:<port>`），或一个 `--listen 127.0.0.1` 的导出器被别的机器抓。
 - **`--dsn and --admin-dsn are mutually exclusive`（`--dsn` 与 `--admin-dsn` 互斥）** —— 你传了两个远程 URL；只给一个：`--admin-dsn` 让 pgcli 建监控角色（其 host/port/database 即成为目标），或 `--dsn` 用你自己管理的凭据原样拨号。

@@ -135,8 +135,10 @@ func redactExporterArgs(args []string, dsn string) []string {
 }
 
 // SetupMonitorRole creates (or resets) the low-privilege role pg_exporter
-// connects as, and returns its generated plaintext password. It mirrors
-// PgBouncerManager.SetupAuth: crypto/rand password, idempotent DO-block
+// connects as, and returns the plaintext password in use. An empty password
+// asks pgcli to generate one (the default); a non-empty password pins the
+// credential so several hosts/instances can share it without a post-install
+// fetch. It mirrors PgBouncerManager.SetupAuth: idempotent DO-block
 // (CREATE ROLE ... ELSE ALTER ROLE ... PASSWORD), run through a throwaway psql
 // via ExecDSNQuery against the ADMIN dsn the caller supplies. Nothing about the
 // admin DSN is retained — only the returned user/password are, by the caller.
@@ -147,8 +149,9 @@ func redactExporterArgs(args []string, dsn string) []string {
 // queries (harmless on newer servers where the grant is unnecessary).
 //
 // monitorUser is embedded in SQL, so it must be a plain identifier — validated
-// here, not trusted from the flag.
-func (m *PGExporterManager) SetupMonitorRole(adminDSN, monitorUser string) (string, error) {
+// here, not trusted from the flag. password is a standard SQL literal, so
+// single quotes are doubled.
+func (m *PGExporterManager) SetupMonitorRole(adminDSN, monitorUser, password string) (string, error) {
 	if !ValidMonitorUser(monitorUser) {
 		return "", fmt.Errorf("invalid monitor user name %q: use letters, digits and '_', starting with a letter (max 63 chars)", monitorUser)
 	}
@@ -157,16 +160,28 @@ func (m *PGExporterManager) SetupMonitorRole(adminDSN, monitorUser string) (stri
 		return "", err
 	}
 
-	pwBytes := make([]byte, 16)
-	if _, err := rand.Read(pwBytes); err != nil {
-		return "", fmt.Errorf("generating random password: %w", err)
+	if password == "" {
+		pwBytes := make([]byte, 16)
+		if _, err := rand.Read(pwBytes); err != nil {
+			return "", fmt.Errorf("generating random password: %w", err)
+		}
+		password = "pgx_" + hex.EncodeToString(pwBytes)
 	}
-	password := "pgx_" + hex.EncodeToString(pwBytes)
 
-	// Idempotent: create the role or rotate its password if it exists, then
-	// always re-grant pg_monitor. pg_catalog-qualified so it works regardless of
-	// the target database's search_path.
-	setupSQL := fmt.Sprintf(`
+	if _, err := pm.ExecDSNQuery(adminDSN, monitorRoleSetupSQL(monitorUser, password)); err != nil {
+		return "", fmt.Errorf("setting up monitor role %q: %w", monitorUser, err)
+	}
+	return password, nil
+}
+
+// monitorRoleSetupSQL renders the idempotent role setup: create the role or
+// rotate its password if it exists, then always re-grant pg_monitor.
+// pg_catalog-qualified so it works regardless of the target database's
+// search_path. The password is a caller-supplied value in --monitor-password
+// mode, so it is escaped as a standard SQL literal.
+func monitorRoleSetupSQL(monitorUser, password string) string {
+	literal := strings.ReplaceAll(password, "'", "''")
+	return fmt.Sprintf(`
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '%[1]s') THEN
     CREATE ROLE "%[1]s" LOGIN CONNECTION LIMIT 5 PASSWORD '%[2]s';
@@ -187,12 +202,7 @@ DO $$ BEGIN
 END $$;
 
 GRANT SELECT (oid) ON pg_catalog.pg_subscription TO "%[1]s";
-`, monitorUser, password)
-
-	if _, err := pm.ExecDSNQuery(adminDSN, setupSQL); err != nil {
-		return "", fmt.Errorf("setting up monitor role %q: %w", monitorUser, err)
-	}
-	return password, nil
+`, monitorUser, literal)
 }
 
 // ValidMonitorUser reports whether name is safe to embed as a quoted role name:

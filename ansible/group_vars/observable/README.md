@@ -6,9 +6,9 @@ monitoring stack. The live variables are in `main.yml` (gitignored);
 
 | Host | Role |
 |------|------|
-| `debian12-01` | stand-alone instance `pg01`, `nodeexporter` |
-| `debian12-02` | primary `pg02`, `nodeexporter` |
-| `debian12-03` | cross-host read-only replica `pg_primary_ro1`, `nodeexporter` |
+| `debian12-01` | stand-alone instance `pg01`, `nodeexporter`, `pgexporter` |
+| `debian12-02` | primary `pg02`, `nodeexporter`, `pgexporter` |
+| `debian12-03` | cross-host read-only replica `pg_primary_ro1`, `nodeexporter`, `pgexporter` |
 | `debian12-04` | `nodeexporter`, `prometheus`, `grafana` |
 
 `pgcli_addons` is declared at group level here rather than in the `addon_*`
@@ -19,27 +19,61 @@ cd ansible
 uv run ansible-playbook playbooks/apply.yaml --limit observable
 ```
 
-`nodeexporter` has no `host`, so it runs on every member. Prometheus listens on
-loopback because it has no web authentication; Grafana is the exposed UI
-(`--listen=0.0.0.0`, port 3000). The `force: true` on the Prometheus entry makes
-a re-run recreate the container so edits to `--scrape` take effect — an
-already-installed add-on ignores changed params otherwise.
+`nodeexporter` has no `host`, so it runs on every member. `pgexporter` runs on
+the three database hosts and binds `0.0.0.0:9630` so the Prometheus on
+`debian12-04` can scrape it; it has no authentication and also exposes its admin
+endpoints, so keep port 9630 on the monitoring network.
+
+The local `--pg-name` mode creates a low-privilege `pgexporter` role
+(`pg_monitor`) on `pg01` and `pg02`, pinning its password with
+`--monitor-password` so no post-install fetch is needed. `pg_primary_ro1` is a
+physical standby and cannot execute that role-creation SQL, but streaming
+replication carries the role created for `pg02` to the standby, so its exporter
+uses `--dsn` (dial as-is) with the same role and password. The value is not in
+the repo; put it in the gitignored `group_vars/observable/secrets.yaml` before
+the first run:
+
+```yaml
+pgexporter_monitor_password: "<choose a strong value>"
+```
+
+The same value is used by both local-mode installs and the standby's `--dsn`
+entry, so one `apply` creates all three. An exporter already installed with an
+auto-generated password keeps it until recreated — add `force: true` to that
+entry once (or reinstall it) to adopt the pinned value.
+
+Prometheus listens on loopback because it has no web authentication; Grafana is
+the exposed UI (`--listen=0.0.0.0`, port 3000). The `force: true` on the
+Prometheus entry makes a re-run recreate the container so edits to `--scrape`
+take effect — an already-installed add-on ignores changed params otherwise.
 
 ## Endpoints
 
 | Component | Endpoint |
 |-----------|----------|
 | node_exporter | `http://<host>:9100/metrics` |
+| pg_exporter | `http://<db-host>:9630/metrics` |
 | Prometheus | `http://<prometheus-host>:9090` (loopback only) |
 | Grafana | `http://<grafana-host>:3000` |
 
-Confirm Prometheus sees every exporter as `up` (run on the Prometheus host,
-since it binds loopback):
+Confirm both scrape jobs are `up` (run on the Prometheus host, since it binds
+loopback):
 
 ```bash
 curl -sS http://127.0.0.1:9090/api/v1/targets \
-  | jq -r '.data.activeTargets[] | "\(.labels.instance)\t\(.health)"'
+  | jq -r '.data.activeTargets[] | "\(.labels.job)\t\(.labels.instance)\t\(.health)"'
 ```
+
+The job names are `node-exporter` (four hosts) and `pg` (three hosts). For a
+per-instance check directly on a database host:
+
+```bash
+curl -s http://127.0.0.1:9630/up        # 200 when the target is reachable
+curl -s http://127.0.0.1:9630/metrics | grep '^pg_up'   # pg_up 1
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9630/replica
+```
+
+The last probe returns `200` on the standby and `404`/non-200 on a primary.
 
 ## Grafana API
 
@@ -138,8 +172,9 @@ curl -sS -u "admin:$GF_PASSWORD" \
   "$GRAFANA/api/datasources/proxy/uid/$DS_UID/api/v1/query?query=up"
 ```
 
-A working data source returns one series per node_exporter target with
-`"value":[...,"1"]`.
+A working data source returns one series per scrape target — both the
+`node-exporter` and `pg` jobs — with `"value":[...,"1"]`. Use
+`query=pg_up` to check only the PostgreSQL targets.
 
 ## UIDs are deployment data
 

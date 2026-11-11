@@ -42,13 +42,52 @@ pgcli_instances:
     state: started
     autostart: true
 
-# Observability stack. node_exporter runs on every host; Prometheus (scraping
-# all four exporters) and Grafana live on the fourth host. Prometheus has no
-# web authentication, so it stays on loopback; Grafana is the exposed UI.
+# Observability stack. node_exporter runs on every host; pg_exporter runs on the
+# three PostgreSQL hosts. Prometheus (scraping both jobs) and Grafana live on
+# the fourth host. Prometheus has no web authentication, so it stays on
+# loopback; Grafana is the exposed UI.
 pgcli_addons:
   - type: nodeexporter
     name: nodeexporter
     state: present
+
+  # Local mode derives the admin DSN and creates the low-privilege monitor role.
+  # The password is pinned from the gitignored secrets.yaml so the standby's
+  # --dsn entry can use the same credential without a post-install fetch.
+  - type: pgexporter
+    name: pgexporter
+    host: debian12-01
+    state: present
+    params:
+      - "--listen=0.0.0.0"
+      - "--pg-name"
+      - "pg01"
+      - "--monitor-password"
+      - "{{ pgexporter_monitor_password }}"
+
+  - type: pgexporter
+    name: pgexporter
+    host: debian12-02
+    state: present
+    params:
+      - "--listen=0.0.0.0"
+      - "--pg-name"
+      - "pg02"
+      - "--monitor-password"
+      - "{{ pgexporter_monitor_password }}"
+
+  # A physical standby cannot execute the monitor-role creation SQL. Streaming
+  # replication carries the role created for pg02 to this host, so dial it
+  # as-is. Put the generated monitor password in the gitignored
+  # group_vars/observable/secrets.yaml:
+  #   pgexporter_monitor_password: "<output of pg addon password pgexporter>"
+  - type: pgexporter
+    name: pgexporter
+    host: debian12-03
+    state: present
+    dsn: "postgres://pgexporter:{{ pgexporter_monitor_password }}@127.0.0.1:<host-port>/<database>?sslmode=disable"
+    params:
+      - "--listen=0.0.0.0"
 
   - type: prometheus
     name: prometheus
@@ -60,6 +99,8 @@ pgcli_addons:
       - "--listen=127.0.0.1"
       - "--scrape"
       - "node-exporter=192.0.2.10:9100,192.0.2.11:9100,192.0.2.12:9100,192.0.2.13:9100"
+      - "--scrape"
+      - "pg=192.0.2.10:9630,192.0.2.11:9630,192.0.2.12:9630"
 
   - type: grafana
     name: grafana

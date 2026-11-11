@@ -243,7 +243,11 @@ addon_pgbouncer_single_addons:
 ```
 
 pgexporter is declared the same way in `addon_pgexporter_single_addons`, but
-uses `name` instead of `pg_name`:
+uses `name` instead of `pg_name`. A local (no `dsn`) entry can pin the
+monitor-role password with `--monitor-password-file FILE` (or
+`--monitor-password VALUE`) in `params`, so a standby's dial-as-is `dsn` entry
+can reuse the same credential without a post-install fetch. The role sets
+`no_log` on the tasks carrying `--monitor-password`.
 
 These entries are top-level (`addons.<type>.<name>`), so `state: absent` and
 autostart use `--pg-name` (remote pgbouncer/postgrest) or `--name` (pgexporter).

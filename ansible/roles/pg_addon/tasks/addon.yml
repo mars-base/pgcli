@@ -53,6 +53,15 @@
     - pgcli_images_http_url | length > 0
     - _addon_images | length > 0
 
+# --monitor-password carries a plaintext secret in the params list. Detect it
+# up front so the tasks that resolve/render/run the argv can suppress their
+# output; the condition is checked on both the entry and group-level sources.
+- name: Check whether the add-on parameters carry a monitor password
+  ansible.builtin.set_fact:
+    _addon_params_carry_monitor_password: >-
+      {{ ('--monitor-password' in (addon.params | default([])))
+         or ('--monitor-password' in lookup('vars', 'addon_' ~ (_addon_kind | default('')) ~ '_params', default=[])) }}
+
 # An entry may set `params` to its own complete list of `pg addon install`
 # flags; that replaces the group-level list for the entry. The group-level
 # variable is addon_<group>_params for a group selected by --limit (for
@@ -64,6 +73,7 @@
       {{ addon.params if addon.params is defined
          else lookup('vars', 'addon_' ~ (_addon_kind | default('')) ~ '_params',
                      default=lookup('vars', 'addon_' ~ _addon_key ~ '_params', default=[])) }}
+  no_log: "{{ _addon_params_carry_monitor_password | bool }}"
 
 - name: Validate the resolved add-on parameters
   ansible.builtin.assert:
@@ -74,6 +84,7 @@
     fail_msg: >-
       params and the group-level addon_<group>_params (or addon_<type>_params)
       must be lists of CLI flags.
+  no_log: "{{ _addon_params_carry_monitor_password | bool }}"
 
 # conf may be set per entry, or once per group as addon_<group>_conf for the
 # add-ons that accept --conf-file (addon_<type>_conf is the fallback).
@@ -141,11 +152,13 @@
          + (_addon_params | map('string') | list)
          + (['--conf-file', _addon_conf_path] if _addon_conf_content | length > 0 else [])
          + (addon.args | default([]) | map('string') | list) }}
+  no_log: "{{ _addon_params_carry_monitor_password | bool }}"
 
 - name: Install the add-on
   ansible.builtin.command:
     argv: "{{ _addon_install_argv }}"
   register: _addon_install
+  no_log: "{{ _addon_params_carry_monitor_password | bool }}"
   when:
     - _addon_state == 'present'
     - (not (_addon_installed | bool)) or (_addon_force | bool)
