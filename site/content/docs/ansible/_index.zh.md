@@ -66,6 +66,7 @@ ansible/
 |------|------|
 | [快速部署](./quick-deploy/) | 可直接粘贴的命令：一台主机、一个单机实例，从 clone 到 `pg list` |
 | [安装与示例文件](./setup/) | 每个 `*.example` 对应哪个实际文件、`hosts.ini` 分组、`group_vars` 字段、首次运行 |
+| [离线与隔离环境安装](./offline/) | 局域网 HTTP 服务器：镜像清单与懒加载、`pg`/podman 二进制、运行时主机二进制与 DocumentDB DEB |
 | [剧本](./playbooks/) | `ping.yaml`、`apply.yaml`、`resources.yaml`、`deploy-s3.yaml`、`ha-status.yaml`、`passwords.yaml`：tags、`--limit`、幂等、生命周期顺序 |
 | [实例与副本](./instances/) | `single`/`samehost`/`crosshost` 示例文件与 `pgcli_instances` 全部字段 |
 | [插件](./addons/) | `addon_<type>_<mode>` 条目：安装/移除、实例级插件、etcd |

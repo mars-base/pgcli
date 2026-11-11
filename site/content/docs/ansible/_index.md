@@ -69,6 +69,7 @@ ansible/
 |------|----------------|
 | [Quick deploy](./quick-deploy/) | Copy-paste commands: one host, one standalone instance, from clone to `pg list` |
 | [Setup and example files](./setup/) | Which `*.example` file becomes which live file, `hosts.ini` groups, `group_vars` fields, first run |
+| [Offline and air-gapped installs](./offline/) | LAN HTTP server: image manifest and lazy loading, `pg`/podman binaries, runtime host binaries and DocumentDB DEBs |
 | [Playbooks](./playbooks/) | `ping.yaml`, `apply.yaml`, `resources.yaml`, `deploy-s3.yaml`, `ha-status.yaml`, `passwords.yaml`: tags, `--limit`, idempotency, lifecycle orders |
 | [Instances and replicas](./instances/) | The `single`/`samehost`/`crosshost` example files and every `pgcli_instances` field |
 | [Add-ons](./addons/) | `addon_<type>_<mode>` entries: install/remove, instance-scoped add-ons, etcd |

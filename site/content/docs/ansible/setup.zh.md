@@ -201,7 +201,7 @@ namespace、集群和 HAProxy 列表，把它们替换为一个位于账号 home
 |------|------|
 | `pgcli_install_version` | 安装的 release tag；留空表示最新版 |
 | `pgcli_install_force` | 即使 `pg` 已存在也重跑安装脚本 |
-| `pgcli_install_binary_url`、`pgcli_images_http_url`、`pgcli_download_mirror` | 离线/隔离环境的安装源（后者供 juicefs/zerofs/duckdb 二进制与 DocumentDB DEB 使用） |
+| `pgcli_install_binary_url`、`pgcli_images_http_url`、`pgcli_download_mirror` | 离线/隔离环境的安装源（后者供 juicefs/zerofs/duckdb 二进制与 DocumentDB DEB 使用）；详见[离线与隔离环境安装](./offline/) |
 | `pgcli_install_path` | 二进制路径，默认 `/usr/local/bin/pg` |
 | `pgcli_deploy_rootless`、`pgcli_deploy_user` | `[rootless]` 主机的非 root 部署（见 [Rootless 部署](#rootless-部署)）；`all` 只保留默认值 |
 | `pgcli_namespace_path` | 主机默认 namespace 目录；留空用 `<部署账号 home>/.pgcli/pg.yaml`（rootful 为 `/root`，rootless 为账号 home） |
