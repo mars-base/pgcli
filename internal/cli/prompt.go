@@ -15,11 +15,15 @@ import (
 // EOF or fail to register typed characters when the console input mode is not
 // in the expected cooked/line-buffered state). Reading a line directly from
 // os.Stdin works consistently across PowerShell, cmd.exe, and Unix terminals.
+// One reader is shared by every prompt: a fresh bufio.Reader per call would
+// leave lines already buffered by the previous reader unread, so piped input
+// such as "y\ny" would abort at the second prompt.
+var stdinReader = bufio.NewReader(os.Stdin)
+
 func confirmPrompt(prompt string) bool {
 	fmt.Print(prompt)
 
-	reader := bufio.NewReader(os.Stdin)
-	line, err := reader.ReadString('\n')
+	line, err := stdinReader.ReadString('\n')
 	if err != nil && line == "" {
 		// stdin closed or EOF without input -> treat as non-confirming.
 		fmt.Println()
