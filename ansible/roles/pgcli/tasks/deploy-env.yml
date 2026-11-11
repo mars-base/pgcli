@@ -1,0 +1,14 @@
+---
+# Plays that run without the pgcli install role (for example --tags instance
+# or --tags addon) still need the deployment account's home and systemd runtime
+# directory for rootless podman. Resolve them from the passwd entry; the
+# install role records the same values when it runs.
+- name: Read the deployment account entry
+  ansible.builtin.command: "getent passwd {{ pgcli_deploy_user }}"
+  register: _pgcli_deploy_passwd
+  changed_when: false
+
+- name: Record the deployment account identity
+  ansible.builtin.set_fact:
+    pgcli_deploy_home: "{{ _pgcli_deploy_passwd.stdout.split(':')[5] }}"
+    pgcli_deploy_run_dir: "/run/user/{{ _pgcli_deploy_passwd.stdout.split(':')[2] }}"

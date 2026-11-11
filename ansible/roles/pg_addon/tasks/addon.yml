@@ -32,6 +32,27 @@
     _addon_state: "{{ addon.state | default('present') }}"
     _addon_force: "{{ addon.force | default(false) | bool }}"
 
+# Offline installs only preload the core images. Entries marked auto_load: true
+# in pgcli_images declare the add-on types that need them; pull exactly this
+# add-on's images from the offline server before `pg addon install` runs.
+- name: Resolve the add-on images
+  ansible.builtin.set_fact:
+    _addon_images: >-
+      {{ pgcli_images | selectattr('auto_load', 'defined') | selectattr('auto_load')
+         | selectattr('addons', 'defined')
+         | selectattr('addons', 'contains', _addon_key) | list }}
+
+- name: Load the add-on images from the offline server
+  ansible.builtin.include_role:
+    name: pgcli
+    tasks_from: images
+  vars:
+    _pgcli_images_to_load: "{{ _addon_images }}"
+  when:
+    - _addon_state == 'present'
+    - pgcli_images_http_url | length > 0
+    - _addon_images | length > 0
+
 # An entry may set `params` to its own complete list of `pg addon install`
 # flags; that replaces the group-level list for the entry. The group-level
 # variable is addon_<group>_params for a group selected by --limit (for

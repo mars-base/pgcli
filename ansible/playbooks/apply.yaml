@@ -41,6 +41,20 @@
       run_once: true
       tags: [always]
 
+    - name: Require a deployment account for rootless mode
+      ansible.builtin.assert:
+        that:
+          - not (pgcli_deploy_rootless | bool) or
+            (pgcli_deploy_user | default('', true) | length > 0)
+          - pgcli_deploy_user | default('', true) != 'root'
+        fail_msg: >-
+          pgcli_deploy_rootless is true but pgcli_deploy_user is empty or
+          root. Set a non-root service account in group_vars/rootless/main.yml;
+          it is created with a nologin shell when missing. ansible_user in
+          hosts.ini only needs sudo and may be a different account.
+      run_once: true
+      tags: [always]
+
 - name: Install and configure pgcli
   hosts: all
   gather_facts: false
@@ -56,8 +70,22 @@
   hosts: all
   gather_facts: false
   serial: 1
-  environment:
-    PGCLI_DOWNLOAD_MIRROR: "{{ pgcli_download_mirror | default('') }}"
+  pre_tasks:
+    - name: Resolve the rootless deployment environment
+      ansible.builtin.include_role:
+        name: pgcli
+        tasks_from: deploy-env
+      when: pgcli_deploy_rootless | bool
+      tags: [always]
+  become: true
+  become_user: "{{ pgcli_deploy_become_user }}"
+  module_defaults:
+    ansible.builtin.command:
+      chdir: "{{ pgcli_deploy_home }}"
+    ansible.builtin.shell:
+      chdir: "{{ pgcli_deploy_home }}"
+  environment: >-
+    {{ pgcli_deploy_env | combine({'PGCLI_DOWNLOAD_MIRROR': pgcli_download_mirror | default('')}) }}
   roles:
     - role: pg_instance
       tags: [instance]
@@ -66,8 +94,15 @@
   hosts: all
   gather_facts: false
   serial: 1
-  environment:
-    PGCLI_DOWNLOAD_MIRROR: "{{ pgcli_download_mirror | default('') }}"
+  become: true
+  become_user: "{{ pgcli_deploy_become_user }}"
+  module_defaults:
+    ansible.builtin.command:
+      chdir: "{{ pgcli_deploy_home }}"
+    ansible.builtin.shell:
+      chdir: "{{ pgcli_deploy_home }}"
+  environment: >-
+    {{ pgcli_deploy_env | combine({'PGCLI_DOWNLOAD_MIRROR': pgcli_download_mirror | default('')}) }}
   vars:
     # Cluster add-ons that need shared secrets and/or TLS material. Generated
     # once on the controller and published as host facts before pg_addon
@@ -86,6 +121,13 @@
       - rabbitmq
       - kafka
   pre_tasks:
+    - name: Resolve the rootless deployment environment
+      ansible.builtin.include_role:
+        name: pgcli
+        tasks_from: deploy-env
+      when: pgcli_deploy_rootless | bool
+      tags: [always]
+
     - name: Prepare shared add-on cluster material
       ansible.builtin.include_role:
         name: addon_cluster_shared
@@ -102,6 +144,22 @@
   gather_facts: false
   any_errors_fatal: true
   tags: [addon]
+  pre_tasks:
+    - name: Resolve the rootless deployment environment
+      ansible.builtin.include_role:
+        name: pgcli
+        tasks_from: deploy-env
+      when: pgcli_deploy_rootless | bool
+      tags: [always]
+  become: true
+  become_user: "{{ pgcli_deploy_become_user }}"
+  module_defaults:
+    ansible.builtin.command:
+      chdir: "{{ pgcli_deploy_home }}"
+    ansible.builtin.shell:
+      chdir: "{{ pgcli_deploy_home }}"
+  environment: >-
+    {{ pgcli_deploy_env | combine({'PGCLI_DOWNLOAD_MIRROR': pgcli_download_mirror | default('')}) }}
   vars:
     _redis_cluster_addons: >-
       {{ addon_redis_cluster_addons | default([], true)
@@ -250,6 +308,22 @@
   hosts: ha_cluster
   gather_facts: false
   serial: 1
+  pre_tasks:
+    - name: Resolve the rootless deployment environment
+      ansible.builtin.include_role:
+        name: pgcli
+        tasks_from: deploy-env
+      when: pgcli_deploy_rootless | bool
+      tags: [always]
+  become: true
+  become_user: "{{ pgcli_deploy_become_user }}"
+  module_defaults:
+    ansible.builtin.command:
+      chdir: "{{ pgcli_deploy_home }}"
+    ansible.builtin.shell:
+      chdir: "{{ pgcli_deploy_home }}"
+  environment: >-
+    {{ pgcli_deploy_env | combine({'PGCLI_DOWNLOAD_MIRROR': pgcli_download_mirror | default('')}) }}
   roles:
     - role: pg_ha
       tags: [ha]
@@ -260,6 +334,22 @@
 - name: Patroni HA backup convergence
   hosts: ha_cluster
   gather_facts: false
+  pre_tasks:
+    - name: Resolve the rootless deployment environment
+      ansible.builtin.include_role:
+        name: pgcli
+        tasks_from: deploy-env
+      when: pgcli_deploy_rootless | bool
+      tags: [always]
+  become: true
+  become_user: "{{ pgcli_deploy_become_user }}"
+  module_defaults:
+    ansible.builtin.command:
+      chdir: "{{ pgcli_deploy_home }}"
+    ansible.builtin.shell:
+      chdir: "{{ pgcli_deploy_home }}"
+  environment: >-
+    {{ pgcli_deploy_env | combine({'PGCLI_DOWNLOAD_MIRROR': pgcli_download_mirror | default('')}) }}
   roles:
     - role: pg_ha
       tags: [ha]
@@ -278,6 +368,22 @@
                  if ('ha_cluster' in groups and groups['ha_cluster'] | length > 0)
                  else 'ha_cluster', true) }}
   gather_facts: false
+  pre_tasks:
+    - name: Resolve the rootless deployment environment
+      ansible.builtin.include_role:
+        name: pgcli
+        tasks_from: deploy-env
+      when: pgcli_deploy_rootless | bool
+      tags: [always]
+  become: true
+  become_user: "{{ pgcli_deploy_become_user }}"
+  module_defaults:
+    ansible.builtin.command:
+      chdir: "{{ pgcli_deploy_home }}"
+    ansible.builtin.shell:
+      chdir: "{{ pgcli_deploy_home }}"
+  environment: >-
+    {{ pgcli_deploy_env | combine({'PGCLI_DOWNLOAD_MIRROR': pgcli_download_mirror | default('')}) }}
   roles:
     - role: pg_ha_haproxy
       tags: [ha, haproxy]

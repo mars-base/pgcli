@@ -26,31 +26,32 @@ pgcli_images:
     archive: pgbouncer_v1.25.2-p0.tar
 
 # The host-default config lives in dev, so instances and add-ons without an
-# explicit namespace use /root/.pgcli/dev/pg.yaml. Non-default namespaces get
-# their own directory layer (config, data and backup) and a disjoint PG port
-# range. The run below initializes both: dev through the default config task
-# (pgcli_config_overrides) and default through the extra-namespace task, which
-# only runs when /root/.pgcli/pg.yaml is missing.
-pgcli_namespace_path: /root/.pgcli/dev
+# explicit namespace use <deploy home>/.pgcli/dev/pg.yaml. Non-default
+# namespaces get their own directory layer (config, data and backup) and a
+# disjoint PG port range. The run below initializes both: dev through the
+# default config task (pgcli_config_overrides) and default through the
+# extra-namespace task, which only runs when <deploy home>/.pgcli/pg.yaml is
+# missing.
+pgcli_namespace_path: "{{ pgcli_deploy_home }}/.pgcli/dev"
 
 pgcli_config_overrides:
   namespace: dev
-  base_dir: /data/pg/dev
-  backup_dir: /mnt/backup/pg/dev
+  base_dir: "{{ pgcli_data_root }}/dev"
+  backup_dir: "{{ pgcli_backup_root }}/dev"
   pg_start_port: 36432
   pg_ssh_port: 43201
 
 pgcli_namespaces:
   - name: default
-    path: /root/.pgcli
-    base_dir: /data/pg
-    backup_dir: /mnt/backup/pg
+    path: "{{ pgcli_deploy_home }}/.pgcli"
+    base_dir: "{{ pgcli_data_root }}"
+    backup_dir: "{{ pgcli_backup_root }}"
     pg_start_port: 35432
     pg_ssh_port: 42201
   - name: dev
-    path: /root/.pgcli/dev
-    base_dir: /data/pg/dev
-    backup_dir: /mnt/backup/pg/dev
+    path: "{{ pgcli_deploy_home }}/.pgcli/dev"
+    base_dir: "{{ pgcli_data_root }}/dev"
+    backup_dir: "{{ pgcli_backup_root }}/dev"
     pg_start_port: 36432
     pg_ssh_port: 43201
 

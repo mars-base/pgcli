@@ -1,4 +1,131 @@
 ---
+# ── Rootless deployment account ────────────────────────────────────────────
+# ansible_user only connects and escalates with sudo. The deployment account
+# owns pgcli's state and runs rootless podman. A missing account is created
+# with a nologin shell; existing accounts are left unchanged.
+- name: Bootstrap the rootless deployment account
+  become: true
+  when: pgcli_deploy_rootless | default(false) | bool
+  block:
+    - name: Check for the deployment account
+      ansible.builtin.command: "getent passwd {{ pgcli_deploy_user }}"
+      register: _pgcli_deploy_account
+      changed_when: false
+      failed_when: false
+
+    - name: Create the deployment account
+      ansible.builtin.user:
+        name: "{{ pgcli_deploy_user }}"
+        home: "{{ pgcli_deploy_home }}"
+        shell: /usr/sbin/nologin
+        create_home: true
+        password: "!"
+        state: present
+      when: _pgcli_deploy_account.rc != 0
+
+    # Debian's useradd allocates subordinate ranges automatically. Keep a
+    # fallback for images that disable SUB_UID_COUNT.
+    - name: Ensure the deployment account has a subordinate UID range
+      ansible.builtin.shell: |
+        set -eu
+        user={{ pgcli_deploy_user | quote }}
+        if grep -q "^${user}:" /etc/subuid; then
+          exit 0
+        fi
+        max=$(awk -F: '{ end = $2 + $3; if (end > max) max = end } END { print max + 0 }' /etc/subuid)
+        if [ "$max" -lt 100000 ]; then
+          max=100000
+        fi
+        start=$(( (max + 65535) / 65536 * 65536 ))
+        usermod --add-subuids "$start-$((start + 65535))" "$user"
+        echo added
+      args:
+        executable: /bin/bash
+      register: _pgcli_subuid_add
+      changed_when: "'added' in _pgcli_subuid_add.stdout"
+
+    - name: Ensure the deployment account has a subordinate GID range
+      ansible.builtin.shell: |
+        set -eu
+        user={{ pgcli_deploy_user | quote }}
+        if grep -q "^${user}:" /etc/subgid; then
+          exit 0
+        fi
+        max=$(awk -F: '{ end = $2 + $3; if (end > max) max = end } END { print max + 0 }' /etc/subgid)
+        if [ "$max" -lt 100000 ]; then
+          max=100000
+        fi
+        start=$(( (max + 65535) / 65536 * 65536 ))
+        usermod --add-subgids "$start-$((start + 65535))" "$user"
+        echo added
+      args:
+        executable: /bin/bash
+      register: _pgcli_subgid_add
+      changed_when: "'added' in _pgcli_subgid_add.stdout"
+
+    - name: Read the deployment account entry
+      ansible.builtin.command: "getent passwd {{ pgcli_deploy_user }}"
+      register: _pgcli_deploy_passwd
+      changed_when: false
+
+    - name: Record the deployment account identity
+      ansible.builtin.set_fact:
+        pgcli_deploy_uid: "{{ _pgcli_deploy_passwd.stdout.split(':')[2] }}"
+        pgcli_deploy_home: "{{ _pgcli_deploy_passwd.stdout.split(':')[5] }}"
+        pgcli_deploy_run_dir: "/run/user/{{ _pgcli_deploy_passwd.stdout.split(':')[2] }}"
+
+    # Rootless containers on Linux use host networking. Binding ports below
+    # net.ipv4.ip_unprivileged_port_start still needs privilege, so lower the
+    # floor for the host. The sudoers rule grants exactly that one command and
+    # nothing else.
+    - name: Persist the rootless privileged-port floor
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-pgcli-rootless.conf
+        content: |
+          # Managed by pgcli-ansible: rootless containers use host networking.
+          net.ipv4.ip_unprivileged_port_start=0
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Read the privileged-port floor
+      ansible.builtin.command: sysctl -n net.ipv4.ip_unprivileged_port_start
+      register: _pgcli_port_floor
+      changed_when: false
+
+    - name: Lower the privileged-port floor now
+      ansible.builtin.command: sysctl -w net.ipv4.ip_unprivileged_port_start=0
+      changed_when: true
+      when: _pgcli_port_floor.stdout | int != 0
+
+    - name: Locate the sysctl binary
+      ansible.builtin.shell: command -v sysctl
+      register: _pgcli_sysctl_path
+      changed_when: false
+
+    - name: Allow the deployment account to lift the privileged-port floor
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/pgcli-deploy
+        content: |
+          # Managed by pgcli-ansible. This is the only command the deployment
+          # account may run as root; it cannot run arbitrary commands.
+          {{ pgcli_deploy_user }} ALL=(root) NOPASSWD: {{ _pgcli_sysctl_path.stdout }} -w net.ipv4.ip_unprivileged_port_start=0
+        owner: root
+        group: root
+        mode: "0440"
+        validate: "visudo -cf %s"
+
+    - name: Enable lingering for the deployment account
+      ansible.builtin.command: "loginctl enable-linger {{ pgcli_deploy_user }}"
+      args:
+        creates: "/var/lib/systemd/linger/{{ pgcli_deploy_user }}"
+
+    - name: Wait for the deployment account's runtime bus
+      ansible.builtin.wait_for:
+        path: "{{ pgcli_deploy_run_dir }}/bus"
+        state: present
+        timeout: 30
+
 # Fail fast before installing or loading anything when the offline image
 # server is configured but unusable from this host.
 - name: Verify the offline image source
@@ -20,6 +147,7 @@
       - curl
       - tar
     state: present
+  become: true
   when: _pgcli_install_needed | bool
 
 # When pgcli_install_binary_url is set the pg binary is fetched directly from
@@ -42,13 +170,29 @@
     group: root
     mode: "0755"
     timeout: 60
+  become: true
   when:
     - pgcli_podman_binary_url | length > 0
     - not pgcli_podman_binary.stat.exists
 
+# The launcher keeps per-uid state in /var/tmp/podman-static/<uid>. The first
+# process to run it creates the parent directory; leave it 0755 and every other
+# account silently fails to initialize a rootless store.
+- name: Prepare the shared podman launcher state directory
+  ansible.builtin.file:
+    path: /var/tmp/podman-static
+    state: directory
+    mode: "1777"
+  become: true
+  when: pgcli_deploy_rootless | default(false) | bool
+
 - name: Trigger the podman launcher first-use download
   ansible.builtin.command:
     argv: [/usr/local/bin/podman, --version]
+    chdir: "{{ pgcli_deploy_home }}"
+  become: true
+  become_user: "{{ pgcli_deploy_become_user }}"
+  environment: "{{ pgcli_deploy_env }}"
   when:
     - pgcli_podman_binary_url | length > 0
     - not pgcli_podman_binary.stat.exists
@@ -63,6 +207,7 @@
     owner: root
     group: root
     mode: "0755"
+  become: true
   when:
     - _pgcli_install_needed | bool
     - pgcli_install_script_src is not match('^https?://')
@@ -74,6 +219,7 @@
     owner: root
     group: root
     mode: "0755"
+  become: true
   when:
     - _pgcli_install_needed | bool
     - pgcli_install_script_src is match('^https?://')
@@ -85,6 +231,7 @@
     argv: "{{ [pgcli_install_script_path] + ([pgcli_install_version] if pgcli_install_version | length > 0 else []) + (['--skip-pull'] if (pgcli_install_skip_pull | bool) or (pgcli_images_http_url | length > 0) else []) }}"
   environment:
     INSTALL_DIR: "{{ pgcli_install_path | dirname }}"
+  become: true
   when:
     - _pgcli_install_needed | bool
     - pgcli_install_binary_url | length == 0
@@ -102,6 +249,7 @@
   ansible.builtin.file:
     path: /tmp/pgcli-binary
     state: absent
+  become: true
   when:
     - _pgcli_install_needed | bool
     - _pgcli_binary_is_archive | bool
@@ -111,6 +259,7 @@
     path: /tmp/pgcli-binary
     state: directory
     mode: "0755"
+  become: true
   when:
     - _pgcli_install_needed | bool
     - _pgcli_binary_is_archive | bool
@@ -120,6 +269,7 @@
     url: "{{ pgcli_install_binary_url }}"
     dest: /tmp/pgcli-binary.download
     mode: "0644"
+  become: true
   when:
     - _pgcli_install_needed | bool
     - pgcli_install_binary_url | length > 0
@@ -129,6 +279,7 @@
     src: /tmp/pgcli-binary.download
     dest: /tmp/pgcli-binary
     remote_src: true
+  become: true
   when:
     - _pgcli_install_needed | bool
     - _pgcli_binary_is_archive | bool
@@ -141,6 +292,7 @@
     owner: root
     group: root
     mode: "0755"
+  become: true
   when:
     - _pgcli_install_needed | bool
     - _pgcli_binary_is_archive | bool
@@ -153,6 +305,7 @@
     owner: root
     group: root
     mode: "0755"
+  become: true
   when:
     - _pgcli_install_needed | bool
     - pgcli_install_binary_url | length > 0
@@ -163,6 +316,7 @@
     argv: "{{ [pgcli_install_script_path, '--skip-binary'] + (['--skip-pull'] if (pgcli_install_skip_pull | bool) or (pgcli_images_http_url | length > 0) else []) }}"
   environment:
     INSTALL_DIR: "{{ pgcli_install_path | dirname }}"
+  become: true
   when:
     - _pgcli_install_needed | bool
     - pgcli_install_binary_url | length > 0
@@ -181,65 +335,78 @@
       Check its output and the INSTALL_DIR environment it received.
 
 - name: Load container images from the offline HTTP server
-  ansible.builtin.include_tasks: images.yml
-  when: pgcli_images_http_url | length > 0
+  become: true
+  become_user: "{{ pgcli_deploy_become_user }}"
+  environment: "{{ pgcli_deploy_env }}"
+  block:
+    - name: Load container images from the offline HTTP server
+      ansible.builtin.include_tasks: images.yml
+      when: pgcli_images_http_url | length > 0
 
-- name: Check the pgcli config file
-  ansible.builtin.stat:
-    path: "{{ pgcli_config_path }}"
-  register: pgcli_config_file
+- name: Configure pgcli for the deployment account
+  become: true
+  become_user: "{{ pgcli_deploy_become_user }}"
+  environment: "{{ pgcli_deploy_env }}"
+  block:
+    - name: Check the pgcli config file
+      ansible.builtin.stat:
+        path: "{{ pgcli_config_path }}"
+      register: pgcli_config_file
 
-# `pg config init` refuses to overwrite an existing file, so this runs once.
-- name: Initialize pgcli config
-  ansible.builtin.command:
-    argv:
-      - "{{ pgcli_install_path }}"
-      - config
-      - init
-      - "-o"
-      - "{{ pgcli_config_path }}"
-      - "--namespace"
-      - "{{ pgcli_config.namespace }}"
-      - "--base-dir"
-      - "{{ pgcli_config.base_dir }}"
-      - "--backup-dir"
-      - "{{ pgcli_config.backup_dir }}"
-      - "--pg-start-port"
-      - "{{ pgcli_config.pg_start_port | string }}"
-      - "--pg-ssh-port"
-      - "{{ pgcli_config.pg_ssh_port | string }}"
-    # Confirm the "base-dir/backup-dir is not empty" prompts non-interactively
-    # (e.g. when the config was lost but the data directories survived).
-    stdin: |
-      y
-      y
-  when: not pgcli_config_file.stat.exists
+    # `pg config init` refuses to overwrite an existing file, so this runs once.
+    - name: Initialize pgcli config
+      ansible.builtin.command:
+        argv:
+          - "{{ pgcli_install_path }}"
+          - config
+          - init
+          - "-o"
+          - "{{ pgcli_config_path }}"
+          - "--namespace"
+          - "{{ pgcli_config.namespace }}"
+          - "--base-dir"
+          - "{{ pgcli_config.base_dir }}"
+          - "--backup-dir"
+          - "{{ pgcli_config.backup_dir }}"
+          - "--pg-start-port"
+          - "{{ pgcli_config.pg_start_port | string }}"
+          - "--pg-ssh-port"
+          - "{{ pgcli_config.pg_ssh_port | string }}"
+        chdir: "{{ pgcli_deploy_home }}"
+        # Confirm the "base-dir/backup-dir is not empty" prompts
+        # non-interactively (e.g. when the config was lost but the data
+        # directories survived).
+        stdin: |
+          y
+          y
+      when: not pgcli_config_file.stat.exists
 
-- name: Check additional namespace config files
-  ansible.builtin.stat:
-    path: "{{ item.path | regex_replace('/+$', '') }}/pg.yaml"
-  loop: "{{ pgcli_namespaces | default([]) }}"
-  register: pgcli_namespace_config_files
+    - name: Check additional namespace config files
+      ansible.builtin.stat:
+        path: "{{ item.path | regex_replace('/+$', '') }}/pg.yaml"
+      loop: "{{ pgcli_namespaces | default([]) }}"
+      register: pgcli_namespace_config_files
 
-# Extra namespaces opt into automatic initialization by declaring base_dir.
-# This keeps entries that are intentionally set up by hand (for example
-# crosshost's prod) unchanged.
-- name: Initialize additional namespace configs
-  ansible.builtin.command:
-    argv: >-
-      {{ [pgcli_install_path, 'config', 'init',
-          '-o', (item.item.path | regex_replace('/+$', '')) ~ '/pg.yaml',
-          '--namespace', item.item.name,
-          '--base-dir', item.item.base_dir,
-          '--pg-start-port', (item.item.pg_start_port | default(pgcli_config.pg_start_port)) | string,
-          '--pg-ssh-port', (item.item.pg_ssh_port | default(pgcli_config.pg_ssh_port)) | string]
-         + (['--backup-dir', item.item.backup_dir]
-            if item.item.backup_dir | default('') | length > 0 else []) }}
-    stdin: |
-      y
-      y
-  loop: "{{ pgcli_namespace_config_files.results }}"
-  when:
-    - not item.stat.exists
-    - (((item.item.path | regex_replace('/+$', '')) ~ '/pg.yaml') != pgcli_config_path)
-    - item.item.base_dir | default('') | length > 0
+    # Extra namespaces opt into automatic initialization by declaring base_dir.
+    # This keeps entries that are intentionally set up by hand (for example
+    # crosshost's prod) unchanged.
+    - name: Initialize additional namespace configs
+      ansible.builtin.command:
+        argv: >-
+          {{ [pgcli_install_path, 'config', 'init',
+              '-o', (item.item.path | regex_replace('/+$', '')) ~ '/pg.yaml',
+              '--namespace', item.item.name,
+              '--base-dir', item.item.base_dir,
+              '--pg-start-port', (item.item.pg_start_port | default(pgcli_config.pg_start_port)) | string,
+              '--pg-ssh-port', (item.item.pg_ssh_port | default(pgcli_config.pg_ssh_port)) | string]
+             + (['--backup-dir', item.item.backup_dir]
+                if item.item.backup_dir | default('') | length > 0 else []) }}
+        chdir: "{{ pgcli_deploy_home }}"
+        stdin: |
+          y
+          y
+      loop: "{{ pgcli_namespace_config_files.results }}"
+      when:
+        - not item.stat.exists
+        - (((item.item.path | regex_replace('/+$', '')) ~ '/pg.yaml') != pgcli_config_path)
+        - item.item.base_dir | default('') | length > 0

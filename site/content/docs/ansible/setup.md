@@ -11,9 +11,10 @@ editing it. The live copies are ignored by `ansible/.gitignore`.
 ## Prerequisites
 
 - A Linux or macOS control node with [uv](https://docs.astral.sh/uv/).
-- SSH access to every managed host. The examples use `ansible_user=root`;
-  the plays do not escalate privileges, so use an account with the rights the
-  roles need (podman, `/usr/local/bin`, systemd).
+- SSH access to every managed host. The examples use `ansible_user=root`.
+  Rootless deployments keep the SSH account separate from the unprivileged
+  deployment account; the SSH account still needs sudo because host
+  preparation always runs through `become`.
 - Target hosts run a supported Linux distribution; podman is installed by the
   `pgcli` role when missing.
 
@@ -43,6 +44,7 @@ through `uv run` so the pinned environment is used.
 | `group_vars/{minio,silo,rustfs}_s3/main.yml.example` | matching live file | S3-compatible store deployment |
 | `group_vars/addon_<type>_single/main.yml.example` | matching live file | One standalone add-on type (1 host) |
 | `group_vars/addon_<type>_cluster/main.yml.example` | matching live file | One multi-host add-on cluster (3–4 hosts) |
+| `group_vars/rootless/main.yml.example` | `group_vars/rootless/main.yml` | Non-root deployment account for hosts in `[rootless]` |
 
 ```bash
 cp ansible.cfg.example ansible.cfg
@@ -110,6 +112,53 @@ db-03
   `addon_<type>_cluster` (three or four hosts). Declare them all at once —
   their variables are uniquely named and `--limit` picks one group per run.
 
+## Rootless deployment
+
+By default every host runs pgcli and podman as `root`. To run them as an
+unprivileged account, add the host to `[rootless]` and enable it in
+`group_vars/rootless/main.yml`:
+
+```ini
+[rootless]
+db-01
+```
+
+```yaml
+# group_vars/rootless/main.yml
+pgcli_deploy_rootless: true
+pgcli_deploy_user: pgcli
+```
+
+`ansible_user` in `hosts.ini` is only the SSH connection account and must have
+sudo. `pgcli_deploy_user` is the account that owns pgcli's state and runs
+rootless podman; the two may be different accounts. It is created automatically
+when missing, with a nologin shell, locked password, subordinate UID/GID ranges
+and systemd lingering. Packages, the podman launcher and host preparation
+(uidmap, `/etc/containers/policy.json`, userns, SELinux) still run through
+`become` as the SSH account. The `pg` binary stays in `/usr/local/bin/pg`.
+
+Rootless containers use host networking. Binding ports below
+`net.ipv4.ip_unprivileged_port_start` (1024 by default) would fail, so the play
+persists `net.ipv4.ip_unprivileged_port_start=0` in
+`/etc/sysctl.d/99-pgcli-rootless.conf` and writes `/etc/sudoers.d/pgcli-deploy`
+granting the deployment account exactly one command:
+`sysctl -w net.ipv4.ip_unprivileged_port_start=0`. It gets no other sudo rights.
+
+Config, image cache, data and backups move under the account's home:
+
+| Rootful (default) | Rootless |
+|-------------------|----------|
+| `/root/.pgcli/pg.yaml` | `~/.pgcli/pg.yaml` |
+| `/var/cache/pgcli/images` | `~/.cache/pgcli/images` |
+| `/data/pg` | `~/pg/data` |
+| `/mnt/backup/pg` | `~/pg/backup` |
+
+Hosts outside `[rootless]` keep the rootful layout. Rootless autostart uses
+systemd user units; the play enables lingering so they start at boot. Run with
+`--limit rootless` to deploy only those hosts. Rootless podman keeps its own
+per-user image store, so images are not shared with the rootful store on the
+same host.
+
 ## Choose the group by business type
 
 Each business scenario has its own inventory group and its own `group_vars`
@@ -155,7 +204,8 @@ The example file is commented field by field. The blocks that matter most:
 | `pgcli_install_force` | Re-run the installer even when `pg` exists |
 | `pgcli_install_binary_url`, `pgcli_images_http_url`, `pgcli_download_mirror` | Offline/air-gapped install source (the last covers juicefs/zerofs/duckdb binaries and DocumentDB DEBs) |
 | `pgcli_install_path` | Binary path, default `/usr/local/bin/pg` |
-| `pgcli_namespace_path` | Host-default namespace directory; empty uses `/root/.pgcli/pg.yaml` |
+| `pgcli_deploy_rootless`, `pgcli_deploy_user` | Non-root deployment for `[rootless]` hosts (see [Rootless deployment](#rootless-deployment)); defaults stay in `all` |
+| `pgcli_namespace_path` | Host-default namespace directory; empty uses `<deployment home>/.pgcli/pg.yaml` (`/root` rootful, the account's home rootless) |
 | `pgcli_namespaces` | Named namespace → `pg.yaml` directory map |
 | `pgcli_config_defaults` | `pg config init` values: namespace, `base_dir`, `backup_dir`, port ranges |
 | `pgcli_config_overrides` | Per-group namespace override (set by each mode example) |

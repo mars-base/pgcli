@@ -10,6 +10,32 @@
 # stack. Scenario groups take precedence over the role marker groups
 # (ansible_group_priority).
 
+# ── Deployment account ──────────────────────────────────────────────────────
+# Defaults: run everything as root. Hosts that should deploy rootless podman
+# are listed in the [rootless] inventory group; group_vars/rootless/main.yml
+# sets pgcli_deploy_rootless / pgcli_deploy_user for them.
+#
+# ansible_user (hosts.ini) is only the SSH connection account and must have
+# sudo; pgcli_deploy_user is the account that owns pgcli's state and runs
+# rootless podman. They may be different accounts. A missing deploy account is
+# created with a nologin shell on the first run.
+pgcli_deploy_rootless: false
+pgcli_deploy_user: ""
+# Derived home for the deployment account. Override only for nonstandard homes.
+pgcli_deploy_home: "{{ ('/home/' ~ pgcli_deploy_user) if pgcli_deploy_rootless | bool else '/root' }}"
+# Account that runs pgcli and podman: the deploy account for rootless hosts,
+# root for the default rootful layout.
+pgcli_deploy_become_user: "{{ pgcli_deploy_user if pgcli_deploy_rootless | bool else 'root' }}"
+# Runtime directory of the deploy account. The rootless play fills this in from
+# the account's uid after ensuring the account exists; it stays empty for
+# rootful hosts.
+pgcli_deploy_run_dir: ""
+pgcli_deploy_env: >-
+  {{ {'XDG_RUNTIME_DIR': pgcli_deploy_run_dir,
+      'DBUS_SESSION_BUS_ADDRESS': 'unix:path=' ~ pgcli_deploy_run_dir ~ '/bus'}
+     if (pgcli_deploy_rootless | bool and pgcli_deploy_run_dir | length > 0)
+     else {} }}
+
 # Installation goes through scripts/install.sh (GitHub release, not a local
 # build). The installer only runs when pg is missing or force is true.
 # Use an https:// URL to download it on the target host, or a controller path
@@ -65,7 +91,9 @@ pgcli_images_http_url: ""
 
 # Where downloaded tarballs are cached on the target host. Kept across runs so
 # only missing images are transferred again; safe to delete at any time.
-pgcli_images_cache_dir: /var/cache/pgcli/images
+pgcli_images_cache_dir: >-
+  {{ (pgcli_deploy_home ~ '/.cache/pgcli/images')
+     if pgcli_deploy_rootless | bool else '/var/cache/pgcli/images' }}
 
 # true = always re-download and re-load every archive, even when the image
 # tag already exists in podman. Use after replacing an archive on the server.
@@ -75,6 +103,12 @@ pgcli_images_force_load: false
 # matches the tar name produced by `make container-images-export`
 # (`<repo>_<tag>.tar`). Trim entries that are not needed to reduce transfer
 # time; add any custom image tags here as well.
+#
+# Entries without auto_load are core images, loaded during installation.
+# Entries with `auto_load: true` are loaded lazily by the pg_addon role when
+# an add-on of one of their `addons` types is first created; `addons` uses the
+# add-on type name (`-` becomes `_`). This keeps the first deployment short on
+# a host with an empty image store.
 pgcli_images:
   - image: ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0
     archive: pgcli-pg_18-2.58.0.tar
@@ -84,84 +118,171 @@ pgcli_images:
     archive: pgcli-backup_2.58.0.tar
   - image: ghcr.io/mars-base/pgcli/pgcli-minio:20250422221226
     archive: pgcli-minio_20250422221226.tar
+    auto_load: true
+    addons: [minio]
   - image: ghcr.io/mars-base/pgcli/pgcli-mc:20250813083541
     archive: pgcli-mc_20250813083541.tar
+    auto_load: true
+    addons: [minio]
   - image: ghcr.io/mars-base/pgcli/pgcli-rustfs:1.0.0
     archive: pgcli-rustfs_1.0.0.tar
+    auto_load: true
+    addons: [rustfs]
   - image: ghcr.io/mars-base/pgcli/pgcli-influxdb:1.13.1
     archive: pgcli-influxdb_1.13.1.tar
+    auto_load: true
+    addons: [influxdb]
   - image: ghcr.io/mars-base/pgcli/pgcli-influx2tsdb:1.3.2
     archive: pgcli-influx2tsdb_1.3.2.tar
+    auto_load: true
+    addons: [influx2tsdb]
   - image: ghcr.io/mars-base/pgcli/pgcli-documentdb-gateway:1.0.0
     archive: pgcli-documentdb-gateway_1.0.0.tar
+    auto_load: true
+    addons: [documentdb]
   - image: ghcr.io/mars-base/pgcli/pgcli-mongosh:2.14.1
     archive: pgcli-mongosh_2.14.1.tar
+    auto_load: true
+    addons: [documentdb]
   - image: ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine
     archive: predixy_7.0.1-alpine.tar
+    auto_load: true
+    addons: [predixy]
   - image: docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z
     archive: silo_RELEASE.2026-09-16T00-00-00Z.tar
+    auto_load: true
+    addons: [silo]
   - image: docker.io/postgrest/postgrest:v16.3
     archive: postgrest_v16.3.tar
+    auto_load: true
+    addons: [postgrest]
   - image: docker.io/edoburu/pgbouncer:v1.25.2-p0
     archive: pgbouncer_v1.25.2-p0.tar
+    auto_load: true
+    addons: [pgbouncer]
   - image: docker.io/library/haproxy:3.2.23-alpine
     archive: haproxy_3.2.23-alpine.tar
+    auto_load: true
+    addons: [haproxy]
   - image: quay.io/coreos/etcd:v3.5.30
     archive: etcd_v3.5.30.tar
+    auto_load: true
+    addons: [etcd]
   - image: ghcr.io/pgdogdev/pgdog:v0.1.57
     archive: pgdog_v0.1.57.tar
+    auto_load: true
+    addons: [pgdog]
   - image: docker.io/library/redis:7.4.11
     archive: redis_7.4.11.tar
+    auto_load: true
+    addons: [redis]
   - image: docker.io/library/redis:8.10.2
     archive: redis_8.10.2.tar
+    auto_load: true
+    addons: [redis]
   - image: docker.io/dpage/pgadmin4:9.18
     archive: pgadmin4_9.18.tar
+    auto_load: true
+    addons: [pgadmin]
   - image: docker.io/library/nginx:1.27-alpine
     archive: nginx_1.27-alpine.tar
+    auto_load: true
+    addons: [nginx]
   - image: docker.io/dxflrs/garage:v2.4.1
     archive: garage_v2.4.1.tar
+    auto_load: true
+    addons: [garage]
   - image: docker.io/chrislusf/seaweedfs:4.48_large_disk
     archive: seaweedfs_4.48_large_disk.tar
+    auto_load: true
+    addons: [seaweedfs]
   - image: docker.io/grafana/grafana:13.2.4
     archive: grafana_13.2.4.tar
+    auto_load: true
+    addons: [grafana]
   - image: docker.io/prom/prometheus:v3.15.0
     archive: prometheus_v3.15.0.tar
+    auto_load: true
+    addons: [prometheus]
   - image: docker.io/prom/alertmanager:v0.34.1
     archive: alertmanager_v0.34.1.tar
+    auto_load: true
+    addons: [alertmanager]
   - image: docker.io/gitea/gitea:28.1.0
     archive: gitea_28.1.0.tar
+    auto_load: true
+    addons: [gitea]
   - image: ghcr.io/thinkparq/beegfs-mgmtd:8.4.0
     archive: beegfs-mgmtd_8.4.0.tar
+    auto_load: true
+    addons: [beegfs]
   - image: ghcr.io/thinkparq/beegfs-meta:8.4.0
     archive: beegfs-meta_8.4.0.tar
+    auto_load: true
+    addons: [beegfs]
   - image: ghcr.io/thinkparq/beegfs-storage:8.4.0
     archive: beegfs-storage_8.4.0.tar
+    auto_load: true
+    addons: [beegfs]
   - image: docker.io/victoriametrics/victoria-metrics:v1.154.1
     archive: victoria-metrics_v1.154.1.tar
+    auto_load: true
+    addons: [victoriametrics]
   - image: docker.io/victoriametrics/vminsert:v1.154.1-cluster
     archive: vminsert_v1.154.1-cluster.tar
+    auto_load: true
+    addons: [vmcluster]
   - image: docker.io/victoriametrics/vmselect:v1.154.1-cluster
     archive: vmselect_v1.154.1-cluster.tar
+    auto_load: true
+    addons: [vmcluster]
   - image: docker.io/victoriametrics/vmstorage:v1.154.1-cluster
     archive: vmstorage_v1.154.1-cluster.tar
+    auto_load: true
+    addons: [vmcluster]
   - image: docker.io/victoriametrics/victoria-logs:v1.53.0
     archive: victoria-logs_v1.53.0.tar
+    auto_load: true
+    addons: [victorialogs, vlcluster]
   - image: docker.io/victoriametrics/vlagent:v1.53.0
     archive: vlagent_v1.53.0.tar
+    auto_load: true
+    addons: [vlagent]
   - image: docker.io/victoriametrics/vmalert:v1.133.0
     archive: vmalert_v1.133.0.tar
+    auto_load: true
+    addons: [vmalert]
   - image: docker.io/clickhouse/clickhouse-server:26.8.36.3
     archive: clickhouse-server_26.8.36.3.tar
+    auto_load: true
+    addons: [clickhouse, clickhouse_keeper]
   - image: docker.io/apache/kafka:4.4.0
     archive: kafka_4.4.0.tar
+    auto_load: true
+    addons: [kafka]
   - image: docker.io/library/rabbitmq:4.4.0-management
     archive: rabbitmq_4.4.0-management.tar
+    auto_load: true
+    addons: [rabbitmq]
   - image: docker.io/apache/rocketmq:5.5.0
     archive: rocketmq_5.5.0.tar
+    auto_load: true
+    addons: [rocketmq]
   - image: docker.io/prom/node-exporter:v1.12.1
     archive: node-exporter_v1.12.1.tar
+    auto_load: true
+    addons: [nodeexporter]
   - image: docker.io/pgsty/pg_exporter:1.5.0
     archive: pg_exporter_1.5.0.tar
+    auto_load: true
+    addons: [pgexporter]
+
+# Install-time subset: everything the pgcli role must have before instances
+# and add-ons are reconciled. Entries with auto_load: true are excluded here
+# and loaded on demand by the pg_addon role instead.
+_pgcli_images_install: >-
+  {{ (pgcli_images | selectattr('auto_load', 'defined') | rejectattr('auto_load') | list)
+     + (pgcli_images | rejectattr('auto_load', 'defined') | list) }}
 
 pgcli_install_path: /usr/local/bin/pg
 
@@ -175,7 +296,7 @@ pgcli_namespace_path: ""
 pgcli_config_path: >-
   {{ (pgcli_namespace_path | regex_replace('/+$', '') ~ '/pg.yaml')
      if pgcli_namespace_path | default('', true) | length > 0
-     else '/root/.pgcli/pg.yaml' }}
+     else (pgcli_deploy_home ~ '/.pgcli/pg.yaml') }}
 
 # Named namespaces shared by every host. Each entry maps a selector name to the
 # directory that stores its pg.yaml. An instance picks one with
@@ -194,14 +315,22 @@ pgcli_config_path: >-
 # the manual `pg config init -o <path>/pg.yaml` workflow.
 pgcli_namespaces:
   - name: default
-    path: /root/.pgcli
+    path: "{{ pgcli_deploy_home }}/.pgcli"
 
 # Consumed by `pg config init` on the first run only. Editing these later
-# does NOT rewrite an existing pg.yaml.
+# does NOT rewrite an existing pg.yaml. Rootless deployments default to
+# directories under the deployment account's home.
+# Scenario group_vars can build namespaced directories from these roots.
+pgcli_data_root: >-
+  {{ '/data/pg' if not (pgcli_deploy_rootless | bool)
+     else pgcli_deploy_home ~ '/pg/data' }}
+pgcli_backup_root: >-
+  {{ '/mnt/backup/pg' if not (pgcli_deploy_rootless | bool)
+     else pgcli_deploy_home ~ '/pg/backup' }}
 pgcli_config_defaults:
   namespace: default
-  base_dir: /data/pg
-  backup_dir: /mnt/backup/pg
+  base_dir: "{{ pgcli_data_root }}"
+  backup_dir: "{{ pgcli_backup_root }}"
   pg_start_port: 35432
   pg_ssh_port: 42201
 

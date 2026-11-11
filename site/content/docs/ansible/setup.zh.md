@@ -10,8 +10,9 @@ weight: 10
 ## 前置条件
 
 - 一台安装了 [uv](https://docs.astral.sh/uv/) 的 Linux 或 macOS 控制机。
-- 能通过 SSH 访问所有被管理主机。示例使用 `ansible_user=root`；play 不做提权，
-  因此请使用具备角色所需权限的账号（podman、`/usr/local/bin`、systemd）。
+- 能通过 SSH 访问所有被管理主机。示例使用 `ansible_user=root`；rootless 部署把
+  SSH 连接账号与非 root 部署账号分开，连接账号仍需 sudo，因为主机初始化始终
+  通过 `become` 执行。
 - 目标主机为受支持的 Linux 发行版；缺少 podman 时由 `pgcli` 角色安装。
 
 ## 准备运行环境
@@ -40,6 +41,7 @@ playbook，确保使用固定的环境。
 | `group_vars/{minio,silo,rustfs}_s3/main.yml.example` | 对应的正式文件 | S3 兼容存储部署 |
 | `group_vars/addon_<type>_single/main.yml.example` | 对应的正式文件 | 一种单机插件（1 台主机） |
 | `group_vars/addon_<type>_cluster/main.yml.example` | 对应的正式文件 | 一种多主机插件集群（3–4 台主机） |
+| `group_vars/rootless/main.yml.example` | `group_vars/rootless/main.yml` | `[rootless]` 主机的非 root 部署账号 |
 
 ```bash
 cp ansible.cfg.example ansible.cfg
@@ -105,6 +107,49 @@ db-03
   （3 或 4 台）。可以同时声明全部插件分组——变量名互不冲突，每次用 `--limit`
   选择一个。
 
+## Rootless 部署
+
+默认所有主机都以 `root` 运行 pgcli 与 podman。要以非 root 账号运行，把主机加入
+`[rootless]`，并在 `group_vars/rootless/main.yml` 中启用：
+
+```ini
+[rootless]
+db-01
+```
+
+```yaml
+# group_vars/rootless/main.yml
+pgcli_deploy_rootless: true
+pgcli_deploy_user: pgcli
+```
+
+`hosts.ini` 里的 `ansible_user` 只是 SSH 连接账号，需具备 sudo 权限。
+`pgcli_deploy_user` 才是拥有 pgcli 状态并运行 rootless podman 的账号，两者可以
+不同；账号不存在时会自动创建（nologin shell、锁定密码、subuid/subgid 区间、
+systemd lingering）。软件包、podman launcher 与主机初始化（uidmap、
+`/etc/containers/policy.json`、userns、SELinux）仍以 SSH 账号通过 `become`
+执行。`pg` 二进制仍位于 `/usr/local/bin/pg`。
+
+rootless 容器使用 host 网络。绑定低于 `net.ipv4.ip_unprivileged_port_start`
+（默认 1024）的端口会失败，因此 play 会把
+`net.ipv4.ip_unprivileged_port_start=0` 持久化到
+`/etc/sysctl.d/99-pgcli-rootless.conf`，并写入 `/etc/sudoers.d/pgcli-deploy`，
+只授权部署账号执行一条命令：
+`sysctl -w net.ipv4.ip_unprivileged_port_start=0`。除此之外没有任何 sudo 权限。
+
+配置、镜像缓存、数据与备份会移到该账号的 home 下：
+
+| Rootful（默认） | Rootless |
+|-----------------|----------|
+| `/root/.pgcli/pg.yaml` | `~/.pgcli/pg.yaml` |
+| `/var/cache/pgcli/images` | `~/.cache/pgcli/images` |
+| `/data/pg` | `~/pg/data` |
+| `/mnt/backup/pg` | `~/pg/backup` |
+
+`[rootless]` 之外的主机保持 rootful 布局。rootless 自启动使用 systemd user
+unit；play 会启用 lingering，保证开机启动。用 `--limit rootless` 只部署这些主机。
+rootless podman 使用独立的按用户镜像存储，不与该主机上的 rootful 存储共享。
+
 ## 按业务类型选择分组
 
 每种业务场景对应一个 inventory 分组和一个 `group_vars` 文件。**一次只启用一种
@@ -145,7 +190,8 @@ db-03
 | `pgcli_install_force` | 即使 `pg` 已存在也重跑安装脚本 |
 | `pgcli_install_binary_url`、`pgcli_images_http_url`、`pgcli_download_mirror` | 离线/隔离环境的安装源（后者供 juicefs/zerofs/duckdb 二进制与 DocumentDB DEB 使用） |
 | `pgcli_install_path` | 二进制路径，默认 `/usr/local/bin/pg` |
-| `pgcli_namespace_path` | 主机默认 namespace 目录；留空用 `/root/.pgcli/pg.yaml` |
+| `pgcli_deploy_rootless`、`pgcli_deploy_user` | `[rootless]` 主机的非 root 部署（见 [Rootless 部署](#rootless-部署)）；`all` 只保留默认值 |
+| `pgcli_namespace_path` | 主机默认 namespace 目录；留空用 `<部署账号 home>/.pgcli/pg.yaml`（rootful 为 `/root`，rootless 为账号 home） |
 | `pgcli_namespaces` | namespace 名称 → `pg.yaml` 目录的映射 |
 | `pgcli_config_defaults` | `pg config init` 的初始值：namespace、`base_dir`、`backup_dir`、端口段 |
 | `pgcli_config_overrides` | 分组级 namespace 覆盖（各模式示例里设置） |

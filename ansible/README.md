@@ -12,8 +12,10 @@ lives at <https://pgcli.pages.dev/docs/ansible/>.
 ## Requirements
 
 - Control node: Python 3.11+ and [uv](https://docs.astral.sh/uv/)
-- Managed hosts: most mainstream Linux distributions, reachable over SSH (the
-  examples connect as `root`)
+- Managed hosts: most mainstream Linux distributions, reachable over SSH. The
+  examples connect as `root`; rootless deployments keep the SSH account
+  separate from the unprivileged deployment account (see
+  [Rootless deployment](#rootless-deployment)).
 - The playbooks install pgcli and its podman dependency; no manual setup is
   needed on a fresh host
 
@@ -56,6 +58,43 @@ uv run ansible single -m command -a 'pg exec pg_single -c "SELECT version();"'
 ```
 
 Re-running `apply.yaml` is idempotent.
+
+## Rootless deployment
+
+By default every host runs pgcli and podman as `root`. To run them as an
+unprivileged account, put the host in the `[rootless]` inventory group and copy
+`group_vars/rootless/main.yml.example` to `group_vars/rootless/main.yml`:
+
+```ini
+[rootless]
+db-01
+```
+
+```yaml
+# group_vars/rootless/main.yml
+pgcli_deploy_rootless: true
+pgcli_deploy_user: pgcli
+```
+
+`ansible_user` in `hosts.ini` is only the SSH connection account and must have
+sudo. `pgcli_deploy_user` is the account that owns pgcli's state and runs
+rootless podman; the two may be different accounts. It is created automatically
+when missing, with a nologin shell, locked password, subordinate UID/GID ranges
+and systemd lingering. Packages, the podman launcher and host preparation
+(uidmap, `/etc/containers/policy.json`, userns, SELinux) still run through
+`become` as the SSH account.
+
+Rootless containers use host networking. Binding ports below
+`net.ipv4.ip_unprivileged_port_start` (1024 by default) would fail, so the play
+persists `net.ipv4.ip_unprivileged_port_start=0` in
+`/etc/sysctl.d/99-pgcli-rootless.conf` and writes `/etc/sudoers.d/pgcli-deploy`
+granting the deployment account exactly one command:
+`sysctl -w net.ipv4.ip_unprivileged_port_start=0`. It gets no other sudo rights.
+
+Run with `--limit rootless`. Config, image cache, data and backups move under
+the account's home (`~/.pgcli`, `~/.cache/pgcli/images`, `~/pg/data`,
+`~/pg/backup`); `pg` stays in `/usr/local/bin/pg`. Hosts outside `[rootless]`
+keep the rootful layout.
 
 ## Playbooks
 

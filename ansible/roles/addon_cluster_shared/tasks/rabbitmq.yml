@@ -37,6 +37,7 @@
       - "{{ addon_cluster_shared_dir }}/rabbitmq_admin_password"
       - --force
   delegate_to: localhost
+  become: false
   when:
     - inventory_hostname == _addon_cluster_rabbitmq_first_host
     - (_addon_cluster_rmq_secret.json.count | default('0')) != '2'

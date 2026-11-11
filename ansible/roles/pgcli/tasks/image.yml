@@ -4,6 +4,7 @@
 - name: Check whether {{ pgcli_image.image }} is already present
   ansible.builtin.command:
     argv: [podman, image, exists, "{{ pgcli_image.image }}"]
+    chdir: "{{ pgcli_deploy_home }}"
   register: _pgcli_image_present
   changed_when: false
   failed_when: false
@@ -20,4 +21,5 @@
 - name: Load {{ pgcli_image.archive }} into podman
   ansible.builtin.command:
     argv: [podman, load, -i, "{{ pgcli_images_cache_dir }}/{{ pgcli_image.archive }}"]
+    chdir: "{{ pgcli_deploy_home }}"
   when: pgcli_images_force_load | bool or _pgcli_image_present.rc != 0

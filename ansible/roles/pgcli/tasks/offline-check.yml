@@ -31,7 +31,7 @@
     status_code: 200
     timeout: 10
     use_proxy: false
-  loop: "{{ pgcli_images }}"
+  loop: "{{ _pgcli_images_install | default(pgcli_images) }}"
   loop_control:
     label: "{{ item.archive }}"
   register: _pgcli_image_url_checks

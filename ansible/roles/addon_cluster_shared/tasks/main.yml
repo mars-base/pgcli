@@ -10,6 +10,7 @@
     state: directory
     mode: '0700'
   delegate_to: localhost
+  become: false
 
 - name: Generate shared cluster passwords
   tags: [addon]
@@ -18,6 +19,7 @@
     creates: "{{ addon_cluster_shared_dir }}/{{ item }}"
   loop: "{{ addon_cluster_shared_password_files }}"
   delegate_to: localhost
+  become: false
 
 - name: Restrict shared secret permissions
   tags: [addon]
@@ -26,6 +28,7 @@
     mode: '0600'
   loop: "{{ addon_cluster_shared_password_files }}"
   delegate_to: localhost
+  become: false
 
 - name: Generate the shared CA key and certificate
   tags: [addon]
@@ -38,6 +41,7 @@
       -subj "/CN=pgcli-addon-cluster-ca"
     creates: "{{ addon_cluster_shared_dir }}/ca.crt"
   delegate_to: localhost
+  become: false
 
 - name: Write the shared server certificate SAN list
   tags: [addon]
@@ -46,6 +50,7 @@
     content: "subjectAltName={{ addon_cluster_shared_cert_san }}\n"
     mode: '0600'
   delegate_to: localhost
+  become: false
 
 - name: Generate the shared server key and CSR
   tags: [addon]
@@ -57,6 +62,7 @@
       -subj "/CN=pgcli-addon-cluster"
     creates: "{{ addon_cluster_shared_dir }}/server.csr"
   delegate_to: localhost
+  become: false
 
 - name: Sign the shared server certificate
   tags: [addon]
@@ -72,6 +78,7 @@
       -extfile {{ addon_cluster_shared_dir }}/server-san.cnf
     creates: "{{ addon_cluster_shared_dir }}/server.crt"
   delegate_to: localhost
+  become: false
 
 - name: Build the shared chain certificate
   tags: [addon]
@@ -82,6 +89,7 @@
       > {{ addon_cluster_shared_dir }}/server-chain.crt
     creates: "{{ addon_cluster_shared_dir }}/server-chain.crt"
   delegate_to: localhost
+  become: false
 
 - name: Build the shared combined PEM for single-file TLS options
   tags: [addon]
@@ -92,6 +100,7 @@
       > {{ addon_cluster_shared_dir }}/server.pem
     creates: "{{ addon_cluster_shared_dir }}/server.pem"
   delegate_to: localhost
+  become: false
 
 - name: Ensure the shared material directory exists on the member
   tags: [addon]

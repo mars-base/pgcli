@@ -9,9 +9,9 @@
 # must be initialized on every host first with `pg config init -o`.
 pgcli_namespaces:
   - name: dev
-    path: /root/.pgcli
+    path: "{{ pgcli_deploy_home }}/.pgcli"
   - name: prod
-    path: /root/.pgcli/prod
+    path: "{{ pgcli_deploy_home }}/.pgcli/prod"
 
 # Shared S3 repository for instances with backup_target: s3. The endpoint is
 # <private_ip>:<port> of pgcli_backup_s3_host, and its CA is copied directly

@@ -41,6 +41,16 @@ node4 ansible_host=192.0.2.13 private_ip=192.0.2.13
 ansible_user=root
 ansible_port=22
 
+# Rootless podman hosts. Copy group_vars/rootless/main.yml.example to
+# group_vars/rootless/main.yml and set pgcli_deploy_user there. ansible_user
+# (hosts.ini) is only the SSH connection account and must have sudo; the
+# deployment account may be a different, non-root account. It is created with a
+# nologin shell automatically when missing. Run with --limit rootless to deploy
+# only these.
+[rootless]
+node1
+node2
+
 # ── S3 store groups ────────────────────────────────────────────────────────
 # Standalone S3-compatible object store (minio/silo/rustfs) for the pgBackRest
 # s3 backup target; deploy with playbooks/deploy-s3.yaml. Store-type groups

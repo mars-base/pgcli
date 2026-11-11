@@ -7,10 +7,10 @@
 # scope and the rest join. apply.yaml runs the HA play with serial: 1 so this
 # ordering holds.
 
-# The host-default config (pgcli_config_path, /root/.pgcli/pg.yaml). This
-# override sets the namespace it is initialized with; it must match the name of
-# the pgcli_namespaces entry whose path is that same directory. The entry is
-# matched by path/name, not by list position.
+# The host-default config (pgcli_config_path, <deploy home>/.pgcli/pg.yaml).
+# This override sets the namespace it is initialized with; it must match the
+# name of the pgcli_namespaces entry whose path is that same directory. The
+# entry is matched by path/name, not by list position.
 pgcli_config_overrides:
   namespace: ha
 
@@ -21,11 +21,11 @@ pgcli_config_overrides:
 # Data directories and port ranges must not overlap between namespaces.
 pgcli_namespaces:
   - name: ha
-    path: /root/.pgcli
+    path: "{{ pgcli_deploy_home }}/.pgcli"
   - name: ha2
-    path: /root/.pgcli/ha2
-    base_dir: /data/pg-ha2
-    backup_dir: /mnt/backup/pg-ha2
+    path: "{{ pgcli_deploy_home }}/.pgcli/ha2"
+    base_dir: "{{ pgcli_data_root }}/ha2"
+    backup_dir: "{{ pgcli_backup_root }}/ha2"
     pg_start_port: 36432
     pg_ssh_port: 43201
 

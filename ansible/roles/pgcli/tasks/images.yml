@@ -1,22 +1,27 @@
 ---
 # Offline path: load the tarballs exported by `make container-images-export`
 # from pgcli_images_http_url instead of pulling from public registries.
+# `_pgcli_images_to_load` lets the pg_addon role reuse this file for the
+# images of one add-on type; the install role loads the core subset instead.
+- name: Normalize the offline image base URL
+  ansible.builtin.set_fact:
+    _pgcli_images_base_url: "{{ pgcli_images_http_url | regex_replace('/+$', '') }}"
+
 - name: Require podman for offline images
   ansible.builtin.command:
     argv: [podman, --version]
+    chdir: "{{ pgcli_deploy_home }}"
   changed_when: false
 
 - name: Ensure the image cache directory exists
   ansible.builtin.file:
     path: "{{ pgcli_images_cache_dir }}"
     state: directory
-    owner: root
-    group: root
     mode: "0755"
 
 - name: Load images from the offline HTTP server
   ansible.builtin.include_tasks: image.yml
-  loop: "{{ pgcli_images }}"
+  loop: "{{ _pgcli_images_to_load | default(_pgcli_images_install) }}"
   loop_control:
     loop_var: pgcli_image
     label: "{{ pgcli_image.image }}"

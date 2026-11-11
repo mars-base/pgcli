@@ -1,0 +1,27 @@
+---
+# Rootless podman deployments for hosts in the [rootless] inventory group.
+#
+# ansible_user in hosts.ini is only the SSH connection account and must have
+# sudo. pgcli_deploy_user is the account that owns pgcli's state and runs
+# rootless podman; the two may be different accounts. A missing deployment
+# account is created automatically with a nologin shell, locked password,
+# subordinate UID/GID ranges and systemd lingering. The play grants it exactly
+# one sudoers.d command (lowering net.ipv4.ip_unprivileged_port_start) so
+# rootless host-networking containers can bind privileged ports; it has no
+# general sudo.
+#
+# Config, image cache, data and backups live under the account's home:
+#   ~/.pgcli/pg.yaml, ~/.cache/pgcli/images, ~/pg/data, ~/pg/backup
+# The pg binary stays in /usr/local/bin/pg and is installed through sudo.
+#
+# Hosts outside [rootless] keep the rootful defaults from group_vars/all.
+pgcli_deploy_rootless: true
+pgcli_deploy_user: pgcli
+
+# One stand-alone instance on the first rootless host. `host` scopes the entry
+# to that inventory host; other [rootless] members ignore it.
+pgcli_instances:
+  - name: pg_single
+    host: node1
+    state: started
+    autostart: true
