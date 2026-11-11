@@ -41,3 +41,29 @@ pgcli_instances:
     replica_of_host: debian12-02
     state: started
     autostart: true
+
+# Observability stack. node_exporter runs on every host; Prometheus (scraping
+# all four exporters) and Grafana live on the fourth host. Prometheus has no
+# web authentication, so it stays on loopback; Grafana is the exposed UI.
+pgcli_addons:
+  - type: nodeexporter
+    name: nodeexporter
+    state: present
+
+  - type: prometheus
+    name: prometheus
+    host: debian12-04
+    state: present
+    # Recreate so changed scrape params are applied to the running add-on.
+    force: true
+    params:
+      - "--listen=127.0.0.1"
+      - "--scrape"
+      - "node-exporter=192.0.2.10:9100,192.0.2.11:9100,192.0.2.12:9100,192.0.2.13:9100"
+
+  - type: grafana
+    name: grafana
+    host: debian12-04
+    state: present
+    params:
+      - "--listen=0.0.0.0"
