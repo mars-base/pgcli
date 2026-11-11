@@ -493,6 +493,12 @@ func (m *Manager) EnsureDirs() error {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("creating data directory %s: %w", dir, err)
 		}
+		// The image ships /var/lib/postgresql as 1777; this bind mount shadows
+		// it, and the init scripts run as the non-root postgres user, which
+		// must be able to create .pgpass here on first initialization.
+		if err := os.Chmod(dir, os.ModeSticky|0o777); err != nil {
+			return fmt.Errorf("setting permissions on data directory %s: %w", dir, err)
+		}
 		fmt.Printf("-> Data directory ensured: %s\n", dir)
 	}
 
