@@ -1,0 +1,36 @@
+---
+# Observability scenario: four hosts running a mix of PostgreSQL topologies
+# for metrics and log collection.
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit observable
+#
+# The first host runs a stand-alone instance, the second a primary and the
+# third its cross-host read-only replica; the fourth is left for the
+# observability stack itself.
+#
+# Observability group vars define pgcli_instances at group level, so keep the
+# single/samehost/crosshost/instance_addon_mixed scenario groups disabled.
+pgcli_config_overrides:
+  namespace: dev
+
+pgcli_instances:
+  # Stand-alone instance, no replica.
+  - name: pg01
+    host: debian12-01
+    state: started
+    autostart: true
+
+  # Primary with a cross-host replica on debian12-03.
+  - name: pg02
+    host: debian12-02
+    state: started
+    autostart: true
+
+  # Cross-host read-only replica. replica_of_host is the inventory hostname
+  # of the primary; omit it for a same-host replica.
+  - name: pg_primary_ro1
+    host: debian12-03
+    replica_of: pg02
+    replica_of_host: debian12-02
+    state: started
+    autostart: true

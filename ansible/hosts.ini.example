@@ -134,6 +134,20 @@ minio_s3
 # [instance_addon_mixed:vars]
 # ansible_group_priority=20
 
+# ── Observability group ────────────────────────────────────────────────────
+# The four hosts that run the observability stack. Host order is the bootstrap
+# order for clustered components: the add-on play runs serial: 1.
+# Enables pgcli_instances at group level, so keep the other scenario groups
+# disabled while it is active.
+[observable]
+node1
+node2
+node3
+node4
+
+[observable:vars]
+ansible_group_priority=20
+
 # DCS role: hosts that run the shared etcd cluster. Order matters: the first
 # host bootstraps etcd; the rest join it in apply.yaml's serial: 1 add-on play.
 # In the co-located layout these hosts also appear in [ha_cluster] below.
