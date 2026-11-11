@@ -42,6 +42,7 @@ playbook，确保使用固定的环境。
 | `group_vars/addon_<type>_single/main.yml.example` | 对应的正式文件 | 一种单机插件（1 台主机） |
 | `group_vars/addon_<type>_cluster/main.yml.example` | 对应的正式文件 | 一种多主机插件集群（3–4 台主机） |
 | `group_vars/rootless/main.yml.example` | `group_vars/rootless/main.yml` | `[rootless]` 主机的非 root 部署账号 |
+| `group_vars/rootless_ha/main.yml.example` | `group_vars/rootless_ha/main.yml` | 非 root Patroni HA 场景（`[ha_cluster]` 的子组） |
 
 ```bash
 cp ansible.cfg.example ansible.cfg
@@ -152,6 +153,15 @@ rootless 容器使用 host 网络。绑定低于 `net.ipv4.ip_unprivileged_port_
 unit；play 会启用 lingering，保证开机启动。用 `--limit rootless` 只部署这些主机。
 rootless podman 使用独立的按用户镜像存储，不与该主机上的 rootful 存储共享。
 
+非 root 的 Patroni 部署：新增 `[rootless_ha]` 分组，并在 `hosts.ini` 里通过
+`[ha_cluster:children]` 把它设为 `[ha_cluster]` 的子组。子组继承
+`group_vars/ha_cluster` 的 HA 设置，`group_vars/rootless_ha/main.yml` 只覆盖
+namespace、集群和 HAProxy 列表，把它们替换为一个位于账号 home 下的集群。在同主机
+上启用共址 etcd DCS（`[ha_etcd]` 条目设为 `state: present`），然后运行
+`apply.yaml --limit rootless_ha`。etcd、Patroni 成员、S3 备份初始化与 HAProxy
+全部以部署账号运行。若 pgbackup bucket 与其他集群共用，请为本场景的 pgBackRest
+仓库指定独立的 `pgcli_backup_s3_path`。
+
 ## 按业务类型选择分组
 
 每种业务场景对应一个 inventory 分组和一个 `group_vars` 文件。**一次只启用一种
@@ -164,6 +174,7 @@ rootless podman 使用独立的按用户镜像存储，不与该主机上的 roo
 | 主库 + 跨机副本 | `[crosshost]` | `group_vars/crosshost/main.yml` | `apply.yaml --limit crosshost` |
 | 单机实例 + 插件 | `[instance_addon_mixed]` | `group_vars/instance_addon_mixed/main.yml` | `apply.yaml --limit instance_addon_mixed` |
 | Patroni HA 集群 | `[ha_etcd]` + `[ha_cluster]` | `group_vars/ha_etcd/main.yml` + `group_vars/ha_cluster/main.yml` | `apply.yaml --tags addon,ha` |
+| 非 root Patroni HA 集群 | `[rootless_ha]`（`[ha_cluster]` 的子组）+ `[ha_etcd]` | `group_vars/rootless_ha/main.yml` + `group_vars/ha_etcd/main.yml` | `apply.yaml --limit rootless_ha` |
 | S3 兼容备份存储 | `[s3]` 下的 `[minio_s3]` / `[silo_s3]` / `[rustfs_s3]` 之一 | 对应的 `group_vars/<type>_s3/main.yml` | `deploy-s3.yaml` |
 | 单机插件（一种类型） | `[addon_<type>_single]` | `group_vars/addon_<type>_single/main.yml` | `apply.yaml --limit addon_<type>_single --tags addon` |
 | 多主机插件集群 | `[addon_<type>_cluster]` | `group_vars/addon_<type>_cluster/main.yml` | `apply.yaml --limit addon_<type>_cluster --tags addon` |

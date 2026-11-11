@@ -51,6 +51,23 @@ ansible_port=22
 node1
 node2
 
+# Rootless Patroni HA scenario. The group is a child of [ha_cluster], so the
+# HA plays include its hosts and group_vars/rootless_ha overrides the parent's
+# HA settings. Enable the co-located etcd DCS in [ha_etcd] on the same hosts
+# (entries set to state: present) and run:
+#
+#   apply.yaml --limit rootless_ha
+#
+# Keep this group commented unless you run the scenario; it replaces the
+# parent's pgcli_namespaces and pg_ha_clusters/pg_ha_haproxy lists.
+# [rootless_ha]
+# node2
+# node3
+# node4
+#
+# [rootless_ha:vars]
+# ansible_group_priority=20
+
 # ── S3 store groups ────────────────────────────────────────────────────────
 # Standalone S3-compatible object store (minio/silo/rustfs) for the pgBackRest
 # s3 backup target; deploy with playbooks/deploy-s3.yaml. Store-type groups
@@ -131,6 +148,12 @@ minio_s3
 # node2
 # node3
 # node4
+#
+# For the rootless HA scenario, leave the host list above empty and instead
+# make [rootless_ha] a child of this group:
+#
+# [ha_cluster:children]
+# rootless_ha
 
 # ── Add-on groups: standalone (one host) ───────────────────────────────────
 # Variables live in the matching group_vars/addon_<type>_single/main.yml.

@@ -98,6 +98,18 @@ the account's home (`~/.pgcli`, `~/.cache/pgcli/images`, `~/pg/data`,
 `~/pg/backup`); `pg` stays in `/usr/local/bin/pg`. Hosts outside `[rootless]`
 keep the rootful layout.
 
+### Rootless HA
+
+For a non-root Patroni deployment, add a `[rootless_ha]` group and make it a
+child of `[ha_cluster]`, then copy
+`group_vars/rootless_ha/main.yml.example` to `group_vars/rootless_ha/main.yml`.
+The child group turns on the unprivileged account and overrides the parent's
+namespace, cluster and HAProxy lists with one home-based cluster. Enable the
+co-located etcd DCS on the same hosts in `[ha_etcd]` (entries `state: present`)
+and run `uv run ansible-playbook playbooks/apply.yaml --limit rootless_ha`.
+etcd, the Patroni members, backups and HAProxy all run as the deployment
+account.
+
 ## Playbooks
 
 Run every playbook from the repository root with `uv run`.

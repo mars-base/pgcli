@@ -74,6 +74,11 @@
   ansible.builtin.slurp:
     src: "{{ _pg_ha_s3_store_ca_file }}"
   delegate_to: "{{ pgcli_backup_s3_host }}"
+  # The store's TLS directory is under its base_dir, which rootful stores keep
+  # at 0700 root:root. The HA play runs as the (possibly non-root) deployment
+  # account, so read the store copy as root regardless of deployment mode.
+  become: true
+  become_user: root
   register: _pg_ha_s3_store_ca
   failed_when: false
   changed_when: false

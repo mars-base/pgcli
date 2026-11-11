@@ -1,4 +1,24 @@
 ---
+# Offline installs preload only the core images. The HAProxy image is marked
+# auto_load in pgcli_images, so fetch it from the offline server the same way
+# the pg_addon role does before any proxy instance is created.
+- name: Resolve the HAProxy images
+  ansible.builtin.set_fact:
+    _pg_hap_images: >-
+      {{ pgcli_images | selectattr('auto_load', 'defined') | selectattr('auto_load')
+         | selectattr('addons', 'defined')
+         | selectattr('addons', 'contains', 'haproxy') | list }}
+
+- name: Load the HAProxy image from the offline server
+  ansible.builtin.include_role:
+    name: pgcli
+    tasks_from: images
+  vars:
+    _pgcli_images_to_load: "{{ _pg_hap_images }}"
+  when:
+    - pgcli_images_http_url | length > 0
+    - _pg_hap_images | length > 0
+
 - name: Validate the HAProxy configuration
   ansible.builtin.assert:
     that:

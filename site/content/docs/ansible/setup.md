@@ -45,6 +45,7 @@ through `uv run` so the pinned environment is used.
 | `group_vars/addon_<type>_single/main.yml.example` | matching live file | One standalone add-on type (1 host) |
 | `group_vars/addon_<type>_cluster/main.yml.example` | matching live file | One multi-host add-on cluster (3–4 hosts) |
 | `group_vars/rootless/main.yml.example` | `group_vars/rootless/main.yml` | Non-root deployment account for hosts in `[rootless]` |
+| `group_vars/rootless_ha/main.yml.example` | `group_vars/rootless_ha/main.yml` | Non-root Patroni HA scenario (child of `[ha_cluster]`) |
 
 ```bash
 cp ansible.cfg.example ansible.cfg
@@ -161,6 +162,17 @@ systemd user units; the play enables lingering so they start at boot. Run with
 per-user image store, so images are not shared with the rootful store on the
 same host.
 
+For a non-root Patroni deployment, add a `[rootless_ha]` group and make it a
+child of `[ha_cluster]` (`[ha_cluster:children]` in `hosts.ini`). The child
+group inherits the HA settings from `group_vars/ha_cluster` and
+`group_vars/rootless_ha/main.yml` overrides the namespace, cluster and HAProxy
+lists with a single home-based cluster. Enable the co-located etcd DCS on the
+same hosts in `[ha_etcd]` with `state: present`, then run
+`apply.yaml --limit rootless_ha`. etcd, the Patroni members, the S3 backup
+setup and HAProxy all run as the deployment account. Keep the scenario's
+pgBackRest repository under its own `pgcli_backup_s3_path` when the bucket is
+shared with another cluster.
+
 ## Choose the group by business type
 
 Each business scenario has its own inventory group and its own `group_vars`
@@ -174,6 +186,7 @@ but empty so the play patterns still resolve.
 | Primary + cross-host replica | `[crosshost]` | `group_vars/crosshost/main.yml` | `apply.yaml --limit crosshost` |
 | Standalone instance + add-ons | `[instance_addon_mixed]` | `group_vars/instance_addon_mixed/main.yml` | `apply.yaml --limit instance_addon_mixed` |
 | Patroni HA cluster | `[ha_etcd]` + `[ha_cluster]` | `group_vars/ha_etcd/main.yml` + `group_vars/ha_cluster/main.yml` | `apply.yaml --tags addon,ha` |
+| Rootless Patroni HA cluster | `[rootless_ha]` (child of `[ha_cluster]`) + `[ha_etcd]` | `group_vars/rootless_ha/main.yml` + `group_vars/ha_etcd/main.yml` | `apply.yaml --limit rootless_ha` |
 | S3-compatible backup store | one of `[minio_s3]` / `[silo_s3]` / `[rustfs_s3]` under `[s3]` | matching `group_vars/<type>_s3/main.yml` | `deploy-s3.yaml` |
 | Standalone add-on (one type) | `[addon_<type>_single]` | `group_vars/addon_<type>_single/main.yml` | `apply.yaml --limit addon_<type>_single --tags addon` |
 | Multi-host add-on cluster | `[addon_<type>_cluster]` | `group_vars/addon_<type>_cluster/main.yml` | `apply.yaml --limit addon_<type>_cluster --tags addon` |

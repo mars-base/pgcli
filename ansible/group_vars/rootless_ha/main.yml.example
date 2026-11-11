@@ -1,0 +1,63 @@
+---
+# Rootless Patroni HA for hosts in the [rootless_ha] inventory group.
+#
+# Add the hosts to [rootless_ha] and make the group a child of [ha_cluster],
+# then enable the co-located etcd DCS in [ha_etcd] (same hosts, entries set to
+# state: present). group_vars/rootless_ha overrides the parent group's HA
+# settings; everything it does not redefine comes from group_vars/ha_cluster.
+#
+# Full deployment (install, etcd DCS, Patroni members, HAProxy):
+#
+#   cd ansible
+#   uv run ansible-playbook playbooks/apply.yaml --limit rootless_ha
+#
+# Reconcile the DCS, HA members and proxy on already-installed hosts:
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit rootless_ha --tags addon,ha
+pgcli_deploy_rootless: true
+pgcli_deploy_user: pgcli
+
+# Rootless namespaces live under the deployment account's home. The parent
+# group defines a second namespace (ha2) with rootful paths, so replace the
+# list with the single cluster this scenario runs.
+pgcli_namespaces:
+  - name: ha
+    path: "{{ pgcli_deploy_home }}/.pgcli"
+
+# One Patroni cluster; members follow [rootless_ha] order. Use unprivileged
+# ports. The S3 backup settings (pgcli_backup_s3_*) are inherited from
+# group_vars/ha_cluster. When the pgbackup bucket is shared with another
+# cluster, give this scenario its own pgBackRest repository prefix:
+#
+#   pgcli_backup_s3_path: /pgbackrest-rootless
+pg_ha_clusters:
+  - namespace: ha
+    scope: pgcluster
+    members:
+      - ha1
+      - ha2
+      - ha3
+    host_port: 35532
+    restapi_port: 8008
+    dcs_endpoints: "{{ _ha_dcs_endpoints }}"
+    state: started
+    autostart: true
+    extensions:
+      - pg_stat_statements
+
+# HAProxy runs on the first rootless HA host. The haproxy image is marked
+# auto_load, so the role fetches it from the offline server on first use.
+pg_ha_haproxy_host: "{{ groups['rootless_ha'] | first }}"
+pg_ha_haproxy:
+  enabled: true
+  mode: split
+  max_lag: 1MB
+  listen: 0.0.0.0
+  autostart: true
+  clusters:
+    - namespace: ha
+      name: lb-ha
+      rw_port: 5000
+      ro_port: 5001
+      stats_port: 5002
+      state: present

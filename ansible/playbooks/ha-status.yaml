@@ -20,6 +20,25 @@
   hosts: ha_cluster
   gather_facts: false
 
+  pre_tasks:
+    - name: Resolve the rootless deployment environment
+      ansible.builtin.include_role:
+        name: pgcli
+        tasks_from: deploy-env
+      when: pgcli_deploy_rootless | bool
+
+  # pgcli and podman run under the deployment account: root for the default
+  # layout, the unprivileged account for [rootless_ha] hosts. Running `pg` as
+  # the SSH account would report the rootless containers as stopped.
+  become: true
+  become_user: "{{ pgcli_deploy_become_user }}"
+  module_defaults:
+    ansible.builtin.command:
+      chdir: "{{ pgcli_deploy_home }}"
+    ansible.builtin.shell:
+      chdir: "{{ pgcli_deploy_home }}"
+  environment: "{{ pgcli_deploy_env }}"
+
   tasks:
     - name: Read the status of every HA cluster
       ansible.builtin.shell: >-
