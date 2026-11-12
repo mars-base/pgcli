@@ -234,6 +234,69 @@ A single Prometheus add-on scrapes the whole fleet. Size it deliberately:
 - Prometheus has no authentication. Keep `--listen=127.0.0.1` as in the
   example and let Grafana proxy queries, or firewall the port.
 
+### Remote-write long-term example
+
+Add a single-node VictoriaMetrics instance on the observability host and make
+Prometheus push a copy of every sample to it:
+
+```yaml
+  # node4: long-term storage. No auth, so bind loopback only.
+  - type: victoriametrics
+    name: victoriametrics
+    host: node4
+    state: present
+    force: true
+    params:
+      - "--listen=127.0.0.1"
+      - "--retention-months=12"
+
+  - type: prometheus
+    name: prometheus
+    host: node4
+    state: present
+    force: true
+    params:
+      - "--listen=127.0.0.1"
+      - "--alertmanager-url"
+      - "127.0.0.1:9093"
+      # Inventory-derived scrape parameters stay as they are...
+      - "--scrape"
+      - "node-exporter={{ _observable_node_exporter_targets }}"
+      - "--scrape"
+      - "pg={{ _observable_pg_exporter_targets }}"
+      # the rule_files mapping stays as it is...
+      # Full URL; the path is the write endpoint (single-node uses
+      # /api/v1/write; vmcluster's vminsert uses
+      # :8480/insert/0/prometheus/api/v1/write).
+      - "--remote-write-url"
+      - "http://127.0.0.1:8428/api/v1/write"
+      # Optional: batch tuning suggested by VictoriaMetrics under load.
+      - "--remote-write-queue"
+      - "max_samples_per_send=10000"
+      - "--remote-write-queue"
+      - "capacity=20000"
+      - "--remote-write-queue"
+      - "max_shards=30"
+```
+
+Both containers use host networking, so loopback is reachable. `remote_write`
+is a **copy**, not a migration: the local TSDB still retains and serves data
+per its own `--retention`. If you rely on VictoriaMetrics for long-term data,
+shorten Prometheus's `--retention` (for example `7d`) so the local disk does
+not grow without bound. A remote outage only stalls the write queue; it
+replays once the remote returns.
+
+Add `http://127.0.0.1:8428` as a second Prometheus-type data source in Grafana
+to query history beyond the local retention; VictoriaMetrics accepts PromQL.
+Verify the pipeline:
+
+```bash
+# the queue is draining and samples keep flowing
+curl -s 'http://127.0.0.1:9090/api/v1/query?query=prometheus_remote_storage_samples_pending'
+# samples have landed in VictoriaMetrics
+curl -s 'http://127.0.0.1:8428/api/v1/query?query=prometheus_build_info'
+```
+
 ## Alerting rules and routing
 
 Prometheus loads `misc/prometheus/postgres.rules.yml` through the `rule_files`

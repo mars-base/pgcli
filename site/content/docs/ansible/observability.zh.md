@@ -217,6 +217,64 @@ inventory 推导，机群变化时必须更新。
 - Prometheus 没有认证。保持示例中的 `--listen=127.0.0.1` 由 Grafana 代理查询，
   或用防火墙限制端口。
 
+### 远程写长期存储示例
+
+在可观测主机上再加一个单机版 VictoriaMetrics，并让 Prometheus 把样本副本推过去：
+
+```yaml
+  # node4：长期存储。无认证，因此只绑回环。
+  - type: victoriametrics
+    name: victoriametrics
+    host: node4
+    state: present
+    force: true
+    params:
+      - "--listen=127.0.0.1"
+      - "--retention-months=12"
+
+  - type: prometheus
+    name: prometheus
+    host: node4
+    state: present
+    force: true
+    params:
+      - "--listen=127.0.0.1"
+      - "--alertmanager-url"
+      - "127.0.0.1:9093"
+      # 从 inventory 推导的抓取参数保持不变……
+      - "--scrape"
+      - "node-exporter={{ _observable_node_exporter_targets }}"
+      - "--scrape"
+      - "pg={{ _observable_pg_exporter_targets }}"
+      # rule_files 映射保持不变……
+      # 完整 URL，路径就是写入端点（单机版是 /api/v1/write；
+      # vmcluster 的 vminsert 是 :8480/insert/0/prometheus/api/v1/write）。
+      - "--remote-write-url"
+      - "http://127.0.0.1:8428/api/v1/write"
+      # 可选：VictoriaMetrics 建议的高压批量参数。
+      - "--remote-write-queue"
+      - "max_samples_per_send=10000"
+      - "--remote-write-queue"
+      - "capacity=20000"
+      - "--remote-write-queue"
+      - "max_shards=30"
+```
+
+两个容器都使用 host network，所以 loopback 可达。`remote_write` 是**副本**，不是
+迁移：本地 TSDB 仍按自己的 `--retention` 保留并可查询；打算长期依赖 VictoriaMetrics
+时，可把 Prometheus 的 `--retention` 缩短到例如 `7d`，避免本地盘无限增长。远端
+故障只会让写队列积压，恢复后自动重放。
+
+在 Grafana 中把 `http://127.0.0.1:8428` 添加为第二个 Prometheus 类型数据源，即可
+查询超过本地保留期的历史；VictoriaMetrics 兼容 PromQL。验证链路：
+
+```bash
+# 队列在排空、样本持续投递
+curl -s 'http://127.0.0.1:9090/api/v1/query?query=prometheus_remote_storage_samples_pending'
+# 样本已经写入 VictoriaMetrics
+curl -s 'http://127.0.0.1:8428/api/v1/query?query=prometheus_build_info'
+```
+
 ## 告警规则与路由
 
 Prometheus 通过 Prometheus 条目上的 `rule_files` 映射加载
