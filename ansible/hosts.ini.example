@@ -71,6 +71,18 @@ node2
 # [rootless_ha:vars]
 # ansible_group_priority=20
 
+# ── Host firewall ──────────────────────────────────────────────────────────
+# Hosts that receive the nftables ruleset from playbooks/nftables.yaml. The
+# address sets and SSH source list live in group_vars/nftables/main.yml
+# (gitignored; copy the .example file). Run:
+#
+#   uv run ansible-playbook playbooks/nftables.yaml --limit nftables
+[nftables]
+node1
+node2
+node3
+node4
+
 # ── S3 store groups ────────────────────────────────────────────────────────
 # Standalone S3-compatible object store (minio/silo/rustfs) for the pgBackRest
 # s3 backup target; deploy with playbooks/deploy-s3.yaml. Store-type groups

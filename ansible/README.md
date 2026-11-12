@@ -161,6 +161,7 @@ Run every playbook from the repository root with `uv run`.
 | `deploy-s3.yaml` | Deploys a standalone minio/silo/rustfs store as a pgBackRest S3 target | Yes |
 | `ha-status.yaml` | Shows the live Patroni topology and HAProxy endpoints | No |
 | `resources.yaml` | Shows host resources and, per namespace, instances, add-ons and HA status | No |
+| `nftables.yaml` | Applies the host nftables firewall from `group_vars/nftables` (Debian family) | Yes |
 | `passwords.yaml` | Shows the stored credentials of instances, HA clusters and add-ons | No |
 
 ### ping.yaml
@@ -389,12 +390,92 @@ See the [observability guide](https://pgcli.pages.dev/docs/ansible/observability
 and `group_vars/observable/README.md` for the full layout, Grafana import steps
 and verification commands.
 
+## Host firewall
+
+`nftables.yaml` installs nftables on Debian-family hosts and replaces the
+ruleset with a default-drop input policy. New connections are accepted only
+when they match a rule; the default rules allow the `trusted` set (normally the
+first entry in `nftables_sets`) to the pgcli PostgreSQL SQL port and the
+pgBackRest SSH port; the example configuration also opens the obs exporter,
+Grafana and MinIO ports. Add port-scoped rules for add-ons or custom instance
+ports. SSH is handled separately: only
+`nftables_ssh_sources` may establish host SSH connections, and SSH from every
+other source is dropped even when that source is in a set. Loopback,
+established/related traffic, DHCP replies and ICMP are always accepted.
+
+Both lists hold IPv4 CIDRs or individual addresses (a single IP implies
+`/32`) and live in the gitignored `group_vars/nftables/main.yml`.
+`nftables_ssh_sources` must contain at least one entry unless
+`nftables_ssh_allow_all` is true, and should include the control node before
+the first run. The role refuses to apply an empty list otherwise, so a
+misconfiguration cannot lock SSH out by accident. `nftables_ssh_allow_all`
+accepts SSH from any source.
+`nftables_ssh_ports` is a list (default `[22]`), so a host that listens on
+several or non-standard SSH ports can list all of them; override it per host
+in `host_vars/<host>.yml` when only some machines differ.
+
+Add public-cloud or other intranet ranges as extra named sets. The built-in
+`ssh_sources` set comes from `nftables_ssh_sources` and must not be redefined:
+
+```yaml
+nftables_sets:
+  - name: trusted
+    subnet:
+      - 192.168.0.0/16
+  - name: cloud
+    subnet:
+      - 203.0.113.0/24
+  - name: other_dc
+    subnet:
+      - 10.20.0.0/16
+
+nftables_ssh_sources:
+  - 192.168.0.0/16
+
+nftables_rules:
+  - chain: filter_default
+    rules:
+      - ip saddr $trusted tcp dport 35432 counter jump nolimit  # pgcli PostgreSQL SQL
+      - ip saddr $trusted tcp dport 42201 counter jump nolimit  # pgBackRest backup SSH
+      - ip saddr $trusted tcp dport 9100 counter jump nolimit  # node_exporter
+      - ip saddr $trusted tcp dport 9630 counter jump nolimit  # pg_exporter
+      - ip saddr $trusted tcp dport 3000 counter jump nolimit  # Grafana
+      - ip saddr $trusted tcp dport { 19800, 19801 } counter jump nolimit  # MinIO API/console
+      - ip saddr $cloud tcp dport { 35432-35492 } counter jump nolimit
+      - ip saddr $other_dc tcp dport { 42201-42210 } counter jump nolimit
+```
+
+`35432` is the default PostgreSQL SQL port and `42201` the pgcli instance SSH
+port used by pgBackRest. The example also opens node_exporter (`9100`),
+pg_exporter (`9630`), Grafana (`3000`) and the legacy MinIO API/console
+(`19800`, `19801`). Add rules for any other add-on that must be reachable.
+
+Set names must be valid nft identifiers, entries cannot be named `ssh_sources`,
+and a rule that references a set with no entries is skipped. The SSH rules run
+before `nftables_rules`, so an SSH allow rule added there cannot bypass
+`nftables_ssh_sources`; put additional SSH sources in that list instead.
+
+```bash
+cp group_vars/nftables/main.yml.example group_vars/nftables/main.yml
+# edit the set list and the SSH source list, then:
+uv run ansible-playbook playbooks/nftables.yaml --limit nftables
+```
+
+Every host in `[nftables]` receives the ruleset; pgcli containers use host
+networking, so any port opened in the input policy covers instance SQL/SSH,
+exporters and add-ons without forwarding or DNAT rules. Existing SSH sessions
+survive the reload, but new SSH connections are dropped unless the source is in
+`nftables_ssh_sources` or `nftables_ssh_allow_all` is true. Extend
+`nftables_rules` with port-scoped rules for services beyond the ports listed
+above; the role supports the `filter_default`, `filter_forward`,
+`nat_prerouting` and `nat_postrouting` chains.
+
 ## Layout
 
 | Path | Description |
 |---|---|
-| `playbooks/` | Entry points: `apply.yaml`, `ping.yaml`, `resources.yaml`, `deploy-s3.yaml`, `ha-status.yaml`, `passwords.yaml` |
-| `roles/` | `pgcli`, `pg_instance`, `pg_addon`, `pg_daemon`, `pg_ha`, `pg_ha_haproxy`, `pg_s3`, `addon_cluster_shared` |
+| `playbooks/` | Entry points: `apply.yaml`, `ping.yaml`, `resources.yaml`, `deploy-s3.yaml`, `ha-status.yaml`, `nftables.yaml`, `passwords.yaml` |
+| `roles/` | `pgcli`, `pg_instance`, `pg_addon`, `pg_daemon`, `pg_ha`, `pg_ha_haproxy`, `pg_s3`, `addon_cluster_shared`, `nftables` |
 | `group_vars/` | Per-scenario and per-add-on settings; only `main.yml.example` files are tracked |
 | `hosts.ini.example` | Inventory template (`hosts.ini` is gitignored) |
 | `ansible.cfg.example` | Ansible config template (`ansible.cfg` is gitignored) |

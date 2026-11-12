@@ -1,0 +1,63 @@
+---
+# Named address sets for playbooks/nftables.yaml. The first entry is the
+# trusted intranet range used by the default pgcli port rules; add
+# public-cloud or other intranet ranges after it. Entries are IPv4 CIDRs or
+# individual addresses (a /32 is implied). Keep live values in the gitignored
+# main.yml, not here.
+nftables_sets:
+  - name: trusted
+    subnet:
+      - 192.168.0.0/16
+  # - name: cloud
+  #   subnet:
+  #     - 203.0.113.0/24
+  # - name: other_dc
+  #   subnet:
+  #     - 10.20.0.0/16
+
+# Sources allowed to establish host SSH connections. At least one entry is
+# required unless nftables_ssh_allow_all is true; the role refuses to apply an
+# empty list otherwise. Independent of the sets above: a host in nftables_sets
+# still cannot SSH unless it is listed here. Include the Ansible control node.
+nftables_ssh_sources:
+  - 192.168.0.0/16
+
+# Host SSH ports. List every port sshd listens on; hosts with non-standard
+# ports can override the list in host_vars/<host>.yml.
+nftables_ssh_ports:
+  - 22
+
+# Emergency switch: accept SSH from any source, bypassing
+# nftables_ssh_sources. Leave false in normal operation.
+nftables_ssh_allow_all: false
+
+# The role installs nftables and removes the iptables persistence packages so
+# two managers cannot write the ruleset. Set false when the host still relies
+# on iptables-persistent.
+nftables_remove_iptables_persistent: true
+
+# Forwarding and NAT defaults. pgcli containers use host networking, so no
+# forwarding rules are needed for them.
+filter_forward_default_policy: drop
+net_postrouting_default_policy: accept
+
+# Rules from the obs port survey: pgcli PostgreSQL SQL (35432), pgBackRest SSH
+# (42201), node_exporter (9100), pg_exporter (9630), Grafana (3000) and legacy
+# MinIO API/console (19800/19801). Remove the ports your hosts do not run.
+# Overriding nftables_rules replaces the role default. Supported chains:
+# filter_default, filter_forward, nat_prerouting, nat_postrouting. A rule that
+# references a set with no entries is skipped. SSH is handled in the template
+# before these rules, so adding an SSH rule here cannot bypass
+# nftables_ssh_sources.
+nftables_rules:
+  - chain: filter_default
+    rules:
+      - ip saddr $trusted tcp dport 35432 counter jump nolimit  # pgcli PostgreSQL SQL
+      - ip saddr $trusted tcp dport 42201 counter jump nolimit  # pgBackRest backup SSH
+      - ip saddr $trusted tcp dport 9100 counter jump nolimit  # node_exporter
+      - ip saddr $trusted tcp dport 9630 counter jump nolimit  # pg_exporter
+      - ip saddr $trusted tcp dport 3000 counter jump nolimit  # Grafana
+      - ip saddr $trusted tcp dport { 19800, 19801 } counter jump nolimit  # MinIO API/console
+      # Port-scoped access from an extra set:
+      # - ip saddr $cloud tcp dport { 35432-35492 } counter jump nolimit
+      # - ip saddr $other_dc tcp dport { 42201-42210 } counter jump nolimit

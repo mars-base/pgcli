@@ -1,0 +1,152 @@
+{# Emit only non-empty sets. Every rule that references a skipped set is
+   dropped, so an empty set cannot render an invalid ruleset. The built-in
+   ssh_sources set is generated from nftables_ssh_sources. #}
+{% set ns = namespace(defined=[]) %}
+{% set all_sets = nftables_sets + [{'name': 'ssh_sources', 'subnet': nftables_ssh_sources}] %}
+{% for set in all_sets %}
+{% set subnets = [set.subnet] if set.subnet is string else set.subnet %}
+{% if subnets | length > 0 %}
+define {{ set.name }} = {
+{% for ip in subnets %}
+	{{ ip }},
+{% endfor %}
+}
+{% set ns.defined = ns.defined + [set.name] %}
+{% endif %}
+{% endfor %}
+
+{% macro render_rules(chain_name, rules, defined_sets) %}
+{% for item in rules if item.chain == chain_name %}
+{% for rule in item.rules %}
+{% set refs = rule | regex_findall('\\$([A-Za-z_][A-Za-z0-9_]*)') %}
+{% if refs | difference(defined_sets) | length == 0 %}
+		{{ rule }}
+{% endif %}
+{% endfor %}
+{% endfor %}
+{% endmacro %}
+
+table inet _filter
+delete table inet _filter
+table inet _filter {
+	chain INPUT {
+		type filter hook input priority 0; policy accept;
+		counter jump before_input
+		counter jump filter_input
+		counter jump after_input
+		counter jump logging_and_drop
+	}
+
+	chain FORWARD {
+		type filter hook forward priority 0; policy {{ filter_forward_default_policy }};
+		counter jump filter_forward
+	}
+
+	chain OUTPUT {
+		type filter hook output priority 0; policy accept;
+		counter jump filter_output
+	}
+
+	chain before_input {
+		iifname "lo" counter accept
+		ct state established,related counter accept
+		udp sport 67 udp dport 68 counter accept
+		icmp type destination-unreachable counter accept
+		icmp type source-quench counter accept
+		icmp type echo-request counter accept
+		icmp type time-exceeded counter accept
+		icmp type parameter-problem counter accept
+		icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } counter accept
+		counter jump not_local
+	}
+
+	chain filter_input {
+{% if 'ssh_sources' in ns.defined %}
+		ip saddr $ssh_sources tcp dport { {{ nftables_ssh_ports | join(', ') }} } counter accept
+{% endif %}
+{% if nftables_ssh_allow_all | bool %}
+		tcp dport { {{ nftables_ssh_ports | join(', ') }} } counter accept
+{% endif %}
+{% if ('ssh_sources' in ns.defined) and not (nftables_ssh_allow_all | bool) %}
+		tcp dport { {{ nftables_ssh_ports | join(', ') }} } counter drop
+{% endif %}
+		counter jump filter_default
+	}
+
+	chain after_input {
+		fib daddr type multicast counter drop
+		fib daddr type broadcast counter drop
+	}
+
+	chain logging_and_drop {
+		limit rate 3/minute burst 10 packets counter log prefix "nft-drop: "
+		counter drop
+	}
+
+	chain not_local {
+		fib daddr type local counter return
+		fib daddr type multicast counter return
+		fib daddr type broadcast counter return
+		counter drop
+	}
+
+	chain filter_forward {
+{{ render_rules("filter_forward", nftables_rules, ns.defined) }}
+	}
+
+	chain filter_output {
+	}
+
+	chain filter_default {
+{{ render_rules("filter_default", nftables_rules, ns.defined) }}
+	}
+
+	chain deny {
+		counter drop
+	}
+
+	chain nolimit {
+		counter accept
+	}
+
+	chain switch {
+	}
+}
+
+table inet _nat
+delete table inet _nat
+table inet _nat {
+	chain PREROUTING {
+		type nat hook prerouting priority -100; policy accept;
+		counter jump nat_prerouting
+	}
+
+	chain INPUT {
+		type nat hook input priority 100; policy accept;
+		counter jump nat_input
+	}
+
+	chain OUTPUT {
+		type nat hook output priority -100; policy accept;
+		counter jump nat_output
+	}
+
+	chain POSTROUTING {
+		type nat hook postrouting priority 100; policy {{ net_postrouting_default_policy }};
+		counter jump nat_postrouting
+	}
+
+	chain nat_prerouting {
+{{ render_rules("nat_prerouting", nftables_rules, ns.defined) }}
+	}
+
+	chain nat_input {
+	}
+
+	chain nat_output {
+	}
+
+	chain nat_postrouting {
+{{ render_rules("nat_postrouting", nftables_rules, ns.defined) }}
+	}
+}

@@ -1,0 +1,35 @@
+---
+# Manage the host firewall with nftables. Debian-family hosts for now.
+#
+# The ruleset accepts loopback, established/related traffic, DHCP replies,
+# ICMP, SSH from nftables_ssh_sources, and connections matching nftables_rules
+# (by default the `trusted` intranet set to the pgcli PostgreSQL, pgBackRest,
+# exporter, Grafana and MinIO ports). SSH from any other source is dropped,
+# even when that source is in a set; anything else is dropped at the end.
+# pgcli containers use host networking, so this input policy also covers
+# instance SQL/SSH ports, exporters and add-on ports. No forwarding or DNAT
+# rules are needed for them.
+#
+# The set list and SSH sources live in the gitignored
+# group_vars/nftables/main.yml. Copy the .example file first. Hosts are
+# selected by the [nftables] inventory group; override with -e HOSTS=<pattern>
+# and set the variables for those hosts.
+#
+#   cd ansible
+#   uv run ansible-playbook playbooks/nftables.yaml
+#   uv run ansible-playbook playbooks/nftables.yaml -e HOSTS=debian12-01
+#
+# nftables_ssh_sources must contain at least one entry unless
+# nftables_ssh_allow_all is true, and should include the control node; the role
+# refuses to apply an empty list otherwise. Existing SSH sessions survive the
+# reload (established/related is accepted), but new ones are dropped unless the
+# source is in the list or nftables_ssh_allow_all is true. Verify the list
+# before the first run.
+
+- name: Apply nftables host firewall
+  hosts: "{{ HOSTS | default('nftables') }}"
+  gather_facts: true
+  become: true
+  roles:
+    - role: nftables
+      tags: [nftables]
