@@ -225,13 +225,13 @@ import creates a new dashboard.
 
 ### 4. Import the PostgreSQL dashboard
 
-`group_vars/observable/postgresql-pgexporter.json` is the pgcli-maintained
+`misc/grafana/postgresql-pgexporter.json` is the pgcli-maintained
 **Pgcli PostgreSQL** dashboard for the `pg` scrape job. Its UID is
 `pgcli-pgexporter`, so `overwrite: true` updates the same dashboard on every
 import:
 
 ```bash
-jq -n --slurpfile d group_vars/observable/postgresql-pgexporter.json \
+jq -n --slurpfile d misc/grafana/postgresql-pgexporter.json \
   '{dashboard: $d[0], overwrite: true, folderId: 0}' \
   > /tmp/pg-dashboard-import.json
 

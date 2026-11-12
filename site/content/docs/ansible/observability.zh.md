@@ -416,7 +416,7 @@ jq --arg ds Prometheus '
 curl -sS -u "admin:$GF_PASSWORD" -H 'Content-Type: application/json' \
   -X POST "$GRAFANA/api/dashboards/db" --data @/tmp/node-exporter-import.json
 
-jq -n --slurpfile d group_vars/observable/postgresql-pgexporter.json \
+jq -n --slurpfile d misc/grafana/postgresql-pgexporter.json \
   '{dashboard: $d[0], overwrite: true, folderId: 0}' > /tmp/pg-dashboard-import.json
 curl -sS -u "admin:$GF_PASSWORD" -H 'Content-Type: application/json' \
   -X POST "$GRAFANA/api/dashboards/db" --data @/tmp/pg-dashboard-import.json
