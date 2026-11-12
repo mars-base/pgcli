@@ -28,22 +28,22 @@ pgcli_config_overrides:
 pgcli_instances:
   # Stand-alone instance, no replica.
   - name: pg01
-    host: debian12-01
+    host: node1
     state: started
     autostart: true
 
-  # Primary with a cross-host replica on debian12-03.
+  # Primary with a cross-host replica on node3.
   - name: pg02
-    host: debian12-02
+    host: node2
     state: started
     autostart: true
 
   # Cross-host read-only replica. replica_of_host is the inventory hostname
   # of the primary; omit it for a same-host replica.
   - name: pg_primary_ro1
-    host: debian12-03
+    host: node3
     replica_of: pg02
-    replica_of_host: debian12-02
+    replica_of_host: node2
     state: started
     autostart: true
 
@@ -56,7 +56,7 @@ pgcli_instances:
 # the next apply; registration is idempotent.
 pgcli_daemons:
   - name: alertmanager-webhook
-    host: debian12-04
+    host: node4
     state: started
     autostart: true
     dir: "{{ pgcli_deploy_home }}/alertmanager-webhook"
@@ -98,7 +98,7 @@ pgcli_addons:
   # credential without a post-install fetch.
   - type: pgexporter
     name: pgexporter
-    host: debian12-01
+    host: node1
     state: present
     params:
       - "--listen=0.0.0.0"
@@ -109,7 +109,7 @@ pgcli_addons:
 
   - type: pgexporter
     name: pgexporter
-    host: debian12-02
+    host: node2
     state: present
     params:
       - "--listen=0.0.0.0"
@@ -128,7 +128,7 @@ pgcli_addons:
   #   pgexporter_monitor_password: "<output of pg addon password pgexporter>"
   - type: pgexporter
     name: pgexporter
-    host: debian12-03
+    host: node3
     state: present
     dsn: "postgres://pgexporter:{{ pgexporter_monitor_password }}@127.0.0.1:<host-port>/<database>?sslmode=disable"
     params:
@@ -141,7 +141,7 @@ pgcli_addons:
   # the container so a changed receiver URL takes effect.
   - type: alertmanager
     name: alertmanager
-    host: debian12-04
+    host: node4
     state: present
     force: true
     params:
@@ -151,7 +151,7 @@ pgcli_addons:
 
   - type: prometheus
     name: prometheus
-    host: debian12-04
+    host: node4
     state: present
     # Recreate so changed scrape params are applied to the running add-on.
     force: true
@@ -172,7 +172,7 @@ pgcli_addons:
 
   - type: grafana
     name: grafana
-    host: debian12-04
+    host: node4
     state: present
     params:
       - "--listen=0.0.0.0"
