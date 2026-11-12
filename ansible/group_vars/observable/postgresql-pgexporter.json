@@ -2488,23 +2488,15 @@
         "type": "datasource"
       },
       {
-        "allValue": ".*",
-        "current": {
-          "selected": true,
-          "text": [
-            "All"
-          ],
-          "value": [
-            "$__all"
-          ]
-        },
+        "allValue": null,
+        "current": {},
         "datasource": {
           "type": "prometheus",
           "uid": "${datasource}"
         },
         "definition": "label_values(pg_up, instance)",
         "hide": 0,
-        "includeAll": true,
+        "includeAll": false,
         "label": "Instance",
         "multi": true,
         "name": "instance",
@@ -2534,7 +2526,7 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(pg_db_xact_commit, datname)",
+        "definition": "label_values(pg_db_xact_commit{instance=~\"$instance\"}, datname)",
         "hide": 0,
         "includeAll": true,
         "label": "Database",
@@ -2542,7 +2534,7 @@
         "name": "datname",
         "options": [],
         "query": {
-          "query": "label_values(pg_db_xact_commit, datname)",
+          "query": "label_values(pg_db_xact_commit{instance=~\"$instance\"}, datname)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,
@@ -2559,7 +2551,7 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "PostgreSQL / pg_exporter",
+  "title": "Pgcli PostgreSQL",
   "uid": "pgcli-pgexporter",
   "version": 1,
   "weekStart": ""

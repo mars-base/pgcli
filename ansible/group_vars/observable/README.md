@@ -165,7 +165,36 @@ later commands need them. The UID comes from the imported JSON when it has one
 JSON, `overwrite: true` updates the same dashboard in place; without one, each
 import creates a new dashboard.
 
-### 4. Verify through Grafana
+### 4. Import the PostgreSQL dashboard
+
+`group_vars/observable/postgresql-pgexporter.json` is the pgcli-maintained
+**Pgcli PostgreSQL** dashboard for the `pg` scrape job. Its UID is
+`pgcli-pgexporter`, so `overwrite: true` updates the same dashboard on every
+import:
+
+```bash
+jq -n --slurpfile d group_vars/observable/postgresql-pgexporter.json \
+  '{dashboard: $d[0], overwrite: true, folderId: 0}' \
+  > /tmp/pg-dashboard-import.json
+
+curl -sS -u "admin:$GF_PASSWORD" \
+  -H 'Content-Type: application/json' \
+  -X POST "$GRAFANA/api/dashboards/db" \
+  --data @/tmp/pg-dashboard-import.json \
+  | jq -r '"uid=\(.uid) url=\(.url)"'
+```
+
+Run from `ansible/`. The dashboard's `datasource` variable is left unset, so
+Grafana binds it to the default data source — the Prometheus created in step 1.
+If the instance has more than one Prometheus data source, choose the right one
+in the dashboard's data source picker after import.
+
+The **Instance** variable defaults to the first PostgreSQL target rather than
+`All`; **Database** lists only the databases of the selected instance
+(`label_values(pg_db_xact_commit{instance=~"$instance"}, datname)`). Both allow
+multiple selections.
+
+### 5. Verify through Grafana
 
 ```bash
 curl -sS -u "admin:$GF_PASSWORD" \
