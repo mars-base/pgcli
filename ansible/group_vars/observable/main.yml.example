@@ -42,6 +42,17 @@ pgcli_instances:
     state: started
     autostart: true
 
+# Prometheus scrape targets, derived from the inventory. node_exporter runs on
+# every member of the observable group; pg_exporter runs on every host that
+# carries a pgcli instance. Private IPs come from the [all] host vars.
+_observable_node_exporter_targets: >-
+  {{ groups['observable'] | map('extract', hostvars, 'private_ip')
+     | map('regex_replace', '$', ':9100') | join(',') }}
+_observable_pg_exporter_targets: >-
+  {{ pgcli_instances | map(attribute='host') | unique
+     | map('extract', hostvars, 'private_ip')
+     | map('regex_replace', '$', ':9630') | join(',') }}
+
 # Observability stack. node_exporter runs on every host; pg_exporter runs on the
 # three PostgreSQL hosts. Prometheus (scraping both jobs) and Grafana live on
 # the fourth host. Prometheus has no web authentication, so it stays on
@@ -51,9 +62,11 @@ pgcli_addons:
     name: nodeexporter
     state: present
 
-  # Local mode derives the admin DSN and creates the low-privilege monitor role.
-  # The password is pinned from the gitignored secrets.yaml so the standby's
-  # --dsn entry can use the same credential without a post-install fetch.
+  # Local mode derives the admin DSN and creates the low-privilege monitor
+  # role: "pgexporter" by default (override with --monitor-user), granted
+  # pg_monitor with CONNECTION LIMIT 5. The password is pinned from the
+  # gitignored secrets.yaml so the standby's --dsn entry can use the same
+  # credential without a post-install fetch.
   - type: pgexporter
     name: pgexporter
     host: debian12-01
@@ -78,7 +91,10 @@ pgcli_addons:
 
   # A physical standby cannot execute the monitor-role creation SQL. Streaming
   # replication carries the role created for pg02 to this host, so dial it
-  # as-is. Put the generated monitor password in the gitignored
+  # as-is. Keep the default role name "pgexporter" (avoid changing
+  # --monitor-user on the primary): this DSN is pinned to it, and a renamed
+  # role would need to be created on the primary and carried here by
+  # replication. Put the generated monitor password in the gitignored
   # group_vars/observable/secrets.yaml:
   #   pgexporter_monitor_password: "<output of pg addon password pgexporter>"
   - type: pgexporter
@@ -98,9 +114,9 @@ pgcli_addons:
     params:
       - "--listen=127.0.0.1"
       - "--scrape"
-      - "node-exporter=192.0.2.10:9100,192.0.2.11:9100,192.0.2.12:9100,192.0.2.13:9100"
+      - "node-exporter={{ _observable_node_exporter_targets }}"
       - "--scrape"
-      - "pg=192.0.2.10:9630,192.0.2.11:9630,192.0.2.12:9630"
+      - "pg={{ _observable_pg_exporter_targets }}"
 
   - type: grafana
     name: grafana
