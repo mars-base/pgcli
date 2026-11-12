@@ -157,7 +157,7 @@ Run every playbook from the repository root with `uv run`.
 | Playbook | What it does | Modifies hosts |
 |---|---|---|
 | `ping.yaml` | Verifies SSH/Ansible connectivity to every selected host | No |
-| `apply.yaml` | Installs pgcli and reconciles instances, extensions, add-ons and HA clusters | Yes |
+| `apply.yaml` | Installs pgcli and reconciles instances, extensions, add-ons, host daemons and HA clusters | Yes |
 | `deploy-s3.yaml` | Deploys a standalone minio/silo/rustfs store as a pgBackRest S3 target | Yes |
 | `ha-status.yaml` | Shows the live Patroni topology and HAProxy endpoints | No |
 | `resources.yaml` | Shows host resources and, per namespace, instances, add-ons and HA status | No |
@@ -187,8 +187,8 @@ uv run ansible-playbook playbooks/apply.yaml --limit instance_addon_mixed
 uv run ansible-playbook playbooks/apply.yaml --limit ha_cluster
 ```
 
-Tags allow running only part of it: `pgcli`, `instance`, `addon`, `ha`
-(the validation play is tagged `always`). On hosts that already have pgcli
+Tags allow running only part of it: `pgcli`, `instance`, `addon`, `daemon`,
+`ha` (the validation play is tagged `always`). On hosts that already have pgcli
 installed, skip the install play:
 
 ```bash
@@ -350,12 +350,51 @@ the inventory, and run `apply.yaml --limit instance_addon_mixed`. The instance
 play runs before the add-on play, so a local pgbouncer can pool an instance
 created in the same run. Enable only one scenario group at a time.
 
+## Observability
+
+The `observable` scenario turns a group of hosts into a monitored fleet: every
+member gets `nodeexporter`, every host that carries a pgcli instance also gets
+`pgexporter`, and one host runs Prometheus, Alertmanager, Grafana and the
+`alertmanager-webhook` daemon. Instances, add-ons and the daemon are declared
+once in `group_vars/observable/main.yml`, and the scrape targets are derived
+from the inventory's `private_ip` values:
+
+```bash
+cp group_vars/observable/main.yml.example group_vars/observable/main.yml
+# adjust hosts, then put pgexporter_monitor_password in the gitignored
+# group_vars/observable/secrets.yaml
+uv run ansible-playbook playbooks/apply.yaml --limit observable
+```
+
+The example uses four hosts (`node1`-`node4`); place every machine you want
+scraped in `[observable]`. To use a different scenario group name, copy the
+group vars to `group_vars/<name>/main.yml` and update the group referenced by
+`_observable_node_exporter_targets`. After changing alert rules, scrape targets
+or add-on parameters, redeploy the add-ons; daemon-only changes use the
+`daemon` tag:
+
+```bash
+uv run ansible-playbook playbooks/apply.yaml --limit observable --tags addon
+uv run ansible-playbook playbooks/apply.yaml --limit observable --tags daemon
+```
+
+Prometheus loads `misc/prometheus/postgres.rules.yml` (PostgreSQL, node and
+Alertmanager health alerts) and forwards firing alerts to the loopback-only
+Alertmanager, whose receiver appends one JSON line per alert to the webhook
+daemon log. Prometheus, Alertmanager and the webhook bind loopback; Grafana is
+the exposed UI on port 3000. Remote write to a VictoriaMetrics add-on is
+covered in the guide.
+
+See the [observability guide](https://pgcli.pages.dev/docs/ansible/observability/)
+and `group_vars/observable/README.md` for the full layout, Grafana import steps
+and verification commands.
+
 ## Layout
 
 | Path | Description |
 |---|---|
 | `playbooks/` | Entry points: `apply.yaml`, `ping.yaml`, `resources.yaml`, `deploy-s3.yaml`, `ha-status.yaml`, `passwords.yaml` |
-| `roles/` | `pgcli`, `pg_instance`, `pg_addon`, `pg_ha`, `pg_ha_haproxy`, `pg_s3`, `addon_cluster_shared` |
+| `roles/` | `pgcli`, `pg_instance`, `pg_addon`, `pg_daemon`, `pg_ha`, `pg_ha_haproxy`, `pg_s3`, `addon_cluster_shared` |
 | `group_vars/` | Per-scenario and per-add-on settings; only `main.yml.example` files are tracked |
 | `hosts.ini.example` | Inventory template (`hosts.ini` is gitignored) |
 | `ansible.cfg.example` | Ansible config template (`ansible.cfg` is gitignored) |
