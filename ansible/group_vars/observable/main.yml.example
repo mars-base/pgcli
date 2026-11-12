@@ -4,6 +4,11 @@
 #
 #   uv run ansible-playbook playbooks/apply.yaml --limit observable
 #
+# After changing alert rules, scrape targets or add-on parameters, redeploy
+# the add-ons:
+#   uv run ansible-playbook playbooks/apply.yaml --limit observable --tags addon
+# Daemon-only changes (for example the webhook script) use --tags daemon.
+#
 # The first host runs a stand-alone instance, the second a primary and the
 # third its cross-host read-only replica; the fourth is left for the
 # observability stack itself.
