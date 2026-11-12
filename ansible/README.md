@@ -395,16 +395,19 @@ and verification commands.
 `nftables.yaml` installs nftables on Debian-family hosts and replaces the
 ruleset with a default-drop input policy. New connections are accepted only
 when they match a rule; the default rules allow the `trusted` set (normally the
-first entry in `nftables_sets`) to the pgcli PostgreSQL SQL port and the
-pgBackRest SSH port; the example configuration also opens the obs exporter,
-Grafana and MinIO ports. Add port-scoped rules for add-ons or custom instance
-ports. SSH is handled separately: only
+first entry in `nftables_sets`) to the pgcli PostgreSQL SQL, exporter and
+Grafana ports. Ports accessed only between managed machines use the
+`managed_hosts` set: the `[nftables]` host addresses plus any extra IPs. It
+covers pgBackRest SSH (`42201`), etcd client/peer (`2379`, `2380`) and MinIO
+API/console (`19800`, `19801`) in the example. Add port-scoped rules for
+add-ons or custom instance ports. SSH is
+handled separately: only
 `nftables_ssh_sources` may establish host SSH connections, and SSH from every
 other source is dropped even when that source is in a set. Loopback,
 established/related traffic, DHCP replies and ICMP are always accepted.
 
-Both lists hold IPv4 CIDRs or individual addresses (a single IP implies
-`/32`) and live in the gitignored `group_vars/nftables/main.yml`.
+Set entries and SSH sources are IPv4 CIDRs or individual addresses (a single
+IP implies `/32`) and live in the gitignored `group_vars/nftables/main.yml`.
 `nftables_ssh_sources` must contain at least one entry unless
 `nftables_ssh_allow_all` is true, and should include the control node before
 the first run. The role refuses to apply an empty list otherwise, so a
@@ -422,6 +425,8 @@ nftables_sets:
   - name: trusted
     subnet:
       - 192.168.0.0/16
+  - name: managed_hosts
+    subnet: "{{ (groups['nftables'] | map('extract', hostvars, 'private_ip') | list) + ['192.0.2.1'] }}"
   - name: cloud
     subnet:
       - 203.0.113.0/24
@@ -436,19 +441,33 @@ nftables_rules:
   - chain: filter_default
     rules:
       - ip saddr $trusted tcp dport 35432 counter jump nolimit  # pgcli PostgreSQL SQL
-      - ip saddr $trusted tcp dport 42201 counter jump nolimit  # pgBackRest backup SSH
+      - ip saddr $managed_hosts tcp dport 42201 counter jump nolimit  # pgBackRest backup SSH
+      - ip saddr $managed_hosts tcp dport { 2379, 2380 } counter jump nolimit  # etcd client/peer
       - ip saddr $trusted tcp dport 9100 counter jump nolimit  # node_exporter
       - ip saddr $trusted tcp dport 9630 counter jump nolimit  # pg_exporter
       - ip saddr $trusted tcp dport 3000 counter jump nolimit  # Grafana
-      - ip saddr $trusted tcp dport { 19800, 19801 } counter jump nolimit  # MinIO API/console
+      - ip saddr $managed_hosts tcp dport { 19800, 19801 } counter jump nolimit  # MinIO API/console
       - ip saddr $cloud tcp dport { 35432-35492 } counter jump nolimit
       - ip saddr $other_dc tcp dport { 42201-42210 } counter jump nolimit
 ```
 
 `35432` is the default PostgreSQL SQL port and `42201` the pgcli instance SSH
-port used by pgBackRest. The example also opens node_exporter (`9100`),
-pg_exporter (`9630`), Grafana (`3000`) and the legacy MinIO API/console
-(`19800`, `19801`). Add rules for any other add-on that must be reachable.
+port used by pgBackRest. `managed_hosts` is the address list of the hosts in
+`[nftables]` plus any extra IPs that need access, so only managed machines and
+those extra sources can reach managed-only ports such as `42201`, etcd
+client/peer (`2379`, `2380`) and MinIO API/console (`19800`, `19801`); every
+host in that group must define `private_ip` (as in `hosts.ini.example`). The
+example adds `192.0.2.1` as a placeholder extra source. The local bridged test
+environment adds the host's bridge address here because VM-to-VM traffic is
+masqueraded. Ports used by external clients (SQL clients, Grafana, pgAdmin)
+should keep `$trusted` or a dedicated set. The example also opens node_exporter
+(`9100`), pg_exporter (`9630`) and Grafana (`3000`) to `$trusted`. Add rules
+for any other add-on that must be reachable.
+
+The expression `(groups['nftables'] | map('extract', hostvars, 'private_ip') |
+list) + ['192.0.2.1']` is equivalent to reading
+`hostvars[host]['private_ip']` for each host in the group plus the extra IPs;
+it expands at play time and keeps the set in sync with the inventory.
 
 Set names must be valid nft identifiers, entries cannot be named `ssh_sources`,
 and a rule that references a set with no entries is skipped. The SSH rules run

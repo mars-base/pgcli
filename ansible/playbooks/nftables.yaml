@@ -3,9 +3,11 @@
 #
 # The ruleset accepts loopback, established/related traffic, DHCP replies,
 # ICMP, SSH from nftables_ssh_sources, and connections matching nftables_rules
-# (by default the `trusted` intranet set to the pgcli PostgreSQL, pgBackRest,
-# exporter, Grafana and MinIO ports). SSH from any other source is dropped,
-# even when that source is in a set; anything else is dropped at the end.
+# (by default the `trusted` intranet set to the pgcli PostgreSQL, exporter and
+# Grafana ports, and the `managed_hosts` set to managed-only ports such as
+# pgBackRest SSH, etcd client/peer and MinIO). SSH from any other source is
+# dropped, even when that source is in a set; anything else is dropped at the
+# end.
 # pgcli containers use host networking, so this input policy also covers
 # instance SQL/SSH ports, exporters and add-on ports. No forwarding or DNAT
 # rules are needed for them.

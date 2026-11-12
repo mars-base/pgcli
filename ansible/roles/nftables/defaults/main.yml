@@ -24,11 +24,17 @@ nftables_remove_iptables_persistent: true
 # Named address sets. The first entry is the trusted intranet range used by the
 # default pgcli port rules in nftables_rules; add public-cloud or other
 # intranet ranges after it. Entries are IPv4 CIDRs or individual addresses (a
-# /32 is implied). The built-in `ssh_sources` set is generated from
-# nftables_ssh_sources and must not be redefined here. An empty subnet is
-# skipped, so the placeholder below is safe until you fill it in.
+# /32 is implied). `managed_hosts` restricts ports that only managed machines
+# access (pgBackRest SSH, etcd client/peer); fill it in group_vars from the
+# managed hosts, for example with
+# `groups['nftables'] | map('extract', hostvars, 'private_ip') | list`, plus
+# any extra IPs that need access. The built-in `ssh_sources` set is generated
+# from nftables_ssh_sources and must not be redefined here. An empty subnet is
+# skipped, so the placeholders below are safe until you fill them in.
 nftables_sets:
   - name: trusted
+    subnet: []
+  - name: managed_hosts
     subnet: []
   # - name: cloud
   #   subnet:
@@ -44,15 +50,18 @@ nftables_sets:
 # nftables_ssh_sources before these rules run.
 #
 # The default opens the trusted set to the pgcli PostgreSQL SQL port (35432),
-# the instance SSH/pgBackRest port (42201), node_exporter (9100), pg_exporter
-# (9630), Grafana (3000) and the legacy MinIO API/console (19800/19801).
-# Override for custom ports, add-ons or extra sets.
+# node_exporter (9100), pg_exporter (9630) and Grafana (3000). pgBackRest SSH
+# (42201), etcd client/peer (2379/2380) and the legacy MinIO API/console
+# (19800/19801) are only opened to managed_hosts, so only the managed hosts can
+# reach them; those rules are skipped while the set is empty. Override for
+# custom ports, add-ons or extra sets.
 nftables_rules:
   - chain: filter_default
     rules:
       - ip saddr $trusted tcp dport 35432 counter jump nolimit  # pgcli PostgreSQL SQL
-      - ip saddr $trusted tcp dport 42201 counter jump nolimit  # pgBackRest backup SSH
+      - ip saddr $managed_hosts tcp dport 42201 counter jump nolimit  # pgBackRest backup SSH
+      - ip saddr $managed_hosts tcp dport { 2379, 2380 } counter jump nolimit  # etcd client/peer
       - ip saddr $trusted tcp dport 9100 counter jump nolimit  # node_exporter
       - ip saddr $trusted tcp dport 9630 counter jump nolimit  # pg_exporter
       - ip saddr $trusted tcp dport 3000 counter jump nolimit  # Grafana
-      - ip saddr $trusted tcp dport { 19800, 19801 } counter jump nolimit  # MinIO API/console
+      - ip saddr $managed_hosts tcp dport { 19800, 19801 } counter jump nolimit  # MinIO API/console
