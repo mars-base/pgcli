@@ -9,7 +9,7 @@ monitoring stack. The live variables are in `main.yml` (gitignored);
 | `debian12-01` | stand-alone instance `pg01`, `nodeexporter`, `pgexporter` |
 | `debian12-02` | primary `pg02`, `nodeexporter`, `pgexporter` |
 | `debian12-03` | cross-host read-only replica `pg_primary_ro1`, `nodeexporter`, `pgexporter` |
-| `debian12-04` | `nodeexporter`, `prometheus`, `grafana` |
+| `debian12-04` | `nodeexporter`, `prometheus`, `alertmanager`, `grafana`, `alertmanager-webhook` daemon |
 
 `pgcli_addons` is declared at group level here rather than in the `addon_*`
 groups, so one run deploys the whole scenario:
@@ -17,6 +17,14 @@ groups, so one run deploys the whole scenario:
 ```bash
 cd ansible
 uv run ansible-playbook playbooks/apply.yaml --limit observable
+```
+
+The webhook receiver is a host process managed by `pg daemon`, not an add-on.
+Deploy or refresh only that part with the `daemon` tag:
+
+```bash
+cd ansible
+uv run ansible-playbook playbooks/apply.yaml --limit observable --tags daemon
 ```
 
 `nodeexporter` has no `host`, so it runs on every member. `pgexporter` runs on
@@ -54,6 +62,8 @@ take effect — an already-installed add-on ignores changed params otherwise.
 | node_exporter | `http://<host>:9100/metrics` |
 | pg_exporter | `http://<db-host>:9630/metrics` |
 | Prometheus | `http://<prometheus-host>:9090` (loopback only) |
+| Alertmanager | `http://<prometheus-host>:9093` (loopback only) |
+| Alertmanager webhook | `http://127.0.0.1:18801/health` (loopback only) |
 | Grafana | `http://<grafana-host>:3000` |
 
 Confirm both scrape jobs are `up` (run on the Prometheus host, since it binds
@@ -74,6 +84,54 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9630/replica
 ```
 
 The last probe returns `200` on the standby and `404`/non-200 on a primary.
+
+## Alerts and the webhook receiver
+
+Prometheus loads `ansible/misc/prometheus/postgres.rules.yml` through the
+`rule_files` mapping on the Prometheus add-on entry. The `pg_addon` role copies
+it into pgcli's managed rules directory and passes `--rule-file` during
+install. The file contains PostgreSQL, node, and Alertmanager self-monitoring
+rules. Prometheus forwards firing alerts to the loopback-only Alertmanager; its
+only receiver is a webhook.
+
+The receiver is a stdlib-only Python HTTP server started by `pg daemon` on
+`debian12-04`:
+
+| Item | Value |
+|------|-------|
+| Working dir / script | `/home/pgcli/alertmanager-webhook/alertmanager_webhook.py` |
+| Listen | `127.0.0.1:18801` (`POST /alertmanager`, `GET /health`) |
+| Log | `/home/pgcli/alertmanager-webhook/logs/alertmanager-webhook.log` |
+| Rotation | 10 MB, keep 7 |
+| Autostart | enabled (`pg autostart enable --daemon --name alertmanager-webhook`) |
+
+It prints one JSON line per alert and nothing else (access logs are
+suppressed). Check it as the deployment account:
+
+```bash
+ssh debian12-04 'runuser -u pgcli -- /usr/local/bin/pg \
+  -c /home/pgcli/.pgcli/pg.yaml daemon status alertmanager-webhook'
+ssh debian12-04 'runuser -u pgcli -- /usr/local/bin/pg \
+  -c /home/pgcli/.pgcli/pg.yaml daemon logs alertmanager-webhook -n 50'
+ssh debian12-04 'runuser -u pgcli -- /usr/local/bin/pg \
+  -c /home/pgcli/.pgcli/pg.yaml autostart status'
+```
+
+Send a synthetic alert through Alertmanager (it appears in the daemon log after
+the default `group_wait` of 30 seconds):
+
+```bash
+ssh debian12-04 'curl -sS -X POST http://127.0.0.1:9093/api/v2/alerts \
+  -H "Content-Type: application/json" \
+  -d "[{\"labels\":{\"alertname\":\"WebhookTest\",\"severity\":\"warning\"},\"annotations\":{\"summary\":\"test\"}}]"'
+```
+
+To forward alerts to a custom third-party API, implement the HTTP call in
+`deliver()` inside `ansible/misc/webhook/alertmanager_webhook.py`; the function
+docstring shows the `urllib.request` pattern and retry semantics. Keep tokens
+out of the repository (read them from a 0600 file owned by `pgcli`). Rerunning
+the `--tags daemon` command above rewrites the file and restarts the daemon
+when its content changed.
 
 ## Grafana API
 

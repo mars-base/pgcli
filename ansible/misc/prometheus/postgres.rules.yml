@@ -1,0 +1,101 @@
+groups:
+  - name: postgres
+    rules:
+      - alert: PgDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL {{ $labels.instance }} is unreachable"
+          description: "pg_up has been 0 for over a minute; the exporter cannot reach its database."
+
+      - alert: PgReplicaReplayLag
+        expr: max by (instance) (pg_repl_replay_lag) > 30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Replica of {{ $labels.instance }} is lagging"
+          description: "Replay lag has exceeded 30s for 5m (current {{ $value }}s)."
+
+      - alert: PgReplayPaused
+        expr: pg_is_wal_replay_paused == 1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "WAL replay is paused on {{ $labels.instance }}"
+
+      - alert: PgConnectionsHigh
+        expr: sum by (instance, job) (pg_db_numbackends) / pg_setting_max_connections > 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Connections on {{ $labels.instance }} above 80% of max_connections"
+          description: "Current ratio: {{ $value | humanizePercentage }}."
+
+      - alert: PgIdleInTransaction
+        expr: max by (instance) (pg_activity_max_tx_duration{state=~"idle in transaction.*"}) > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Long idle-in-transaction session on {{ $labels.instance }}"
+          description: "The oldest idle-in-transaction session has been open for more than 5 minutes."
+
+      - alert: PgDeadlocks
+        expr: increase(pg_db_deadlocks[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Deadlocks detected on {{ $labels.instance }}"
+          description: "{{ $value | humanize }} deadlock(s) in the last 5 minutes."
+
+      - alert: PgArchiverFailing
+        expr: increase(pg_archiver_failed_count[10m]) > 0 and on(instance) pg_setting_archive_mode > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "WAL archiving is failing on {{ $labels.instance }}"
+          description: "The archiver reported failures in the last 10 minutes."
+
+  - name: node
+    rules:
+      - alert: ScrapeTargetDown
+        expr: up{job=~"pg|node-exporter"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} target {{ $labels.instance }} is down"
+          description: "Prometheus has failed to scrape this target for 2 minutes."
+
+      - alert: NodeFilesystemLow
+        expr: (node_filesystem_avail_bytes{fstype=~"ext4|xfs"} / node_filesystem_size_bytes{fstype=~"ext4|xfs"}) < 0.15
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Filesystem {{ $labels.mountpoint }} on {{ $labels.instance }} is almost full"
+          description: "Less than 15% free for 10 minutes."
+
+      - alert: NodeFilesystemReadonly
+        expr: node_filesystem_readonly{fstype=~"ext4|xfs"} == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Filesystem {{ $labels.mountpoint }} on {{ $labels.instance }} is read-only"
+
+  - name: alertmanager
+    rules:
+      - alert: AlertmanagerConfigReloadFailed
+        expr: alertmanager_config_last_reload_successful == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Alertmanager on {{ $labels.instance }} failed to reload its config"

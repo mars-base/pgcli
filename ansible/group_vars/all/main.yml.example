@@ -452,3 +452,36 @@ pgcli_instances: >-
 pgcli_addons: >-
   {{ lookup('vars', 'addon_' ~ _addon_kind ~ '_addons', default=[])
      if _addon_group | length > 0 else [] }}
+
+# Host processes managed by `pg daemon` (not containers), reconciled by the
+# pg_daemon role before add-ons. Entries without `host` run on every host in
+# the play; `host: <inventory hostname>` scopes one entry to a single host.
+# Each entry accepts:
+#   name, host, state (started|stopped|absent), autostart,
+#   dir (default: the deployment home), log_file (relative paths resolve
+#   under dir; empty keeps the pgcli default), log_max_size (for example 10M),
+#   log_rotate_daily (bool), log_keep (default 7),
+#   files (flat filename -> content, written under dir with mode 0640),
+#   command (argv; command[0] must be an absolute path).
+# The daemon runs as the deployment account, so its pg.yaml and home are the
+# same ones used for instances and add-ons.
+#
+# Example: a loopback webhook receiver on one host.
+#
+# pgcli_daemons:
+#   - name: alertmanager-webhook
+#     host: debian12-04
+#     state: started
+#     autostart: true
+#     dir: "{{ pgcli_deploy_home }}/alertmanager-webhook"
+#     log_file: logs/webhook.log
+#     log_max_size: 10M
+#     log_keep: 7
+#     files:
+#       webhook.py: "{{ lookup('file', playbook_dir ~ '/../misc/webhook/webhook.py') }}"
+#     command:
+#       - /usr/bin/python3
+#       - "{{ pgcli_deploy_home }}/alertmanager-webhook/webhook.py"
+#       - "--listen"
+#       - "127.0.0.1:18801"
+pgcli_daemons: []

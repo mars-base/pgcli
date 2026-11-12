@@ -11,11 +11,12 @@
       - addon.params is not defined or (addon.params is sequence and addon.params is not string and addon.params is not mapping)
       - addon.args is not defined or (addon.args is sequence and addon.args is not string and addon.args is not mapping)
       - addon.conf is not defined or addon.conf is string
+      - addon.rule_files is not defined or addon.rule_files is mapping
     fail_msg: >-
       Each pgcli_addons entry needs type plus either name (top-level),
       instance (instance-scoped), or pg_name (remote PgBouncer/PostgREST),
-      and state present|absent. params and args must be lists and conf must be
-      a string.
+      and state present|absent. params and args must be lists, conf must be a
+      string, and rule_files must be a mapping of filenames to contents.
 
 - name: Resolve the add-on key
   ansible.builtin.set_fact:
@@ -99,6 +100,39 @@
       {{ (pgcli_config_path | dirname) ~ '/addons/' ~ addon.type ~ '-'
          ~ (_addon_key_name | regex_replace('[^A-Za-z0-9_.-]', '_')) ~ '.conf' }}
 
+- name: Resolve the inline rule files
+  ansible.builtin.set_fact:
+    _addon_rule_files: "{{ addon.rule_files | default({}) }}"
+    _addon_rule_prefix: >-
+      {{ (pgcli_config_path | dirname) ~ '/addons/' ~ addon.type ~ '-'
+         ~ (_addon_key_name | regex_replace('[^A-Za-z0-9_.-]', '_')) ~ '-' }}
+
+- name: Validate the inline rule files
+  ansible.builtin.assert:
+    that:
+      - _addon_rule_files is mapping
+      - (_addon_rule_files | length == 0) or addon.type == 'prometheus'
+      - (_addon_rule_files | dict2items | map(attribute='key')
+         | map('regex_replace', '[^A-Za-z0-9_.-]', '_') | unique | length)
+        == (_addon_rule_files | length)
+      - (_addon_rule_files | dict2items | map(attribute='value')
+         | select('string') | list | length) == (_addon_rule_files | length)
+    fail_msg: >-
+      rule_files is supported by prometheus only, must be a mapping of
+      filenames to source paths on the controller, and filenames must stay
+      unique after sanitising.
+
+- name: Resolve the inline rule file paths
+  ansible.builtin.set_fact:
+    _addon_rule_paths: >-
+      {{ _addon_rule_files | dict2items | map(attribute='key')
+         | map('regex_replace', '[^A-Za-z0-9_.-]', '_')
+         | map('regex_replace', '^', _addon_rule_prefix) | list }}
+
+- name: Resolve the inline rule file arguments
+  ansible.builtin.set_fact:
+    _addon_rule_args: "{{ (['--rule-file'] | product(_addon_rule_paths) | list) | flatten }}"
+
 - name: Validate the inline add-on config
   ansible.builtin.assert:
     that:
@@ -116,7 +150,7 @@
     mode: '0700'
   when:
     - _addon_state == 'present'
-    - _addon_conf_content | length > 0
+    - (_addon_conf_content | length > 0) or (_addon_rule_files | length > 0)
 
 - name: Write the inline add-on config
   ansible.builtin.copy:
@@ -127,11 +161,30 @@
     - _addon_state == 'present'
     - _addon_conf_content | length > 0
 
+- name: Write the inline add-on rule files
+  ansible.builtin.copy:
+    src: "{{ item.value }}"
+    dest: "{{ _addon_rule_prefix }}{{ item.key | regex_replace('[^A-Za-z0-9_.-]', '_') }}"
+    mode: '0600'
+  loop: "{{ _addon_rule_files | dict2items }}"
+  when:
+    - _addon_state == 'present'
+    - _addon_rule_files | length > 0
+
 - name: Remove the inline add-on config
   ansible.builtin.file:
     path: "{{ _addon_conf_path }}"
     state: absent
   when: _addon_state == 'absent'
+
+- name: Remove the inline add-on rule files
+  ansible.builtin.file:
+    path: "{{ _addon_rule_prefix }}{{ item.key | regex_replace('[^A-Za-z0-9_.-]', '_') }}"
+    state: absent
+  loop: "{{ _addon_rule_files | dict2items }}"
+  when:
+    - _addon_state == 'absent'
+    - _addon_rule_files | length > 0
 
 - name: Resolve add-on facts
   ansible.builtin.set_fact:
@@ -150,6 +203,7 @@
          + _addon_dsn_args
          + (['--force'] if _addon_force | bool else [])
          + (_addon_params | map('string') | list)
+         + _addon_rule_args
          + (['--conf-file', _addon_conf_path] if _addon_conf_content | length > 0 else [])
          + (addon.args | default([]) | map('string') | list) }}
   no_log: "{{ _addon_params_carry_monitor_password | bool }}"

@@ -90,6 +90,28 @@
     - role: pg_instance
       tags: [instance]
 
+- name: Host daemons
+  hosts: all
+  gather_facts: false
+  become: true
+  become_user: "{{ pgcli_deploy_become_user }}"
+  module_defaults:
+    ansible.builtin.command:
+      chdir: "{{ pgcli_deploy_home }}"
+    ansible.builtin.shell:
+      chdir: "{{ pgcli_deploy_home }}"
+  environment: "{{ pgcli_deploy_env }}"
+  pre_tasks:
+    - name: Resolve the rootless deployment environment
+      ansible.builtin.include_role:
+        name: pgcli
+        tasks_from: deploy-env
+      when: pgcli_deploy_rootless | bool
+      tags: [always]
+  roles:
+    - role: pg_daemon
+      tags: [daemon]
+
 - name: Add-ons
   hosts: all
   gather_facts: false

@@ -42,6 +42,30 @@ pgcli_instances:
     state: started
     autostart: true
 
+# Host process managed by `pg daemon` (not a container). The receiver appends
+# one JSON line per Alertmanager alert to its daemon log:
+#   /home/pgcli/alertmanager-webhook/logs/alertmanager-webhook.log
+# It binds loopback only, so keep Alertmanager on the same host. The script
+# lives in ansible/misc/webhook/ and documents how to forward each alert to a
+# custom third-party API. Change the script content to restart the daemon on
+# the next apply; registration is idempotent.
+pgcli_daemons:
+  - name: alertmanager-webhook
+    host: debian12-04
+    state: started
+    autostart: true
+    dir: "{{ pgcli_deploy_home }}/alertmanager-webhook"
+    log_file: logs/alertmanager-webhook.log
+    log_max_size: 10M
+    log_keep: 7
+    files:
+      alertmanager_webhook.py: "{{ lookup('file', playbook_dir ~ '/../misc/webhook/alertmanager_webhook.py') }}"
+    command:
+      - /usr/bin/python3
+      - "{{ pgcli_deploy_home }}/alertmanager-webhook/alertmanager_webhook.py"
+      - "--listen"
+      - "127.0.0.1:18801"
+
 # Prometheus scrape targets, derived from the inventory. node_exporter runs on
 # every member of the observable group; pg_exporter runs on every host that
 # carries a pgcli instance. Private IPs come from the [all] host vars.
@@ -105,6 +129,21 @@ pgcli_addons:
     params:
       - "--listen=0.0.0.0"
 
+  # Alertmanager receives alerts from the rules below. It stays on loopback
+  # (no auth; its silence API is as sensitive as a notification channel). The
+  # pg daemon above is the webhook sink on the same host; Alertmanager uses
+  # host networking, so it reaches the receiver over loopback. force recreates
+  # the container so a changed receiver URL takes effect.
+  - type: alertmanager
+    name: alertmanager
+    host: debian12-04
+    state: present
+    force: true
+    params:
+      - "--listen=127.0.0.1"
+      - "--webhook-url"
+      - "http://127.0.0.1:18801/alertmanager"
+
   - type: prometheus
     name: prometheus
     host: debian12-04
@@ -113,10 +152,18 @@ pgcli_addons:
     force: true
     params:
       - "--listen=127.0.0.1"
+      - "--alertmanager-url"
+      - "127.0.0.1:9093"
       - "--scrape"
       - "node-exporter={{ _observable_node_exporter_targets }}"
       - "--scrape"
       - "pg={{ _observable_pg_exporter_targets }}"
+    # Copied into pgcli's managed rules dir and loaded by the rendered
+    # prometheus.yml via rule_files. The mapping value is the source path on
+    # the controller; keep rule content in a file so Prometheus's own
+    # {{ $labels.* }} templating is never re-rendered by Ansible.
+    rule_files:
+      postgres.rules.yml: "{{ playbook_dir }}/../misc/prometheus/postgres.rules.yml"
 
   - type: grafana
     name: grafana

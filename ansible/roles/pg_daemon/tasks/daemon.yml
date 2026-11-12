@@ -1,0 +1,245 @@
+---
+- name: Validate the daemon spec
+  ansible.builtin.assert:
+    that:
+      - daemon.name is defined
+      - daemon.name is string
+      - daemon.name is match('^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$')
+      - (daemon.state | default('started')) in ['started', 'stopped', 'absent']
+      - daemon.files is not defined or daemon.files is mapping
+      - daemon.files is not defined or
+        ((daemon.files | dict2items | map(attribute='key')
+          | select('match', '^[A-Za-z0-9_.-]+$') | list | length)
+         == (daemon.files | length))
+      - daemon.files is not defined or
+        ('.' not in daemon.files and '..' not in daemon.files)
+      - (daemon.state | default('started')) == 'absent' or
+        (daemon.command is defined and
+         daemon.command is sequence and
+         daemon.command is not string and
+         daemon.command is not mapping and
+         (daemon.command | length) > 0)
+      - (daemon.state | default('started')) == 'absent' or
+        (daemon.command[0] is string and daemon.command[0] is match('^/'))
+    fail_msg: >-
+      pgcli_daemons entries need name and state started|stopped|absent.
+      Started/stopped entries also need an absolute command[0]; files is a
+      mapping of flat filenames (no directory components) to file contents.
+
+- name: Resolve the daemon working directory
+  ansible.builtin.set_fact:
+    _daemon_dir: "{{ (daemon.dir | default(pgcli_deploy_home)) | regex_replace('/+$', '') }}"
+
+- name: Resolve the daemon spec
+  ansible.builtin.set_fact:
+    _daemon_state: "{{ daemon.state | default('started') }}"
+    _daemon_command: "{{ (daemon.command | default([])) | map('string') | list }}"
+    _daemon_files: "{{ daemon.files | default({}) }}"
+    _daemon_log_file: >-
+      {{ '' if ((daemon.log_file | default('')) | length == 0)
+         else (daemon.log_file if (daemon.log_file | default('')) is match('^/')
+               else _daemon_dir ~ '/' ~ daemon.log_file) }}
+    _daemon_log_max_size: "{{ daemon.log_max_size | default('') | string | trim | upper }}"
+    _daemon_log_daily: "{{ daemon.log_rotate_daily | default(false) | bool }}"
+    _daemon_log_keep: "{{ daemon.log_keep | default(7) | int }}"
+    _daemon_autostart: "{{ daemon.autostart | default(true) | bool }}"
+    _daemon_registered: "{{ daemon.name in (_daemon_pgcli_cfg.daemons | default({})) }}"
+    _daemon_current: "{{ (_daemon_pgcli_cfg.daemons | default({})).get(daemon.name, {}) }}"
+
+- name: Validate the daemon log settings
+  ansible.builtin.assert:
+    that:
+      - _daemon_log_max_size is match('^([0-9]+([KMGT]B?)?)?$')
+      - (_daemon_log_keep | int) >= 0
+      - not (daemon.log_keep is defined and
+             (_daemon_log_max_size | length == 0) and
+             not (_daemon_log_daily | bool))
+    fail_msg: >-
+      log_max_size is a size such as 10M or 10485760; log_keep needs
+      log_max_size or log_rotate_daily.
+
+- name: Resolve the daemon log rotation
+  ansible.builtin.set_fact:
+    _daemon_log_size_num: "{{ _daemon_log_max_size | regex_replace('[A-Z]', '') }}"
+    _daemon_log_size_unit: "{{ _daemon_log_max_size | regex_replace('[0-9]', '') }}"
+
+- name: Resolve the daemon log rotation size
+  ansible.builtin.set_fact:
+    _daemon_log_max_bytes: >-
+      {{ ((_daemon_log_size_num | int)
+          * ({'': 1, 'B': 1, 'K': 1024, 'KB': 1024, 'M': 1048576, 'MB': 1048576,
+              'G': 1073741824, 'GB': 1073741824, 'T': 1099511627776,
+              'TB': 1099511627776}[_daemon_log_size_unit]))
+         if (_daemon_log_max_size | length > 0) else 0 }}
+
+- name: Resolve the daemon log retention
+  ansible.builtin.set_fact:
+    _daemon_desired_keep: >-
+      {{ _daemon_log_keep
+         if ((_daemon_log_max_bytes | int) > 0 or _daemon_log_daily | bool)
+         else 0 }}
+
+- name: Read the daemon status
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - daemon
+      - status
+      - "{{ daemon.name }}"
+  register: _daemon_status
+  changed_when: false
+  failed_when: false
+  when: _daemon_registered | bool
+
+- name: Resolve the daemon runtime state
+  ansible.builtin.set_fact:
+    _daemon_running: >-
+      {{ (_daemon_registered | bool)
+         and ((_daemon_status.stdout | default('')) is search('Status:\s+running')) }}
+    _daemon_spec_matches: >-
+      {{ (_daemon_registered | bool)
+         and ((_daemon_current.command | default([])) == _daemon_command)
+         and ((_daemon_current.dir | default('')) == _daemon_dir)
+         and ((_daemon_current.log_file | default('')) == _daemon_log_file)
+         and ((((_daemon_current.log_rotate | default({}, true)) or {}).get('max_size', 0) | int)
+              == (_daemon_log_max_bytes | int))
+         and ((((_daemon_current.log_rotate | default({}, true)) or {}).get('daily', false) | bool)
+              == (_daemon_log_daily | bool))
+         and ((((_daemon_current.log_rotate | default({}, true)) or {}).get('keep', 0) | int)
+              == (_daemon_desired_keep | int)) }}
+
+- name: Create the daemon working directory
+  ansible.builtin.file:
+    path: "{{ _daemon_dir }}"
+    state: directory
+    mode: '0750'
+  when: _daemon_state != 'absent'
+
+- name: Write the daemon files
+  ansible.builtin.copy:
+    content: "{{ item.value }}"
+    dest: "{{ _daemon_dir ~ '/' ~ item.key }}"
+    mode: '0640'
+  loop: "{{ _daemon_files | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: _daemon_file_writes
+  when: _daemon_state != 'absent'
+
+- name: Stop the daemon before re-registering it
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - daemon
+      - stop
+      - "{{ daemon.name }}"
+  when:
+    - _daemon_state != 'absent'
+    - _daemon_registered | bool
+    - not (_daemon_spec_matches | bool)
+    - _daemon_running | bool
+
+- name: Register the daemon
+  ansible.builtin.command:
+    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'daemon', 'add', daemon.name,
+              '--dir', _daemon_dir]
+             + (['--log-file', _daemon_log_file] if (_daemon_log_file | length) > 0 else [])
+             + (['--log-max-size', _daemon_log_max_size] if (_daemon_log_max_size | length) > 0 else [])
+             + (['--log-rotate-daily'] if _daemon_log_daily | bool else [])
+             + (['--log-keep', _daemon_desired_keep | string]
+                if ((_daemon_log_max_bytes | int) > 0 or _daemon_log_daily | bool) else [])
+             + (['--force'] if _daemon_registered | bool else [])
+             + ['--'] + _daemon_command }}"
+  when:
+    - _daemon_state != 'absent'
+    - not (_daemon_registered | bool) or not (_daemon_spec_matches | bool)
+
+- name: Restart the daemon after its files changed
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - daemon
+      - restart
+      - "{{ daemon.name }}"
+  when:
+    - _daemon_state == 'started'
+    - _daemon_spec_matches | bool
+    - _daemon_running | bool
+    - (_daemon_file_writes.changed | default(false)) | bool
+
+- name: Start the daemon
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - daemon
+      - start
+      - "{{ daemon.name }}"
+  register: _daemon_start
+  changed_when: _daemon_start.stdout is not search('already running')
+  when: _daemon_state == 'started'
+
+- name: Stop the daemon
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - daemon
+      - stop
+      - "{{ daemon.name }}"
+  register: _daemon_stop
+  changed_when: _daemon_stop.stdout is not search('is not running')
+  when: _daemon_state == 'stopped'
+
+- name: Enable daemon autostart
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - autostart
+      - enable
+      - "--daemon"
+      - "--name"
+      - "{{ daemon.name }}"
+  when:
+    - _daemon_state != 'absent'
+    - _daemon_autostart | bool
+    - not ((_daemon_current.autostart | default(false)) | bool)
+
+- name: Disable daemon autostart
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - autostart
+      - disable
+      - "--daemon"
+      - "--name"
+      - "{{ daemon.name }}"
+  when:
+    - _daemon_state != 'absent'
+    - not (_daemon_autostart | bool)
+    - (_daemon_current.autostart | default(false)) | bool
+
+- name: Remove the daemon
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - daemon
+      - remove
+      - "{{ daemon.name }}"
+  when:
+    - _daemon_state == 'absent'
+    - _daemon_registered | bool

@@ -1,0 +1,41 @@
+---
+# Reconcile the host processes declared in pgcli_daemons. An entry may set
+# host: <inventory host> to limit it to that host; entries without host run
+# everywhere, matching pgcli_addons and pgcli_instances. The command runs as
+# the deployment account (become_user), so `pg daemon` state stays under that
+# account's pg.yaml and home directory.
+- name: Read pgcli config
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - config
+      - show
+  register: _daemon_config_raw
+  changed_when: false
+
+- name: Parse pgcli config
+  ansible.builtin.set_fact:
+    _daemon_pgcli_cfg: "{{ _daemon_config_raw.stdout | from_yaml }}"
+
+- name: Validate daemon host assignments
+  ansible.builtin.assert:
+    that:
+      - item.host is not defined or item.host in groups['all']
+    fail_msg: >-
+      pgcli_daemons entry {{ item.name | default('?') }} sets host={{
+      item.host | default('') }}, which is not an inventory host.
+  loop: "{{ pgcli_daemons | default([]) }}"
+  loop_control:
+    label: "{{ item.name | default('?') }}"
+
+- name: Reconcile daemons
+  ansible.builtin.include_tasks: daemon.yml
+  loop: >-
+    {{ ((pgcli_daemons | default([])) | selectattr('host', 'defined')
+        | selectattr('host', 'equalto', inventory_hostname) | list)
+       + ((pgcli_daemons | default([])) | rejectattr('host', 'defined') | list) }}
+  loop_control:
+    loop_var: daemon
+    label: "{{ daemon.name | default('?') }}"
