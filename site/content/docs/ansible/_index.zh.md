@@ -25,6 +25,7 @@ pgcli 仓库的 `ansible/` 目录把 CLI 变成声明式部署工具。不必在
 |------|--------------|------|
 | `pg` 二进制、podman、主机配置 | `group_vars/all` 中的 `pgcli_*` 变量 | `pgcli` |
 | PostgreSQL 实例与只读副本 | `pgcli_instances` | `pg_instance` |
+| 主机长驻进程（webhook 等） | `pgcli_daemons` | `pg_daemon` |
 | 插件（etcd、pgbouncer、MinIO 等） | `pgcli_addons` | `pg_addon` |
 | Patroni HA 集群及其 etcd DCS | `pg_ha_clusters`、`pgcli_addons`（etcd） | `pg_ha`、`pg_addon` |
 | HA 集群前置的 HAProxy | `pg_ha_haproxy` | `pg_ha_haproxy` |
@@ -47,17 +48,21 @@ ansible/
 ├── group_vars/
 │   ├── all/main.yml.example        # 全局默认：安装、配置、实例默认值
 │   ├── single/ samehost/ crosshost/  # 每种部署模式一个分组
+│   ├── observable/                   # 机房监控 + 告警场景（含 exporter、Prometheus、Alertmanager）
 │   ├── minio_s3/ silo_s3/ rustfs_s3/ # S3 存储类型
 │   ├── addon_<type>_single/         # 每种单机插件一个分组
 │   ├── addon_<type>_cluster/        # 每种多主机插件集群一个分组
 │   └── ha_etcd/ ha_cluster/          # 共享 DCS 与 Patroni 成员
 ├── host_vars/               # 可选的单主机覆盖
+├── misc/
+│   ├── prometheus/          # Prometheus 告警规则文件
+│   └── webhook/             # Alertmanager webhook 接收端
 ├── playbooks/
-│   ├── apply.yaml           # 安装 + 实例 + 插件 + HA
+│   ├── apply.yaml           # 安装 + 实例 + daemon + 插件 + HA
 │   ├── deploy-s3.yaml       # 独立 S3 存储
 │   ├── ha-status.yaml       # 只读的 Patroni/HAProxy 状态
 │   └── ping.yaml            # 连通性冒烟测试
-└── roles/                   # pgcli、pg_instance、pg_addon、addon_cluster_shared、pg_ha、pg_ha_haproxy、pg_s3
+└── roles/                   # pgcli、pg_instance、pg_daemon、pg_addon、addon_cluster_shared、pg_ha、pg_ha_haproxy、pg_s3
 ```
 
 ## 子页面
@@ -69,6 +74,7 @@ ansible/
 | [离线与隔离环境安装](./offline/) | 局域网 HTTP 服务器：镜像清单与懒加载、`pg`/podman 二进制、运行时主机二进制与 DocumentDB DEB |
 | [剧本](./playbooks/) | `ping.yaml`、`apply.yaml`、`resources.yaml`、`deploy-s3.yaml`、`ha-status.yaml`、`passwords.yaml`：tags、`--limit`、幂等、生命周期顺序 |
 | [实例与副本](./instances/) | `single`/`samehost`/`crosshost` 示例文件与 `pgcli_instances` 全部字段 |
+| [机房可观测部署](./observability/) | 大量机器的监控与告警：exporter、Prometheus、告警规则、Alertmanager、webhook daemon、Grafana |
 | [插件](./addons/) | `addon_<type>_<mode>` 条目：安装/移除、实例级插件、etcd |
 | [插件集群](./addon-cluster/) | 多主机插件集群：每种类型一个 inventory 分组、共享密钥/CA、法定人数布局、生命周期 |
 | [HA 集群](./ha/) | `ha_etcd`/`ha_cluster` 示例文件、`pg_ha_clusters`、HAProxy、基于 state 的销毁 |

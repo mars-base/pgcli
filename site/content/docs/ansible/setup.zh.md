@@ -173,6 +173,7 @@ namespace、集群和 HAProxy 列表，把它们替换为一个位于账号 home
 | 主库 + 同机副本 | `[samehost]` | `group_vars/samehost/main.yml` | `apply.yaml --limit samehost` |
 | 主库 + 跨机副本 | `[crosshost]` | `group_vars/crosshost/main.yml` | `apply.yaml --limit crosshost` |
 | 单机实例 + 插件 | `[instance_addon_mixed]` | `group_vars/instance_addon_mixed/main.yml` | `apply.yaml --limit instance_addon_mixed` |
+| 机房监控 + 告警 | `[observable]`（或自定义分组，复制同名示例文件） | `group_vars/observable/main.yml` | `apply.yaml --limit observable` |
 | Patroni HA 集群 | `[ha_etcd]` + `[ha_cluster]` | `group_vars/ha_etcd/main.yml` + `group_vars/ha_cluster/main.yml` | `apply.yaml --tags addon,ha` |
 | 非 root Patroni HA 集群 | `[rootless_ha]`（`[ha_cluster]` 的子组）+ `[ha_etcd]` | `group_vars/rootless_ha/main.yml` + `group_vars/ha_etcd/main.yml` | `apply.yaml --limit rootless_ha` |
 | S3 兼容备份存储 | `[s3]` 下的 `[minio_s3]` / `[silo_s3]` / `[rustfs_s3]` 之一 | 对应的 `group_vars/<type>_s3/main.yml` | `deploy-s3.yaml` |
@@ -211,6 +212,7 @@ namespace、集群和 HAProxy 列表，把它们替换为一个位于账号 home
 | `pgcli_config_overrides` | 分组级 namespace 覆盖（各模式示例里设置） |
 | `pgcli_instance_defaults` | 实例默认 `state`、`autostart`、`backup_target`、`password_length`、`extensions`、`clean_data` |
 | `pgcli_instances` | 期望实例列表（通常放在各模式分组；插件分组也可声明，由 `--limit` 选中） |
+| `pgcli_daemons` | 由 `pg daemon` 管理的主机长驻进程（webhook 接收端等）；不写 `host` 时在所有主机运行 |
 | `pgcli_addons` | `--limit` 所选插件分组的列表（`addon_<kind>_addons`） |
 | `_addon_limit`、`_addon_group`、`_addon_type`、`_addon_mode` | 由 `--limit addon_<type>_<single\|cluster>` 推导的插件选择器 |
 

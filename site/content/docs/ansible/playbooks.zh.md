@@ -31,11 +31,12 @@ uv run ansible-playbook playbooks/ping.yaml --limit crosshost
 | 1 | 校验插件选择 | `all` | – | `always` |
 | 2 | 安装并配置 pgcli | `all` | – | `pgcli` |
 | 3 | PostgreSQL 实例 | `all` | 1 | `instance` |
-| 4 | 插件 | `all` | 1 | `addon` |
-| 5 | 组建 Redis 集群 | `all` | – | `addon` |
-| 6 | Patroni HA 成员 | `ha_cluster` | 1 | `ha` |
-| 7 | Patroni HA 备份收敛 | `ha_cluster` | – | `ha` |
-| 8 | Patroni HA 代理 | 代理主机 | – | `ha`、`haproxy` |
+| 4 | 主机 daemon | `all` | – | `daemon` |
+| 5 | 插件 | `all` | 1 | `addon` |
+| 6 | 组建 Redis 集群 | `all` | – | `addon` |
+| 7 | Patroni HA 成员 | `ha_cluster` | 1 | `ha` |
+| 8 | Patroni HA 备份收敛 | `ha_cluster` | – | `ha` |
+| 9 | Patroni HA 代理 | 代理主机 | – | `ha`、`haproxy` |
 
 `serial: 1` 是刻意的：首台主机先安装插件或 bootstrap etcd，下一台再加入；
 跨机副本也要求主库先存在。
@@ -55,6 +56,9 @@ uv run ansible-playbook playbooks/apply.yaml --limit crosshost
 
 # 只收敛实例（pgcli 必须已安装并初始化）
 uv run ansible-playbook playbooks/apply.yaml --limit single --tags instance
+
+# 只收敛主机 daemon（例如 Alertmanager webhook）
+uv run ansible-playbook playbooks/apply.yaml --limit observable --tags daemon
 
 # 全新主机：一次完成安装与创建
 uv run ansible-playbook playbooks/apply.yaml --limit single --tags pgcli,instance

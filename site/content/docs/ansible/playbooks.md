@@ -33,11 +33,12 @@ whatever the selected hosts declare in `group_vars/`.
 | 1 | Validate the add-on selection | `all` | – | `always` |
 | 2 | Install and configure pgcli | `all` | – | `pgcli` |
 | 3 | PostgreSQL instances | `all` | 1 | `instance` |
-| 4 | Add-ons | `all` | 1 | `addon` |
-| 5 | Assemble the Redis cluster | `all` | – | `addon` |
-| 6 | Patroni HA members | `ha_cluster` | 1 | `ha` |
-| 7 | Patroni HA backup convergence | `ha_cluster` | – | `ha` |
-| 8 | Patroni HA proxy | proxy host | – | `ha`, `haproxy` |
+| 4 | Host daemons | `all` | – | `daemon` |
+| 5 | Add-ons | `all` | 1 | `addon` |
+| 6 | Assemble the Redis cluster | `all` | – | `addon` |
+| 7 | Patroni HA members | `ha_cluster` | 1 | `ha` |
+| 8 | Patroni HA backup convergence | `ha_cluster` | – | `ha` |
+| 9 | Patroni HA proxy | proxy host | – | `ha`, `haproxy` |
 
 `serial: 1` is deliberate: the first host installs the add-ons or bootstraps
 etcd, then the next host joins; cross-host replicas need their primary to
@@ -61,6 +62,9 @@ uv run ansible-playbook playbooks/apply.yaml --limit crosshost
 
 # Only reconcile instances (pgcli must already be installed/configured)
 uv run ansible-playbook playbooks/apply.yaml --limit single --tags instance
+
+# Only reconcile host daemons (for example the Alertmanager webhook)
+uv run ansible-playbook playbooks/apply.yaml --limit observable --tags daemon
 
 # Fresh host: install and create in one pass
 uv run ansible-playbook playbooks/apply.yaml --limit single --tags pgcli,instance

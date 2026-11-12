@@ -185,6 +185,7 @@ but empty so the play patterns still resolve.
 | Primary + same-host replica | `[samehost]` | `group_vars/samehost/main.yml` | `apply.yaml --limit samehost` |
 | Primary + cross-host replica | `[crosshost]` | `group_vars/crosshost/main.yml` | `apply.yaml --limit crosshost` |
 | Standalone instance + add-ons | `[instance_addon_mixed]` | `group_vars/instance_addon_mixed/main.yml` | `apply.yaml --limit instance_addon_mixed` |
+| Machine fleet monitoring + alerting | `[observable]` (or a custom group with its own copy of the example) | `group_vars/observable/main.yml` | `apply.yaml --limit observable` |
 | Patroni HA cluster | `[ha_etcd]` + `[ha_cluster]` | `group_vars/ha_etcd/main.yml` + `group_vars/ha_cluster/main.yml` | `apply.yaml --tags addon,ha` |
 | Rootless Patroni HA cluster | `[rootless_ha]` (child of `[ha_cluster]`) + `[ha_etcd]` | `group_vars/rootless_ha/main.yml` + `group_vars/ha_etcd/main.yml` | `apply.yaml --limit rootless_ha` |
 | S3-compatible backup store | one of `[minio_s3]` / `[silo_s3]` / `[rustfs_s3]` under `[s3]` | matching `group_vars/<type>_s3/main.yml` | `deploy-s3.yaml` |
@@ -227,6 +228,7 @@ The example file is commented field by field. The blocks that matter most:
 | `pgcli_config_overrides` | Per-group namespace override (set by each mode example) |
 | `pgcli_instance_defaults` | Default `state`, `autostart`, `backup_target`, `password_length`, `extensions`, `clean_data` |
 | `pgcli_instances` | Desired instances (normally set per mode group; add-on groups declare their own, selected by `--limit`) |
+| `pgcli_daemons` | Host processes managed by `pg daemon` (webhook receivers, …); entries without `host` run everywhere |
 | `pgcli_addons` | The selected add-on group's list (`addon_<kind>_addons`) |
 | `_addon_limit`, `_addon_group`, `_addon_type`, `_addon_mode` | Add-on selector derived from `--limit addon_<type>_<single\|cluster>` |
 
