@@ -224,7 +224,8 @@ Prometheus 通过 Prometheus 条目上的 `rule_files` 映射加载
 规则目录，并在安装时传入 `--rule-file`。规则内容放在真实文件中，因此 Prometheus
 自己的 `{{ $labels.* }}` 模板不会被 Ansible 二次渲染。规则覆盖 PostgreSQL
 （`pg_up`、复制延迟、replay 暂停、连接数饱和、长事务、死锁、归档失败）、node
-目标（抓取失败、磁盘空间、只读文件系统）以及 Alertmanager 配置重载。
+目标（抓取失败、CPU 与内存压力、磁盘空间、只读文件系统）以及 Alertmanager
+配置重载。
 
 触发的告警发给 Alertmanager，它的唯一 receiver 是由 `pg daemon` 托管的 webhook：
 

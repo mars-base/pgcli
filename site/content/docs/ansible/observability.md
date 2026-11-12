@@ -242,8 +242,8 @@ pgcli's managed rules directory and passes `--rule-file` at install time. Rule
 content lives in a real file so Prometheus's own `{{ $labels.* }}` templating
 is never re-rendered by Ansible. The rules cover PostgreSQL (`pg_up`,
 replication lag, paused replay, connection saturation, idle-in-transaction,
-deadlocks, archiver failures), node targets (scrape failures, disk space,
-read-only filesystems), and Alertmanager config reloads.
+deadlocks, archiver failures), node targets (scrape failures, CPU and memory
+pressure, disk space, read-only filesystems), and Alertmanager config reloads.
 
 Firing alerts go to Alertmanager, whose only receiver is the webhook managed by
 `pg daemon`:

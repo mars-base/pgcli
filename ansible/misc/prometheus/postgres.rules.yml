@@ -73,14 +73,32 @@ groups:
           summary: "{{ $labels.job }} target {{ $labels.instance }} is down"
           description: "Prometheus has failed to scrape this target for 2 minutes."
 
-      - alert: NodeFilesystemLow
-        expr: (node_filesystem_avail_bytes{fstype=~"ext4|xfs"} / node_filesystem_size_bytes{fstype=~"ext4|xfs"}) < 0.15
+      - alert: NodeCPUHigh
+        expr: 1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) > 0.9
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "Filesystem {{ $labels.mountpoint }} on {{ $labels.instance }} is almost full"
-          description: "Less than 15% free for 10 minutes."
+          summary: "CPU usage on {{ $labels.instance }} is above 90%"
+          description: "Average CPU utilization has been above 90% for 10 minutes (current {{ $value | humanizePercentage }})."
+
+      - alert: NodeMemoryLow
+        expr: 1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Memory usage on {{ $labels.instance }} is above 90%"
+          description: "Memory usage has been above 90% for 10 minutes (current {{ $value | humanizePercentage }})."
+
+      - alert: NodeFilesystemHigh
+        expr: 1 - (node_filesystem_avail_bytes{fstype=~"ext4|xfs"} / node_filesystem_size_bytes{fstype=~"ext4|xfs"}) > 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Filesystem {{ $labels.mountpoint }} on {{ $labels.instance }} is above 80% usage"
+          description: "Disk usage has been above 80% for 10 minutes (current {{ $value | humanizePercentage }})."
 
       - alert: NodeFilesystemReadonly
         expr: node_filesystem_readonly{fstype=~"ext4|xfs"} == 1
