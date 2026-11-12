@@ -394,9 +394,10 @@ and verification commands.
 
 `nftables.yaml` installs nftables on Debian-family hosts and replaces the
 ruleset with a default-drop input policy. New connections are accepted only
-when they match a rule; the default rules allow the `trusted` set (normally the
-first entry in `nftables_sets`) to the pgcli PostgreSQL SQL, exporter and
-Grafana ports. Ports accessed only between managed machines use the
+when they match a rule. The role defaults for `nftables_sets` and
+`nftables_rules` are empty; the example group_vars allow the `trusted` set
+(normally the first entry in `nftables_sets`) to the pgcli PostgreSQL SQL,
+exporter and Grafana ports. Ports accessed only between managed machines use the
 `managed_hosts` set: the `[nftables]` host addresses plus any extra IPs. It
 covers pgBackRest SSH (`42201`), etcd client/peer (`2379`, `2380`) and MinIO
 API/console (`19800`, `19801`) in the example. Add port-scoped rules for
