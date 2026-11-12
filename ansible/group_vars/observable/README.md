@@ -6,10 +6,10 @@ monitoring stack. The live variables are in `main.yml` (gitignored);
 
 | Host | Role |
 |------|------|
-| `debian12-01` | stand-alone instance `pg01`, `nodeexporter`, `pgexporter` |
-| `debian12-02` | primary `pg02`, `nodeexporter`, `pgexporter` |
-| `debian12-03` | cross-host read-only replica `pg_primary_ro1`, `nodeexporter`, `pgexporter` |
-| `debian12-04` | `nodeexporter`, `prometheus`, `alertmanager`, `grafana`, `alertmanager-webhook` daemon |
+| `node1` | stand-alone instance `pg01`, `nodeexporter`, `pgexporter` |
+| `node2` | primary `pg02`, `nodeexporter`, `pgexporter` |
+| `node3` | cross-host read-only replica `pg_primary_ro1`, `nodeexporter`, `pgexporter` |
+| `node4` | `nodeexporter`, `prometheus`, `alertmanager`, `grafana`, `alertmanager-webhook` daemon |
 
 `pgcli_addons` is declared at group level here rather than in the `addon_*`
 groups, so one run deploys the whole scenario:
@@ -29,7 +29,7 @@ uv run ansible-playbook playbooks/apply.yaml --limit observable --tags daemon
 
 `nodeexporter` has no `host`, so it runs on every member. `pgexporter` runs on
 the three database hosts and binds `0.0.0.0:9630` so the Prometheus on
-`debian12-04` can scrape it; it has no authentication and also exposes its admin
+`node4` can scrape it; it has no authentication and also exposes its admin
 endpoints, so keep port 9630 on the monitoring network.
 
 The local `--pg-name` mode creates a low-privilege `pgexporter` role
@@ -95,7 +95,7 @@ rules. Prometheus forwards firing alerts to the loopback-only Alertmanager; its
 only receiver is a webhook.
 
 The receiver is a stdlib-only Python HTTP server started by `pg daemon` on
-`debian12-04`:
+`node4`:
 
 | Item | Value |
 |------|-------|
@@ -109,11 +109,11 @@ It prints one JSON line per alert and nothing else (access logs are
 suppressed). Check it as the deployment account:
 
 ```bash
-ssh debian12-04 'runuser -u pgcli -- /usr/local/bin/pg \
+ssh node4 'runuser -u pgcli -- /usr/local/bin/pg \
   -c /home/pgcli/.pgcli/pg.yaml daemon status alertmanager-webhook'
-ssh debian12-04 'runuser -u pgcli -- /usr/local/bin/pg \
+ssh node4 'runuser -u pgcli -- /usr/local/bin/pg \
   -c /home/pgcli/.pgcli/pg.yaml daemon logs alertmanager-webhook -n 50'
-ssh debian12-04 'runuser -u pgcli -- /usr/local/bin/pg \
+ssh node4 'runuser -u pgcli -- /usr/local/bin/pg \
   -c /home/pgcli/.pgcli/pg.yaml autostart status'
 ```
 
@@ -121,7 +121,7 @@ Send a synthetic alert through Alertmanager (it appears in the daemon log after
 the default `group_wait` of 30 seconds):
 
 ```bash
-ssh debian12-04 'curl -sS -X POST http://127.0.0.1:9093/api/v2/alerts \
+ssh node4 'curl -sS -X POST http://127.0.0.1:9093/api/v2/alerts \
   -H "Content-Type: application/json" \
   -d "[{\"labels\":{\"alertname\":\"WebhookTest\",\"severity\":\"warning\"},\"annotations\":{\"summary\":\"test\"}}]"'
 ```
