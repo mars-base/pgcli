@@ -417,6 +417,11 @@ pgcli_instance_defaults:
 # instance_addon_mixed and ha_etcd also define pgcli_instances / pgcli_addons
 # at group level, and group vars override this file for their hosts. Keep them
 # disabled in hosts.ini while running add-on groups.
+#
+# Normally do not edit pgcli_instances / pgcli_addons here: they are derived
+# from --limit addon_<type>_<single|cluster> (and stay empty otherwise).
+# Scenario groups such as observable define their own lists in
+# group_vars/<group>/main.yml.
 _addon_limit: "{{ ansible_limit | default('', true) }}"
 _addon_group: >-
   {{ _addon_limit
