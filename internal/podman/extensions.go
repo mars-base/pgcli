@@ -184,6 +184,10 @@ func (b *extImageBuilder) build(fromTag string, pkgList []string, pigstyRepo str
 // runtime user configured on the base image; an empty value means the image
 // inherits root, so no trailing USER instruction is needed. localDebs are
 // filenames in the build context (official vendor packages).
+//
+// Proxy variables are deliberately left unset: podman build injects the
+// host's HTTP_PROXY/HTTPS_PROXY/NO_PROXY into RUN by default, so apt and curl
+// work in a network that only reaches the internet through a forward proxy.
 func extContainerfile(buildFrom string, aptPkgs, localDebs []string, pigstyRepo, baseUser string) string {
 	userLine := ""
 	if baseUser != "" {
@@ -220,7 +224,6 @@ func extContainerfile(buildFrom string, aptPkgs, localDebs []string, pigstyRepo,
 		// just install additional packages (apt install is idempotent).
 		return fmt.Sprintf(`FROM %s
 
-ENV http_proxy="" HTTP_PROXY="" https_proxy="" HTTPS_PROXY="" no_proxy="" NO_PROXY=""
 ENV DEBIAN_FRONTEND=noninteractive
 
 USER root
@@ -233,7 +236,6 @@ USER root
 	// First-time ext build from the plain base image: set up Pigsty repo.
 	return fmt.Sprintf(`FROM %s
 
-ENV http_proxy="" HTTP_PROXY="" https_proxy="" HTTPS_PROXY="" no_proxy="" NO_PROXY=""
 ENV DEBIAN_FRONTEND=noninteractive
 
 USER root

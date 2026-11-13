@@ -1201,6 +1201,7 @@ func (m *BackupManager) createBackupContainer(confPath string) error {
 
 	args := []string{
 		"run", "-d",
+		"--http-proxy=false",
 		"--name", m.cfg.Backup.ContainerName,
 		"--network", networkMode,
 		// Restart automatically if it exits (terminal close, service restart).

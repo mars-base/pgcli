@@ -276,7 +276,7 @@ func GiteaDisplayHost(listen string) string {
 // dataDir is the caller's already-resolved host data dir (the manager resolves
 // it from base+name+override), so this stays a pure function of its arguments.
 func giteaArgsAndEnv(gc *config.GiteaConfig, bridge bool, network, dataDir string) []string {
-	args := []string{"run", "-d", "--name", gc.ContainerName}
+	args := []string{"run", "-d", "--http-proxy=false", "--name", gc.ContainerName}
 	args = append(args, netFlags(bridge, network, gc.HostPort)...)
 	env := []string{
 		"USER_UID=" + strconv.Itoa(giteaContainerUID),

@@ -32,6 +32,11 @@ Benefits of this approach:
 - `pg start` does not need to run `apt-get install` on every boot
 - Extension files are persistent and decoupled from the container lifecycle
 
+The build runs `podman build` on the host and inherits `HTTP_PROXY`,
+`HTTPS_PROXY` and `NO_PROXY` from the invoking environment, so apt and curl
+reach the Pigsty repository through a forward proxy. Ansible deployments set
+the global `pgcli_proxy_url` variable instead of exporting them by hand.
+
 ## Commands
 
 ### Install Extensions

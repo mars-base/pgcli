@@ -193,7 +193,7 @@ func (m *Manager) runBasebackup(host string, port int, user, password string, ho
 		networkMode = m.cfg.Podman.Network
 	}
 	args := []string{
-		"run", "-d", "--name", tmpName,
+		"run", "-d", "--http-proxy=false", "--name", tmpName,
 		"--network", networkMode,
 		"-v", fmt.Sprintf("%s:/var/lib/postgresql:z", hostMountPath(m.cfg.Podman.DataDir)),
 		"-e", "PGDATA=/var/lib/postgresql/data",

@@ -2131,6 +2131,7 @@ func (m *Manager) createContainer() error {
 
 	args := []string{
 		"run", "-d",
+		"--http-proxy=false",
 		"--name", m.cfg.Podman.ContainerName,
 		"--network", networkMode,
 		// Restart automatically if the container exits (e.g. podman service

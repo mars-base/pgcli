@@ -58,8 +58,7 @@
 - name: Install and configure pgcli
   hosts: all
   gather_facts: false
-  environment:
-    PGCLI_DOWNLOAD_MIRROR: "{{ pgcli_download_mirror | default('') }}"
+  environment: "{{ pgcli_proxy_env | combine({'PGCLI_DOWNLOAD_MIRROR': pgcli_download_mirror | default('')}) }}"
   roles:
     - role: pgcli
       tags: [pgcli]

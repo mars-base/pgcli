@@ -30,11 +30,13 @@ pgcli_deploy_become_user: "{{ pgcli_deploy_user if pgcli_deploy_rootless | bool 
 # the account's uid after ensuring the account exists; it stays empty for
 # rootful hosts.
 pgcli_deploy_run_dir: ""
+# Includes pgcli_proxy_env (defined below) when an egress proxy is configured.
 pgcli_deploy_env: >-
-  {{ {'XDG_RUNTIME_DIR': pgcli_deploy_run_dir,
+  {{ ({'XDG_RUNTIME_DIR': pgcli_deploy_run_dir,
       'DBUS_SESSION_BUS_ADDRESS': 'unix:path=' ~ pgcli_deploy_run_dir ~ '/bus'}
      if (pgcli_deploy_rootless | bool and pgcli_deploy_run_dir | length > 0)
-     else {} }}
+     else {})
+     | combine(pgcli_proxy_env) }}
 
 # Installation goes through scripts/install.sh (GitHub release, not a local
 # build). The installer only runs when pg is missing or force is true.
@@ -97,6 +99,44 @@ pgcli_sqlite_install: false
 # to every enabled archive; if any is unreachable or missing it aborts before
 # changing anything.
 pgcli_images_http_url: ""
+
+# ── Egress proxy ────────────────────────────────────────────────────────────
+# Forward HTTP proxy for steps that reach the internet: install.sh/apt,
+# get_url, podman pull, pg runtime downloads, and the podman build that
+# `pg extension install` runs. Leave empty for direct connections.
+# Privoxy serves HTTP and HTTPS (CONNECT) on one listener, so one URL covers
+# both. Start one with the pgcli Privoxy add-on on a host that has internet
+# access (allow the hosts that will use it):
+#
+#   pg addon install privoxy --name p1 --allow-network 192.0.2.0/24
+#   pgcli_proxy_url: "http://192.0.2.10:8118"
+#
+# pgcli_proxy_env is merged into pgcli_deploy_env above, so every play that
+# runs as the deployment account picks it up.
+pgcli_proxy_url: ""
+# Hosts that bypass the proxy. The hosts of the four offline URLs above and
+# every inventory private_ip are appended automatically. List other internal
+# services here by exact IP or hostname: Python (get_url/uri) and apt do not
+# understand CIDR entries in no_proxy.
+pgcli_no_proxy: "localhost,127.0.0.1,::1"
+
+_pgcli_direct_hosts: >-
+  {{ ([pgcli_install_binary_url, pgcli_podman_binary_url,
+       pgcli_download_mirror, pgcli_images_http_url]
+      | select('match', '^https?://')
+      | map('urlsplit', 'hostname') | select | list)
+     + (groups['all'] | map('extract', hostvars)
+        | map(attribute='private_ip', default='') | select | list) }}
+
+_pgcli_no_proxy: >-
+  {{ ((pgcli_no_proxy.split(',') | map('trim') | select | list)
+      + _pgcli_direct_hosts) | unique | join(',') }}
+
+pgcli_proxy_env: >-
+  {{ {'HTTP_PROXY': pgcli_proxy_url, 'HTTPS_PROXY': pgcli_proxy_url,
+      'http_proxy': pgcli_proxy_url, 'https_proxy': pgcli_proxy_url,
+      'NO_PROXY': _pgcli_no_proxy, 'no_proxy': _pgcli_no_proxy}
+     if pgcli_proxy_url | length > 0 else {} }}
 
 # Where downloaded tarballs are cached on the target host. Kept across runs so
 # only missing images are transferred again; safe to delete at any time.

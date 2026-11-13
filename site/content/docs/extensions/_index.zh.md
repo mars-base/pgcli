@@ -25,6 +25,10 @@ pgcli 支持从 [Pigsty DEB 仓库](https://pigsty.io/ext/)安装和管理 Postg
 - `pg start` 不需要在每次启动时运行 `apt-get install`
 - 扩展文件是持久的并与容器生命周期解耦
 
+镜像构建以 `podman build` 在主机上执行，会继承调用环境中的 `HTTP_PROXY`、
+`HTTPS_PROXY` 和 `NO_PROXY`，因此 apt 和 curl 可以通过正向代理访问 Pigsty 仓库。
+Ansible 部署只需设置全局变量 `pgcli_proxy_url`，不必手工导出。
+
 ## 命令
 
 ### 安装扩展

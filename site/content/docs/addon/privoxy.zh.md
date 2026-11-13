@@ -158,6 +158,9 @@ export HTTPS_PROXY=http://10.0.0.5:8118
 export NO_PROXY=localhost,127.0.0.1,10.0.0.0/8
 ```
 
+Ansible 管理的集群只需在 `group_vars/all/main.yml` 设置 `pgcli_proxy_url`；
+见[离线与隔离环境](../../ansible/offline/)。
+
 对 HTTPS 地址执行 `curl -v` 会先看到 `CONNECT example.com:443`，随后是与源站
 的正常 TLS 握手——没有任何证书被替换。
 

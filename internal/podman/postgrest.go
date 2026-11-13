@@ -46,7 +46,7 @@ func NewPostgrestManager(cfg *config.Config) (*PostgrestManager, error) {
 //     the same port via `-p P:P`); the bind address goes through
 //     proxyBindHost so loopback is widened to 0.0.0.0 under bridge.
 func postgrestArgsAndEnv(pc *config.PostgrestConfig, bridge bool, network string) []string {
-	args := []string{"run", "-d", "--name", pc.ContainerName}
+	args := []string{"run", "-d", "--http-proxy=false", "--name", pc.ContainerName}
 	args = append(args, netFlags(bridge, network, pc.HostPort)...)
 	args = append(args,
 		"--restart", "unless-stopped",

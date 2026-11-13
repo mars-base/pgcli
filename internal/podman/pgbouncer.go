@@ -302,7 +302,7 @@ func (m *PgBouncerManager) StartContainer(pbConf *config.PgBouncerConfig, instNa
 }
 
 func (m *PgBouncerManager) createContainer(iniPath, userListPath string, pbConf *config.PgBouncerConfig) error {
-	args := []string{"run", "-d", "--name", pbConf.ContainerName}
+	args := []string{"run", "-d", "--http-proxy=false", "--name", pbConf.ContainerName}
 	args = append(args, netFlags(m.bridge, m.cfg.Podman.Network, pbConf.HostPort)...)
 	args = append(args,
 		"--restart", "unless-stopped",

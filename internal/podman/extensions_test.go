@@ -413,6 +413,23 @@ func TestExtContainerfileDocumentDB(t *testing.T) {
 	}
 }
 
+func TestExtContainerfileKeepsProxyEnv(t *testing.T) {
+	for _, buildFrom := range []string{
+		"postgres:18",
+		"postgres:18-ext",
+	} {
+		got := extContainerfile(buildFrom, []string{"postgresql-18-pgvector"}, nil, "https://repo.pigsty.io", "")
+		for _, unwanted := range []string{`http_proxy=""`, `HTTP_PROXY=""`, `NO_PROXY=""`} {
+			if strings.Contains(got, unwanted) {
+				t.Errorf("%s: containerfile must not clear proxy env (%q); podman build injects the host proxy:\n%s", buildFrom, unwanted, got)
+			}
+		}
+		if !strings.Contains(got, "ENV DEBIAN_FRONTEND=noninteractive") {
+			t.Errorf("%s: containerfile missing DEBIAN_FRONTEND:\n%s", buildFrom, got)
+		}
+	}
+}
+
 func TestExtPreloadLibsDocumentDB(t *testing.T) {
 	libs, first := ExtPreloadLibs("documentdb")
 	want := []string{"pg_cron", "pg_documentdb_core", "pg_documentdb", "pg_documentdb_extended_rum"}
