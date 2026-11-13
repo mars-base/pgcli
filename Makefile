@@ -62,6 +62,19 @@ container-build-backup:
 container-build-patroni:
 	podman build --http-proxy=false -t ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5 -f embed/patroni.Containerfile embed/
 
+container-build-privoxy:
+	podman build --http-proxy=false --platform linux/amd64 -t ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0-amd64 -f embed/privoxy.Containerfile embed/
+	podman build --http-proxy=false --platform linux/arm64 -t ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0-arm64 -f embed/privoxy.Containerfile embed/
+
+container-manifest-privoxy:
+	podman manifest rm ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0 2>/dev/null || true
+	podman manifest create ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0 \
+		containers-storage:ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0-amd64 \
+		containers-storage:ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0-arm64
+
+container-push-privoxy:
+	podman manifest push ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0 ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0 --all
+
 container-manifest:
 	podman manifest rm ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 2>/dev/null || true
 	podman manifest create ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 \
