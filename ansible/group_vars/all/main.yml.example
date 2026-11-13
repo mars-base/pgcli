@@ -197,6 +197,10 @@ pgcli_images:
     archive: nginx_1.27-alpine.tar
     auto_load: true
     addons: [nginx]
+  - image: ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0
+    archive: pgcli-privoxy_4.2.0.tar
+    auto_load: true
+    addons: [privoxy]
   - image: docker.io/dxflrs/garage:v2.4.1
     archive: garage_v2.4.1.tar
     auto_load: true
@@ -451,9 +455,10 @@ pgcli_instances: >-
 #     - "--data-dir=/data/pg/addon/redis/redis1"
 #     - "--aof"
 #
-# For nginx, haproxy, prometheus and alertmanager, addon_<kind>_conf holds the
-# full config file content. The role writes it under <config dir>/addons/ and
-# passes --conf-file; a per-entry `conf` overrides the group-level variable.
+# For nginx, haproxy, privoxy, prometheus and alertmanager, addon_<kind>_conf
+# holds the full config file content. The role writes it under
+# <config dir>/addons/ and passes --conf-file; a per-entry `conf` overrides the
+# group-level variable.
 pgcli_addons: >-
   {{ lookup('vars', 'addon_' ~ _addon_kind ~ '_addons', default=[])
      if _addon_group | length > 0 else [] }}

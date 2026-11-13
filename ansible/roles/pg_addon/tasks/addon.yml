@@ -136,12 +136,13 @@
 - name: Validate the inline add-on config
   ansible.builtin.assert:
     that:
-      - _addon_conf_content | length == 0 or addon.type in ['nginx', 'haproxy', 'prometheus', 'alertmanager']
+      - _addon_conf_content | length == 0 or addon.type in ['nginx', 'haproxy', 'privoxy', 'prometheus', 'alertmanager']
       - _addon_conf_content | length == 0 or ((_addon_params | map('string') | select('match', '^--conf-file') | list) | length) == 0
       - _addon_conf_content | length == 0 or (((addon.args | default([])) | map('string') | select('match', '^--conf-file') | list) | length) == 0
     fail_msg: >-
-      conf is only supported by nginx, haproxy, prometheus and alertmanager,
-      and cannot be combined with an explicit --conf-file in params or args.
+      conf is only supported by nginx, haproxy, privoxy, prometheus and
+      alertmanager, and cannot be combined with an explicit --conf-file in
+      params or args.
 
 - name: Create the add-on config directory
   ansible.builtin.file:

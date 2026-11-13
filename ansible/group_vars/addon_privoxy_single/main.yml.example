@@ -1,0 +1,36 @@
+---
+# privoxy standalone add-on group (addon_privoxy_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_privoxy_single --tags addon
+
+# Default flags for privoxy entries that do not set their own params.
+addon_privoxy_single_params:
+  - "--listen=0.0.0.0"
+# Additional flags, for example:
+#   - "--port=8118"
+#   - "--allow-network=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+#   - "--deny-network=10.0.0.66/32,10.0.0.67/32,192.0.2.10/32"
+
+# Inline privoxy.conf, written under <pgcli config dir>/addons/ and passed as
+# --conf-file. It replaces the rendered config, so it must be complete
+# (listen-address and the log directives are not inherited), and it cannot be
+# combined with --allow-network / --deny-network. Example: forward everything
+# through an upstream SOCKS5 proxy and accept only private-network clients.
+addon_privoxy_single_conf: ""
+# Example:
+#   confdir /etc/privoxy
+#   logdir /var/log/privoxy
+#   logfile /dev/stdout
+#   listen-address 0.0.0.0:8118
+#
+#   forward-socks5 / 127.0.0.1:1080 .
+#
+#   permit-access 127.0.0.1/32
+#   permit-access 10.0.0.0/8
+#   permit-access 172.16.0.0/12
+#   permit-access 192.168.0.0/16
+
+addon_privoxy_single_addons:
+  - type: privoxy
+    state: present
+    name: privoxy1

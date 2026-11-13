@@ -256,6 +256,9 @@ ansible_group_priority=20
 # [addon_predixy_single]
 # node1
 
+# [addon_privoxy_single]
+# node1
+
 # [addon_prometheus_single]
 # node1
 

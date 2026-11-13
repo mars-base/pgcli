@@ -201,7 +201,7 @@ Behavior and caveats:
 ## Reference file list
 
 The current LAN server is a complete mirror of the default `pgcli_images`
-manifest (43 image tarballs) plus the install binaries and every runtime asset
+manifest (44 image tarballs) plus the install binaries and every runtime asset
 at the versions pgcli pins. Use it as the authoritative checklist when building
 a new server; regenerate the image names with `make container-images-export`
 whenever image tags change.
@@ -235,6 +235,7 @@ d1cd9b9447132d8728211fb5e05830e9c6d536dfe8db7a8eb094e1cdcbb567bb  pgcli-mc_20250
 9179e64e34c72db01dae3748ff4118a93796a9c0bba0826e49d70b6b8720d10a  pgcli-mongosh_2.14.1.tar
 0519713fdf5510b72e3bd2b5f69ab4ef73695eeb3d5f6a822383da62754542b0  pgcli-patroni_18-4.1.5.tar
 46bbe0a99d342c967097c4147fa0ebd1ce8f6c0128676080f11efeb1be21f831  pgcli-pg_18-2.58.0.tar
+377877a78d2fc29a02ed4658946d2f248f909a524bb4fc091bb3d4acdb70d413  pgcli-privoxy_4.2.0.tar
 e13cc780306750ad6dd6d543d41249fb8e62dfff01c956a16d2a4f093d49a6b8  pgcli-rustfs_1.0.0.tar
 5ab1ad708255e084d60cabbb7dbe807ea1c26dd767ef86502732f5f1132ebca2  pgdog_v0.1.57.tar
 529231f4bfc8ea0240ec753a36aea676970ac39606529e219b751d03648926ff  pg_exporter_1.5.0.tar

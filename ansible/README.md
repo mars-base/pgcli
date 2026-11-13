@@ -306,14 +306,14 @@ entirely. The same operations are available directly through
 
 ## Add-ons
 
-pgcli manages 38 add-on types — PostgreSQL sidecars, storage systems,
+pgcli manages 39 add-on types — PostgreSQL sidecars, storage systems,
 observability stacks, messaging systems and supporting services. Most run as
 managed host-network containers; JuiceFS, ZeroFS and DuckDB are installed as
 host binaries.
 
 | Category | Add-ons |
 |---|---|
-| Connection pooling and proxying | `pgbouncer`, `pgdog`, `predixy`, `haproxy`, `nginx` |
+| Connection pooling and proxying | `pgbouncer`, `pgdog`, `predixy`, `haproxy`, `nginx`, `privoxy` |
 | Observability | `prometheus`, `alertmanager`, `grafana`, `nodeexporter`, `pgexporter`, `victoriametrics`, `vmalert`, `victorialogs`, `vlagent`, `vmcluster`, `vlcluster` |
 | Object storage | `minio`, `silo`, `rustfs`, `garage`, `seaweedfs` |
 | Filesystems | `beegfs`, `juicefs`, `zerofs` |

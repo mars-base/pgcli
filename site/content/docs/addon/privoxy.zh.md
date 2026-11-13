@@ -64,9 +64,17 @@ ACL 使用 Privoxy 原生语法（`host`、`addr[/mask][:port]`，以及可选�
 
 两个参数都可重复，**也支持逗号分隔**，代码里会合并成一个列表：
 `--allow-network 10.0.0.0/8,192.168.0.0/16 --allow-network 172.16.0.0/12`
-等于三条白名单。重装时传任一 ACL 参数会**替换**已存列表；两个都不传则清空。
+等于三条白名单；`--deny-network` 同样可以一次写多个地址。重装时传任一 ACL
+参数会**替换**已存列表；两个都不传则清空。
 没有任何 ACL 且监听非回环地址时，安装会打印**开放代理**警告——能连到端口的人
 都能借它出网。除非端口已有防火墙保护，否则请绑定 `--listen 127.0.0.1` 或加 ACL。
+
+```bash
+# 黑名单多个客户端：可重复，也可逗号分隔（会合并）
+pg addon install privoxy --name p2 \
+  --deny-network 10.0.0.66/32,10.0.0.67/32 \
+  --deny-network 192.0.2.10/32
+```
 
 IPv6 监听时，catch-all permit 使用 `[::]/0` 而不是 `0.0.0.0/0`。
 
@@ -74,8 +82,36 @@ IPv6 监听时，catch-all permit 使用 `[::]/0` 而不是 `0.0.0.0/0`。
 
 `--conf-file FILE` 会复制一份完整的 Privoxy 配置到插件目录，而不是渲染模板。
 它与 ACL 参数互斥；监听地址以文件里的 `listen-address` 为准（此时 `--port`
-仅用于摘要输出和 macOS 端口发布）。需要 actions/filter 文件、上游 SOCKS 转发，
-或模板未暴露的指令时使用它。
+仅用于摘要输出和 macOS 端口发布）。需要上游 SOCKS 转发、镜像内自带的
+actions/filter 文件，或模板未暴露的指令时使用它。
+
+因为文件会**整体替换**渲染出的配置，所以必须写成完整配置，不会继承任何指令。
+下面是一个完整示例：全部流量走本机 SOCKS5 上游，只允许私网客户端：
+
+```conf
+# privoxy.conf
+confdir /etc/privoxy
+logdir /var/log/privoxy
+logfile /dev/stdout
+listen-address 0.0.0.0:8118
+
+# 上游：所有请求转发给 SOCKS5 代理
+forward-socks5 / 127.0.0.1:1080 .
+
+# 客户端 ACL：只要出现任何 ACL 行，默认即为拒绝，需列全允许的网段
+permit-access 127.0.0.1/32
+permit-access 10.0.0.0/8
+permit-access 172.16.0.0/12
+permit-access 192.168.0.0/16
+```
+
+```bash
+pg addon install privoxy --name p4 --conf-file ./privoxy.conf
+```
+
+希望 `pg logs addon privoxy` 能看到请求日志时，保留 `logfile /dev/stdout`。
+容器只把配置文件本身只读挂载到 `/etc/privoxy/config`，其它目录和文件不会挂载，
+因此 `actionsfile` 只能引用镜像内已有的文件（自带的 `/etc/privoxy/*.action`）。
 
 ## 常用命令
 
@@ -86,8 +122,9 @@ pg addon install privoxy --name p1
 # 白名单两个私网段（可重复，也可逗号分隔）
 pg addon install privoxy --name p1 --allow-network 10.0.0.0/8,192.168.0.0/16
 
-# 黑名单一台客户端，其余保持开放
-pg addon install privoxy --name p2 --deny-network 10.0.0.66/32
+# 黑名单多个客户端（可重复，也可逗号分隔）
+pg addon install privoxy --name p2 --deny-network 10.0.0.66/32,10.0.0.67/32 \
+  --deny-network 192.0.2.10/32
 
 # 显式端口 + 仅回环监听
 pg addon install privoxy --name p3 --port 8120 --listen 127.0.0.1

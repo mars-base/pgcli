@@ -6883,6 +6883,8 @@ func runAddonList(showPassword bool) error {
 			}
 			fmt.Printf("    ACL allow:   %d\n", len(pc.AllowNetworks))
 			fmt.Printf("    ACL deny:    %d\n", len(pc.DenyNetworks))
+			fmt.Printf("    HTTP:        http://%s\n", privoxyAddr(pc))
+			fmt.Printf("    HTTPS:       http://%s (CONNECT)\n", privoxyAddr(pc))
 			fmt.Printf("    Image:       %s\n", pc.ImageTag)
 			fmt.Printf("    Container:   %s\n", pc.ContainerName)
 		}
@@ -6892,11 +6894,34 @@ func runAddonList(showPassword bool) error {
 			fmt.Printf("  %s (name: %s)\n", "privoxy", name)
 			fmt.Printf("    Status:      n/a (%v)\n", err)
 			fmt.Printf("    Listen:      http://%s:%d\n", pc.Listen, pc.Port)
+			fmt.Printf("    HTTP:        http://%s\n", privoxyAddr(pc))
+			fmt.Printf("    HTTPS:       http://%s (CONNECT)\n", privoxyAddr(pc))
 			fmt.Printf("    Container:   %s\n", pc.ContainerName)
 		}
 	}
 
 	return nil
+}
+
+// privoxyAddr returns the client-facing host:port for a privoxy instance. In
+// conf-file mode the file owns listen-address, so read it from the source file;
+// otherwise the rendered config uses the stored listen address and port.
+func privoxyAddr(pc config.PrivoxyConfig) string {
+	if pc.ConfFile != "" {
+		if data, err := os.ReadFile(pc.ConfFile); err == nil {
+			for line := range strings.SplitSeq(string(data), "\n") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 && fields[0] == "listen-address" {
+					return fields[1]
+				}
+			}
+		}
+	}
+	listen := pc.Listen
+	if listen == "" {
+		listen = "0.0.0.0"
+	}
+	return fmt.Sprintf("%s:%d", listen, pc.Port)
 }
 
 // sortedAddonNames returns an addon map's keys in order, so `pg addon list` is

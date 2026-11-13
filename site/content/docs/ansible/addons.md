@@ -34,7 +34,7 @@ haproxy, minio/silo/rustfs, redis, nginx, prometheus, kafka, and so on).
 | `state` | `present` (default) or `absent` |
 | `params` | Complete per-entry flag list; replaces `addon_<group>_params` for this entry |
 | `args` | Per-entry flags appended verbatim after the resolved parameters |
-| `conf` | Inline config content, overriding `addon_<group>_conf` (nginx, haproxy, prometheus, alertmanager only) |
+| `conf` | Inline config content, overriding `addon_<group>_conf` (nginx, haproxy, privoxy, prometheus, alertmanager only) |
 | `clean_data` | With `state: absent`, delete data where the add-on supports it (default `true`; set `false` to keep it) |
 | `force` | With `state: present`, recreate with `pg addon install --force` |
 | `autostart` | `true` (default) enables boot autostart, `false` disables it |
@@ -84,8 +84,9 @@ Groups that define `pgcli_addons` directly fall back to `addon_<type>_params`.
 
 ## Inline config files
 
-nginx, haproxy, prometheus and alertmanager accept `--conf-file`. Put the file
-content in `addon_<group>_conf` instead of maintaining a path on the target:
+nginx, haproxy, privoxy, prometheus and alertmanager accept `--conf-file`. Put
+the file content in `addon_<group>_conf` instead of maintaining a path on the
+target:
 
 ```yaml
 addon_haproxy_single_conf: |
@@ -101,6 +102,30 @@ addon_haproxy_single_conf: |
 addon_haproxy_single_addons:
   - type: haproxy
     name: lb1
+    state: present
+```
+
+A Privoxy config replaces the rendered template, so it must be complete — the
+listener and stdout logging are not inherited — and it cannot be combined with
+`--allow-network` / `--deny-network`:
+
+```yaml
+addon_privoxy_single_conf: |
+  confdir /etc/privoxy
+  logdir /var/log/privoxy
+  logfile /dev/stdout
+  listen-address 0.0.0.0:8118
+
+  forward-socks5 / 127.0.0.1:1080 .
+
+  permit-access 127.0.0.1/32
+  permit-access 10.0.0.0/8
+  permit-access 172.16.0.0/12
+  permit-access 192.168.0.0/16
+
+addon_privoxy_single_addons:
+  - type: privoxy
+    name: privoxy1
     state: present
 ```
 
@@ -170,6 +195,7 @@ the product flags; the S3 and HA groups are covered in their own pages here.
 | zerofs | standalone | host binary; external S3 |
 | duckdb | standalone | host binary |
 | nginx | standalone | one reverse proxy |
+| privoxy | standalone | HTTP/HTTPS forward proxy; no TLS interception |
 
 ## Top-level add-on example
 

@@ -32,7 +32,7 @@ minio/silo/rustfs、redis、nginx、prometheus、kafka 等）。
 | `state` | `present`（默认）或 `absent` |
 | `params` | 条目级完整参数列表，覆盖该条目的 `addon_<group>_params` |
 | `args` | 条目级额外参数，追加在最终参数之后 |
-| `conf` | 内联配置文件内容，覆盖 `addon_<group>_conf`（仅 nginx、haproxy、prometheus、alertmanager） |
+| `conf` | 内联配置文件内容，覆盖 `addon_<group>_conf`（仅 nginx、haproxy、privoxy、prometheus、alertmanager） |
 | `clean_data` | 与 `state: absent` 搭配，在插件支持时一并删除数据（默认 `true`，设为 `false` 保留数据） |
 | `force` | 与 `state: present` 搭配，用 `pg addon install --force` 重建 |
 | `autostart` | `true`（默认）启用开机自启，`false` 关闭 |
@@ -80,8 +80,8 @@ addon_redis_single_addons:
 
 ## 内联配置文件
 
-nginx、haproxy、prometheus、alertmanager 支持 `--conf-file`。把文件内容放到
-`addon_<group>_conf`，不用在目标机上另外维护路径：
+nginx、haproxy、privoxy、prometheus、alertmanager 支持 `--conf-file`。把文件内容
+放到 `addon_<group>_conf`，不用在目标机上另外维护路径：
 
 ```yaml
 addon_haproxy_single_conf: |
@@ -97,6 +97,29 @@ addon_haproxy_single_conf: |
 addon_haproxy_single_addons:
   - type: haproxy
     name: lb1
+    state: present
+```
+
+Privoxy 的配置会整体替换渲染模板，因此必须是完整配置——监听地址和 stdout
+日志不会继承——并且不能与 `--allow-network` / `--deny-network` 同时使用：
+
+```yaml
+addon_privoxy_single_conf: |
+  confdir /etc/privoxy
+  logdir /var/log/privoxy
+  logfile /dev/stdout
+  listen-address 0.0.0.0:8118
+
+  forward-socks5 / 127.0.0.1:1080 .
+
+  permit-access 127.0.0.1/32
+  permit-access 10.0.0.0/8
+  permit-access 172.16.0.0/12
+  permit-access 192.168.0.0/16
+
+addon_privoxy_single_addons:
+  - type: privoxy
+    name: privoxy1
     state: present
 ```
 
@@ -162,6 +185,7 @@ S3 与 HA 分组见本站的对应页面。
 | zerofs | 单机 | 宿主二进制；外部 S3 |
 | duckdb | 单机 | 宿主二进制 |
 | nginx | 单机 | 单个反向代理 |
+| privoxy | 单机 | HTTP/HTTPS 正向代理；不做 TLS 中间人 |
 
 ## 顶层插件示例
 

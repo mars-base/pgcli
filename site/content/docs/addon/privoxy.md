@@ -74,11 +74,19 @@ pgcli therefore renders permits before denies:
 
 Both flags are repeatable **and** accept comma-separated lists; all forms are
 merged (`--allow-network 10.0.0.0/8,192.168.0.0/16 --allow-network 172.16.0.0/12`
-is one three-entry whitelist). Passing either flag replaces the stored list on
+is one three-entry whitelist, and the same applies to `--deny-network` with
+several addresses). Passing either flag replaces the stored list on
 reinstall; passing neither clears it. With no ACL and a non-loopback listener
 the install prints an **open proxy** warning — anyone who can reach the port
 can proxy through it. Bind loopback (`--listen 127.0.0.1`) or add an ACL unless
 the port is already firewalled.
+
+```bash
+# Blacklist several clients: repeatable and/or comma-separated (all merged).
+pg addon install privoxy --name p2 \
+  --deny-network 10.0.0.66/32,10.0.0.67/32 \
+  --deny-network 192.0.2.10/32
+```
 
 For an IPv6 listener the catch-all permit is `[::]/0` instead of `0.0.0.0/0`.
 
@@ -87,8 +95,40 @@ For an IPv6 listener the catch-all permit is `[::]/0` instead of `0.0.0.0/0`.
 `--conf-file FILE` copies a full Privoxy config into the addon directory
 instead of rendering one. It is mutually exclusive with the ACL flags; the
 file owns `listen-address` (pgcli's `--port` is then used only in the summary
-and for macOS port publishing). Use this for actions/filter files, upstream
-SOCKS forwarding, or any directive the template does not expose.
+and for macOS port publishing). Use this for upstream SOCKS forwarding, the
+stock actions/filter files shipped in the image, or any directive the template
+does not expose.
+
+Because the file replaces the rendered config, it must be complete — nothing
+is inherited. A complete example that sends all traffic through a local SOCKS5
+proxy and accepts only private-network clients:
+
+```conf
+# privoxy.conf
+confdir /etc/privoxy
+logdir /var/log/privoxy
+logfile /dev/stdout
+listen-address 0.0.0.0:8118
+
+# Upstream: forward everything through a SOCKS5 proxy.
+forward-socks5 / 127.0.0.1:1080 .
+
+# Client ACL: any ACL line makes the default deny, so list every allowed net.
+permit-access 127.0.0.1/32
+permit-access 10.0.0.0/8
+permit-access 172.16.0.0/12
+permit-access 192.168.0.0/16
+```
+
+```bash
+pg addon install privoxy --name p4 --conf-file ./privoxy.conf
+```
+
+Keep `logfile /dev/stdout` if you want `pg logs addon privoxy` to show request
+logs. Only the config file itself is bind-mounted at `/etc/privoxy/config`;
+directories and extra files are not mounted, so an `actionsfile` can only refer
+to files already present in the image (the stock `/etc/privoxy/*.action`
+set).
 
 ## Commands
 
@@ -99,8 +139,9 @@ pg addon install privoxy --name p1
 # whitelist two private ranges (repeatable and/or comma-separated)
 pg addon install privoxy --name p1 --allow-network 10.0.0.0/8,192.168.0.0/16
 
-# blacklist one client, keep the rest open
-pg addon install privoxy --name p2 --deny-network 10.0.0.66/32
+# blacklist several clients (repeatable and/or comma-separated)
+pg addon install privoxy --name p2 --deny-network 10.0.0.66/32,10.0.0.67/32 \
+  --deny-network 192.0.2.10/32
 
 # explicit port and loopback bind
 pg addon install privoxy --name p3 --port 8120 --listen 127.0.0.1
