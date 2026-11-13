@@ -50,31 +50,8 @@ pgcli_install_script_src: "{{ inventory_dir | dirname }}/scripts/install.sh"
 ## 出网代理
 
 主机只能通过正向代理访问公网时（例如在一台可联网机器上运行 Privoxy add-on），
-设置一个全局 URL 即可，可与局域网镜像同时使用：
-
-```yaml
-pgcli_proxy_url: "http://192.0.2.10:8118"
-```
-
-该 URL 会同时导出为 `HTTP_PROXY` 和 `HTTPS_PROXY`（含小写形式；Privoxy 用
-`CONNECT` 隧道转发 HTTPS），并附带 `NO_PROXY`。playbook 会把这些变量传给：
-
-- `scripts/install.sh`（apt 与 release 下载）以及安装 play 里所有 `get_url` 任务；
-- 拉取镜像、下载运行时资源的 `pg` 命令；
-- `pg extension install` 背后的 `podman build`，构建内的 apt 和 curl 因此走代理。
-
-容器以 `--http-proxy=false` 启动：代理只服务下载和镜像构建，不进入运行中的服务。
-
-`NO_PROXY` 以 `localhost,127.0.0.1,::1` 和 `pgcli_no_proxy` 为起点，自动追加上述
-四个离线 URL 的主机名以及 inventory 中所有 `private_ip`。其它内网服务请按**具体
-IP 或域名**补充：Python（Ansible `get_url`/`uri`）和 apt 不支持 `no_proxy` 里的
-CIDR，`10.0.0.0/8` 这类网段只对 curl 和 Go 客户端有效。
-
-优先使用 Privoxy 的客户端 ACL，而不是 `user:pass@` 形式的 URL：代理凭据会出现在
-进程环境（`/proc/<pid>/environ`）和 Ansible 详细日志里。add-on 与 ACL 用法见
-[Privoxy](../../addon/privoxy/)。
-
-常规部署从 `pgcli_images` 加载 Patroni 与备份镜像；它们的兜底构建路径仍显式禁用代理。
+设置全局 `pgcli_proxy_url` 即可，可与局域网镜像同时使用。代理启动、完整变量、
+`NO_PROXY` 规则、手动 SSH 用法与验证方法见[出网代理](./proxy/)。
 
 ## 用 `pg http` 启动服务器
 
@@ -155,7 +132,7 @@ rootless podman 使用部署账号独立的镜像存储，root 已加载的镜�
 - 下载完成后 pgcli 仍会校验固定的 SHA-256，因此 mirror 上的文件必须与上游发布资源逐字节一致。
 - 使用固定版本。`--version latest` 会访问 GitHub API，这条请求不会被 mirror 重定向。
 - DocumentDB 的两个 DEB 会被复制进派生扩展镜像并在其中安装；mirror 覆盖的正是这两个包。
-- 其他扩展目录中的扩展在 `podman build` 阶段从 Pigsty DEB 仓库安装，`pgcli_download_mirror` 不会重定向这一步。设置 `pgcli_proxy_url` 后，构建中的 apt 和 curl 会走该代理；完全隔离的网络上仍应先在联网主机上构建好派生的 `-ext` 镜像（或镜像 Pigsty 仓库并在构建主机上配置 apt），再通过 `pgcli_images` 分发该镜像。
+- 其他扩展目录中的扩展在 `podman build` 阶段从 Pigsty DEB 仓库安装，`pgcli_download_mirror` 不会重定向这一步。设置 [`pgcli_proxy_url`](./proxy/) 后，构建中的 apt 和 curl 会走该代理；完全隔离的网络上仍应先在联网主机上构建好派生的 `-ext` 镜像（或镜像 Pigsty 仓库并在构建主机上配置 apt），再通过 `pgcli_images` 分发该镜像。
 - Litestream 不是 add-on：`pg sqlite install` 负责安装 sqlite3 与固定版本的
   Litestream。在用到 SQLite 的主机或分组上设置 `pgcli_sqlite_install: true`，
   `pgcli` 角色会在安装 play 中执行该命令，下载同样走 mirror。sqlite3 本身来自

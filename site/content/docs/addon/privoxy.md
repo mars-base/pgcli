@@ -177,7 +177,7 @@ export NO_PROXY=localhost,127.0.0.1,10.0.0.0/8
 ```
 
 For Ansible-managed fleets, set `pgcli_proxy_url` once in
-`group_vars/all/main.yml`; see [offline installs](../../ansible/offline/).
+`group_vars/all/main.yml`; see [egress proxy](../ansible/proxy/).
 
 A `curl -v` against an HTTPS URL shows `CONNECT example.com:443` followed by a
 normal TLS handshake with the origin — no certificate is replaced.

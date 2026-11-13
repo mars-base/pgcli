@@ -66,39 +66,10 @@ is downloaded on the host.
 ## Egress proxy
 
 When hosts reach the internet only through a forward proxy (for example a
-Privoxy add-on on a connected machine), set one global URL instead of — or
-alongside — the LAN mirror:
-
-```yaml
-pgcli_proxy_url: "http://192.0.2.10:8118"
-```
-
-It is exported as `HTTP_PROXY` and `HTTPS_PROXY` (also lowercase), because
-Privoxy tunnels HTTPS with `CONNECT`, plus `NO_PROXY`. The playbooks pass the
-variables to:
-
-- `scripts/install.sh` (apt and the release download) and every `get_url`
-  task in the install play,
-- `pg` commands that pull images or download runtime assets,
-- the `podman build` behind `pg extension install`, so apt and curl inside the
-  build use the proxy.
-
-Containers are started with `--http-proxy=false`: the proxy covers downloads
-and image builds, not the services themselves.
-
-`NO_PROXY` starts with `localhost,127.0.0.1,::1` plus `pgcli_no_proxy`. The
-hosts of the four offline URLs above and every inventory `private_ip` are
-appended automatically. Add other internal endpoints by exact IP or hostname:
-Python (Ansible `get_url`/`uri`) and apt do not understand CIDR entries in
-`no_proxy`, so a range such as `10.0.0.0/8` only helps curl and Go clients.
-
-Prefer Privoxy client ACLs to a `user:pass@` URL: credentials embedded in the
-proxy URL are visible in process environments (`/proc/<pid>/environ`) and in
-verbose Ansible logs. See [Privoxy](../../addon/privoxy/) for the add-on and
-its ACLs.
-
-Normal deployments load the Patroni and backup images from `pgcli_images`;
-their fallback build paths keep the proxy explicitly disabled.
+Privoxy add-on on a connected machine), set the global `pgcli_proxy_url`
+instead of — or alongside — the LAN mirror. Proxy startup, the full variable
+set, `NO_PROXY` rules, manual SSH usage and verification are covered in
+[Egress proxy](./proxy/).
 
 ## Starting the server with `pg http`
 
@@ -222,7 +193,8 @@ Behavior and caveats:
   installed there; the mirror covers exactly these two packages.
 - Other catalog extensions are built from the Pigsty DEB repository inside
   `podman build`, which `pgcli_download_mirror` does not redirect. With
-  `pgcli_proxy_url` set, the build's apt and curl use that proxy; on a fully
+  [`pgcli_proxy_url` set](./proxy/), the build's apt and curl use that proxy;
+  on a fully
   air-gapped network, pre-build the derived `-ext` image on a connected host
   (or mirror the Pigsty repository and point apt at it on the build host) and
   distribute the image through `pgcli_images`.

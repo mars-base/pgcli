@@ -35,7 +35,8 @@ Benefits of this approach:
 The build runs `podman build` on the host and inherits `HTTP_PROXY`,
 `HTTPS_PROXY` and `NO_PROXY` from the invoking environment, so apt and curl
 reach the Pigsty repository through a forward proxy. Ansible deployments set
-the global `pgcli_proxy_url` variable instead of exporting them by hand.
+the global `pgcli_proxy_url` variable instead of exporting them by hand; see
+[egress proxy](../ansible/proxy/).
 
 ## Commands
 
