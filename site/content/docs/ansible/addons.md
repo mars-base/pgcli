@@ -116,6 +116,8 @@ addon_privoxy_single_conf: |
   logfile /dev/stdout
   listen-address 0.0.0.0:8118
 
+  # Plain forward-socks5 resolves hostnames locally; forward-socks5t uses
+  # remote DNS.
   forward-socks5 / 127.0.0.1:1080 .
 
   permit-access 127.0.0.1/32

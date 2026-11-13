@@ -95,7 +95,8 @@ logdir /var/log/privoxy
 logfile /dev/stdout
 listen-address 0.0.0.0:8118
 
-# 上游：所有请求转发给 SOCKS5 代理
+# 上游：所有请求转发给 SOCKS5 代理。普通 forward-socks5 在本地解析域名；
+# 需要由 SOCKS5 端解析（远程 DNS）时改用 forward-socks5t。
 forward-socks5 / 127.0.0.1:1080 .
 
 # 客户端 ACL：只要出现任何 ACL 行，默认即为拒绝，需列全允许的网段

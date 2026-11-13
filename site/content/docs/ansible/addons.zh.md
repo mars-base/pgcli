@@ -110,6 +110,7 @@ addon_privoxy_single_conf: |
   logfile /dev/stdout
   listen-address 0.0.0.0:8118
 
+  # 普通 forward-socks5 在本地解析域名；需要远程 DNS 时改用 forward-socks5t。
   forward-socks5 / 127.0.0.1:1080 .
 
   permit-access 127.0.0.1/32

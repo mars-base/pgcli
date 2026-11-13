@@ -110,7 +110,8 @@ logdir /var/log/privoxy
 logfile /dev/stdout
 listen-address 0.0.0.0:8118
 
-# Upstream: forward everything through a SOCKS5 proxy.
+# Upstream: forward everything through a SOCKS5 proxy. Plain forward-socks5
+# resolves target hostnames locally; use forward-socks5t for remote DNS.
 forward-socks5 / 127.0.0.1:1080 .
 
 # Client ACL: any ACL line makes the default deny, so list every allowed net.
