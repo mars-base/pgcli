@@ -80,8 +80,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartNodeExporter(c) && !hasAutostartPGExporter(c) && !hasAutostartDocumentDB(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartVmalert(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouseKeeper(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartRabbitMQ(c) && !hasAutostartRocketMQ(c) && !hasAutostartNginx(c) && !hasAutostartHTTP(c) && !hasAutostartDaemons(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --vmalert / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --kafka / --rabbitmq / --nginx / --nodeexporter / --pgexporter / --documentdb / --daemon / --http)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartNodeExporter(c) && !hasAutostartPGExporter(c) && !hasAutostartDocumentDB(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartVmalert(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouseKeeper(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartRabbitMQ(c) && !hasAutostartRocketMQ(c) && !hasAutostartNginx(c) && !hasAutostartPrivoxy(c) && !hasAutostartHTTP(c) && !hasAutostartDaemons(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --vmalert / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --kafka / --rabbitmq / --nginx / --nodeexporter / --pgexporter / --documentdb / --daemon / --http / --privoxy)")
 		return nil
 	}
 
@@ -373,6 +373,13 @@ func startAutostart() error {
 	// starts namesrv -> broker -> proxy; a cluster member may wait for the
 	// controller quorum, which StartContainers tolerates.
 	if err := startAutostartRocketMQ(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// Privoxy forward proxies (top-level addon). No dependencies on other
+	// addons: the proxy dials destinations on demand, so it can come up before
+	// nginx.
+	if err := startAutostartPrivoxy(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -1315,6 +1322,16 @@ func hasAutostartNginx(c *config.Config) bool {
 	return false
 }
 
+// hasAutostartPrivoxy reports whether any Privoxy instance is autostart-enabled.
+func hasAutostartPrivoxy(c *config.Config) bool {
+	for _, pc := range c.Addons.Privoxy {
+		if pc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
 // hasAutostartJuicefs / hasAutostartZerofs report whether any host-binary
 // filesystem volume is autostart-enabled.
 func hasAutostartJuicefs(c *config.Config) bool {
@@ -1790,6 +1807,39 @@ func startAutostartNginx(c *config.Config) error {
 		nc := c.Addons.Nginx[name]
 		if err := nm.StartContainer(&nc); err != nil {
 			fmt.Printf("  [X] nginx autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// startAutostartPrivoxy starts each autostart-enabled Privoxy instance.
+// Start-only like the other config-file addons: the container comes up reading
+// the config already on disk, recreating it if the container was removed —
+// install first. Order is sorted by instance name for deterministic boot logs.
+func startAutostartPrivoxy(c *config.Config) error {
+	var names []string
+	for name, pc := range c.Addons.Privoxy {
+		if pc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	pm, err := podman.NewPrivoxyManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		pc := c.Addons.Privoxy[name]
+		if err := pm.StartContainer(&pc); err != nil {
+			fmt.Printf("  [X] privoxy autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}

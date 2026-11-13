@@ -9,7 +9,7 @@ LDFLAGS = -s -w \
 
 PLATFORMS = linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
-.PHONY: build clean test lint install build-all gencert container-build container-push container-build-minio container-push-minio container-build-mc container-push-mc container-build-patroni container-push-patroni container-build-rustfs container-push-rustfs container-build-predixy container-push-predixy container-build-influxdb container-push-influxdb container-build-influx2tsdb container-push-influx2tsdb container-build-documentdb-gateway container-push-documentdb-gateway container-build-mongosh container-push-mongosh container-images-export
+.PHONY: build clean test lint install build-all gencert container-build container-push container-build-minio container-push-minio container-build-mc container-push-mc container-build-patroni container-push-patroni container-build-rustfs container-push-rustfs container-build-predixy container-push-predixy container-build-influxdb container-push-influxdb container-build-influx2tsdb container-push-influx2tsdb container-build-documentdb-gateway container-push-documentdb-gateway container-build-mongosh container-push-mongosh container-build-privoxy container-manifest-privoxy container-push-privoxy container-save-privoxy container-images-export
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) .
@@ -62,18 +62,28 @@ container-build-backup:
 container-build-patroni:
 	podman build --http-proxy=false -t ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5 -f embed/patroni.Containerfile embed/
 
+PRIVOXY_VERSION = 4.2.0
+PRIVOXY_IMAGE   = ghcr.io/mars-base/pgcli/pgcli-privoxy:$(PRIVOXY_VERSION)
+
 container-build-privoxy:
-	podman build --http-proxy=false --platform linux/amd64 -t ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0-amd64 -f embed/privoxy.Containerfile embed/
-	podman build --http-proxy=false --platform linux/arm64 -t ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0-arm64 -f embed/privoxy.Containerfile embed/
+	podman build --http-proxy=false --platform linux/amd64 -t $(PRIVOXY_IMAGE)-amd64 -f embed/privoxy.Containerfile embed/
+	podman build --http-proxy=false --platform linux/arm64 -t $(PRIVOXY_IMAGE)-arm64 -f embed/privoxy.Containerfile embed/
 
 container-manifest-privoxy:
-	podman manifest rm ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0 2>/dev/null || true
-	podman manifest create ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0 \
-		containers-storage:ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0-amd64 \
-		containers-storage:ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0-arm64
+	podman manifest rm $(PRIVOXY_IMAGE) 2>/dev/null || true
+	podman manifest create $(PRIVOXY_IMAGE) \
+		containers-storage:$(PRIVOXY_IMAGE)-amd64 \
+		containers-storage:$(PRIVOXY_IMAGE)-arm64
 
 container-push-privoxy:
-	podman manifest push ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0 ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0 --all
+	podman manifest push $(PRIVOXY_IMAGE) $(PRIVOXY_IMAGE) --all
+
+container-save-privoxy:
+	@mkdir -p images
+	podman pull --platform linux/amd64 $(PRIVOXY_IMAGE) >/dev/null 2>&1 \
+	  || podman image exists $(PRIVOXY_IMAGE) \
+	  || { echo "FAIL: cannot resolve $(PRIVOXY_IMAGE) (pull --platform amd64 failed and not in local store; login ghcr.io if private)" >&2; exit 1; }
+	podman save --format docker-archive -o images/pgcli-privoxy_$(PRIVOXY_VERSION).tar $(PRIVOXY_IMAGE)
 
 container-manifest:
 	podman manifest rm ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0 2>/dev/null || true
@@ -365,6 +375,7 @@ IMAGES := \
 	docker.io/library/redis:8.10.2 \
 	docker.io/dpage/pgadmin4:9.18 \
 	docker.io/library/nginx:1.27-alpine \
+	ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0 \
 	docker.io/dxflrs/garage:v2.4.1 \
 	docker.io/chrislusf/seaweedfs:4.48_large_disk \
 	docker.io/grafana/grafana:13.2.4 \

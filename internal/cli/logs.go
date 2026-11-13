@@ -48,6 +48,8 @@ Examples:
   pg logs addon prometheus             # Prometheus server logs
   pg logs addon alertmanager           # Alertmanager server logs
   pg logs addon gitea                  # Gitea server logs
+  pg logs addon nginx --name web       # nginx reverse proxy logs
+  pg logs addon privoxy --name p1      # Privoxy forward proxy logs
   pg logs addon beegfs --service meta  # BeeGFS metadata-daemon logs (default service: mgmtd)`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		follow, _ := cmd.Flags().GetBool("follow")
@@ -70,7 +72,7 @@ var logsAddonCmd = &cobra.Command{
 	Short: "Show addon console output logs",
 	Long: `Show addon console output logs.
 
-Requires the addon type (pgbouncer, postgrest, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rocketmq, patroni).
+Requires the addon type (pgbouncer, postgrest, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rocketmq, nginx, privoxy, patroni).
 Use -i for local instance addons, --pg-name for remote addons,
 --name for an etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage,
 seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rocketmq or Patroni member (default
@@ -185,7 +187,7 @@ Examples:
 			if err != nil {
 				return err
 			}
-		case "etcd", "pgdog", "haproxy", "minio", "silo", "rustfs", "garage", "seaweedfs", "redis", "predixy", "pgadmin", "grafana", "prometheus", "alertmanager", "vmalert", "nodeexporter", "pgexporter", "documentdb", "gitea", "beegfs", "nginx", "influxdb", "influx2tsdb", "clickhouse", "clickhouse-keeper", "kafka", "rabbitmq", "rocketmq", "vmcluster", "vlcluster":
+		case "etcd", "pgdog", "haproxy", "minio", "silo", "rustfs", "garage", "seaweedfs", "redis", "predixy", "pgadmin", "grafana", "prometheus", "alertmanager", "vmalert", "nodeexporter", "pgexporter", "documentdb", "gitea", "beegfs", "nginx", "privoxy", "influxdb", "influx2tsdb", "clickhouse", "clickhouse-keeper", "kafka", "rabbitmq", "rocketmq", "vmcluster", "vlcluster":
 			// (patroni is handled above; it shares --name but requires --scope.)
 			if pgName != "" {
 				return fmt.Errorf("--pg-name selects a remote PgBouncer or PostgREST; use --name for an %s", addonType)
@@ -476,6 +478,15 @@ Examples:
 					return fmt.Errorf("nginx instance %q not found (use 'pg addon list' to see available)", name)
 				}
 				containerName = nc.ContainerName
+			case "privoxy":
+				if cfg.Addons.Privoxy == nil {
+					return fmt.Errorf("no privoxy addons configured")
+				}
+				pc, ok := cfg.Addons.Privoxy[name]
+				if !ok {
+					return fmt.Errorf("privoxy instance %q not found (use 'pg addon list' to see available)", name)
+				}
+				containerName = pc.ContainerName
 			case "vmcluster":
 				if cfg.Addons.VMCluster == nil {
 					return fmt.Errorf("no vmcluster addons configured")
@@ -585,7 +596,7 @@ Examples:
 			}
 			return tailHostLog(m, tail, follow)
 		default:
-			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rocketmq, nginx, patroni)", addonType)
+			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rocketmq, nginx, privoxy, patroni)", addonType)
 		}
 
 		return runPodmanLogs(containerName, tail, follow)

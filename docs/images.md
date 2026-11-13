@@ -36,6 +36,7 @@ pgcli 使用的容器镜像及其默认 tag。
 | `ghcr.io/mars-base/pgcli/predixy` | `7.0.1-alpine` | Predixy（Redis 集群代理），建立在上游 free edition 二进制之上的 wrapper，单架构 amd64 | `DefaultPredixyImageTag` |
 | `docker.io/dpage/pgadmin4` | `9.18` | pgAdmin 4（PostgreSQL 官方 Web 管理界面），纯上游镜像无 wrapper，双架构 manifest list | `DefaultPgAdminImageTag` |
 | `docker.io/library/nginx` | `1.27-alpine` | nginx HTTP 反向代理，纯上游镜像无 wrapper，双架构 manifest list | `DefaultNginxImageTag` |
+| `ghcr.io/mars-base/pgcli/pgcli-privoxy` | `4.2.0` | Privoxy HTTP/HTTPS 正向代理（HTTP 直连转发 + HTTPS CONNECT 隧道，不做 TLS 中间人）；amd64 装官方 `.deb`，arm64 用官方源码编译（OpenSSL/Brotli/zstd），双架构 manifest list | `config.DefaultPrivoxyImageTag` |
 | `docker.io/dxflrs/garage` | `v2.4.1` | Garage（Deuxfleurs 的 Rust S3 存储，面向自建/异地集群），纯上游镜像无 wrapper，`FROM scratch` 无 shell | `DefaultGarageImageTag` |
 | `docker.io/chrislusf/seaweedfs` | `4.48_large_disk` | SeaweedFS（Go 对象存储，volume + placement-code 复制模型），纯上游镜像无 wrapper，`_large_disk` 变体 | `DefaultSeaweedfsImageTag` |
 | `docker.io/grafana/grafana` | `13.2.4` | Grafana（开源可观测性面板），纯上游官方镜像无 wrapper；自 12.4.0 起 `grafana-oss` 仓库冻结，OSS 构建就发在这个仓库里；默认 Alpine base，双架构 manifest list | `config.go:578`（`DefaultGrafanaImageTag`） |
@@ -154,6 +155,11 @@ podman save -o "$TARGET/pgadmin4_9.18.tar" docker.io/dpage/pgadmin4:9.18
 # nginx 上游镜像与 redis 一样是双架构 manifest list，先按 amd64 pull 再 save
 podman pull --platform linux/amd64 docker.io/library/nginx:1.27-alpine
 podman save -o "$TARGET/nginx_1.27-alpine.tar" docker.io/library/nginx:1.27-alpine
+
+# pgcli-privoxy 是双架构 manifest list，先按 amd64 pull 再 save
+podman pull --platform linux/amd64 ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0
+podman save -o "$TARGET/pgcli-privoxy_4.2.0.tar" \
+  ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0
 
 # garage 上游镜像（FROM scratch，多架构）先按 amd64 pull 再 save
 podman pull --platform linux/amd64 docker.io/dxflrs/garage:v2.4.1
@@ -461,7 +467,7 @@ done
 
 ---
 
-**最后更新**：2026-11-03（新增 vmalert 镜像并同步 Makefile IMAGES；2026-11-02 补入 RabbitMQ、RocketMQ、node_exporter、pg_exporter 镜像并同步 Makefile IMAGES；同日新增 pgcli-mongosh；同步补入 pgcli-documentdb-gateway；2026-10-28 新增 Kafka 4.4.0 镜像；2026-10-27 新增 clickhouse 与 influx2tsdb 镜像；2026-10-23 新增 vlagent 镜像；同日新增 victorialogs 镜像；此前新增 vmcluster 三镜像于 2026-10-22；
+**最后更新**：2026-11-13（pgcli-privoxy 接入 pg addon 并进入主镜像表、同步 Makefile IMAGES；2026-11-03 新增 vmalert 镜像并同步 Makefile IMAGES；2026-11-02 补入 RabbitMQ、RocketMQ、node_exporter、pg_exporter 镜像并同步 Makefile IMAGES；同日新增 pgcli-mongosh；同步补入 pgcli-documentdb-gateway；2026-10-28 新增 Kafka 4.4.0 镜像；2026-10-27 新增 clickhouse 与 influx2tsdb 镜像；2026-10-23 新增 vlagent 镜像；同日新增 victorialogs 镜像；此前新增 vmcluster 三镜像于 2026-10-22；
 此前新增 victoriametrics 镜像；
 此前新增 beegfs 三镜像于 2026-10-19，gitea 于 2026-10-16
 合入时补录，alertmanager 于 2026-10-15

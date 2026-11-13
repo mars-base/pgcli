@@ -46,6 +46,7 @@ type Config struct {
 	GiteaStartPort           int                         `yaml:"gitea_start_port,omitempty"`                   // starting Gitea web host port, default 3080 (Gitea's own default 3000 belongs to the Grafana pool here)
 	GiteaSSHStartPort        int                         `yaml:"gitea_ssh_start_port,omitempty"`               // starting Gitea OpenSSH host port, default 2222 (allocated for every gitea instance — the image's sshd always runs, so even SSH-off needs a port to park it on, off 22)
 	NginxStartPort           int                         `yaml:"nginx_start_port,omitempty"`                   // starting nginx HTTP host port, default 8080 (HTTPS takes the next free port)
+	PrivoxyStartPort         int                         `yaml:"privoxy_start_port,omitempty"`                 // starting Privoxy proxy host port, default 8118 (one port per instance, skipping host-listening ports)
 	GarageStartPort          int                         `yaml:"garage_start_port,omitempty"`                  // starting Garage S3 API host port, default 3900 (RPC, web, admin take the next three free ports)
 	SeaweedfsStartPort       int                         `yaml:"seaweedfs_start_port,omitempty"`               // starting SeaweedFS master host port, default 8400 (volume, filer, s3 take the next three free ports; gRPC twins at +10000 are reserved)
 	VictoriaMetricsStartPort int                         `yaml:"victoriametrics_start_port,omitempty"`         // starting VictoriaMetrics HTTP host port, default 8428
@@ -192,6 +193,7 @@ type TopAddonsConfig struct {
 	Alertmanager     map[string]AlertmanagerConfig     `yaml:"alertmanager,omitempty"`
 	Gitea            map[string]GiteaConfig            `yaml:"gitea,omitempty"`
 	Nginx            map[string]NginxConfig            `yaml:"nginx,omitempty"`
+	Privoxy          map[string]PrivoxyConfig          `yaml:"privoxy,omitempty"`
 	BeeGFS           map[string]BeeGFSConfig           `yaml:"beegfs,omitempty"`
 	Juicefs          map[string]JuicefsConfig          `yaml:"juicefs,omitempty"`
 	Zerofs           map[string]ZerofsConfig           `yaml:"zerofs,omitempty"`
@@ -613,6 +615,42 @@ type NginxConfig struct {
 	// into the addon directory and manages only the container lifecycle.
 	// TLS/HTTPPort/HTTPSPort/Listen still take effect for container networking.
 	ConfFile string `yaml:"conf_file,omitempty"`
+}
+
+// DefaultPrivoxyImageTag is pgcli's own Privoxy image (official binaries on
+// Debian, amd64 .deb / arm64 source build). It is a const here, the single
+// source of truth, so ApplyDefaults and the podman manager agree.
+const DefaultPrivoxyImageTag = "ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0"
+
+// PrivoxyConfig holds a top-level Privoxy forward-proxy addon. Privoxy is
+// shared egress infrastructure: HTTP requests are forwarded directly and
+// HTTPS requests use CONNECT tunneling, so TLS is never intercepted and no CA
+// or certificate is managed. The config is rendered by pgcli and bind-mounted
+// read-only; AllowNetworks/DenyNetworks map to Privoxy's permit-access /
+// deny-access client ACLs (last match wins, default deny once any ACL line
+// exists). ConfFile replaces the rendered config for advanced directives.
+type PrivoxyConfig struct {
+	ContainerName string `yaml:"container_name"`      // pgcli-privoxy<ns>-<name>
+	Name          string `yaml:"name,omitempty"`      // addon key, defaults to the map key
+	ImageTag      string `yaml:"image_tag,omitempty"` // config.DefaultPrivoxyImageTag
+	Listen        string `yaml:"listen,omitempty"`    // bind address, default 0.0.0.0
+	Port          int    `yaml:"port,omitempty"`      // proxy listener port, 8118+ auto-assigned
+
+	// AllowNetworks renders permit-access lines (client whitelist: with no
+	// DenyNetworks, every other client is denied). DenyNetworks renders
+	// deny-access lines; when AllowNetworks is empty a catch-all permit is
+	// emitted first so the result is a blacklist rather than deny-all.
+	AllowNetworks []string `yaml:"allow_networks,omitempty"`
+	DenyNetworks  []string `yaml:"deny_networks,omitempty"`
+
+	// ConfFile is a user-provided Privoxy config. When set it is copied into
+	// the addon directory instead of rendering, and AllowNetworks/DenyNetworks
+	// must be empty (they are flags of the rendered form).
+	ConfFile string `yaml:"conf_file,omitempty"`
+
+	// Autostart brings this container up on host boot via the boot service
+	// (pg autostart enable --privoxy). Start-only: install first.
+	Autostart bool `yaml:"autostart,omitempty"`
 }
 
 // DefaultMinioImageTag is the public pre-built single-node MinIO image
@@ -4676,6 +4714,7 @@ func Default() *Config {
 		GiteaStartPort:           3080,
 		GiteaSSHStartPort:        2222,
 		NginxStartPort:           8080,
+		PrivoxyStartPort:         8118,
 		GarageStartPort:          3900,
 		SeaweedfsStartPort:       8400,
 		VictoriaMetricsStartPort: 8428,
@@ -4932,6 +4971,7 @@ type displayConfig struct {
 	GiteaStartPort           int                         `yaml:"gitea_start_port,omitempty"`
 	GiteaSSHStartPort        int                         `yaml:"gitea_ssh_start_port,omitempty"`
 	NginxStartPort           int                         `yaml:"nginx_start_port,omitempty"`
+	PrivoxyStartPort         int                         `yaml:"privoxy_start_port,omitempty"`
 	GarageStartPort          int                         `yaml:"garage_start_port,omitempty"`
 	SeaweedfsStartPort       int                         `yaml:"seaweedfs_start_port,omitempty"`
 	VictoriaMetricsStartPort int                         `yaml:"victoriametrics_start_port,omitempty"`
@@ -4990,6 +5030,7 @@ func (c *Config) Display() displayConfig {
 		GiteaStartPort:           c.GiteaStartPort,
 		GiteaSSHStartPort:        c.GiteaSSHStartPort,
 		NginxStartPort:           c.NginxStartPort,
+		PrivoxyStartPort:         c.PrivoxyStartPort,
 		GarageStartPort:          c.GarageStartPort,
 		SeaweedfsStartPort:       c.SeaweedfsStartPort,
 		VictoriaMetricsStartPort: c.VictoriaMetricsStartPort,
@@ -6065,6 +6106,27 @@ func (c *Config) GetPostgresURL() string {
 		c.Postgres.Database)
 }
 
+// NormalizeACLValues flattens repeated flags and comma-separated lists into
+// one deduplicated list, preserving order. Used for Privoxy ACL entries.
+func NormalizeACLValues(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, v := range values {
+		for part := range strings.SplitSeq(v, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" || seen[part] {
+				continue
+			}
+			seen[part] = true
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
 // ApplyDefaults fills zero-value fields with their defaults.
 func (c *Config) ApplyDefaults() {
 	d := Default()
@@ -6123,6 +6185,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.NginxStartPort == 0 {
 		c.NginxStartPort = d.NginxStartPort
+	}
+	if c.PrivoxyStartPort == 0 {
+		c.PrivoxyStartPort = d.PrivoxyStartPort
 	}
 	if c.GarageStartPort == 0 {
 		c.GarageStartPort = d.GarageStartPort
@@ -6510,6 +6575,30 @@ func (c *Config) ApplyDefaults() {
 			addon.Listen = "127.0.0.1"
 		}
 		c.Addons.Nginx[name] = addon
+	}
+
+	// Top-level addons defaults (Privoxy forward proxy). Listen defaults to
+	// 0.0.0.0 — the proxy is consumed by other hosts and containers. ACLs are
+	// never defaulted: an empty pair means no ACL lines (open proxy), which the
+	// install handler warns about for a non-loopback listener.
+	for name, addon := range c.Addons.Privoxy {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-privoxy" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = DefaultPrivoxyImageTag
+		}
+		if addon.Listen == "" {
+			addon.Listen = "0.0.0.0"
+		}
+		// Each ACL flag may repeat and/or carry a comma-separated list; merge
+		// both forms here so the renderer and YAML users see one flat list.
+		addon.AllowNetworks = NormalizeACLValues(addon.AllowNetworks)
+		addon.DenyNetworks = NormalizeACLValues(addon.DenyNetworks)
+		c.Addons.Privoxy[name] = addon
 	}
 
 	// Top-level addons defaults (MinIO single-node object storage). DataDir is
@@ -9369,6 +9458,44 @@ func (c *Config) autoAssignPorts() {
 				next = addon.HTTPSPort + 1
 			}
 			c.Addons.Nginx[name] = addon
+		}
+	}
+
+	// Allocate ports for Privoxy addons from their own pool (privoxy_start_port,
+	// default 8118). Each instance takes exactly one proxy listener port. The
+	// host-listening probe in usedPorts makes the cursor skip ports occupied by
+	// unrelated services, so several proxies on one machine land on 8118,
+	// 8119, ... without colliding.
+	{
+		privoxyBase := c.PrivoxyStartPort
+		assignedPrivoxy := map[int]bool{}
+		for _, addon := range c.Addons.Privoxy {
+			if addon.Port != 0 {
+				assignedPrivoxy[addon.Port] = true
+			}
+		}
+		next := privoxyBase
+		nextFreePrivoxy := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedPrivoxy[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.Privoxy))
+		for name := range c.Addons.Privoxy {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.Privoxy[name]
+			if addon.Port == 0 && privoxyBase > 0 {
+				addon.Port = nextFreePrivoxy()
+			} else if addon.Port >= next {
+				next = addon.Port + 1
+			}
+			c.Addons.Privoxy[name] = addon
 		}
 	}
 

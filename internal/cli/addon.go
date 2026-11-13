@@ -404,6 +404,7 @@ Currently supported add-ons:
   rabbitmq    RabbitMQ 4.x — AMQP 0-9-1 broker with the management web UI/API from the official docker.io/library/rabbitmq management image (amd64/arm64; host networking, data/config dirs bind-mounted); loopback-only by default, admin password auto-generated and reconciled on every start; optional additive TLS (--tls) adds AMQPS 5671 and management HTTPS 15671 while keeping the plaintext listeners; multi-host clusters via --cluster with etcd peer discovery (quorum queues by default, one member per host, fixed EPMD 4369 / distribution 25672); "pg addon rabbitmq status|shell|queue ...|cluster status|cluster forget"; no federation/MQTT/STOMP, Prometheus plugin disabled; Linux only
   rocketmq    RocketMQ 5.x — Apache RocketMQ messaging from the official docker.io/apache/rocketmq image (host networking, data/config/log dirs bind-mounted); three containers per instance (NameServer + broker + proxy) and one 5.x client entry point on the proxy (gRPC 8081, remoting 8080); standalone starts one async master with no replicas, or a multi-host cluster with an embedded DLedger controller in every NameServer and controller-mode brokers that fail over automatically (--cluster/--controller-id/--advertise-host/--peer ID@HOST, one member per host, fixed ports 9876/9877/10911/10912/8080/8081); no auth and no TLS; "pg addon rocketmq status|shell|topic ...|send|cluster status"; Linux only
   nginx       HTTP reverse proxy in front of web services (path-based routing, optional TLS termination; single container from docker.io/library/nginx; Linux host network, macOS bridge)
+  privoxy     HTTP/HTTPS forward proxy (direct HTTP forwarding + HTTPS CONNECT tunneling, no TLS interception; single container from pgcli's pgcli-privoxy image, amd64/arm64; Linux host network, macOS bridge; port auto-increments from privoxy_start_port 8118 and skips host-listening ports; client ACLs via --allow-network/--deny-network)
 
 Two modes (pgbouncer, postgrest):
   Local:  pg addon install pgbouncer -i <instance>
@@ -843,6 +844,28 @@ nginx (HTTP reverse proxy in front of web services; top-level addon, Linux and m
   pgcli generates a self-signed cert via tlsca. Re-running install with --force
   recreates the container to apply changed backends or TLS settings.
 
+privoxy (HTTP/HTTPS forward proxy; top-level addon, Linux and macOS):
+  pg addon install privoxy [--name p1]
+                          [--listen 0.0.0.0] [--port N]
+                          [--allow-network CIDR[,CIDR...]] (repeatable)
+                          [--deny-network CIDR[,CIDR...]] (repeatable)
+                          [--conf-file FILE] [--image ...] [--force]
+  Stored under top-level addons.privoxy in config. HTTP requests are forwarded
+  directly and HTTPS requests use CONNECT tunnels — TLS is never intercepted,
+  so there is no CA or certificate to manage. The port auto-assigns from
+  privoxy_start_port (default 8118): each additional instance takes the next
+  free port and ports already listening on the host are skipped; --port pins
+  one explicitly. ACLs use Privoxy's native syntax (host, addr[/mask][:port]);
+  repeated flags and comma-separated values are merged. --allow-network alone
+  is a whitelist (everything else denied); --deny-network alone is a blacklist
+  (a catch-all permit is emitted first); with both, permits render first and
+  denies after, since the last matching line wins. Passing either flag
+  replaces the stored list; pass neither to clear ACLs (an open proxy, which
+  install warns about when the listener is not loopback). --conf-file copies a
+  full Privoxy config instead of rendering and is mutually exclusive with the
+  ACL flags. Re-running install recreates the container only when the rendered
+  config changed; --force always recreates it.
+
 Re-running install is idempotent — it re-syncs all users and passwords from
 pg_shadow, regenerates config files and restarts the container.
 
@@ -917,7 +940,10 @@ Examples:
   pg addon install duckdb                                                                  # default 1.5.6 LTS, install extensions, data dir at <base>/addon/duckdb/duckdb
   pg addon install duckdb --version 2.0.0 --name analytics                                 # pin v2.0.0 under a custom name
   pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050
-  pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050 --upstream name=postgrest,path=/api,backend=127.0.0.1:3000 --tls`,
+  pg addon install nginx --name proxy --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050 --upstream name=postgrest,path=/api,backend=127.0.0.1:3000 --tls
+  pg addon install privoxy --name p1                                   # 8118, auto-assigned
+  pg addon install privoxy --name p2 --allow-network 10.0.0.0/8,192.168.0.0/16
+  pg addon install privoxy --name p3 --deny-network 10.0.0.66/32 --port 8120`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonInstall(args[0], cmd)
@@ -1084,6 +1110,7 @@ Supported add-ons:
   influx2tsdb pg addon start influx2tsdb [--name influx2tsdb]   (recreates the stateless proxy container)
   clickhouse pg addon start clickhouse [--name clickhouse]   (starts the container; config is re-rendered first)
   nginx      pg addon start nginx [--name proxy]
+  privoxy    pg addon start privoxy [--name p1]
   pgbouncer  pg addon start pgbouncer -i <instance>
              pg addon start pgbouncer --pg-name <remote-name>
   postgrest  pg addon start postgrest -i <instance>
@@ -1149,6 +1176,7 @@ Supported add-ons:
   influx2tsdb pg addon stop influx2tsdb [--name influx2tsdb]   (stops the proxy container)
   clickhouse pg addon stop clickhouse [--name clickhouse]   (stops the container, keeps data)
   nginx      pg addon stop nginx [--name proxy]
+  privoxy    pg addon stop privoxy [--name p1]
   pgbouncer  pg addon stop pgbouncer -i <instance>
              pg addon stop pgbouncer --pg-name <remote-name>
   postgrest  pg addon stop postgrest -i <instance>
@@ -1278,10 +1306,10 @@ func init() {
 	addonRemoveCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to remove")
 
 	// etcd flags (top-level shared-infrastructure addon)
-	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, vmcluster, vlcluster, alertmanager, vmalert, gitea, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, beegfs or rocketmq instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"vmc\"/\"vlc\"/\"alertmanager\"/\"vmalert\"/\"gitea\"/\"influx2tsdb\"/\"clickhouse\"/\"clickhouse-keeper\"/\"beegfs\"/\"rocketmq\")")
+	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, vmcluster, vlcluster, alertmanager, vmalert, gitea, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, beegfs, privoxy or rocketmq instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"vmc\"/\"vlc\"/\"alertmanager\"/\"vmalert\"/\"gitea\"/\"influx2tsdb\"/\"clickhouse\"/\"clickhouse-keeper\"/\"beegfs\"/\"privoxy\"/\"rocketmq\")")
 	addonInstallCmd.Flags().Int("client-port", 0, "etcd client host port (0=auto-assign from etcd_start_port); clickhouse-keeper client (4lw/ZooKeeper protocol) port (0=default 9181; immutable after install)")
 	addonInstallCmd.Flags().Int("peer-port", 0, "etcd peer host port (0=auto-assign, next free port after client)")
-	addonInstallCmd.Flags().String("image", "", "override the addon image tag verbatim (etcd default quay.io/coreos/etcd:v3.5.30; redis default resolved from --version, e.g. docker.io/library/redis:8.10.2; predixy default ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine; pgadmin default docker.io/dpage/pgadmin4:9.18; grafana default docker.io/grafana/grafana:13.2.4; prometheus default docker.io/prom/prometheus:v3.15.0; vmcluster/insert-image/select-image/storage-image override the per-role vm* images; vlcluster default docker.io/victoriametrics/victoria-logs:v1.53.0 for all three roles; alertmanager default docker.io/prom/alertmanager:v0.34.1; vmalert default docker.io/victoriametrics/vmalert:v1.133.0; gitea default docker.io/gitea/gitea:28.1.0; rocketmq is pinned by --version and rejects --image)")
+	addonInstallCmd.Flags().String("image", "", "override the addon image tag verbatim (etcd default quay.io/coreos/etcd:v3.5.30; redis default resolved from --version, e.g. docker.io/library/redis:8.10.2; predixy default ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine; pgadmin default docker.io/dpage/pgadmin4:9.18; grafana default docker.io/grafana/grafana:13.2.4; prometheus default docker.io/prom/prometheus:v3.15.0; vmcluster/insert-image/select-image/storage-image override the per-role vm* images; vlcluster default docker.io/victoriametrics/victoria-logs:v1.53.0 for all three roles; alertmanager default docker.io/prom/alertmanager:v0.34.1; vmalert default docker.io/victoriametrics/vmalert:v1.133.0; gitea default docker.io/gitea/gitea:28.1.0; rocketmq is pinned by --version and rejects --image; privoxy default ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0)")
 	addonInstallCmd.Flags().String("cluster", "", "cluster grouping token: etcd --initial-cluster-token (default \"pgcli-etcd\"); redis native-cluster name (--cluster-enabled yes, members sharing it form one cluster you assemble once with `pg redis-cli -- --cluster create ...`); garage — switch on multi-node mode (members sharing the name join one Garage cluster; requires --advertise-host); seaweedfs — switch on multi-node mode (members sharing the name join one Raft cluster via the full --peer list; requires --advertise-host, a shared --dsn metadata database, and the SAME --root-user/--root-password on every node); kafka — switch on multi-host cluster mode: the cluster name, from which the deterministic KRaft cluster id is derived; pass the SAME name on every host and a unique --node-id per host; rabbitmq — switch on multi-host cluster mode: the etcd discovery cluster_name; pass the SAME name on every host and a unique --node-name per host; rocketmq — switch on multi-host cluster mode: the DLedger controller group and broker group name; pass the SAME name on every host with a unique --controller-id, that host's --advertise-host, and --peer entries for the other controllers; clickhouse — switch on multi-host cluster mode: the remote_servers/macros cluster name; pass the SAME name on every host with a unique --shard/--replica pair, that host's --advertise-host, --peer entries for the other members, and --keeper endpoints for the Keeper quorum (immutable after install)")
 	addonInstallCmd.Flags().StringArray("peer", nil, "cluster peer list (repeat one per peer): garage — an existing member's <id>@<addr> to connect to (a joiner usually needs just one — peering is transitive; printed by the bootstrap node's install summary). seaweedfs — a member's <ip>:<master_port> Raft address; pass the FULL list on EVERY node (weed requires the complete membership, MNMD-style, no bootstrap/join distinction), your own entry optional. kafka — another controller as <id>@<host>:<controller_port>; pass every OTHER node on EVERY host (static KRaft quorum, no bootstrap/join distinction) — your own entry is added automatically; rabbitmq does not use --peer: members discover each other through etcd; rocketmq — another controller as <id>@<host> (bare IPv4, no port; the controller port is fixed at 9877); pass every OTHER node on every host — your own entry is added automatically; clickhouse — another cluster member as <shard>/<replica>@<host>:<tcp_port>; pass every OTHER member on EVERY host and use the same --cluster name everywhere; clickhouse-keeper — another Keeper as <server_id>@<host>[:<raft_port>]; pass every OTHER member on EVERY host, your own entry is added automatically (Raft membership is immutable after install)")
 	addonInstallCmd.Flags().String("replication", "", "seaweedfs cluster only: placement code XYZ (X=remote copies, Y=distinct racks, Z=distinct data centers; each digit 0-3), e.g. 001 = one remote copy. Default \"000\" (single-node — no peers to copy to). Immutable once set in a cluster")
@@ -1295,7 +1323,7 @@ func init() {
 	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs, garage, redis, pgAdmin, Grafana, Gitea, DuckDB, VMCluster or VLCluster instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; garage default <base_dir>/addon/garage/<name>/data (its metadata dir is a sibling .../meta); seaweedfs default <base_dir>/addon/seaweedfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data; pgadmin default <base_dir>/addon/pgadmin/<name>/data; grafana default <base_dir>/addon/grafana/<name>/data; prometheus default <base_dir>/addon/prometheus/<name>/data; vmcluster default <base_dir>/addon/vmcluster/<name>/data (vmstorage only); vlcluster default <base_dir>/addon/vlcluster/<name>/data (vlstorage only); alertmanager default <base_dir>/addon/alertmanager/<name>/data; gitea default <base_dir>/addon/gitea/<name>/data; beegfs — ONE dir for the whole filesystem, its three services use <dir>/mgmtd, <dir>/meta and <dir>/storage, default root <base_dir>/addon/beegfs/<name>; duckdb default <base_dir>/addon/duckdb/<name>; influxdb default <base_dir>/addon/influxdb/<name>/data; clickhouse default <base_dir>/addon/clickhouse/<name>/data; clickhouse-keeper default <base_dir>/addon/clickhouse-keeper/<name>/data (its config and logs live in sibling dirs and may be overridden separately); kafka default <base_dir>/addon/kafka/<name>/data; rabbitmq default <base_dir>/addon/rabbitmq/<name>/data; rocketmq default <base_dir>/addon/rocketmq/<name>/data (broker store; cluster controller store is beside it)")
 	addonInstallCmd.Flags().String("advertise-host", "", "peer-visible host: etcd member peer/client URLs, redis native-cluster --cluster-announce-ip, garage cluster rpc_public_addr, and seaweedfs cluster weed -ip that peers dial (empty=127.0.0.1 single-host; set a LAN IP or FQDN for cross-host clusters — required on every garage or seaweedfs --cluster member; Kafka advertises this broker host:port to clients and may not be 0.0.0.0; in Kafka --cluster mode it is also this node's controller voter address, must be a concrete non-loopback IP, and is required on every fresh cluster install. RabbitMQ does not use --advertise-host: its peer-visible identity is --node-name NAME@HOST. RocketMQ advertises this host to clients and peers; required on every fresh cluster install and must be a concrete non-loopback IPv4 in cluster mode (standalone defaults to 127.0.0.1). ClickHouse advertises this host to peers (interserver) and is required on every fresh --cluster install; clickhouse-keeper advertises this host to Raft peers and is required on every fresh install (both must be concrete non-loopback addresses)")
 	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.0.0.12:2379 or https://10.0.0.12:2379 (implies --initial-cluster-state existing; requires --advertise-host). For etcd the scheme must match --tls, the member must use the same auth setting as the cluster, and with TLS the cluster CA is fetched automatically (credentials required when auth is enabled). RabbitMQ does not use --join: members discover each other through etcd")
-	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, vmcluster, vlcluster, alertmanager, vmalert, gitea, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, beegfs or rocketmq instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"vmc\"/\"vlc\"/\"alertmanager\"/\"vmalert\"/\"gitea\"/\"influx2tsdb\"/\"clickhouse\"/\"clickhouse-keeper\"/\"beegfs\"/\"rocketmq\")")
+	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, vmcluster, vlcluster, alertmanager, vmalert, gitea, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, beegfs, privoxy or rocketmq instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"vmc\"/\"vlc\"/\"alertmanager\"/\"vmalert\"/\"gitea\"/\"influx2tsdb\"/\"clickhouse\"/\"clickhouse-keeper\"/\"beegfs\"/\"privoxy\"/\"rocketmq\")")
 	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/garage/seaweedfs/redis/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea/VMCluster/VLCluster data directory (object storage / backup repository / key-value data / pgAdmin config+sessions, Grafana dashboards sqlite DB, Prometheus TSDB, Alertmanager silences+notification state, or Gitea repos + app.ini + its default SQLite DB; VMCluster vmstorage TSDB; VLCluster vlstorage logs) and pgcli-rendered files beside it, or the juicefs/zerofs host per-instance dir (cache, logs, sqlite meta), or the influxdb per-instance dir (data, generated influxdb.conf, local backups), or the clickhouse per-instance dir (data, logs, rendered config, local backups); or the rocketmq per-instance dir (broker store, cluster controller store, logs, rendered config); for vmalert, only pgcli-managed rules/templates dirs (a user-supplied --rules-dir/--templates-dir is never deleted); never the S3 bucket or a PG metadata database. No-op for predixy and influx2tsdb, which are stateless. Never drops a seaweedfs filer metadata database or a Gitea --dsn PostgreSQL database")
 
 	// haproxy flags (top-level load balancer in front of a Patroni cluster)
@@ -1312,8 +1340,12 @@ func init() {
 	addonInstallCmd.Flags().Int("https-port", 0, "nginx HTTPS listener host port, TLS only (0=auto-assign, next free port)")
 	addonInstallCmd.Flags().Int("worker-connections", 0, "nginx worker_connections (max simultaneous connections per worker; default 1024)")
 	addonInstallCmd.Flags().StringArray("upstream", nil, "nginx upstream target name=<upstream>,path=<location>,backend=<host:port> (repeatable; e.g. --upstream name=pgadmin,path=/admin,backend=127.0.0.1:5050, or backends=h1:p1,h2:p2 for multiple servers)")
-	addonInstallCmd.Flags().String("conf-file", "", "path to a full custom config file (nginx: nginx.conf, mutually exclusive with --upstream; haproxy: haproxy.cfg, mutually exclusive with --node/--ha; prometheus: prometheus.yml, mutually exclusive with --scrape/--scrape-append/--scrape-interval/--alertmanager-url/--remote-write-url/--remote-write-queue (but NOT --rule-file, which is copied and mounted either way); alertmanager: alertmanager.yml, mutually exclusive with --webhook-url) — pgcli copies it into its managed path and mounts that, manages the container lifecycle, and you control the whole config; validated with nginx -t / haproxy -c at install (prometheus/alertmanager: not pre-validated — a bad file is logged and the last good config keeps serving; reload with SIGHUP)")
+	addonInstallCmd.Flags().String("conf-file", "", "path to a full custom config file (nginx: nginx.conf, mutually exclusive with --upstream; haproxy: haproxy.cfg, mutually exclusive with --node/--ha; prometheus: prometheus.yml, mutually exclusive with --scrape/--scrape-append/--scrape-interval/--alertmanager-url/--remote-write-url/--remote-write-queue (but NOT --rule-file, which is copied and mounted either way); alertmanager: alertmanager.yml, mutually exclusive with --webhook-url) — pgcli copies it into its managed path and mounts that, manages the container lifecycle, and you control the whole config; validated with nginx -t / haproxy -c at install (prometheus/alertmanager: not pre-validated — a bad file is logged and the last good config keeps serving; reload with SIGHUP); privoxy: a full Privoxy config (copied verbatim into the addon dir and mounted read-only at /etc/privoxy/config; --listen/--port are then summary/macOS-only, the file owns the listener), mutually exclusive with --allow-network/--deny-network")
 	addonInstallCmd.Flags().Bool("reload", false, "haproxy --conf-file only: hot-reload the running instance (validate with haproxy -c, then SIGUSR2) instead of recreating the container — no dropped connections; ignored otherwise")
+
+	// privoxy flags (top-level HTTP/HTTPS forward proxy)
+	addonInstallCmd.Flags().StringArray("allow-network", nil, "Privoxy: client ACL spec to PERMIT (repeatable, and each value may be a comma-separated list; all forms are merged) — native Privoxy syntax: host, addr[/mask][:port], optionally followed by a space and a destination address, e.g. 10.0.0.0/8 or 192.0.2.10. Once any ACL exists the default is deny, so --allow-network alone is a whitelist (only listed clients may use the proxy). Passing the flag REPLACES the stored whitelist; omit both ACL flags on reinstall to clear them (open proxy). Mutually exclusive with --conf-file")
+	addonInstallCmd.Flags().StringArray("deny-network", nil, "Privoxy: client ACL spec to DENY (same syntax, repeatable/comma-separated merging, replaces the stored blacklist). With no --allow-network a catch-all permit is emitted first, so this alone is a blacklist. When both are given, permits render before denies (Privoxy: last match wins) — allow a range, then deny a narrower address inside it. Mutually exclusive with --conf-file")
 
 	// prometheus flags (top-level metrics collection backend)
 	addonInstallCmd.Flags().String("retention", "", "data retention: Prometheus TSDB retention (--storage.tsdb.retention.time), e.g. 15d, 6mo, 2y (default \"15d\"); VictoriaLogs retention as a duration the binary parses (e.g. 30d, 3months, 1y), passed verbatim as -retentionPeriod — omit to keep the victoria-logs default. For vlcluster it applies to vlstorage only (same flag, same default)")
@@ -1361,7 +1393,7 @@ func init() {
 	// minio flags (top-level single-node S3-compatible object storage)
 	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo/rustfs S3 API host port (0=auto-assign from the shared minio_start_port pool); for garage, the S3 API port (0=auto from garage_start_port, default 3900 — garage takes four consecutive ports API/RPC/Web/Admin)")
 	addonInstallCmd.Flags().Int("console-port", 0, "MinIO/silo/rustfs web console host port (0=auto-assign, next free port)")
-	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo, rustfs, garage or seaweedfs server / PostgREST HTTP server / pgAdmin web server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network) — Redis, Predixy and Grafana default to \"0.0.0.0\" instead, since their password is always required (and a dashboard is meant to be viewed remotely); pass 127.0.0.1 to keep them loopback-only. Gitea also defaults to \"0.0.0.0\" — a Git host is pushed to from other machines, and its generated admin login plus closed self-registration are the gate. Prometheus and Alertmanager ALSO default to 0.0.0.0 but have NO auth at all — Alertmanager worse: anyone reaching its port can create silences (mute on-call). vmalert is the same: no auth, no TLS — its rule API and GET /-/reload are open to anyone who can reach the port, and it defaults to 0.0.0.0 to match Prometheus/Alertmanager; pass --listen 127.0.0.1 on an untrusted network. VMCluster and VLCluster are the same story: no auth at all, so 0.0.0.0 means anyone who reaches the port can ingest, query, or delete data; pass 127.0.0.1 to keep the cluster loopback-only. Both are guarded only by the network boundary, so pass 127.0.0.1 to keep them loopback-only. BeeGFS is a different shape again: its daemons always bind the fixed protocol ports on the host network, so --listen does NOT gate anything there — it only picks the address the cluster self-references and clients dial for mgmtd (sysMgmtdHost), defaulting to \"0.0.0.0\" because a parallel filesystem is mounted from other machines. InfluxDB defaults to \"0.0.0.0\" too: its HTTP API always requires authentication, while the unauthenticated backup/restore RPC endpoint is pinned to 127.0.0.1 regardless of --listen. ClickHouse defaults to \"127.0.0.1\": its HTTP and native listeners always require authentication, but loopback is the safer default — pass 0.0.0.0 to expose it on the network. Kafka defaults to \"127.0.0.1\": it has NO authentication, so expose it only on a trusted private network; Kafka --cluster mode requires 0.0.0.0 (or the advertised address) because peers and clients must reach it. RabbitMQ defaults to \"127.0.0.1\" and uses the same address for AMQP and the management UI; both require the admin login, but loopback is still the safer default — pass 0.0.0.0 to expose them on the network. In RabbitMQ --cluster mode --listen defaults to 0.0.0.0 (mandatory for cross-host distribution) and may not be loopback. RocketMQ does not use --listen: it always binds host networking (cluster ports are fixed), so restrict access with a firewall. ClickHouse --cluster requires 0.0.0.0 (or the advertised address) so peers and clients can reach it; ClickHouse Keeper defaults to 127.0.0.1 and requires a non-loopback bind whenever --peer is set")
+	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo, rustfs, garage or seaweedfs server / PostgREST HTTP server / pgAdmin web server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network) — Redis, Predixy and Grafana default to \"0.0.0.0\" instead, since their password is always required (and a dashboard is meant to be viewed remotely); pass 127.0.0.1 to keep them loopback-only. Gitea also defaults to \"0.0.0.0\" — a Git host is pushed to from other machines, and its generated admin login plus closed self-registration are the gate. Prometheus and Alertmanager ALSO default to 0.0.0.0 but have NO auth at all — Alertmanager worse: anyone reaching its port can create silences (mute on-call). vmalert is the same: no auth, no TLS — its rule API and GET /-/reload are open to anyone who can reach the port, and it defaults to 0.0.0.0 to match Prometheus/Alertmanager; pass --listen 127.0.0.1 on an untrusted network. VMCluster and VLCluster are the same story: no auth at all, so 0.0.0.0 means anyone who reaches the port can ingest, query, or delete data; pass 127.0.0.1 to keep the cluster loopback-only. Both are guarded only by the network boundary, so pass 127.0.0.1 to keep them loopback-only. BeeGFS is a different shape again: its daemons always bind the fixed protocol ports on the host network, so --listen does NOT gate anything there — it only picks the address the cluster self-references and clients dial for mgmtd (sysMgmtdHost), defaulting to \"0.0.0.0\" because a parallel filesystem is mounted from other machines. InfluxDB defaults to \"0.0.0.0\" too: its HTTP API always requires authentication, while the unauthenticated backup/restore RPC endpoint is pinned to 127.0.0.1 regardless of --listen. ClickHouse defaults to \"127.0.0.1\": its HTTP and native listeners always require authentication, but loopback is the safer default — pass 0.0.0.0 to expose it on the network. Kafka defaults to \"127.0.0.1\": it has NO authentication, so expose it only on a trusted private network; Kafka --cluster mode requires 0.0.0.0 (or the advertised address) because peers and clients must reach it. RabbitMQ defaults to \"127.0.0.1\" and uses the same address for AMQP and the management UI; both require the admin login, but loopback is still the safer default — pass 0.0.0.0 to expose them on the network. In RabbitMQ --cluster mode --listen defaults to 0.0.0.0 (mandatory for cross-host distribution) and may not be loopback. RocketMQ does not use --listen: it always binds host networking (cluster ports are fixed), so restrict access with a firewall. ClickHouse --cluster requires 0.0.0.0 (or the advertised address) so peers and clients can reach it; ClickHouse Keeper defaults to 127.0.0.1 and requires a non-loopback bind whenever --peer is set. Privoxy defaults to \"0.0.0.0\": clients on other hosts and containers must reach the forward proxy, and --allow-network/--deny-network are the gate (with no ACL it is an open proxy — install warns about this)")
 	addonInstallCmd.Flags().String("root-user", "", "MinIO/silo/rustfs root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config). For garage this is the seeded access key: omit it to auto-generate a GK-prefixed key (garage has no \"admin\" user). For seaweedfs it is the s3.json identity access key: omit it to auto-generate an SW-prefixed key on a SINGLE-NODE install only — under --cluster both it and --root-password are REQUIRED, since each node reads only its own s3.json and must present the identical identity. For etcd it is the authentication username (default \"root\"; only with --auth)")
 	addonInstallCmd.Flags().String("root-password", "", "MinIO/silo/rustfs root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand). For garage this is the seeded secret key; for seaweedfs the s3.json identity secret key — required (with --root-user) on every node of a --cluster install")
 	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO/silo/rustfs distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (MinIO/silo: path is the in-container export dir — /data with a plain --data-dir node, or /data1../dataN on a --drive node (MNMD); repeat for every node's every drive. rustfs: one endpoint per node — scheme://host:port, no path; it has no multi-node single-drive mode so --drive is required, and it derives the /data/rustfs0../rustfsN suffix itself. The list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
@@ -1389,9 +1421,9 @@ func init() {
 	addonInstallCmd.Flags().Int("replica-of-port", 0, "Redis: remote master's port, paired with --replica-of-host")
 
 	// start / stop flags
-	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, beegfs or rocketmq instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"vmalert\"/\"gitea\"/\"influx2tsdb\"/\"clickhouse\"/\"clickhouse-keeper\"/\"beegfs\"/\"rocketmq\")")
+	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, beegfs, privoxy or rocketmq instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"vmalert\"/\"gitea\"/\"influx2tsdb\"/\"clickhouse\"/\"clickhouse-keeper\"/\"beegfs\"/\"privoxy\"/\"rocketmq\")")
 	addonStartCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to start")
-	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, beegfs or rocketmq instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"vmalert\"/\"gitea\"/\"influx2tsdb\"/\"clickhouse\"/\"clickhouse-keeper\"/\"beegfs\"/\"rocketmq\")")
+	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, beegfs, privoxy or rocketmq instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"vmalert\"/\"gitea\"/\"influx2tsdb\"/\"clickhouse\"/\"clickhouse-keeper\"/\"beegfs\"/\"privoxy\"/\"rocketmq\")")
 	addonStopCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to stop")
 
 	// list / password flags
@@ -1400,7 +1432,7 @@ func init() {
 	addonPasswordCmd.Flags().String("file", "", "write the password to this file (mode 0600) instead of stdout, keeping it out of shell history and scrollback")
 
 	// pgdog flags (top-level shared Postgres proxy addon)
-	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port) / PostgREST HTTP host port (0=auto-assign from postgrest_start_port) / Redis host port (0=auto-assign from redis_start_port, default 6379) / Predixy proxy host port (0=auto-assign from predixy_start_port, default 7617) / pgAdmin web host port (0=auto-assign from pgadmin_start_port, default 5050) / Grafana web host port (0=auto-assign from grafana_start_port, default 3000) / Prometheus web host port (0=auto-assign from prometheus_start_port, default 9090) / Alertmanager web host port (0=auto-assign from alertmanager_start_port, default 9093) / vmalert web/API host port (0=auto-assign from vmalert_start_port, default 8880) / Gitea web host port (0=auto-assign from gitea_start_port, default 3080) / influx2tsdb InfluxDB-protocol HTTP host port (0=auto-assign from influx2tsdb_start_port, default 8087)")
+	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port) / PostgREST HTTP host port (0=auto-assign from postgrest_start_port) / Redis host port (0=auto-assign from redis_start_port, default 6379) / Predixy proxy host port (0=auto-assign from predixy_start_port, default 7617) / pgAdmin web host port (0=auto-assign from pgadmin_start_port, default 5050) / Grafana web host port (0=auto-assign from grafana_start_port, default 3000) / Prometheus web host port (0=auto-assign from prometheus_start_port, default 9090) / Alertmanager web host port (0=auto-assign from alertmanager_start_port, default 9093) / vmalert web/API host port (0=auto-assign from vmalert_start_port, default 8880) / Gitea web host port (0=auto-assign from gitea_start_port, default 3080) / influx2tsdb InfluxDB-protocol HTTP host port (0=auto-assign from influx2tsdb_start_port, default 8087) / Privoxy proxy host port (0=auto-assign from privoxy_start_port, default 8118; multiple instances increment from there and skip ports already listening on the host)")
 	addonInstallCmd.Flags().Int("ssh-port", 0, "Gitea: host port for git-over-ssh (the image's OpenSSH) clone/push — any N>0 enables it. The image always runs sshd, so N=0 does not stop it, only parks it on an idle pool port (off 22). With no explicit value the port auto-assigns from gitea_ssh_start_port (default 2222); on Linux that port is bound directly (host networking), so the clone URL shows ssh://git@<listen>:<port>/...")
 	addonInstallCmd.Flags().String("host", "", "PgDog listen address (default 127.0.0.1)")
 	addonInstallCmd.Flags().String("pool-mode", "", "PgDog pooler mode: transaction (default) or session")
@@ -1480,6 +1512,8 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallZerofs(cmd)
 	case "nginx":
 		return runAddonInstallNginx(cmd)
+	case "privoxy":
+		return runAddonInstallPrivoxy(cmd)
 	case "duckdb":
 		return runAddonInstallDuckdb(cmd)
 	case "influxdb":
@@ -1499,7 +1533,7 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, privoxy)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -6831,6 +6865,37 @@ func runAddonList(showPassword bool) error {
 		}
 	}
 
+	// privoxy (HTTP/HTTPS forward proxy, top-level addon; Linux + macOS)
+	section("Forward proxy add-ons (privoxy):", len(cfg.Addons.Privoxy) > 0)
+	if pm, err := podman.NewPrivoxyManager(cfg); err == nil {
+		for _, name := range sortedAddonNames(cfg.Addons.Privoxy) {
+			pc := cfg.Addons.Privoxy[name]
+			status := "stopped"
+			if running, err := pm.ContainerRunning(pc.ContainerName); err == nil && running {
+				status = "running"
+			}
+			fmt.Printf("  %s (name: %s)\n", "privoxy", name)
+			fmt.Printf("    Status:      %s\n", status)
+			if pc.ConfFile != "" {
+				fmt.Printf("    Listen:      (from conf file %s)\n", pc.ConfFile)
+			} else {
+				fmt.Printf("    Listen:      http://%s:%d\n", pc.Listen, pc.Port)
+			}
+			fmt.Printf("    ACL allow:   %d\n", len(pc.AllowNetworks))
+			fmt.Printf("    ACL deny:    %d\n", len(pc.DenyNetworks))
+			fmt.Printf("    Image:       %s\n", pc.ImageTag)
+			fmt.Printf("    Container:   %s\n", pc.ContainerName)
+		}
+	} else if len(cfg.Addons.Privoxy) > 0 {
+		for _, name := range sortedAddonNames(cfg.Addons.Privoxy) {
+			pc := cfg.Addons.Privoxy[name]
+			fmt.Printf("  %s (name: %s)\n", "privoxy", name)
+			fmt.Printf("    Status:      n/a (%v)\n", err)
+			fmt.Printf("    Listen:      http://%s:%d\n", pc.Listen, pc.Port)
+			fmt.Printf("    Container:   %s\n", pc.ContainerName)
+		}
+	}
+
 	return nil
 }
 
@@ -7077,6 +7142,8 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemoveZerofs(cmd)
 	case "nginx":
 		return runAddonRemoveNginx(cmd)
+	case "privoxy":
+		return runAddonRemovePrivoxy(cmd)
 	case "duckdb":
 		return runAddonRemoveDuckdb(cmd)
 	case "influxdb":
@@ -7096,7 +7163,7 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, privoxy)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -7433,6 +7500,8 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartZerofs(cmd)
 	case "nginx":
 		return runAddonStartNginx(cmd)
+	case "privoxy":
+		return runAddonStartPrivoxy(cmd)
 	case "duckdb":
 		fmt.Println("DuckDB is a CLI tool, not a daemon — start/stop are not applicable.")
 		fmt.Println("Run 'pg addon duckdb shell' to launch an interactive session.")
@@ -7452,7 +7521,7 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 	case "rocketmq":
 		return runAddonStartRocketMQ(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, privoxy)", addonName)
 	}
 }
 
@@ -7518,6 +7587,8 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopZerofs(cmd)
 	case "nginx":
 		return runAddonStopNginx(cmd)
+	case "privoxy":
+		return runAddonStopPrivoxy(cmd)
 	case "duckdb":
 		fmt.Println("DuckDB is a CLI tool, not a daemon — start/stop are not applicable.")
 		return nil
@@ -7536,7 +7607,7 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 	case "rocketmq":
 		return runAddonStopRocketMQ(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, privoxy)", addonName)
 	}
 }
 
@@ -8160,6 +8231,276 @@ func runAddonStopNginx(cmd *cobra.Command) error {
 		return err
 	}
 	fmt.Printf("✓ nginx %q stopped\n", name)
+	return nil
+}
+
+// privoxyListenIsLoopback reports whether the bind address keeps the proxy on
+// the local host (used only for the open-proxy warning).
+func privoxyListenIsLoopback(listen string) bool {
+	if listen == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(listen)
+	return ip != nil && ip.IsLoopback()
+}
+
+// runAddonInstallPrivoxy installs a standalone Privoxy forward proxy: HTTP is
+// forwarded directly, HTTPS goes through CONNECT tunnels, TLS is never
+// intercepted. The container is pull-only and the rendered config is
+// bind-mounted read-only.
+func runAddonInstallPrivoxy(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "privoxy"
+	}
+	imageTag, _ := cmd.Flags().GetString("image")
+	listen, _ := cmd.Flags().GetString("listen")
+	port, _ := cmd.Flags().GetInt("port")
+	confFile, _ := cmd.Flags().GetString("conf-file")
+	allowSpecs, _ := cmd.Flags().GetStringArray("allow-network")
+	denySpecs, _ := cmd.Flags().GetStringArray("deny-network")
+	force, _ := cmd.Flags().GetBool("force")
+
+	// Repeated flags and comma-separated values are merged into one list.
+	allowSpecs = config.NormalizeACLValues(allowSpecs)
+	denySpecs = config.NormalizeACLValues(denySpecs)
+
+	if confFile != "" && (len(allowSpecs) > 0 || len(denySpecs) > 0) {
+		return fmt.Errorf("--conf-file is mutually exclusive with --allow-network/--deny-network")
+	}
+	for _, spec := range append(append([]string{}, allowSpecs...), denySpecs...) {
+		if strings.ContainsAny(spec, "\r\n") {
+			return fmt.Errorf("invalid ACL entry %q: must be a single line", spec)
+		}
+	}
+	if confFile != "" {
+		info, err := os.Stat(confFile)
+		if os.IsNotExist(err) {
+			return fmt.Errorf("--conf-file: %s not found", confFile)
+		}
+		if err != nil {
+			return fmt.Errorf("--conf-file: %w", err)
+		}
+		if info.Size() == 0 {
+			return fmt.Errorf("--conf-file: %s is empty", confFile)
+		}
+	}
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.Privoxy == nil {
+		cfg.Addons.Privoxy = make(map[string]config.PrivoxyConfig)
+	}
+	existing, ok := cfg.Addons.Privoxy[name]
+	if !ok {
+		existing = config.PrivoxyConfig{
+			ContainerName: "pgcli-privoxy" + nsSuffixCLI(cfg.Namespace) + "-" + name,
+			Name:          name,
+		}
+	}
+	if imageTag != "" {
+		existing.ImageTag = imageTag
+	}
+	if listen != "" {
+		existing.Listen = listen
+	}
+	if port != 0 {
+		for other, o := range cfg.Addons.Privoxy {
+			if other != name && o.Port == port {
+				return fmt.Errorf("port %d is already used by privoxy %q", port, other)
+			}
+		}
+		existing.Port = port
+	}
+	// Passing either ACL flag replaces the stored lists; passing neither
+	// clears them (open proxy).
+	existing.AllowNetworks = allowSpecs
+	existing.DenyNetworks = denySpecs
+	existing.ConfFile = confFile
+	if existing.Name == "" {
+		existing.Name = name
+	}
+	cfg.Addons.Privoxy[name] = existing
+
+	cfg.ApplyDefaults()
+	pc := cfg.Addons.Privoxy[name]
+
+	pm, err := podman.NewPrivoxyManager(cfg)
+	if err != nil {
+		return fmt.Errorf("privoxy manager: %w", err)
+	}
+
+	fmt.Println("-> Pulling privoxy image...")
+	if err := pm.EnsureImage(pc.ImageTag); err != nil {
+		return err
+	}
+
+	baseDir := cfg.BaseDir
+	if baseDir == "" {
+		baseDir = platform.DefaultConfigDir()
+	}
+	oldConf, _ := os.ReadFile(filepath.Join(baseDir, "addon", "privoxy", name, "config"))
+
+	cfgPathOut, err := pm.WriteConfig(&pc)
+	if err != nil {
+		return err
+	}
+	newConf, _ := os.ReadFile(cfgPathOut)
+
+	running, _ := pm.ContainerRunning(pc.ContainerName)
+	if running && !force && len(oldConf) > 0 && string(oldConf) == string(newConf) {
+		fmt.Println("  [OK] privoxy running, config unchanged")
+	} else {
+		fmt.Println("-> Starting privoxy container...")
+		if err := pm.EnsureContainer(&pc); err != nil {
+			return err
+		}
+	}
+
+	cfg.Addons.Privoxy[name] = pc
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Printf("✓ privoxy installed: %q\n", name)
+	fmt.Printf("  Container:    %s\n", pc.ContainerName)
+	fmt.Printf("  Image:        %s\n", pc.ImageTag)
+	if pc.ConfFile != "" {
+		fmt.Printf("  Listener:     from %s (the file owns listen-address)\n", pc.ConfFile)
+	} else {
+		fmt.Printf("  Proxy:        http://%s:%d\n", pc.Listen, pc.Port)
+	}
+	fmt.Printf("  ACL allow:    %d\n", len(pc.AllowNetworks))
+	fmt.Printf("  ACL deny:     %d\n", len(pc.DenyNetworks))
+	fmt.Printf("  Config:       %s\n", cfgPathOut)
+	fmt.Printf("  Logs:         pg logs addon privoxy --name %s\n", name)
+	fmt.Println()
+	fmt.Println("  Usage:")
+	fmt.Printf("    curl -x http://<host>:%d http://example.com/          # HTTP forward\n", pc.Port)
+	fmt.Printf("    curl -x http://<host>:%d https://example.com/         # CONNECT tunnel\n", pc.Port)
+	fmt.Printf("    export HTTP_PROXY=http://<host>:%d HTTPS_PROXY=http://<host>:%d\n", pc.Port, pc.Port)
+
+	if pc.ConfFile == "" && len(pc.AllowNetworks) == 0 && len(pc.DenyNetworks) == 0 && !privoxyListenIsLoopback(pc.Listen) {
+		fmt.Println()
+		fmt.Printf("  [!] No client ACLs and listen %s: this is an OPEN PROXY on the network.\n", pc.Listen)
+		fmt.Println("      Restrict it with --allow-network <cidr>[,<cidr>...] or bind loopback with --listen 127.0.0.1.")
+	}
+	return nil
+}
+
+// runAddonRemovePrivoxy removes a Privoxy container and its config directory.
+func runAddonRemovePrivoxy(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "privoxy"
+	}
+
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s -- run \"pg config init\" first", path)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Addons.Privoxy == nil {
+		return fmt.Errorf("no privoxy add-ons configured")
+	}
+	pc, ok := cfg.Addons.Privoxy[name]
+	if !ok {
+		return fmt.Errorf("privoxy %q not found", name)
+	}
+
+	pm, err := podman.NewPrivoxyManager(cfg)
+	if err != nil {
+		return fmt.Errorf("privoxy manager: %w", err)
+	}
+
+	fmt.Printf("-> Removing privoxy %q...\n", name)
+	if err := pm.Remove(&pc); err != nil {
+		return err
+	}
+
+	delete(cfg.Addons.Privoxy, name)
+	if len(cfg.Addons.Privoxy) == 0 {
+		cfg.Addons.Privoxy = nil
+	}
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	fmt.Printf("✓ privoxy %q removed\n", name)
+	return nil
+}
+
+// runAddonStartPrivoxy starts a stopped Privoxy container without re-rendering
+// config (autostart-on-boot path).
+func runAddonStartPrivoxy(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "privoxy"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	if cfg.Addons.Privoxy == nil {
+		return fmt.Errorf("no privoxy add-ons configured (run 'pg addon install privoxy')")
+	}
+	pc, ok := cfg.Addons.Privoxy[name]
+	if !ok {
+		return fmt.Errorf("privoxy %q not found (run 'pg addon install privoxy --name %s')", name, name)
+	}
+	pm, err := podman.NewPrivoxyManager(cfg)
+	if err != nil {
+		return fmt.Errorf("privoxy manager: %w", err)
+	}
+	fmt.Printf("-> Starting privoxy %q...\n", name)
+	return pm.StartContainer(&pc)
+}
+
+// runAddonStopPrivoxy stops a running Privoxy container.
+func runAddonStopPrivoxy(cmd *cobra.Command) error {
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = "privoxy"
+	}
+	cfg, _, err := loadAddonCfg()
+	if err != nil {
+		return err
+	}
+	pc, ok := cfg.Addons.Privoxy[name]
+	if !ok {
+		return fmt.Errorf("privoxy %q not found", name)
+	}
+	pm, err := podman.NewPrivoxyManager(cfg)
+	if err != nil {
+		return fmt.Errorf("privoxy manager: %w", err)
+	}
+	running, _ := pm.ContainerRunning(pc.ContainerName)
+	if !running {
+		fmt.Printf("privoxy %q is not running\n", name)
+		return nil
+	}
+	fmt.Printf("-> Stopping privoxy %q...\n", name)
+	if _, err := pm.Stop(pc.ContainerName); err != nil {
+		return err
+	}
+	fmt.Printf("✓ privoxy %q stopped\n", name)
 	return nil
 }
 
