@@ -161,7 +161,7 @@ Run every playbook from the repository root with `uv run`.
 | `deploy-s3.yaml` | Deploys a standalone minio/silo/rustfs store as a pgBackRest S3 target | Yes |
 | `ha-status.yaml` | Shows the live Patroni topology and HAProxy endpoints | No |
 | `resources.yaml` | Shows host resources and, per namespace, instances, add-ons and HA status | No |
-| `nftables.yaml` | Applies the host nftables firewall from `group_vars/nftables` (Debian family) | Yes |
+| `nftables.yaml` | Applies the host nftables firewall from `group_vars/nftables` (Debian and RedHat families) | Yes |
 | `passwords.yaml` | Shows the stored credentials of instances, HA clusters and add-ons | No |
 
 ### ping.yaml
@@ -392,7 +392,8 @@ and verification commands.
 
 ## Host firewall
 
-`nftables.yaml` installs nftables on Debian-family hosts and replaces the
+`nftables.yaml` installs nftables on Debian-family (Debian, Ubuntu) and
+RedHat-family (Fedora, Rocky) hosts and replaces the
 ruleset with a default-drop input policy. New connections are accepted only
 when they match a rule. The role defaults for `nftables_sets` and
 `nftables_rules` are empty; the example group_vars allow the `trusted` set
@@ -406,6 +407,14 @@ handled separately: only
 `nftables_ssh_sources` may establish host SSH connections, and SSH from every
 other source is dropped even when that source is in a set. Loopback,
 established/related traffic, DHCP replies and ICMP are always accepted.
+
+On Ubuntu, ufw is disabled when it is active; on Fedora and Rocky, firewalld is
+stopped and masked so it cannot program the ruleset in parallel. Both are on by
+default and controlled by `nftables_disable_ufw` and
+`nftables_disable_firewalld`. RedHat-family hosts load
+`/etc/sysconfig/nftables.conf` instead of `/etc/nftables.conf`, and the role
+reloads with `nft -f` rather than `systemctl reload nftables` because the
+Fedora unit starts its reload with `flush ruleset`.
 
 Set entries and SSH sources are IPv4 CIDRs or individual addresses (a single
 IP implies `/32`) and live in the gitignored `group_vars/nftables/main.yml`.

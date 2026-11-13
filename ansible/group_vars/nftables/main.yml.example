@@ -42,6 +42,16 @@ nftables_ssh_allow_all: false
 # on iptables-persistent.
 nftables_remove_iptables_persistent: true
 
+# Ubuntu may ship ufw enabled. It is disabled by default so two packet
+# managers do not write the ruleset. Set false to leave ufw alone.
+nftables_disable_ufw: true
+
+# On the RedHat family (Fedora, Rocky), firewalld is stopped and masked so it
+# cannot program the ruleset alongside the role. Masking also blocks D-Bus
+# activation; restore with `systemctl unmask firewalld`. Set false to leave
+# firewalld alone.
+nftables_disable_firewalld: true
+
 # Forwarding and NAT defaults. pgcli containers use host networking, so no
 # forwarding rules are needed for them.
 filter_forward_default_policy: drop

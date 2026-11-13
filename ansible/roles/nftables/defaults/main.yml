@@ -21,6 +21,18 @@ net_postrouting_default_policy: accept
 # Set false when the host still relies on iptables-persistent.
 nftables_remove_iptables_persistent: true
 
+# Ubuntu ships ufw enabled on some images. Two packet managers writing the
+# ruleset is a common source of surprises, so ufw is disabled by default.
+nftables_disable_ufw: true
+
+# Fedora Server/Workstation ship firewalld. It programs nftables and would
+# fight over the ruleset, so stop and mask it by default.
+nftables_disable_firewalld: true
+
+# RedHat-family nftables.service reads /etc/sysconfig/nftables.conf; Debian
+# family reads /etc/nftables.conf.
+_nftables_config_file: "{{ '/etc/sysconfig/nftables.conf' if ansible_facts.os_family == 'RedHat' else '/etc/nftables.conf' }}"
+
 # Named address sets. Empty sets are skipped, and rules referencing undefined
 # sets are skipped as well, so placeholders cannot render an invalid ruleset.
 # The built-in `ssh_sources` set is generated from nftables_ssh_sources and

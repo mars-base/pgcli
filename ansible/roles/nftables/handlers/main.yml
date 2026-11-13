@@ -4,7 +4,8 @@
     name: nftables
     state: restarted
 
+# Load the file directly instead of `systemctl reload nftables`: Fedora's
+# ExecReload starts with `flush ruleset`, which would wipe foreign tables
+# such as Docker's. On Debian this is what ExecReload runs anyway.
 - name: Reload nftables
-  ansible.builtin.service:
-    name: nftables
-    state: reloaded
+  ansible.builtin.command: /usr/sbin/nft -f {{ _nftables_config_file }}

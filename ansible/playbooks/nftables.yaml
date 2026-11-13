@@ -1,5 +1,6 @@
 ---
-# Manage the host firewall with nftables. Debian-family hosts for now.
+# Manage the host firewall with nftables. Debian-family hosts (Debian, Ubuntu)
+# and RedHat-family hosts (Fedora, Rocky Linux).
 #
 # The ruleset accepts loopback, established/related traffic, DHCP replies,
 # ICMP, SSH from nftables_ssh_sources, and connections matching nftables_rules;
