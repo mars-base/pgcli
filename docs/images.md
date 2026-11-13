@@ -60,7 +60,14 @@ pgcli 使用的容器镜像及其默认 tag。
 
 **推荐一步式**：`make container-images-export` 把下面全部清单镜像（amd64）
 `podman pull --platform linux/amd64` + `podman save` 到项目内 `images/` 目录
-（已 gitignore，tar 不进 git），供离线 VM 同步 load。手工等价命令如下。
+（已 gitignore，tar 不进 git），供离线 VM 同步 load。
+
+需要与 Ansible 的 `pgcli_images` 完全对齐（archive 名直接取自变量）时，用
+`scripts/export-images.sh --ansible ansible/group_vars/all/main.yml -o <目录>`；
+`pg http` 提供 HTTP 服务的完整流程见
+[离线镜像服务器](../site/content/docs/ansible/image-server.md)。
+
+手工等价命令如下。
 
 ```bash
 # 导出到指定目录（默认约定为项目 images/，已在 .gitignore）

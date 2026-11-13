@@ -73,6 +73,10 @@ set, `NO_PROXY` rules, manual SSH usage and verification are covered in
 
 ## Starting the server with `pg http`
 
+To export every image and wire the server up to Ansible step by step, see
+[Offline image server](./image-server/). The rest of this page places that
+server in the context of all offline artifacts.
+
 `pg http` is pgcli's built-in static file server. It runs as a detached host
 process (no container) and supports `HEAD`/`Range` requests, which the image
 loader and its pre-checks rely on.

@@ -55,6 +55,9 @@ pgcli_install_script_src: "{{ inventory_dir | dirname }}/scripts/install.sh"
 
 ## 用 `pg http` 启动服务器
 
+导出全部镜像并接入 Ansible 的完整步骤见[离线镜像服务器](./image-server/)；本页
+其余内容说明该服务器在整套离线资源中的位置。
+
 `pg http` 是 pgcli 自带的静态文件服务器。它以脱离终端的主机进程运行（不占容器），支持 `HEAD`/`Range` 请求——镜像加载与预检正好依赖这两个能力。
 
 ```bash
