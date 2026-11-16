@@ -24,4 +24,5 @@ cascade:
 - [Daemon](./daemon/) — 在宿主机后台运行 webhook 接收端等长期命令
 - [TimescaleDB](./timescaledb/) — 在 PostgreSQL 上使用时序 hypertable 和 time_bucket 分析
 - [HTTP 文件服务器](./http/) — 通过 HTTP(S) 共享目录，提供 autoindex 列表和每文件复制按钮
+- [随机字符串](./rand/) — 生成密码和 token 等安全随机字符串，支持自定义长度和字符集
 {.cards}

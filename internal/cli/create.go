@@ -1,9 +1,7 @@
 package cli
 
 import (
-	"crypto/rand"
 	"fmt"
-	"math/big"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -148,14 +146,5 @@ Examples:
 // generatePassword generates a random password with the given length.
 // Characters: a-z, A-Z, 0-9.
 func generatePassword(length int) (string, error) {
-	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, length)
-	for i := range b {
-		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
-		if err != nil {
-			return "", err
-		}
-		b[i] = chars[n.Int64()]
-	}
-	return string(b), nil
+	return randomString(randCharsetAlnum, length)
 }
