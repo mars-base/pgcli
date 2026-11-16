@@ -80,6 +80,26 @@ When a generated password contains symbols, always quote it in shell commands
 and SQL. For `ALTER ROLE ... PASSWORD`, pass it as a quoted string literal or
 use a parameterized client.
 
+## Is 24 characters enough?
+
+Yes for most uses. The default `alnum` set has 62 characters, so each character
+carries `log2(62) ≈ 5.95` bits; 24 characters give about **143 bits**, above
+the 128-bit standard commonly used for API tokens and session secrets, and far
+above the entropy of a human-chosen password. A 24-character string remains
+infeasible to brute-force even at very high attempt rates.
+
+Two cases deserve a different setting:
+
+- **`hex`**: each character carries only 4 bits, so 24 characters give 96 bits.
+  Use `-l 32` for a 128-bit hex token.
+- **Long-lived, high-value secrets** such as root credentials or encryption
+  keys: `-l 32` gives additional margin at negligible cost.
+
+If a system enforces a "must contain uppercase, lowercase, digit and symbol"
+policy, use `--charset password` (24 characters give about 155 bits) instead of
+the default. Length is only one factor: server-side rate limiting and password
+hashing matter at least as much as raw entropy.
+
 ## Security notes
 
 - Randomness comes from `crypto/rand`, suitable for secrets; it is not
