@@ -15,11 +15,12 @@ cascade:
 
 ### SQL 模式（默认）
 
-没有 `--` 的参数作为 SQL 通过 psql 执行，使用实例配置的用户和数据库。
+没有 `--` 的参数作为 SQL 通过 psql 执行，默认使用实例配置的用户和数据库；`-d/--database` 可以改用同一个实例中的其他数据库。
 
 ```bash
 pg exec "SELECT version()"
 pg exec -i proj01 "SELECT count(*) FROM users"
+pg exec -i proj01 --database bench_db "SELECT count(*) FROM pgbench_accounts"
 pg exec "CREATE TABLE test (id serial PRIMARY KEY, msg text)"
 ```
 
@@ -36,10 +37,11 @@ pg exec -- tail -f /var/log/postgresql/postgresql-*.log
 
 ### 远程数据库（--dsn）
 
-通过连接字符串对任何可达数据库执行 SQL，使用临时容器。`--dsn` 仅支持 SQL 模式；容器命令需要本地实例。
+通过连接字符串对任何可达数据库执行 SQL，使用临时容器。`--dsn` 仅支持 SQL 模式；容器命令需要本地实例。加上 `-d/--database` 可以覆盖 DSN 路径中的数据库。
 
 ```bash
 pg exec --dsn postgres://user:pass@host:5432/db "SELECT count(*) FROM users"
+pg exec --dsn postgres://user:pass@host:5432/db --database bench_db "SELECT 1"
 ```
 
 ## pg psql
@@ -109,5 +111,6 @@ pg shell -- -c "cat /etc/postgresql/postgresql.conf"
 ## 规则
 
 - `--dsn` 和 `--instance` 互斥：连接字符串确定主机、端口和数据库，因此 `-i` 被拒绝以避免静默误用。
-- 使用 `--dsn` 时，数据库是 URL 的路径部分：`postgres://user:pass@host:5432/mydb` 连接到 `mydb`。要使用另一个数据库，更改路径。
+- `-d/--database` 只作用于 SQL 模式：本地实例下选择数据库，`--dsn` 下替换 URL 路径中的数据库；`--` 之后改库请直接把 `-d` 传给容器命令。
+- 使用 `--dsn` 时，数据库默认是 URL 的路径部分：`postgres://user:pass@host:5432/mydb` 连接到 `mydb`。也可以用 `-d/--database` 覆盖它。
 - 使用本地实例时，`--` 传递原始 psql 参数（包括 `-d`/`-U`），覆盖实例默认值。

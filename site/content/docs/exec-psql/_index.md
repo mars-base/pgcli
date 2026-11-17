@@ -22,11 +22,12 @@ Two ways to run SQL against an instance: `pg exec` for one-shot SQL or container
 
 ### SQL mode (default)
 
-Arguments without `--` are executed as SQL via psql, using the instance's configured user and database.
+Arguments without `--` are executed as SQL via psql, using the instance's configured user and database. Use `-d/--database` to target another database in the same instance.
 
 ```bash
 pg exec "SELECT version()"
 pg exec -i proj01 "SELECT count(*) FROM users"
+pg exec -i proj01 --database bench_db "SELECT count(*) FROM pgbench_accounts"
 pg exec "CREATE TABLE test (id serial PRIMARY KEY, msg text)"
 ```
 
@@ -43,10 +44,11 @@ pg exec -- tail -f /var/log/postgresql/postgresql-*.log
 
 ### Remote database (--dsn)
 
-Execute SQL against any database reachable via a connection string, using a temporary container. `--dsn` only supports SQL mode; container commands require a local instance.
+Execute SQL against any database reachable via a connection string, using a temporary container. `--dsn` only supports SQL mode; container commands require a local instance. Add `-d/--database` to override the database in the DSN path.
 
 ```bash
 pg exec --dsn postgres://user:pass@host:5432/db "SELECT count(*) FROM users"
+pg exec --dsn postgres://user:pass@host:5432/db --database bench_db "SELECT 1"
 ```
 
 ## pg psql
@@ -116,5 +118,6 @@ Use cases:
 ## Rules
 
 - `--dsn` and `--instance` are mutually exclusive: the connection string determines host, port and database, so `-i` is rejected to avoid silent misuse.
-- With `--dsn`, the database is the path part of the URL: `postgres://user:pass@host:5432/mydb` connects to `mydb`. To use another database, change the path.
+- `-d/--database` applies to SQL mode only: with a local instance it selects the database, with `--dsn` it replaces the database in the URL path. After `--`, pass `-d` directly to the container command.
+- With `--dsn`, the database defaults to the path part of the URL: `postgres://user:pass@host:5432/mydb` connects to `mydb`. Use `-d/--database` to override it.
 - With a local instance, `--` passes raw psql arguments (including `-d`/`-U`), overriding the instance defaults.

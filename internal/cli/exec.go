@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -16,7 +17,26 @@ func isCgroupPermError(msg string) bool {
 
 func init() {
 	execCmd.Flags().String("dsn", "", "database connection string for remote database (postgres://user:pass@host:port/db)")
+	execCmd.Flags().StringP("database", "d", "", "database for SQL mode (defaults to the instance or DSN database)")
 	rootCmd.AddCommand(execCmd)
+}
+
+// execDSNWithDatabase rewrites the database (URL path) of a DSN while keeping
+// the credentials, host, and query parameters intact.
+func execDSNWithDatabase(dsn, database string) (string, error) {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "", fmt.Errorf("invalid DSN: %w", err)
+	}
+	if u.Scheme != "postgres" && u.Scheme != "postgresql" {
+		return "", fmt.Errorf("invalid DSN: scheme must be postgres:// or postgresql://")
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("invalid DSN: missing host")
+	}
+	u.Path = "/" + database
+	u.RawPath = ""
+	return u.String(), nil
 }
 
 var execCmd = &cobra.Command{
@@ -33,20 +53,28 @@ Examples:
   pg exec "SELECT version()"
   pg exec "CREATE TABLE test (id serial PRIMARY KEY, msg text)"
   pg exec -i myinst "SELECT count(*) FROM users"
+  pg exec -i myinst --database bench_db "SELECT count(*) FROM pgbench_accounts"
   pg exec -- psql -U pgcli -d mydb
   pg exec -- bash -c "cat /var/lib/postgresql/data/postgresql.conf"
   pg exec -- pg_isready
-  pg exec --dsn postgres://user:pass@host:5432/db "SELECT count(*) FROM users"`,
+  pg exec --dsn postgres://user:pass@host:5432/db "SELECT count(*) FROM users"
+  pg exec --dsn postgres://user:pass@host:5432/db --database bench_db "SELECT 1"`,
 	DisableFlagParsing: false,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dsn, _ := cmd.Flags().GetString("dsn")
+		database, _ := cmd.Flags().GetString("database")
 
 		if len(args) == 0 {
 			return fmt.Errorf("no command specified. Usage: pg exec \"SELECT 1\" or pg exec -- <command>")
 		}
 
+		dashDash := cmd.ArgsLenAtDash()
+		if dashDash != -1 && database != "" {
+			return fmt.Errorf("--database only applies to SQL mode; pass the database to the container command instead")
+		}
+
 		// Container commands (after --) only make sense for a local instance.
-		if dsn != "" && cmd.ArgsLenAtDash() != -1 {
+		if dsn != "" && dashDash != -1 {
 			return fmt.Errorf("--dsn only supports SQL mode; container commands require a local instance (drop --dsn)")
 		}
 
@@ -56,6 +84,13 @@ Examples:
 			}
 			if err := loadConfigForDSN(); err != nil {
 				return err
+			}
+			if database != "" {
+				var err error
+				dsn, err = execDSNWithDatabase(dsn, database)
+				if err != nil {
+					return err
+				}
 			}
 			pm, err := newPodman()
 			if err != nil {
@@ -82,14 +117,17 @@ Examples:
 		// Check if -- was used (cobra passes args after -- as positional args).
 		// If the user provided --, args are raw container commands.
 		// If not, treat the joined args as SQL for psql.
-		dashDash := cmd.ArgsLenAtDash()
 		var podmanArgs []string
 
 		if dashDash == -1 {
 			// No -- : treat as SQL
 			sql := strings.Join(args, " ")
+			db := cfg.Postgres.Database
+			if database != "" {
+				db = database
+			}
 			podmanArgs = []string{"exec", "-i", containerName,
-				"psql", "-U", cfg.Postgres.User, "-d", cfg.Postgres.Database,
+				"psql", "-U", cfg.Postgres.User, "-d", db,
 				"-c", sql,
 			}
 		} else {
