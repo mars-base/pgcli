@@ -88,12 +88,12 @@ container-save-privoxy:
 container-manifest:
 	podman manifest rm ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3 2>/dev/null || true
 	podman manifest create ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3 \
-		ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3-amd64 \
-		ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3-arm64
+		containers-storage:ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3-amd64 \
+		containers-storage:ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3-arm64
 	podman manifest rm ghcr.io/mars-base/pgcli/pgcli-backup:2.59.3 2>/dev/null || true
 	podman manifest create ghcr.io/mars-base/pgcli/pgcli-backup:2.59.3 \
-		ghcr.io/mars-base/pgcli/pgcli-backup:2.59.3-amd64 \
-		ghcr.io/mars-base/pgcli/pgcli-backup:2.59.3-arm64
+		containers-storage:ghcr.io/mars-base/pgcli/pgcli-backup:2.59.3-amd64 \
+		containers-storage:ghcr.io/mars-base/pgcli/pgcli-backup:2.59.3-arm64
 
 container-push:
 	podman manifest push ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3 ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3 --all
