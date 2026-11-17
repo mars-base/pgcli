@@ -6,7 +6,7 @@ pgcli 使用的容器镜像及其默认 tag。
 
 | 镜像 | Tag | 用途 | 配置常量 |
 |------|-----|------|----------|
-| `ghcr.io/mars-base/pgcli/pgcli-pg` | `18-2.59.3` | PostgreSQL 实例（单节点或 replica） | `DefaultPgImageTag` |
+| `ghcr.io/mars-base/pgcli/pgcli-pg` | `18-2.59.3` | PostgreSQL 18.7 实例（单节点或 replica） | `DefaultPgImageTag` |
 | `ghcr.io/mars-base/pgcli/pgcli-patroni` | `18-4.1.5` | Patroni HA 集群成员 | `DefaultPatroniImageTag` |
 | `ghcr.io/mars-base/pgcli/pgcli-backup` | `2.59.3` | pgBackRest 备份仓库 | `DefaultBackupImageTag` |
 
@@ -272,7 +272,9 @@ done
 
 ## 版本说明
 
-- **pgcli-pg** / **pgcli-patroni**：PostgreSQL 18 + pgBackRest 2.59.3
+- **pgcli-pg**：PostgreSQL 18.7 + pgBackRest 2.59.3
+- **pgcli-patroni**：PostgreSQL 18.6 + Patroni 4.1.5 + pgBackRest 2.59.3
+  （`18-4.1.5` 构建时的 `postgres:18` minor）
 - **pgcli-backup**：独立备份容器（pgBackRest 2.59.3）
 - **pgcli-minio** / **pgcli-mc**：MinIO 固定版本，避免上游不兼容变更
 - **silo**：Pigsty 官方发布的公开镜像（pull-only），版本随 Pigsty 发布节奏

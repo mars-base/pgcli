@@ -179,7 +179,7 @@ TLS 证书路径会转换为宿主机绝对路径，以只读方式挂载到 `/p
 ### 客户端镜像版本
 
 默认客户端镜像来自 pgcli 配置中的 `image_tag`（`pgcli-pg`，基于
-PostgreSQL 18）。如果远程服务端大版本不同，可显式选择匹配的镜像：
+PostgreSQL 18.7）。如果远程服务端大版本不同，可显式选择匹配的镜像：
 
 ```bash
 pg bench --dsn 'postgres://user:pass@db:5432/appdb' --image docker.io/library/postgres:17 -T 60

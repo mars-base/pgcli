@@ -194,7 +194,7 @@ the container path. `sslrootcert=system` is passed through unchanged.
 ### Client image version
 
 The default client image comes from `image_tag` in the pgcli configuration
-(`pgcli-pg`, based on PostgreSQL 18). For a remote server with a different major
+(`pgcli-pg`, based on PostgreSQL 18.7). For a remote server with a different major
 version, select a matching image explicitly:
 
 ```bash

@@ -16,7 +16,7 @@ cascade:
 
 Complete guide to managing PostgreSQL databases with pgcli.
 
-**PostgreSQL 18** — production ready.
+**PostgreSQL 18.7** — production ready.
 
 - [Quick Start](/docs/quickstart/) — Install and basic usage
 - [Backup](/docs/backup/) — Snapshots and pgBackRest management
