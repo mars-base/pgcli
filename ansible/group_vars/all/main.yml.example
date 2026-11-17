@@ -159,12 +159,12 @@ pgcli_images_force_load: false
 # add-on type name (`-` becomes `_`). This keeps the first deployment short on
 # a host with an empty image store.
 pgcli_images:
-  - image: ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0
-    archive: pgcli-pg_18-2.58.0.tar
+  - image: ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3
+    archive: pgcli-pg_18-2.59.3.tar
   - image: ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5
     archive: pgcli-patroni_18-4.1.5.tar
-  - image: ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0
-    archive: pgcli-backup_2.58.0.tar
+  - image: ghcr.io/mars-base/pgcli/pgcli-backup:2.59.3
+    archive: pgcli-backup_2.59.3.tar
   - image: ghcr.io/mars-base/pgcli/pgcli-minio:20250422221226
     archive: pgcli-minio_20250422221226.tar
     auto_load: true

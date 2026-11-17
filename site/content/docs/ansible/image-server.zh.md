@@ -61,7 +61,7 @@ export HTTPS_PROXY=$HTTP_PROXY
 ### 文件命名与行为
 
 - 文件名规则为 `<镜像仓库名>_<tag>.tar`（`:` 替换为 `_`），例如
-  `ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0` → `pgcli-pg_18-2.58.0.tar`。
+  `ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3` → `pgcli-pg_18-2.59.3.tar`。
   使用 `--ansible` 时完全以清单中的 `archive` 为准。
 - 已存在且未加 `--force` 的 tar 包会 `SKIP`，中断后可以直接重跑续传。
 - 每个包先写成 `.tmp`，成功后原子改名，失败不会留下半个文件；单个镜像失败会
@@ -127,7 +127,7 @@ registry。此时有两项要求：
 
 ```bash
 # 服务器可达，且返回 200 与 Content-Length
-curl -I http://192.0.2.10:18080/pgcli-pg_18-2.58.0.tar
+curl -I http://192.0.2.10:18080/pgcli-pg_18-2.59.3.tar
 
 # 运行 playbook
 cd ansible

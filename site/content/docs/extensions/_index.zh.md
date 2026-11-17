@@ -160,7 +160,7 @@ instances:
       - uuid-ossp
       - pgmq
     podman:
-      image_tag: ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0-ext
+      image_tag: ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3-ext
 ```
 
 `image_tag` 指向包含所有已安装扩展的派生镜像。

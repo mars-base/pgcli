@@ -6,9 +6,9 @@ pgcli 使用的容器镜像及其默认 tag。
 
 | 镜像 | Tag | 用途 | 配置常量 |
 |------|-----|------|----------|
-| `ghcr.io/mars-base/pgcli/pgcli-pg` | `18-2.58.0` | PostgreSQL 实例（单节点或 replica） | `DefaultPgImageTag` |
+| `ghcr.io/mars-base/pgcli/pgcli-pg` | `18-2.59.3` | PostgreSQL 实例（单节点或 replica） | `DefaultPgImageTag` |
 | `ghcr.io/mars-base/pgcli/pgcli-patroni` | `18-4.1.5` | Patroni HA 集群成员 | `DefaultPatroniImageTag` |
-| `ghcr.io/mars-base/pgcli/pgcli-backup` | `2.58.0` | pgBackRest 备份仓库 | `DefaultBackupImageTag` |
+| `ghcr.io/mars-base/pgcli/pgcli-backup` | `2.59.3` | pgBackRest 备份仓库 | `DefaultBackupImageTag` |
 
 ## 插件 / 附加组件
 
@@ -74,14 +74,14 @@ pgcli 使用的容器镜像及其默认 tag。
 TARGET=./images
 mkdir -p "$TARGET"
 
-podman save -o "$TARGET/pgcli-pg_18-2.58.0.tar" \
-  ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0
+podman save -o "$TARGET/pgcli-pg_18-2.59.3.tar" \
+  ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3
 
 podman save -o "$TARGET/pgcli-patroni_18-4.1.5.tar" \
   ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5
 
-podman save -o "$TARGET/pgcli-backup_2.58.0.tar" \
-  ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0
+podman save -o "$TARGET/pgcli-backup_2.59.3.tar" \
+  ghcr.io/mars-base/pgcli/pgcli-backup:2.59.3
 
 podman save -o "$TARGET/pgcli-minio_20250422221226.tar" \
   ghcr.io/mars-base/pgcli/pgcli-minio:20250422221226
@@ -272,8 +272,8 @@ done
 
 ## 版本说明
 
-- **pgcli-pg** / **pgcli-patroni**：PostgreSQL 18 + pgBackRest 2.58.0
-- **pgcli-backup**：独立备份容器（pgBackRest 2.58.0）
+- **pgcli-pg** / **pgcli-patroni**：PostgreSQL 18 + pgBackRest 2.59.3
+- **pgcli-backup**：独立备份容器（pgBackRest 2.59.3）
 - **pgcli-minio** / **pgcli-mc**：MinIO 固定版本，避免上游不兼容变更
 - **silo**：Pigsty 官方发布的公开镜像（pull-only），版本随 Pigsty 发布节奏
 - **pgcli-rustfs**：建立在 `docker.io/rustfs/rustfs:1.0.0`（首个 GA）之上的

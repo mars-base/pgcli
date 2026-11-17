@@ -67,7 +67,7 @@ See [Egress proxy](./proxy/) for running the proxy itself.
 ### Naming and behaviour
 
 - Names follow `<repository-basename>_<tag>.tar` (`:` becomes `_`), for example
-  `ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0` → `pgcli-pg_18-2.58.0.tar`.
+  `ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3` → `pgcli-pg_18-2.59.3.tar`.
   With `--ansible`, the `archive` field is used verbatim.
 - Existing tarballs without `--force` are reported as `SKIP`, so an interrupted
   run can simply be restarted.
@@ -140,7 +140,7 @@ On one target host in the isolated network:
 
 ```bash
 # The server answers with 200 and a Content-Length
-curl -I http://192.0.2.10:18080/pgcli-pg_18-2.58.0.tar
+curl -I http://192.0.2.10:18080/pgcli-pg_18-2.59.3.tar
 
 # Run the playbook
 cd ansible

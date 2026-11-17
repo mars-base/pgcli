@@ -112,10 +112,10 @@ those archive names:
 
 ```yaml
 pgcli_images:
-  - image: ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0
-    archive: pgcli-pg_18-2.58.0.tar
-  - image: ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0
-    archive: pgcli-backup_2.58.0.tar
+  - image: ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3
+    archive: pgcli-pg_18-2.59.3.tar
+  - image: ghcr.io/mars-base/pgcli/pgcli-backup:2.59.3
+    archive: pgcli-backup_2.59.3.tar
   - image: docker.io/edoburu/pgbouncer:v1.25.2-p0
     archive: pgbouncer_v1.25.2-p0.tar
     auto_load: true
@@ -240,7 +240,7 @@ bdbaf2766541a181981ca09e4303591e27cbc48a40df1b14e4e6e399bba72616  grafana_13.2.4
 36f9aa3df9b4dbb92c04224c642a614c71757a6a51eb9b8b7fdf4336774458e2  node-exporter_v1.12.1.tar
 f36fd9dc6da057b14b51c7a913349e8951aed6ab2c14bd786098e3fb851369fd  pgadmin4_9.18.tar
 3110efd6d12a2542f1f033367fd00289b86aaf2150ccd8ada8737e846df0ca28  pgbouncer_v1.25.2-p0.tar
-c12395bb1c9ea0b8095fbc8ff3806958de28ee44d418247490340a8e74fcfc98  pgcli-backup_2.58.0.tar
+c12395bb1c9ea0b8095fbc8ff3806958de28ee44d418247490340a8e74fcfc98  pgcli-backup_2.59.3.tar
 2b15818c746bbbce40da49bfff111c69663c822941b2a7f1cbcfec9f267420a1  pgcli-documentdb-gateway_1.0.0.tar
 03d80d54bfa21bce01827ae557547f15584f6b906762a21a2d196cddcfe05f94  pgcli-influx2tsdb_1.3.2.tar
 a227354e55153e1ad470e05e95000aa177395d8007a9a70a3e8513ff0173bc6e  pgcli-influxdb_1.13.1.tar
@@ -248,7 +248,7 @@ d1cd9b9447132d8728211fb5e05830e9c6d536dfe8db7a8eb094e1cdcbb567bb  pgcli-mc_20250
 412b8ac7decfebb977ba85b77aaf35d0fe95da63de71f2e10e8639e31c97d96c  pgcli-minio_20250422221226.tar
 9179e64e34c72db01dae3748ff4118a93796a9c0bba0826e49d70b6b8720d10a  pgcli-mongosh_2.14.1.tar
 0519713fdf5510b72e3bd2b5f69ab4ef73695eeb3d5f6a822383da62754542b0  pgcli-patroni_18-4.1.5.tar
-46bbe0a99d342c967097c4147fa0ebd1ce8f6c0128676080f11efeb1be21f831  pgcli-pg_18-2.58.0.tar
+46bbe0a99d342c967097c4147fa0ebd1ce8f6c0128676080f11efeb1be21f831  pgcli-pg_18-2.59.3.tar
 377877a78d2fc29a02ed4658946d2f248f909a524bb4fc091bb3d4acdb70d413  pgcli-privoxy_4.2.0.tar
 e13cc780306750ad6dd6d543d41249fb8e62dfff01c956a16d2a4f093d49a6b8  pgcli-rustfs_1.0.0.tar
 5ab1ad708255e084d60cabbb7dbe807ea1c26dd767ef86502732f5f1132ebca2  pgdog_v0.1.57.tar
@@ -300,7 +300,7 @@ release.
 Check one archive per family, then run a deployment:
 
 ```bash
-curl -I http://192.0.2.10:18080/pgcli-pg_18-2.58.0.tar
+curl -I http://192.0.2.10:18080/pgcli-pg_18-2.59.3.tar
 curl -I http://192.0.2.10:18080/pg
 curl -I http://192.0.2.10:18080/ubuntu24.04-postgresql-18-documentdb_1.0-0_amd64.deb
 

@@ -18,8 +18,8 @@ SKIP_BINARY=false
 VERSION_ARG=""
 
 # Container images (pulled during install for faster first startup)
-PG_IMAGE="ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0"
-BACKUP_IMAGE="ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0"
+PG_IMAGE="ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3"
+BACKUP_IMAGE="ghcr.io/mars-base/pgcli/pgcli-backup:2.59.3"
 PATRONI_IMAGE="ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5"
 ETCD_IMAGE="quay.io/coreos/etcd:v3.5.30"
 

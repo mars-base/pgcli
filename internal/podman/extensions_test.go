@@ -15,7 +15,7 @@ func TestExtContainerfileRuntimeUser(t *testing.T) {
 	}{
 		{
 			name:      "root base image keeps root runtime user",
-			buildFrom: "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0",
+			buildFrom: "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3",
 			baseUser:  "",
 			wantLast:  "",
 		},
@@ -181,9 +181,9 @@ func TestExtensionImageTag(t *testing.T) {
 	}{
 		{
 			name:    "pgcli-pg base image",
-			baseTag: "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0",
+			baseTag: "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3",
 			exts:    []string{"pg_stat_statements"},
-			want:    "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0-ext",
+			want:    "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3-ext",
 		},
 		{
 			name:    "pgcli-patroni base image",
@@ -193,9 +193,9 @@ func TestExtensionImageTag(t *testing.T) {
 		},
 		{
 			name:    "already -ext image strips suffix before re-adding",
-			baseTag: "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0-ext",
+			baseTag: "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3-ext",
 			exts:    []string{"pg_stat_statements"},
-			want:    "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0-ext",
+			want:    "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3-ext",
 		},
 	}
 
@@ -217,13 +217,13 @@ func TestBaseImageTag(t *testing.T) {
 	}{
 		{
 			name: "no -ext suffix",
-			tag:  "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0",
-			want: "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0",
+			tag:  "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3",
+			want: "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3",
 		},
 		{
 			name: "with -ext suffix",
-			tag:  "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0-ext",
-			want: "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0",
+			tag:  "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3-ext",
+			want: "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3",
 		},
 		{
 			name: "patroni with -ext",

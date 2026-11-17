@@ -4596,7 +4596,7 @@ type PostgresConfig struct {
 type PodmanConfig struct {
 	ContainerName string `yaml:"container_name"` // PG container name, default pgcli-pg
 	DataDir       string `yaml:"data_dir"`       // PG data directory (host path), default ~/.pgcli/dbdata/<name>/data
-	ImageTag      string `yaml:"image_tag"`      // image tag, default ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0
+	ImageTag      string `yaml:"image_tag"`      // image tag, default ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3
 	HostPort      int    `yaml:"host_port"`      // host port for PG mapping, 0=auto-assign from 35432
 	SSHPort       int    `yaml:"ssh_port"`       // SSH port for pgbackrest, 0=auto-assign from 42201
 	Network       string `yaml:"network"`        // podman network name, default pgcli-net
@@ -4627,7 +4627,7 @@ type LoggingConfig struct {
 // BackupConfig holds shared pgbackrest backup container settings.
 type BackupConfig struct {
 	ContainerName string `yaml:"container_name"` // backup container name, default pgcli-backup
-	ImageTag      string `yaml:"image_tag"`      // backup image tag, default pgcli-backup:2.58.0
+	ImageTag      string `yaml:"image_tag"`      // backup image tag, default pgcli-backup:2.59.3
 	DataDir       string `yaml:"data_dir"`       // pgbackrest repo dir, default ~/.pgcli/backup/data
 	LogDir        string `yaml:"log_dir"`        // pgbackrest log dir, default ~/.pgcli/backup/log
 	RetentionFull int    `yaml:"retention_full"` // number of full backups to retain, default 7
@@ -4749,7 +4749,7 @@ func Default() *Config {
 		Podman: PodmanConfig{
 			ContainerName: "pgcli-pg",
 			DataDir:       filepath.Join(platform.DefaultConfigDir(), "dbdata", "data"),
-			ImageTag:      "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0",
+			ImageTag:      "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3",
 			Network:       "pgcli-net",
 		},
 		PITR: PITRConfig{
@@ -4761,7 +4761,7 @@ func Default() *Config {
 		},
 		Backup: BackupConfig{
 			ContainerName: "pgcli-backup",
-			ImageTag:      "ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0",
+			ImageTag:      "ghcr.io/mars-base/pgcli/pgcli-backup:2.59.3",
 			DataDir:       filepath.Join(platform.DefaultConfigDir(), "backup", "data"),
 			LogDir:        filepath.Join(platform.DefaultConfigDir(), "backup", "log"),
 			RetentionFull: 7,

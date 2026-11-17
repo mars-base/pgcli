@@ -44,7 +44,7 @@ Options:
   -h, --help            show this help
 
 Archive names match the offline manifest convention:
-  <repository-basename>_<tag>.tar    e.g. pgcli-pg_18-2.58.0.tar
+  <repository-basename>_<tag>.tar    e.g. pgcli-pg_18-2.59.3.tar
 
 After exporting, serve the directory with:
   pg http start --listen 0.0.0.0 --port 18080 --dir DIR
@@ -143,7 +143,7 @@ if [[ $ANSIBLE_SET == true ]]; then
     )
 else
     # Table rows carry the repository and tag in the first two columns:
-    #   | `ghcr.io/mars-base/pgcli/pgcli-pg` | `18-2.58.0` | ...
+    #   | `ghcr.io/mars-base/pgcli/pgcli-pg` | `18-2.59.3` | ...
     while IFS= read -r image; do
         add_entry "$image" "$(derive_archive "$image")"
     done < <(

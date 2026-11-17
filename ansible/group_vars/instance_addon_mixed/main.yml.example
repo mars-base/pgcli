@@ -18,10 +18,10 @@
 # offline pre-check validates exactly this list. pgcli-backup is required
 # because pgcli_instance_defaults.backup_target defaults to local.
 pgcli_images:
-  - image: ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0
-    archive: pgcli-pg_18-2.58.0.tar
-  - image: ghcr.io/mars-base/pgcli/pgcli-backup:2.58.0
-    archive: pgcli-backup_2.58.0.tar
+  - image: ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3
+    archive: pgcli-pg_18-2.59.3.tar
+  - image: ghcr.io/mars-base/pgcli/pgcli-backup:2.59.3
+    archive: pgcli-backup_2.59.3.tar
   - image: docker.io/edoburu/pgbouncer:v1.25.2-p0
     archive: pgbouncer_v1.25.2-p0.tar
 

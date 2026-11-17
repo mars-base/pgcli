@@ -31,7 +31,7 @@ import (
 
 // DefaultPatroniImageTag is the built-in Patroni image when a member does not
 // override it. Tag is dual-segment (PG version - Patroni version), mirroring
-// pgcli-pg's `18-2.58.0`.
+// pgcli-pg's `18-2.59.3`.
 const DefaultPatroniImageTag = "ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5"
 
 type PatroniManager struct {
