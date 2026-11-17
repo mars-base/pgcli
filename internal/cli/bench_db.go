@@ -62,8 +62,30 @@ func cleanupBenchTables(pm benchSQLRunner, target benchTarget, image string) err
 	return nil
 }
 
-func benchCleanupHint(database string) string {
-	return fmt.Sprintf("-> pgbench tables remain in %s; drop them with:\n   %s;", database, cleanupBenchTablesQuery())
+func benchCleanupHint(database, target string) string {
+	return fmt.Sprintf(
+		"-> pgbench tables remain in %s; drop them with:\n   pg exec %s --database %s '%s;'",
+		database, target, database, cleanupBenchTablesQuery(),
+	)
+}
+
+func benchInitHint(database, target string) string {
+	return fmt.Sprintf("-> pgbench tables are missing in %s; initialize and run with one of:\n   pg bench %s --init && pg bench %s\n   pg bench %s --cleanup", database, target, target, target)
+}
+
+func benchTablesExistQuery() string {
+	return `SELECT to_regclass('pgbench_accounts') IS NOT NULL
+   AND to_regclass('pgbench_branches') IS NOT NULL
+   AND to_regclass('pgbench_history') IS NOT NULL
+   AND to_regclass('pgbench_tellers') IS NOT NULL`
+}
+
+func benchTablesExist(pm benchSQLRunner, target benchTarget, image string) (bool, error) {
+	out, err := runBenchSQL(pm, target, image, benchTablesExistQuery())
+	if err != nil {
+		return false, err
+	}
+	return parseBenchBool(out)
 }
 
 func quoteBenchIdent(name string) string {

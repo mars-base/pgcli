@@ -46,8 +46,11 @@ pg bench -i proj01 --init --scale 10
 pg bench -i proj01
 ```
 
-When `--cleanup` is not used, the command prints the `DROP TABLE` statement for
-the pgbench tables after the run, so the data can be removed later.
+When `--cleanup` is not used, the command prints a copy-ready `pg exec`
+command that drops the pgbench tables in the benchmark database, so the data can
+be removed later. If the run fails because the pgbench tables are missing, it
+prints a hint to initialize them with `--init` or to use `--cleanup` instead of
+showing the DROP command.
 
 Defaults are 16 clients, 4 threads, 60 seconds, the `prepared` protocol and a
 progress report every 10 seconds.

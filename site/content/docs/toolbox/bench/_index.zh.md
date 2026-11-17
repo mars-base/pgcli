@@ -45,8 +45,10 @@ pg bench -i proj01 --init --scale 10
 pg bench -i proj01
 ```
 
-不使用 `--cleanup` 时，命令会在运行结束后打印用于删除 pgbench 表的
-`DROP TABLE` 语句，方便之后手动清理。
+不使用 `--cleanup` 时，命令会在运行结束后打印一条可直接复制的 `pg exec`
+命令，在压测库中删除 pgbench 表，方便之后手动清理。如果运行因为 pgbench
+表不存在而失败，命令会检测到并提示使用 `--init` 或 `--cleanup`，而不是输出
+删除命令。
 
 默认 16 个客户端、4 个线程、运行 60 秒、使用 `prepared` 协议，每 10 秒输出
 一次进度。

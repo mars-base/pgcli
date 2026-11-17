@@ -255,12 +255,65 @@ func TestCleanupBenchTablesError(t *testing.T) {
 }
 
 func TestBenchCleanupHint(t *testing.T) {
-	hint := benchCleanupHint("bench_db")
-	if !strings.Contains(hint, "bench_db") {
-		t.Errorf("hint does not name the database: %q", hint)
+	hint := benchCleanupHint("bench_db", "-i pg01")
+	for _, want := range []string{
+		"bench_db",
+		"pg exec -i pg01 --database bench_db '" + cleanupBenchTablesQuery() + ";'",
+	} {
+		if !strings.Contains(hint, want) {
+			t.Errorf("hint does not contain %q: %q", want, hint)
+		}
 	}
-	if !strings.Contains(hint, cleanupBenchTablesQuery()+";") {
-		t.Errorf("hint does not contain the DROP statement: %q", hint)
+	if strings.Contains(hint, "--bench-db") || strings.Contains(hint, "--no-auto-db") || strings.Contains(hint, "--image") {
+		t.Errorf("hint contains bench-only flags unusable with pg exec: %q", hint)
+	}
+}
+
+func TestBenchInitHint(t *testing.T) {
+	hint := benchInitHint("bench_db", "-i pg01")
+	for _, want := range []string{"bench_db", "pg bench -i pg01 --init && pg bench -i pg01", "pg bench -i pg01 --cleanup"} {
+		if !strings.Contains(hint, want) {
+			t.Errorf("hint does not contain %q: %q", want, hint)
+		}
+	}
+}
+
+func TestBenchTablesExist(t *testing.T) {
+	query := benchTablesExistQuery()
+	for _, table := range []string{"pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"} {
+		if !strings.Contains(query, table) {
+			t.Errorf("existence query does not check %s: %q", table, query)
+		}
+	}
+
+	tests := []struct {
+		out     string
+		err     error
+		exists  bool
+		wantErr bool
+	}{
+		{"t\n", nil, true, false},
+		{"f\n", nil, false, false},
+		{"", errors.New("connection refused"), false, true},
+		{"unexpected", nil, false, true},
+	}
+	for _, tt := range tests {
+		pm := &fakeBenchSQLRunner{outputs: []string{tt.out}, errs: []error{tt.err}}
+		exists, err := benchTablesExist(pm, testBenchTarget(), "img")
+		if tt.wantErr {
+			if err == nil {
+				t.Errorf("benchTablesExist(%q) accepted", tt.out)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("benchTablesExist(%q): %v", tt.out, err)
+			continue
+		}
+		if exists != tt.exists {
+			t.Errorf("benchTablesExist(%q) = %v, want %v", tt.out, exists, tt.exists)
+		}
+		assertBenchCall(t, pm.calls[0], "appdb", "img")
 	}
 }
 

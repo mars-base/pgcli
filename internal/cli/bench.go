@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -165,16 +166,16 @@ func runBench(cmd *cobra.Command, args []string) error {
 			if o.Cleanup {
 				cleanupErr := cleanupBenchTables(pm, target, image)
 				if cleanupErr != nil {
-					fmt.Println(benchCleanupHint(target.Database))
+					fmt.Println(benchCleanupHint(target.Database, benchExecTargetFlags(cmd, o)))
 				}
 				return errors.Join(initErr, cleanupErr)
 			}
-			fmt.Println(benchCleanupHint(target.Database))
+			fmt.Println(benchCleanupHint(target.Database, benchExecTargetFlags(cmd, o)))
 			return initErr
 		}
 	}
 	if !runTest {
-		fmt.Println(benchCleanupHint(target.Database))
+		fmt.Println(benchCleanupHint(target.Database, benchExecTargetFlags(cmd, o)))
 		return nil
 	}
 
@@ -198,7 +199,13 @@ func runBench(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if !o.Cleanup {
-		fmt.Println(benchCleanupHint(target.Database))
+		if runErr != nil {
+			if tablesExist, probeErr := benchTablesExist(pm, target, image); probeErr == nil && !tablesExist {
+				fmt.Println(benchInitHint(target.Database, benchHintTargetFlags(cmd, o)))
+				return runErr
+			}
+		}
+		fmt.Println(benchCleanupHint(target.Database, benchExecTargetFlags(cmd, o)))
 		return runErr
 	}
 
@@ -208,7 +215,7 @@ func runBench(cmd *cobra.Command, args []string) error {
 		runErr = fmt.Errorf("benchmark run failed: %w", runErr)
 	}
 	if cleanupErr != nil {
-		fmt.Println(benchCleanupHint(target.Database))
+		fmt.Println(benchCleanupHint(target.Database, benchExecTargetFlags(cmd, o)))
 	}
 	return errors.Join(runErr, cleanupErr)
 }
@@ -243,6 +250,35 @@ func resolveBenchTarget(cmd *cobra.Command, o benchOptions) (benchTarget, *podma
 		return benchTarget{}, nil, "", err
 	}
 	return benchTargetFromConfig(cfg), pm, "postgres", nil
+}
+
+func benchHintTargetFlags(cmd *cobra.Command, o benchOptions) string {
+	parts := []string{benchExecTargetFlags(cmd, o)}
+	if o.BenchDB != "bench_db" {
+		parts = append(parts, "--bench-db", o.BenchDB)
+	}
+	if o.NoAutoDB {
+		parts = append(parts, "--no-auto-db")
+	}
+	if o.Image != "" {
+		parts = append(parts, "--image", o.Image)
+	}
+	return strings.Join(parts, " ")
+}
+
+// benchExecTargetFlags selects the same target for a follow-up pg exec
+// command, which does not understand bench-only flags.
+func benchExecTargetFlags(cmd *cobra.Command, o benchOptions) string {
+	var parts []string
+	if cmd.Flags().Changed("config") {
+		parts = append(parts, "-c", cfgPath)
+	}
+	if o.DSN != "" {
+		parts = append(parts, "--dsn", `"$DSN"`)
+	} else {
+		parts = append(parts, "-i", cfgInstance)
+	}
+	return strings.Join(parts, " ")
 }
 
 func readBenchOptions(fs *pflag.FlagSet) benchOptions {
