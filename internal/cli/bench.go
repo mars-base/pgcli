@@ -131,6 +131,24 @@ func runBench(cmd *cobra.Command, args []string) error {
 	}
 
 	runTest := !o.Init || o.Cleanup
+	runScale := o.Scale
+	if runTest {
+		if !o.Init && !o.Cleanup {
+			detected, err := detectBenchScale(pm, target, image)
+			if err != nil {
+				// Missing tables are reported by the run failure path below,
+				// which prints the --init/--cleanup hint.
+				if exists, probeErr := benchTablesExist(pm, target, image); probeErr != nil || exists {
+					return fmt.Errorf("detecting pgbench scale: %w", err)
+				}
+			} else {
+				runScale = detected
+				fmt.Printf("-> pgbench scale: %d (detected from pgbench_accounts)\n", runScale)
+			}
+		} else {
+			fmt.Printf("-> pgbench scale: %d (from --scale)\n", runScale)
+		}
+	}
 	var initPlan, runPlan benchPlan
 	if o.Init || o.Cleanup {
 		initOpts := o
@@ -143,6 +161,7 @@ func runBench(cmd *cobra.Command, args []string) error {
 	if runTest {
 		runOpts := o
 		runOpts.Init = false
+		runOpts.Scale = runScale
 		runPlan, err = buildBenchPlan(runOpts)
 		if err != nil {
 			return err

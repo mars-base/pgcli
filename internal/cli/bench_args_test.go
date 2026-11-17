@@ -201,7 +201,7 @@ func TestBuildBenchPlanDefaultRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"-c", "16", "-j", "4", "-M", "prepared", "-T", "60", "-P", "10"}
+	want := []string{"-c", "16", "-j", "4", "-M", "prepared", "-s", "1", "-T", "60", "-P", "10"}
 	if !reflect.DeepEqual(plan.Args, want) {
 		t.Errorf("args = %q, want %q", plan.Args, want)
 	}
@@ -261,7 +261,7 @@ func TestBuildBenchPlanRunFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"-c", "16", "-j", "4", "-M", "prepared", "-T", "60",
+		"-c", "16", "-j", "4", "-M", "prepared", "-s", "1", "-T", "60",
 		"-S", "-b", "tpcb-like@2", "-b", "select-only", "-D", "scale=5",
 		"-C", "-R", "100", "-L", "50", "-r", "-n",
 	}

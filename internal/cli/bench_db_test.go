@@ -278,6 +278,42 @@ func TestBenchInitHint(t *testing.T) {
 	}
 }
 
+func TestDetectBenchScale(t *testing.T) {
+	tests := []struct {
+		out     string
+		err     error
+		want    int
+		wantErr string
+	}{
+		{out: "100000\n", want: 1},
+		{out: "2500000\n", want: 25},
+		{out: " 300000 \n", want: 3},
+		{out: "99999\n", wantErr: "smaller than 100000"},
+		{out: "\n", wantErr: "no rows"},
+		{out: "0\n", wantErr: "no rows"},
+		{out: "many\n", wantErr: "unexpected"},
+		{out: "", err: errors.New("relation does not exist"), wantErr: "relation does not exist"},
+	}
+	for _, tt := range tests {
+		pm := &fakeBenchSQLRunner{outputs: []string{tt.out}, errs: []error{tt.err}}
+		got, err := detectBenchScale(pm, testBenchTarget(), "img")
+		if tt.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("detectBenchScale(%q) error = %v, want containing %q", tt.out, err, tt.wantErr)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("detectBenchScale(%q): %v", tt.out, err)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("detectBenchScale(%q) = %d, want %d", tt.out, got, tt.want)
+		}
+		assertBenchCall(t, pm.calls[0], "appdb", "img")
+	}
+}
+
 func TestBenchTablesExist(t *testing.T) {
 	query := benchTablesExistQuery()
 	for _, table := range []string{"pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"} {

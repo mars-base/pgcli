@@ -98,6 +98,36 @@ pg bench -i proj01 --no-auto-db
 pg bench -i proj01 --bench-db loadtest
 ```
 
+## Scale (data size)
+
+`--scale N` (pgbench `-s`) multiplies the amount of data; it is not a
+concurrency setting. `--init` creates:
+
+| Table | Rows |
+|-------|------|
+| `pgbench_branches` | N |
+| `pgbench_tellers` | 10 × N |
+| `pgbench_accounts` | 100,000 × N |
+| `pgbench_history` | 0 (one row per transaction while running) |
+
+With scale=1 there is a single branch row, ten teller rows and 100,000
+accounts: concurrent clients contend on the same branch row, and the data
+probably fits in memory, so no disk-read pressure is exercised. Use a larger
+scale (for example 10, 50 or 100) to spread the load and exceed memory. Larger
+scales increase initialization time and disk usage linearly.
+
+At run time pgbench uses the `-s` value to choose random rows and defaults to
+1. If the database was initialized with a larger scale and the same value is
+not passed when running, the built-in scripts only touch the first 100,000
+accounts. Before a run, `pg bench` executes
+`SELECT max(aid) FROM pgbench_accounts` to infer the scale and pass it to
+pgbench, so a standalone `pg bench -i proj01` covers the whole data set.
+`--init`/`--cleanup` use the `--scale` value directly. When the tables are
+missing, inference is skipped and the missing-table hint handles it.
+
+Note that `-D scale=5` sets a custom-script variable; it is unrelated to
+pgbench's `-s/--scale`.
+
 ## Connection targets
 
 ### Local pgcli instance
@@ -304,7 +334,7 @@ instance selection must use `-i/--instance`.
 | `--no-auto-db` | false | all | Do not probe/create a dedicated database |
 | `--init` | false | mode | Initialize pgbench tables |
 | `--cleanup` | false | mode | Initialize, run, then drop the pgbench tables; keeps the database |
-| `--scale N` | 1 | init | pgbench scale factor |
+| `--scale N` | 1 | init | Data size multiplier; inferred from `pgbench_accounts` at run time |
 | `--partitions N` | 0 | init | Number of partitions |
 | `--partition-method METHOD` | empty | init | `range` or `hash` |
 | `--fillfactor N` | 0 | init | Table fillfactor (10–100) |

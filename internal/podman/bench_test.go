@@ -8,7 +8,7 @@ import (
 
 func TestBenchContainerArgs(t *testing.T) {
 	got := benchContainerArgs("pgcli-bench-1", BenchContainerOptions{
-		Image:      "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0",
+		Image:      "ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3",
 		Entrypoint: "pgbench",
 		Args:       []string{"-c", "16", "-T", "60"},
 		Env:        []string{"PGHOST=127.0.0.1", "PGPASSWORD=secret"},
@@ -16,7 +16,7 @@ func TestBenchContainerArgs(t *testing.T) {
 		WorkDir:    "/pgcli-bench/log",
 	})
 	want := []string{
-		"run", "--rm", "--name", "pgcli-bench-1",
+		"run", "--name", "pgcli-bench-1",
 		"--network", "host",
 		"--http-proxy=false",
 		"-i=false",
@@ -24,7 +24,7 @@ func TestBenchContainerArgs(t *testing.T) {
 		"-w", "/pgcli-bench/log",
 		"-e", "PGHOST", "-e", "PGPASSWORD",
 		"--entrypoint", "pgbench",
-		"ghcr.io/mars-base/pgcli/pgcli-pg:18-2.58.0",
+		"ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3",
 		"-c", "16", "-T", "60",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -51,7 +51,7 @@ func TestBenchContainerArgsKeepSecretsOutOfArgv(t *testing.T) {
 func TestBenchContainerArgsMinimal(t *testing.T) {
 	got := benchContainerArgs("name", BenchContainerOptions{Image: "img", Entrypoint: "psql"})
 	want := []string{
-		"run", "--rm", "--name", "name",
+		"run", "--name", "name",
 		"--network", "host",
 		"--http-proxy=false",
 		"-i=false",

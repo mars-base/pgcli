@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/mars-base/pgcli/internal/podman"
@@ -86,6 +87,32 @@ func benchTablesExist(pm benchSQLRunner, target benchTarget, image string) (bool
 		return false, err
 	}
 	return parseBenchBool(out)
+}
+
+// benchScaleQuery reads the largest account id. pgbench creates accounts
+// 1..100000*scale, so this infers the scale factor without a full count.
+func benchScaleQuery() string {
+	return "SELECT max(aid) FROM pgbench_accounts"
+}
+
+func detectBenchScale(pm benchSQLRunner, target benchTarget, image string) (int, error) {
+	out, err := runBenchSQL(pm, target, image, benchScaleQuery())
+	if err != nil {
+		return 0, err
+	}
+	value := strings.TrimSpace(out)
+	if value == "" || value == "0" {
+		return 0, fmt.Errorf("pgbench_accounts has no rows")
+	}
+	maxAid, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("unexpected pgbench_accounts max(aid) %q", value)
+	}
+	scale := maxAid / 100000
+	if scale < 1 {
+		return 0, fmt.Errorf("pgbench_accounts max(aid) %d is smaller than 100000", maxAid)
+	}
+	return scale, nil
 }
 
 func quoteBenchIdent(name string) string {

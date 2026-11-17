@@ -73,9 +73,14 @@ func (m *Manager) execBenchContainer(o BenchContainerOptions, capture bool) (str
 
 // benchContainerArgs builds the podman run argv for a one-shot client
 // container. Pure so tests can pin flag order without podman.
+//
+// The container is removed by the caller's deferred "podman rm -f" instead of
+// --rm: with rootless Podman 4.9, --rm can remove the container before the
+// client collects its exit status and then report exit code 127 even when
+// pgbench succeeded.
 func benchContainerArgs(name string, o BenchContainerOptions) []string {
 	args := []string{
-		"run", "--rm", "--name", name,
+		"run", "--name", name,
 		"--network", "host",
 		"--http-proxy=false",
 		"-i=false",

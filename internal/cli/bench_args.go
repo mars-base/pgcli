@@ -166,6 +166,7 @@ func buildBenchPlan(o benchOptions) (benchPlan, error) {
 		"-c", strconv.Itoa(o.Clients),
 		"-j", strconv.Itoa(o.Threads),
 		"-M", o.Mode,
+		"-s", strconv.Itoa(o.Scale),
 	}
 	if o.Transactions > 0 {
 		plan.Args = append(plan.Args, "-t", strconv.Itoa(o.Transactions))

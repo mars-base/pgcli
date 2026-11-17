@@ -90,6 +90,32 @@ pg bench -i proj01 --no-auto-db
 pg bench -i proj01 --bench-db loadtest
 ```
 
+## scale（数据规模）
+
+`--scale N`（对应 pgbench `-s`）是数据量倍数，不是并发数。`--init` 生成的
+初始行数如下：
+
+| 表 | 行数 |
+|----|------|
+| `pgbench_branches` | N |
+| `pgbench_tellers` | 10 × N |
+| `pgbench_accounts` | 100,000 × N |
+| `pgbench_history` | 0（运行中每事务增加一行） |
+
+scale=1 时只有 1 行 branch、10 行 teller 和 10 万行 account：并发客户端会
+争用同一行 branch，而且数据大概率全部命中内存，测不出磁盘读压力。需要测
+服务器上限时，应使用更大的 scale（如 10、50 或 100），让数据分布更均匀并
+超出内存。scale 越大会线性增加初始化时间和磁盘占用。
+
+pgbench 运行时用 `-s` 决定随机访问范围，默认值为 1；如果初始化用了更大的
+scale 而运行时没有传入相同的值，内置脚本只会访问前 10 万行 accounts。
+`pg bench` 会在运行前执行 `SELECT max(aid) FROM pgbench_accounts` 自动推断
+scale 并传给 pgbench，因此单独执行 `pg bench -i proj01` 也能覆盖全量数据。
+同一命令中的 `--init`/`--cleanup` 则直接使用 `--scale` 的值。表不存在时跳过
+推断，交由缺失表提示处理。
+
+注意 `-D scale=5` 是传给自定义脚本的变量，与 pgbench 的 `-s/--scale` 无关。
+
 ## 连接目标
 
 ### 本地 pgcli 实例
@@ -276,7 +302,7 @@ pg bench -i proj01 -- --sampling-rate 0.1
 | `--no-auto-db` | false | 通用 | 不探测/创建专用库 |
 | `--init` | false | 模式 | 初始化 pgbench 表 |
 | `--cleanup` | false | 模式 | 初始化并运行压测，结束后删除 pgbench 表；保留数据库 |
-| `--scale N` | 1 | init | pgbench scale 因子 |
+| `--scale N` | 1 | init | 数据量倍数；运行时自动从 `pgbench_accounts` 推断 |
 | `--partitions N` | 0 | init | 分区数量 |
 | `--partition-method METHOD` | 空 | init | `range` 或 `hash` |
 | `--fillfactor N` | 0 | init | 表 fillfactor（10–100） |
