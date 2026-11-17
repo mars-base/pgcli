@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -16,6 +17,7 @@ func init() {
 	f.String("bench-db", "bench_db", "dedicated benchmark database when the account has CREATEDB")
 	f.Bool("no-auto-db", false, "use the target database instead of selecting/creating a benchmark database")
 	f.Bool("init", false, "initialize pgbench tables with pgbench -i")
+	f.Bool("cleanup", false, "initialize, run, then drop the pgbench tables (the database is kept)")
 	f.Int("scale", 1, "pgbench scale factor for --init")
 	f.Int("partitions", 0, "number of partitions for --init")
 	f.String("partition-method", "", "partition method: range or hash (requires --partitions)")
@@ -53,6 +55,11 @@ When the account can create databases, a dedicated benchmark database
 (bench_db by default) is selected automatically; otherwise the target database
 is used.
 
+--cleanup runs the whole lifecycle in one command: initialize the pgbench
+tables, run the benchmark, then drop those tables. This is convenient for
+one-off tests and avoids leaving benchmark data behind. The database itself is
+never dropped.
+
 Additional pgbench arguments may be passed after --. Options that would change
 the connection target (-h, -p, -U, -d, -i), script files (-f) and logging (-l)
 are rejected there; use the wrapper flags instead.
@@ -60,9 +67,10 @@ are rejected there; use the wrapper flags instead.
 Examples:
   pg bench -i proj01 --init --scale 1
   pg bench -i proj01
+  pg bench -i proj01 --cleanup -T 60
   pg bench -i proj01 -T 60 --clients 16 --threads 4
   pg bench -i proj01 -S -T 30 --progress 5
-  pg bench --dsn 'postgres://user:pass@10.0.0.8:5432/appdb' --init
+  pg bench --dsn 'postgres://user:pass@10.0.0.8:5432/appdb' --cleanup
   pg bench --dsn 'postgres://user:pass@10.0.0.8:5432/appdb' -T 60
   pg bench -i proj01 -f ./bench.sql@2 -T 30
   pg bench -i proj01 --init --no-vacuum --scale 10
@@ -116,29 +124,93 @@ func runBench(cmd *cobra.Command, args []string) error {
 		default:
 			fmt.Printf("-> benchmark database: %s (account cannot create databases)\n", target.Database)
 		}
-		if result.Created && !o.Init {
+		if result.Created && !o.Init && !o.Cleanup {
 			return fmt.Errorf("benchmark database %q was created but not initialized; run \"pg bench --init\" first", target.Database)
 		}
 	}
 
-	plan, err := buildBenchPlan(o)
-	if err != nil {
-		return err
+	runTest := !o.Init || o.Cleanup
+	var initPlan, runPlan benchPlan
+	if o.Init || o.Cleanup {
+		initOpts := o
+		initOpts.Init = true
+		initPlan, err = buildBenchPlan(initOpts)
+		if err != nil {
+			return err
+		}
 	}
-	if plan.LogDir != "" {
-		fmt.Printf("-> pgbench logs: %s\n", plan.LogDir)
+	if runTest {
+		runOpts := o
+		runOpts.Init = false
+		runPlan, err = buildBenchPlan(runOpts)
+		if err != nil {
+			return err
+		}
+		if runPlan.LogDir != "" {
+			fmt.Printf("-> pgbench logs: %s\n", runPlan.LogDir)
+		}
 	}
 
-	pgArgs := append(append([]string{}, plan.Args...), args...)
-	mounts := append(append([]string{}, target.Mounts...), plan.Mounts...)
-	return pm.RunPgbench(podman.BenchContainerOptions{
+	if o.Init || o.Cleanup {
+		err := pm.RunPgbench(podman.BenchContainerOptions{
+			Image:      image,
+			Entrypoint: "pgbench",
+			Args:       initPlan.Args,
+			Env:        target.env(),
+			Mounts:     append(append([]string{}, target.Mounts...), initPlan.Mounts...),
+			WorkDir:    initPlan.WorkDir,
+		})
+		if err != nil {
+			initErr := fmt.Errorf("initializing pgbench tables: %w", err)
+			if o.Cleanup {
+				cleanupErr := cleanupBenchTables(pm, target, image)
+				if cleanupErr != nil {
+					fmt.Println(benchCleanupHint(target.Database))
+				}
+				return errors.Join(initErr, cleanupErr)
+			}
+			fmt.Println(benchCleanupHint(target.Database))
+			return initErr
+		}
+	}
+	if !runTest {
+		fmt.Println(benchCleanupHint(target.Database))
+		return nil
+	}
+
+	pgArgs := append(append([]string{}, runPlan.Args...), args...)
+	mounts := append(append([]string{}, target.Mounts...), runPlan.Mounts...)
+	var logBefore map[string]bool
+	if runPlan.LogDir != "" {
+		logBefore = benchLogFileSet(runPlan.LogDir)
+	}
+	runErr := pm.RunPgbench(podman.BenchContainerOptions{
 		Image:      image,
 		Entrypoint: "pgbench",
 		Args:       pgArgs,
 		Env:        target.env(),
 		Mounts:     mounts,
-		WorkDir:    plan.WorkDir,
+		WorkDir:    runPlan.WorkDir,
 	})
+	if runPlan.LogDir != "" {
+		for _, path := range benchNewLogFiles(runPlan.LogDir, logBefore) {
+			fmt.Printf("-> pgbench log file: %s\n", path)
+		}
+	}
+	if !o.Cleanup {
+		fmt.Println(benchCleanupHint(target.Database))
+		return runErr
+	}
+
+	fmt.Printf("-> dropping pgbench tables in %s\n", target.Database)
+	cleanupErr := cleanupBenchTables(pm, target, image)
+	if runErr != nil {
+		runErr = fmt.Errorf("benchmark run failed: %w", runErr)
+	}
+	if cleanupErr != nil {
+		fmt.Println(benchCleanupHint(target.Database))
+	}
+	return errors.Join(runErr, cleanupErr)
 }
 
 func resolveBenchTarget(cmd *cobra.Command, o benchOptions) (benchTarget, *podman.Manager, string, error) {
@@ -180,6 +252,7 @@ func readBenchOptions(fs *pflag.FlagSet) benchOptions {
 	o.BenchDB, _ = fs.GetString("bench-db")
 	o.NoAutoDB, _ = fs.GetBool("no-auto-db")
 	o.Init, _ = fs.GetBool("init")
+	o.Cleanup, _ = fs.GetBool("cleanup")
 	o.Scale, _ = fs.GetInt("scale")
 	o.Partitions, _ = fs.GetInt("partitions")
 	o.PartitionMethod, _ = fs.GetString("partition-method")

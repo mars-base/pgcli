@@ -33,7 +33,7 @@ func TestBenchCommandRegistration(t *testing.T) {
 	if bench == nil {
 		t.Fatal("bench command not registered on rootCmd")
 	}
-	for _, name := range []string{"init", "clients"} {
+	for _, name := range []string{"init", "cleanup", "clients"} {
 		f := bench.Flags().Lookup(name)
 		if f == nil {
 			t.Fatalf("--%s not registered", name)
@@ -84,6 +84,23 @@ func TestValidateBenchOptions(t *testing.T) {
 			o.Init = true
 			c["log-dir"] = true
 		}, "run-only"},
+		{"cleanup with run flags", func(o *benchOptions, c map[string]bool) {
+			o.Cleanup = true
+			c["clients"] = true
+			c["time"] = true
+		}, ""},
+		{"cleanup with init flags", func(o *benchOptions, c map[string]bool) {
+			o.Cleanup = true
+			o.Scale = 3
+			c["scale"] = true
+		}, ""},
+		{"cleanup with init and run flags", func(o *benchOptions, c map[string]bool) {
+			o.Cleanup = true
+			o.Init = true
+			o.Scale = 3
+			c["scale"] = true
+			c["clients"] = true
+		}, ""},
 		{"run with init-only scale", func(o *benchOptions, c map[string]bool) {
 			c["scale"] = true
 		}, "requires --init"},
@@ -370,6 +387,28 @@ func TestSplitWeightedBenchSpec(t *testing.T) {
 		if path != tt.path || weight != tt.weight {
 			t.Errorf("splitWeightedBenchSpec(%q) = (%q, %q), want (%q, %q)", tt.in, path, weight, tt.path, tt.weight)
 		}
+	}
+}
+
+func TestBenchNewLogFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/pgbench_log.1", []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir+"/unrelated", []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := benchLogFileSet(dir)
+	if err := os.WriteFile(dir+"/pgbench_log.2.0", []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir+"/pgbench_log.2.1", []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := benchNewLogFiles(dir, before)
+	want := []string{dir + "/pgbench_log.2.0", dir + "/pgbench_log.2.1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("new log files = %q, want %q", got, want)
 	}
 }
 

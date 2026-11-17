@@ -220,6 +220,50 @@ func TestResolveBenchDatabaseMalformedProbe(t *testing.T) {
 	}
 }
 
+func TestCleanupBenchTables(t *testing.T) {
+	pm := &fakeBenchSQLRunner{outputs: []string{""}}
+	if err := cleanupBenchTables(pm, testBenchTarget(), "img"); err != nil {
+		t.Fatal(err)
+	}
+	if len(pm.calls) != 1 {
+		t.Fatalf("calls = %d, want 1", len(pm.calls))
+	}
+	assertBenchCall(t, pm.calls[0], "appdb", "img")
+	sql := pm.calls[0].Args[len(pm.calls[0].Args)-1]
+	for _, table := range []string{"pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"} {
+		if !strings.Contains(sql, table) {
+			t.Errorf("cleanup SQL does not drop %s: %q", table, sql)
+		}
+	}
+	if strings.Contains(strings.ToUpper(sql), "CASCADE") {
+		t.Errorf("cleanup SQL uses CASCADE: %q", sql)
+	}
+	if strings.Contains(strings.ToUpper(sql), "DROP DATABASE") {
+		t.Errorf("cleanup SQL drops the database: %q", sql)
+	}
+}
+
+func TestCleanupBenchTablesError(t *testing.T) {
+	pm := &fakeBenchSQLRunner{
+		outputs: []string{""},
+		errs:    []error{errors.New("permission denied")},
+	}
+	err := cleanupBenchTables(pm, testBenchTarget(), "img")
+	if err == nil || !strings.Contains(err.Error(), "dropping pgbench tables") || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestBenchCleanupHint(t *testing.T) {
+	hint := benchCleanupHint("bench_db")
+	if !strings.Contains(hint, "bench_db") {
+		t.Errorf("hint does not name the database: %q", hint)
+	}
+	if !strings.Contains(hint, cleanupBenchTablesQuery()+";") {
+		t.Errorf("hint does not contain the DROP statement: %q", hint)
+	}
+}
+
 func assertBenchCall(t *testing.T, call podman.BenchContainerOptions, database, image string) {
 	t.Helper()
 	if call.Entrypoint != "psql" {

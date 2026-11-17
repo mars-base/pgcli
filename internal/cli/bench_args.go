@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -14,6 +15,7 @@ type benchOptions struct {
 	BenchDB         string
 	NoAutoDB        bool
 	Init            bool
+	Cleanup         bool
 	Scale           int
 	Partitions      int
 	PartitionMethod string
@@ -58,16 +60,18 @@ var benchInitOnlyFlags = []string{
 }
 
 func validateBenchOptions(o benchOptions, changed map[string]bool) error {
-	if o.Init {
-		for _, name := range benchRunOnlyFlags {
-			if changed[name] {
-				return fmt.Errorf("--%s is a run-only flag; remove it or drop --init", name)
+	if !o.Cleanup {
+		if o.Init {
+			for _, name := range benchRunOnlyFlags {
+				if changed[name] {
+					return fmt.Errorf("--%s is a run-only flag; remove it or drop --init", name)
+				}
 			}
-		}
-	} else {
-		for _, name := range benchInitOnlyFlags {
-			if changed[name] {
-				return fmt.Errorf("--%s requires --init", name)
+		} else {
+			for _, name := range benchInitOnlyFlags {
+				if changed[name] {
+					return fmt.Errorf("--%s requires --init", name)
+				}
 			}
 		}
 	}
@@ -293,6 +297,39 @@ func resolveBenchLogDir(dir string) (string, error) {
 		return "", fmt.Errorf("creating --log-dir %q: %w", dir, err)
 	}
 	return abs, nil
+}
+
+// benchLogFileSet records existing pgbench log files so the files written by
+// the current run can be reported after the container exits.
+func benchLogFileSet(dir string) map[string]bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	names := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasPrefix(entry.Name(), "pgbench_log.") {
+			names[entry.Name()] = true
+		}
+	}
+	return names
+}
+
+func benchNewLogFiles(dir string, before map[string]bool) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var paths []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, "pgbench_log.") || before[name] {
+			continue
+		}
+		paths = append(paths, filepath.Join(dir, name))
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 var benchShortArgOpts = map[byte]bool{

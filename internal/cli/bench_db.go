@@ -48,6 +48,24 @@ func createBenchDBQuery(name string) string {
 	return "CREATE DATABASE " + quoteBenchIdent(name)
 }
 
+// cleanupBenchTablesQuery drops only pgbench's own tables. A multi-table DROP
+// handles the foreign keys created by --foreign-keys without CASCADE, so
+// unrelated objects are left alone.
+func cleanupBenchTablesQuery() string {
+	return "DROP TABLE IF EXISTS pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers"
+}
+
+func cleanupBenchTables(pm benchSQLRunner, target benchTarget, image string) error {
+	if _, err := runBenchSQL(pm, target, image, cleanupBenchTablesQuery()); err != nil {
+		return fmt.Errorf("dropping pgbench tables in database %q: %w", target.Database, err)
+	}
+	return nil
+}
+
+func benchCleanupHint(database string) string {
+	return fmt.Sprintf("-> pgbench tables remain in %s; drop them with:\n   %s;", database, cleanupBenchTablesQuery())
+}
+
 func quoteBenchIdent(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }

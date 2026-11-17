@@ -27,25 +27,36 @@ image already has everything needed.
 
 ## Quick start
 
-Initialize the benchmark tables once, then run the test:
+For a one-off test, `--cleanup` runs the whole lifecycle in one command: it
+initializes the pgbench tables, runs the benchmark, then drops those tables.
 
 ```bash
 # Local pgcli instance
-pg bench -i proj01 --init
-pg bench -i proj01
+pg bench -i proj01 --cleanup
 
 # Remote database
-pg bench --dsn 'postgres://user:pass@10.0.0.8:5432/appdb' --init
-pg bench --dsn 'postgres://user:pass@10.0.0.8:5432/appdb' -T 60
+pg bench --dsn 'postgres://user:pass@10.0.0.8:5432/appdb' --cleanup
 ```
+
+The database itself is kept; only pgbench's own tables are dropped. To keep the
+benchmark data between runs, initialize once and then run without `--cleanup`:
+
+```bash
+pg bench -i proj01 --init --scale 10
+pg bench -i proj01
+```
+
+When `--cleanup` is not used, the command prints the `DROP TABLE` statement for
+the pgbench tables after the run, so the data can be removed later.
 
 Defaults are 16 clients, 4 threads, 60 seconds, the `prepared` protocol and a
 progress report every 10 seconds.
 
 `--init` runs `pgbench -i`, which drops and recreates pgbench's own
-`pgbench_accounts`, `pgbench_branches`, `pgbench_history` and `pgbench_tellers`
-tables in the benchmark database. It does not touch other tables and never
-drops the database.
+`pgbench_accounts`, `pgbench_branches`, `pgbench_history` and
+`pgbench_tellers` tables in the benchmark database. It does not touch other
+tables and never drops the database. `--cleanup` performs the same
+initialization and drops those four tables after the test.
 
 ## Dedicated benchmark database
 
@@ -54,7 +65,8 @@ Before running, pgcli checks whether the supplied account is a superuser or has
 
 - **Allowed to create databases** — use `bench_db` (configurable with
   `--bench-db`). If it does not exist, pgcli creates it; if it exists, it is
-  reused. The database is never dropped automatically.
+  reused. The database is never dropped automatically. With `--cleanup`, the
+  pgbench tables are dropped at the end, but the database remains.
 - **Not allowed** — stay on the database from the instance configuration or
   the DSN, and print why.
 
@@ -63,12 +75,17 @@ through the `postgres` database; DSN targets probe through the database named in
 the DSN. Credentials are passed as `PG*` environment variables, not command-line
 arguments.
 
-When a benchmark database is newly created in run mode (without `--init`),
-`pg bench` stops and asks you to initialize it first:
+When a benchmark database is newly created in run mode (without `--init` or
+`--cleanup`), `pg bench` stops and asks you to initialize it first:
 
 ```text
 benchmark database "bench_db" was created but not initialized; run "pg bench --init" first
 ```
+
+`--cleanup` combines initialization, the test and table cleanup. It accepts
+both init and run flags, and may be combined with `--init`; initialization
+happens either way. Cleanup is attempted even when pgbench fails, and only the
+four `pgbench_*` tables are dropped.
 
 Use `--no-auto-db` to skip the probe and stay on the target database, and
 `--bench-db NAME` to choose a different dedicated database:
@@ -215,9 +232,10 @@ pg bench -i proj01 --log --log-dir ./pgbench-logs -T 30
 
 The directory is created if needed and mounted read-write at
 `/pgcli-bench/log`. pgbench writes `pgbench_log.<pid>` (one file) or
-`pgbench_log.<pid>.<thread>` (multiple threads) inside it. The host path is
-printed by the command, and the files are owned by root with rootful Podman or
-by your user with rootless Podman.
+`pgbench_log.<pid>.<thread>` (multiple threads) inside it. After pgbench exits,
+the command prints the host directory and each log file written by that run.
+The files are owned by root with rootful Podman or by your user with rootless
+Podman.
 
 ## Passing raw pgbench options
 
@@ -282,6 +300,7 @@ instance selection must use `-i/--instance`.
 | `--bench-db NAME` | `bench_db` | all | Dedicated benchmark database name |
 | `--no-auto-db` | false | all | Do not probe/create a dedicated database |
 | `--init` | false | mode | Initialize pgbench tables |
+| `--cleanup` | false | mode | Initialize, run, then drop the pgbench tables; keeps the database |
 | `--scale N` | 1 | init | pgbench scale factor |
 | `--partitions N` | 0 | init | Number of partitions |
 | `--partition-method METHOD` | empty | init | `range` or `hash` |

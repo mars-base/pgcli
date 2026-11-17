@@ -26,43 +26,59 @@ PostgreSQL 客户端工具，因此默认镜像即可直接使用。
 
 ## 快速开始
 
-先初始化压测表，再运行测试：
+一次性压测可以用 `--cleanup` 一条命令完成整个流程：初始化 pgbench 表、运行
+压测，结束后删除这些表。
 
 ```bash
 # 本地 pgcli 实例
-pg bench -i proj01 --init
-pg bench -i proj01
+pg bench -i proj01 --cleanup
 
 # 远程数据库
-pg bench --dsn 'postgres://user:pass@10.0.0.8:5432/appdb' --init
-pg bench --dsn 'postgres://user:pass@10.0.0.8:5432/appdb' -T 60
+pg bench --dsn 'postgres://user:pass@10.0.0.8:5432/appdb' --cleanup
 ```
+
+数据库本身会保留，只删除 pgbench 自己的表。如果希望在多次运行之间保留压测
+数据，先初始化一次，之后不带 `--cleanup` 运行：
+
+```bash
+pg bench -i proj01 --init --scale 10
+pg bench -i proj01
+```
+
+不使用 `--cleanup` 时，命令会在运行结束后打印用于删除 pgbench 表的
+`DROP TABLE` 语句，方便之后手动清理。
 
 默认 16 个客户端、4 个线程、运行 60 秒、使用 `prepared` 协议，每 10 秒输出
 一次进度。
 
 `--init` 执行 `pgbench -i`，会在压测库中删除并重建 pgbench 自己的
 `pgbench_accounts`、`pgbench_branches`、`pgbench_history` 和
-`pgbench_tellers` 表。它不会修改其他表，也绝不会删除数据库。
+`pgbench_tellers` 表。它不会修改其他表，也绝不会删除数据库。`--cleanup`
+会执行同样的初始化，并在压测结束后删除这四张表。
 
 ## 专用压测库
 
 运行前，pgcli 会检查给定账号是否为超级用户或拥有 `CREATEDB`：
 
 - **有创建数据库权限** — 使用 `bench_db`（可通过 `--bench-db` 修改）。库不存在
-  时自动创建，已存在时直接复用；不会自动删除。
+  时自动创建，已存在时直接复用；不会自动删除。加上 `--cleanup` 时会在结束后
+  删除 pgbench 表，但数据库本身仍然保留。
 - **没有该权限** — 继续使用实例配置或 DSN 指定的库，并打印回退原因。
 
 权限探测在一次性 `psql` 容器中执行。本地实例通过 `postgres` 库探测；DSN
 目标通过 DSN 中指定的库探测。凭据通过 `PG*` 环境变量传递，不出现在命令行
 参数中。
 
-如果压测库是在 run 模式（未加 `--init`）下刚创建的，`pg bench` 会直接报错，
-提示先初始化：
+如果压测库是在 run 模式（未加 `--init` 或 `--cleanup`）下刚创建的，`pg bench`
+会直接报错，提示先初始化：
 
 ```text
 benchmark database "bench_db" was created but not initialized; run "pg bench --init" first
 ```
+
+`--cleanup` 把初始化、压测和清理表合并成一次执行。它同时接受 init 参数和 run
+参数，也可以和 `--init` 一起使用；无论是否显式传 `--init` 都会先初始化。
+即使 pgbench 运行失败，也会尝试清理；只删除四张 `pgbench_*` 表。
 
 使用 `--no-auto-db` 可以跳过探测、始终使用原目标库；使用
 `--bench-db NAME` 可以指定其他专用库名：
@@ -200,8 +216,8 @@ pg bench -i proj01 --log --log-dir ./pgbench-logs -T 30
 
 目录不存在时会自动创建，并以读写方式挂载到 `/pgcli-bench/log`。pgbench 会在
 其中写入 `pgbench_log.<pid>`（单线程）或 `pgbench_log.<pid>.<thread>`（多
-线程）。命令会打印宿主机路径；rootful Podman 下文件属 root，rootless Podman
-下归属当前用户。
+线程）。pgbench 退出后，命令会打印宿主机目录和本次运行写入的每个日志文件
+路径；rootful Podman 下文件属 root，rootless Podman 下归属当前用户。
 
 ## 透传原生 pgbench 参数
 
@@ -257,6 +273,7 @@ pg bench -i proj01 -- --sampling-rate 0.1
 | `--bench-db NAME` | `bench_db` | 通用 | 专用压测库名 |
 | `--no-auto-db` | false | 通用 | 不探测/创建专用库 |
 | `--init` | false | 模式 | 初始化 pgbench 表 |
+| `--cleanup` | false | 模式 | 初始化并运行压测，结束后删除 pgbench 表；保留数据库 |
 | `--scale N` | 1 | init | pgbench scale 因子 |
 | `--partitions N` | 0 | init | 分区数量 |
 | `--partition-method METHOD` | 空 | init | `range` 或 `hash` |
