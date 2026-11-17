@@ -25,4 +25,5 @@ Tools and guides that extend pgcli beyond core instance management.
 - [TimescaleDB](./timescaledb/) — Time-series hypertables and time_bucket analytics on PostgreSQL
 - [HTTP File Server](./http/) — Serve a directory over HTTP(S) with an autoindex listing and per-file copy buttons
 - [Random Strings](./rand/) — Generate secure passwords and tokens with a configurable length and character set
+- [Benchmarking](./bench/) — Run pgbench load tests in a one-shot container against local or remote PostgreSQL
 {.cards}

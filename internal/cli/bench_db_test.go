@@ -1,0 +1,243 @@
+package cli
+
+import (
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/mars-base/pgcli/internal/podman"
+)
+
+type fakeBenchSQLRunner struct {
+	outputs []string
+	errs    []error
+	calls   []podman.BenchContainerOptions
+}
+
+func (f *fakeBenchSQLRunner) QueryPsql(o podman.BenchContainerOptions) (string, error) {
+	f.calls = append(f.calls, o)
+	i := len(f.calls) - 1
+	var out string
+	var err error
+	if i < len(f.outputs) {
+		out = f.outputs[i]
+	}
+	if i < len(f.errs) {
+		err = f.errs[i]
+	}
+	return out, err
+}
+
+func testBenchTarget() benchTarget {
+	return benchTarget{
+		Host:     "127.0.0.1",
+		Port:     5432,
+		User:     "admin",
+		Password: "secret",
+		Database: "appdb",
+	}
+}
+
+func TestParseBenchDBProbe(t *testing.T) {
+	tests := []struct {
+		in        string
+		canCreate bool
+		exists    bool
+		wantErr   bool
+	}{
+		{"t|t\n", true, true, false},
+		{"t|f\n", true, false, false},
+		{"f|t\n", false, true, false},
+		{"f|f\n", false, false, false},
+		{" true | false \n", true, false, false},
+		{"t|t", true, true, false},
+		{"", false, false, true},
+		{"x|t", false, false, true},
+		{"t", false, false, true},
+		{"t|f|x", false, false, true},
+	}
+	for _, tt := range tests {
+		got, err := parseBenchDBProbe(tt.in)
+		if tt.wantErr {
+			if err == nil {
+				t.Errorf("parseBenchDBProbe(%q) accepted", tt.in)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("parseBenchDBProbe(%q): %v", tt.in, err)
+			continue
+		}
+		if got.CanCreate != tt.canCreate || got.Exists != tt.exists {
+			t.Errorf("parseBenchDBProbe(%q) = %+v, want canCreate=%v exists=%v", tt.in, got, tt.canCreate, tt.exists)
+		}
+	}
+}
+
+func TestBenchDBQueries(t *testing.T) {
+	probe := benchDBProbeQuery("bench_db")
+	if !strings.Contains(probe, "rolsuper OR rolcreatedb") || !strings.Contains(probe, "datname = 'bench_db'") {
+		t.Errorf("probe query = %q", probe)
+	}
+	if got := benchDBProbeQuery("a'b"); !strings.Contains(got, "'a''b'") {
+		t.Errorf("probe query does not escape quotes: %q", got)
+	}
+	if got, want := createBenchDBQuery("bench_db"), `CREATE DATABASE "bench_db"`; got != want {
+		t.Errorf("create query = %q, want %q", got, want)
+	}
+	if got, want := quoteBenchIdent(`a"b`), `"a""b"`; got != want {
+		t.Errorf("quote ident = %q, want %q", got, want)
+	}
+}
+
+func TestValidateBenchDBName(t *testing.T) {
+	valid := []string{"bench_db", "a", "A1", "bench$1", strings.Repeat("a", 63)}
+	for _, name := range valid {
+		if err := validateBenchDBName(name); err != nil {
+			t.Errorf("validateBenchDBName(%q) = %v", name, err)
+		}
+	}
+	invalid := []string{"", "1bench", "-bench", "bench-db", "bench db", "bench;db", `bench"db`, strings.Repeat("a", 64), "template0", "template1"}
+	for _, name := range invalid {
+		if err := validateBenchDBName(name); err == nil {
+			t.Errorf("validateBenchDBName(%q) accepted", name)
+		}
+	}
+}
+
+func TestResolveBenchDatabaseCannotCreate(t *testing.T) {
+	pm := &fakeBenchSQLRunner{outputs: []string{"f|f"}}
+	result, err := resolveBenchDatabase(pm, testBenchTarget(), "postgres", "img", "bench_db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.CanCreate || result.AutoSelected || result.Created {
+		t.Errorf("result = %+v", result)
+	}
+	if result.Target.Database != "appdb" {
+		t.Errorf("database = %q, want appdb", result.Target.Database)
+	}
+	if len(pm.calls) != 1 {
+		t.Fatalf("calls = %d, want 1", len(pm.calls))
+	}
+	assertBenchCall(t, pm.calls[0], "postgres", "img")
+}
+
+func TestResolveBenchDatabaseExisting(t *testing.T) {
+	pm := &fakeBenchSQLRunner{outputs: []string{"t|t"}}
+	result, err := resolveBenchDatabase(pm, testBenchTarget(), "postgres", "img", "bench_db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.CanCreate || !result.AutoSelected || result.Created {
+		t.Errorf("result = %+v", result)
+	}
+	if result.Target.Database != "bench_db" {
+		t.Errorf("database = %q, want bench_db", result.Target.Database)
+	}
+	if len(pm.calls) != 1 {
+		t.Fatalf("calls = %d, want 1", len(pm.calls))
+	}
+}
+
+func TestResolveBenchDatabaseCreates(t *testing.T) {
+	pm := &fakeBenchSQLRunner{outputs: []string{"t|f", ""}}
+	result, err := resolveBenchDatabase(pm, testBenchTarget(), "postgres", "img", "bench_db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.AutoSelected || !result.Created {
+		t.Errorf("result = %+v", result)
+	}
+	if result.Target.Database != "bench_db" {
+		t.Errorf("database = %q", result.Target.Database)
+	}
+	if len(pm.calls) != 2 {
+		t.Fatalf("calls = %d, want 2", len(pm.calls))
+	}
+	assertBenchCall(t, pm.calls[0], "postgres", "img")
+	assertBenchCall(t, pm.calls[1], "postgres", "img")
+	if !strings.Contains(pm.calls[1].Args[len(pm.calls[1].Args)-1], `CREATE DATABASE "bench_db"`) {
+		t.Errorf("create args = %q", pm.calls[1].Args)
+	}
+}
+
+func TestResolveBenchDatabaseCreateNoiseWithExistingDB(t *testing.T) {
+	pm := &fakeBenchSQLRunner{
+		outputs: []string{"t|f", "", "t|t"},
+		errs:    []error{nil, errors.New("container cleanup failed"), nil},
+	}
+	result, err := resolveBenchDatabase(pm, testBenchTarget(), "postgres", "img", "bench_db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Created || result.Target.Database != "bench_db" {
+		t.Errorf("result = %+v", result)
+	}
+	if len(pm.calls) != 3 {
+		t.Fatalf("calls = %d, want 3", len(pm.calls))
+	}
+}
+
+func TestResolveBenchDatabaseCreateFailure(t *testing.T) {
+	pm := &fakeBenchSQLRunner{
+		outputs: []string{"t|f", "", "t|f"},
+		errs:    []error{nil, errors.New("permission denied"), nil},
+	}
+	_, err := resolveBenchDatabase(pm, testBenchTarget(), "postgres", "img", "bench_db")
+	if err == nil || !strings.Contains(err.Error(), "creating benchmark database") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestResolveBenchDatabaseRecheckFailure(t *testing.T) {
+	pm := &fakeBenchSQLRunner{
+		outputs: []string{"t|f", "", ""},
+		errs:    []error{nil, errors.New("create failed"), errors.New("recheck failed")},
+	}
+	_, err := resolveBenchDatabase(pm, testBenchTarget(), "postgres", "img", "bench_db")
+	if err == nil || !strings.Contains(err.Error(), "creating benchmark database") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestResolveBenchDatabaseProbeError(t *testing.T) {
+	pm := &fakeBenchSQLRunner{
+		outputs: []string{""},
+		errs:    []error{errors.New("connection refused")},
+	}
+	_, err := resolveBenchDatabase(pm, testBenchTarget(), "postgres", "img", "bench_db")
+	if err == nil || !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestResolveBenchDatabaseMalformedProbe(t *testing.T) {
+	pm := &fakeBenchSQLRunner{outputs: []string{"weird"}}
+	_, err := resolveBenchDatabase(pm, testBenchTarget(), "postgres", "img", "bench_db")
+	if err == nil || !strings.Contains(err.Error(), "unexpected permission probe") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func assertBenchCall(t *testing.T, call podman.BenchContainerOptions, database, image string) {
+	t.Helper()
+	if call.Entrypoint != "psql" {
+		t.Errorf("entrypoint = %q", call.Entrypoint)
+	}
+	if call.Image != image {
+		t.Errorf("image = %q", call.Image)
+	}
+	joined := strings.Join(call.Env, "\n")
+	if !strings.Contains(joined, "PGDATABASE="+database) {
+		t.Errorf("env = %q, want PGDATABASE=%s", call.Env, database)
+	}
+	if !strings.Contains(joined, "PGPASSWORD=secret") {
+		t.Errorf("env does not include password: %q", call.Env)
+	}
+	for _, arg := range call.Args {
+		if strings.Contains(arg, "secret") {
+			t.Errorf("args leak the password: %q", call.Args)
+		}
+	}
+}
