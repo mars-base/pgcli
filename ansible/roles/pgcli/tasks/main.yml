@@ -240,7 +240,7 @@
 # when an offline image source is configured; images.yml loads them instead.
 - name: Install pg via the install script
   ansible.builtin.command:
-    argv: "{{ [pgcli_install_script_path] + ([pgcli_install_version] if pgcli_install_version | length > 0 else []) + (['--skip-pull'] if (pgcli_install_skip_pull | bool) or (pgcli_images_http_url | length > 0) else []) }}"
+    argv: "{{ [pgcli_install_script_path] + ([pgcli_install_version] if pgcli_install_version | length > 0 else []) + (['--skip-pull'] if (pgcli_install_skip_pull | bool) or (pgcli_images_http_url | length > 0) else []) + _pgcli_registry_mirror_flags }}"
   environment:
     INSTALL_DIR: "{{ pgcli_install_path | dirname }}"
   become: true
@@ -325,7 +325,7 @@
 
 - name: Initialize the host for the offline pg binary
   ansible.builtin.command:
-    argv: "{{ [pgcli_install_script_path, '--skip-binary'] + (['--skip-pull'] if (pgcli_install_skip_pull | bool) or (pgcli_images_http_url | length > 0) else []) }}"
+    argv: "{{ [pgcli_install_script_path, '--skip-binary'] + (['--skip-pull'] if (pgcli_install_skip_pull | bool) or (pgcli_images_http_url | length > 0) else []) + _pgcli_registry_mirror_flags }}"
   environment:
     INSTALL_DIR: "{{ pgcli_install_path | dirname }}"
   become: true
@@ -345,6 +345,18 @@
     fail_msg: >-
       The install script did not produce {{ pgcli_install_path }}.
       Check its output and the INSTALL_DIR environment it received.
+
+# The installer configures the mirrors when it runs. Reconcile them here when
+# it is skipped (pg already present and pgcli_install_force is false) so the
+# group's mirror settings still take effect.
+- name: Configure container registry mirrors
+  ansible.builtin.command:
+    argv: "{{ [pgcli_install_path, 'mirror', 'set'] + _pgcli_registry_mirror_args }}"
+  become: true
+  changed_when: false
+  when:
+    - pgcli_registry_mirrors | length > 0
+    - not (_pgcli_install_needed | bool)
 
 # `pg sqlite` runs sqlite3 and Litestream directly on the host, and Litestream
 # is not an add-on type, so it has no `pg addon install` path. Opt in per host

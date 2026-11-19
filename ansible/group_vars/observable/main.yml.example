@@ -22,6 +22,13 @@
 pgcli_deploy_rootless: true
 pgcli_deploy_user: pgcli
 
+# Pull container images through the daocloud mirrors. Applies to new pulls on
+# every host in the group.
+pgcli_registry_mirrors:
+  docker.io: docker.m.daocloud.io
+  ghcr.io: ghcr.m.daocloud.io
+  quay.io: quay.m.daocloud.io
+
 pgcli_config_overrides:
   namespace: dev
 

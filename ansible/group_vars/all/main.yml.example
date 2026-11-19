@@ -48,6 +48,24 @@ pgcli_install_version: ""       # release tag, e.g. v1.2.3; empty = latest
 pgcli_install_skip_pull: false  # pass --skip-pull: do not pre-pull images
 pgcli_install_force: false      # re-run the installer even if pg exists
 
+# ── Container registry mirrors ──────────────────────────────────────────────
+# Mirrors passed to scripts/install.sh and `pg mirror set` as repeated
+# --registry-mirror REGISTRY=HOST flags. Supported registries: docker.io,
+# ghcr.io, quay.io. Leave empty to pull directly from the upstream registries.
+# pgcli_registry_mirrors:
+#   docker.io: docker.m.daocloud.io
+#   ghcr.io: ghcr.m.daocloud.io
+#   quay.io: quay.m.daocloud.io
+pgcli_registry_mirrors: {}
+_pgcli_registry_mirror_items: "{{ pgcli_registry_mirrors | dict2items }}"
+_pgcli_registry_mirror_args: >-
+  {{ _pgcli_registry_mirror_items | map(attribute='key')
+     | zip(_pgcli_registry_mirror_items | map(attribute='value'))
+     | map('join', '=') | list }}
+_pgcli_registry_mirror_flags: >-
+  {{ _pgcli_registry_mirror_args
+     | map('regex_replace', '^', '--registry-mirror=') | list }}
+
 # Offline binary: URL of a raw pg binary or a release tarball
 # (pgcli_<version>_linux_amd64.tar.gz). When set, pg is installed from that
 # artifact and scripts/install.sh runs with --skip-binary (host
