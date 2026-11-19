@@ -26,7 +26,7 @@ This script will:
 - Download the latest pgcli binary for your platform
 - Install it to `/usr/local/bin` (or `~/.local/bin` if no sudo)
 - Add pgcli to your PATH
-- Optionally configure a Docker Hub mirror with `--docker-mirror HOST`
+- Optionally configure registry mirrors with `--docker-mirror HOST` or `--registry-mirror REGISTRY=HOST`
 - Pull the PostgreSQL, backup, Patroni and etcd container images
 
 To skip the image pull — for example on an offline host or when the images are
@@ -38,25 +38,8 @@ curl -fsSL https://raw.githubusercontent.com/mars-base/pgcli/main/scripts/instal
 
 A missing image is then pulled by podman on first use.
 
-### Docker Hub mirror
-
-By default the installer leaves the registry configuration unchanged. On
-networks where Docker Hub is unreachable, pull `docker.io` images through a
-mirror by passing `--docker-mirror`:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/mars-base/pgcli/main/scripts/install.sh | bash -s -- --docker-mirror docker.m.daocloud.io
-```
-
-This writes a drop-in configuration (Linux only):
-
-- non-root installs: `~/.config/containers/registries.conf.d/99-pgcli-docker-mirror.conf`
-- root installs: `/etc/containers/registries.conf.d/99-pgcli-docker-mirror.conf`
-
-Podman tries the mirror first and falls back to `docker.io` when the mirror
-does not carry an image. Only `docker.io` is affected; `ghcr.io` and `quay.io`
-pulls stay direct. Re-running the installer with a different
-`--docker-mirror HOST` updates the file.
+If your network cannot reach `docker.io`, `ghcr.io`, or `quay.io`, configure a
+registry mirror before pulling images — see [Config Mirror](/docs/mirror/).
 
 ## Initialize Configuration
 

@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/mars-base/pgcli/main/scripts/instal
 - 为你的平台下载最新的 pgcli 二进制文件
 - 安装到 `/usr/local/bin`（如果没有 sudo 则安装到 `~/.local/bin`）
 - 将 pgcli 添加到你的 PATH
-- 可选：通过 `--docker-mirror HOST` 配置 Docker Hub mirror
+- 可选：通过 `--docker-mirror HOST` 或 `--registry-mirror REGISTRY=HOST` 配置 registry mirror
 - 拉取 PostgreSQL、备份、Patroni 和 etcd 容器镜像
 
 如需跳过镜像拉取——例如离线主机，或镜像已预先加载——传入 `--skip-pull`：
@@ -37,23 +37,8 @@ curl -fsSL https://raw.githubusercontent.com/mars-base/pgcli/main/scripts/instal
 
 缺少的镜像会在首次使用时由 podman 自动拉取。
 
-### Docker Hub mirror
-
-默认不修改 registry 配置。在无法访问 Docker Hub 的网络中，可以通过
-`--docker-mirror` 指定 mirror 来拉取 `docker.io` 镜像：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/mars-base/pgcli/main/scripts/install.sh | bash -s -- --docker-mirror docker.m.daocloud.io
-```
-
-脚本会写入 drop-in 配置（仅 Linux）：
-
-- 非 root 安装：`~/.config/containers/registries.conf.d/99-pgcli-docker-mirror.conf`
-- root 安装：`/etc/containers/registries.conf.d/99-pgcli-docker-mirror.conf`
-
-Podman 会先尝试 mirror，mirror 中没有对应镜像时回退到 `docker.io`。该配置
-只影响 `docker.io`，`ghcr.io` 和 `quay.io` 仍直连。使用不同的
-`--docker-mirror HOST` 重新运行安装脚本会更新该文件。
+如果网络无法访问 `docker.io`、`ghcr.io` 或 `quay.io`，请在拉取镜像前配置
+registry mirror，见 [配置 Mirror](/docs/mirror/)。
 
 ## 初始化配置
 

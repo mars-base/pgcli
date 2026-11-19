@@ -4,13 +4,17 @@
 #
 # Usage: install.sh [VERSION] [--skip-pull] [--skip-binary]
 #                    [--docker-mirror HOST]
+#                    [--registry-mirror REGISTRY=HOST]...
 #   --skip-pull    do not pull container images during install
 #   --skip-binary  do not download the pg binary or the podman launcher
 #                  (use when both are already placed on the host); system
 #                  initialization (uidmap, policy.json, userns check,
 #                  SELinux) still runs
-#   --docker-mirror HOST  configure HOST as the Docker Hub mirror
+#   --docker-mirror HOST  configure HOST as the Docker Hub (docker.io) mirror
 #                         (default: no mirror)
+#   --registry-mirror REGISTRY=HOST
+#                         configure HOST as the mirror for REGISTRY
+#                         (docker.io, ghcr.io, quay.io); repeatable
 set -euo pipefail
 
 REPO="mars-base/pgcli"
@@ -18,8 +22,7 @@ BINARY="pg"
 INSTALL_DIR="${INSTALL_DIR:-}"
 SKIP_PULL=false
 SKIP_BINARY=false
-CONFIGURE_DOCKER_MIRROR=false
-DOCKER_MIRROR=""
+MIRRORS=()
 VERSION_ARG=""
 
 # Container images (pulled during install for faster first startup)
@@ -40,8 +43,23 @@ set_docker_mirror() {
     case "$1" in
         *://*) die "--docker-mirror expects host[:port], not a URL: $1" ;;
     esac
-    DOCKER_MIRROR="$1"
-    CONFIGURE_DOCKER_MIRROR=true
+    MIRRORS+=("docker.io=$1")
+}
+
+add_registry_mirror() {
+    [ -n "$1" ] || die "--registry-mirror requires REGISTRY=HOST"
+    case "$1" in
+        *=*) ;;
+        *) die "--registry-mirror expects REGISTRY=HOST, got: $1" ;;
+    esac
+    local registry="${1%%=*}"
+    local host="${1#*=}"
+    [ -n "$registry" ] || die "--registry-mirror requires a registry name"
+    [ -n "$host" ] || die "--registry-mirror requires a host"
+    case "$host" in
+        *://*) die "--registry-mirror expects REGISTRY=HOST, not a URL: $1" ;;
+    esac
+    MIRRORS+=("$1")
 }
 
 IS_MACOS=false
@@ -412,45 +430,24 @@ install_podman_launcher() {
 # ─── Container registry mirror ───────────────────────────────────────
 
 setup_registry_mirror() {
-    if ! $CONFIGURE_DOCKER_MIRROR; then
-        yellow "-> Skipping Docker Hub mirror configuration"
+    if [ ${#MIRRORS[@]} -eq 0 ]; then
+        yellow "-> Skipping registry mirror configuration"
         return
     fi
 
-    # Docker Hub is unreachable from some networks. Pull docker.io images
-    # through the configured mirror first; podman still falls back to
-    # docker.io when the mirror does not carry an image. The [[registry]]
-    # table only matches docker.io, so ghcr.io/quay.io pulls are untouched.
-    local mirror="$DOCKER_MIRROR"
-    local dropin
-    if [ "$(id -u)" -eq 0 ]; then
-        dropin="/etc/containers/registries.conf.d/99-pgcli-docker-mirror.conf"
-    else
-        dropin="$HOME/.config/containers/registries.conf.d/99-pgcli-docker-mirror.conf"
+    local pg_bin="$INSTALL_DIR/$BINARY"
+    if [ ! -x "$pg_bin" ]; then
+        yellow "  [!] $pg_bin not found, skipping registry mirror configuration"
+        return
     fi
 
-    if [ -f "$dropin" ]; then
-        if grep -Fqx "location = \"$mirror\"" "$dropin" 2>/dev/null; then
-            green "  [OK] Docker Hub mirror already configured ($mirror)"
-            return
-        fi
-        yellow "-> Updating Docker Hub mirror in $dropin..."
+    # Reuse the CLI so system/user path selection, merging and migration of
+    # the legacy 99-pgcli-docker-mirror.conf file stay in one place.
+    yellow "-> Configuring registry mirrors (${MIRRORS[*]})..."
+    if "$pg_bin" mirror set "${MIRRORS[@]}"; then
+        green "  [OK] registry mirror configuration applied"
     else
-        yellow "-> Configuring Docker Hub mirror ($mirror)..."
-    fi
-
-    if mkdir -p "$(dirname "$dropin")" 2>/dev/null && cat > "$dropin" <<EOF
-[[registry]]
-prefix = "docker.io"
-location = "docker.io"
-
-[[registry.mirror]]
-location = "$mirror"
-EOF
-    then
-        green "  [OK] Docker Hub mirror configured in $dropin"
-    else
-        yellow "  [!] Could not write $dropin"
+        yellow "  [!] Could not configure registry mirrors"
     fi
 }
 
@@ -548,15 +545,25 @@ main() {
                 shift
                 ;;
             --docker-mirror=*) set_docker_mirror "${1#*=}" ;;
+            --registry-mirror)
+                [ $# -ge 2 ] || die "--registry-mirror requires REGISTRY=HOST"
+                add_registry_mirror "$2"
+                shift
+                ;;
+            --registry-mirror=*) add_registry_mirror "${1#*=}" ;;
             -h|--help)
                 echo "Usage: install.sh [VERSION] [--skip-pull] [--skip-binary]"
                 echo "                  [--docker-mirror HOST]"
+                echo "                  [--registry-mirror REGISTRY=HOST]..."
                 echo "  --skip-pull    do not pull container images during install"
                 echo "  --skip-binary  keep system initialization (uidmap, policy.json,"
                 echo "                 userns, SELinux) but skip downloading the pg"
                 echo "                 binary and the podman launcher"
                 echo "  --docker-mirror HOST  configure HOST as the Docker Hub mirror"
                 echo "                        (default: no mirror)"
+                echo "  --registry-mirror REGISTRY=HOST"
+                echo "                        configure HOST as the mirror for REGISTRY"
+                echo "                        (docker.io, ghcr.io, quay.io); repeatable"
                 exit 0
                 ;;
             *) VERSION_ARG="$1" ;;
@@ -598,8 +605,8 @@ main() {
     if $IS_MACOS; then
         re_sign_macos_binary
         setup_macos_deps
-        if $CONFIGURE_DOCKER_MIRROR; then
-            yellow "  [!] --docker-mirror is applied on Linux only; the podman machine keeps its own registry config"
+        if [ ${#MIRRORS[@]} -gt 0 ]; then
+            yellow "  [!] registry mirror options are applied on Linux only; the podman machine keeps its own registry config"
         fi
     elif $IS_LINUX; then
         if $SKIP_BINARY; then

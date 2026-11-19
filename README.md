@@ -91,6 +91,7 @@ The installer automatically detects available privileges and adapts accordingly.
 - **Failover** — 3-step manual failover: promote replica to primary, re-point remaining replicas, demote old primary back to replica. Same-host and cross-host supported
 - **Multi-Instance Support** — Run multiple isolated PostgreSQL instances on different ports with independent configurations
 - **Multi-Config Isolation** — Multiple config files on one host with namespaced containers and disjoint port ranges (use pg config init -h for details)
+- **Registry Mirrors** — Configure `docker.io`, `ghcr.io`, and `quay.io` mirrors for podman with `pg mirror set/show/clean`, stored in a single drop-in file; writes `/etc` with root or passwordless sudo, otherwise the invoking user's config (Linux only)
 - **Data Import/Export** — Export/import in custom or SQL format with gzip compression, stream piping between instances, and cross-host support via SSH or `--dsn`
 - **Instance Cloning** — Copy an instance into a new one via logical dump pipe with live progress and pre-flight connectivity checks
 - **Interactive Shell** — Open psql or bash sessions directly in containers, or connect to remote databases via `--dsn`
