@@ -17,7 +17,7 @@ case "${1:-start}" in
             exit 0
         fi
         if ! command -v hugo &>/dev/null; then
-            echo "ERROR: hugo not found. Install Hugo extended >= 0.160.1" >&2
+            echo "ERROR: hugo not found. Install Hugo extended >= 0.168.0" >&2
             exit 1
         fi
         cd "$SITE_DIR"
