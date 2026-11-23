@@ -1,0 +1,404 @@
+---
+- name: Validate the http server spec
+  ansible.builtin.assert:
+    that:
+      - server.name is defined
+      - server.name is string
+      - server.name is match('^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
+      - (server.state | default('started')) in ['started', 'stopped', 'absent']
+      - server.dir is not defined or server.dir is string
+      - server.dir is not defined or server.dir is match('^/')
+      - server.listen is not defined or server.listen is string
+      - (server.port | default(18080) | int) >= 1
+      - (server.port | default(18080) | int) <= 65535
+      - server.max_upload is not defined or server.max_upload is string
+      - (server.max_upload | default('1G') | trim | upper) is match('^[0-9]+(\.[0-9]+)?([KMGT]B?)?$')
+      - ((server.max_upload | default('1G') | trim | upper)
+         | regex_replace('([KMGT])B?$', '') | float) > 0
+      - server.admin_ips is not defined or server.admin_ips is sequence
+      - server.admin_ips is not defined or server.admin_ips is not string
+      - (server.tls_cert is defined) == (server.tls_key is defined)
+      - server.tls_cert is not defined or server.tls_cert is string
+      - server.tls_cert is not defined or server.tls_cert is match('^/')
+      - server.tls_key is not defined or server.tls_key is string
+      - server.tls_key is not defined or server.tls_key is match('^/')
+      - server.auth is not defined or server.auth is sequence
+      - server.auth is not defined or server.auth is not string
+      - server.auth_env is not defined or server.auth_env is sequence
+      - server.auth_env is not defined or server.auth_env is not string
+      - server.auth_file is not defined or server.auth_file is sequence
+      - server.auth_file is not defined or server.auth_file is not string
+      - (server.state | default('started')) == 'started'
+        or not ((server.autostart | default(true)) | bool)
+    fail_msg: >-
+      pgcli_http_servers entries need name (letters, digits, ".", "_", "-"),
+      state started|stopped|absent, an absolute dir, port 1-65535 and a size
+      such as 512M for max_upload. tls_cert and tls_key need absolute paths
+      and must be set together; auth, auth_env and auth_file are lists.
+      autostart requires state: started.
+
+- name: Resolve the http server spec
+  ansible.builtin.set_fact:
+    _http_desired_state: "{{ server.state | default('started') }}"
+    _http_name: "{{ server.name }}"
+    _http_dir: "{{ (server.dir | default(pgcli_http_default_dir)) | regex_replace('/+$', '') }}"
+    _http_listen: "{{ server.listen | default('127.0.0.1') }}"
+    _http_port: "{{ server.port | default(18080) | int }}"
+    _http_allow_upload: "{{ server.allow_upload | default(false) | bool }}"
+    _http_allow_dir: "{{ server.allow_dir | default(false) | bool }}"
+    _http_allow_delete: "{{ server.allow_delete | default(false) | bool }}"
+    _http_max_upload: "{{ server.max_upload | default('1G') | string | trim | upper }}"
+    _http_admin_ips: "{{ server.admin_ips | default([]) }}"
+    _http_autostart: "{{ server.autostart | default(true) | bool }}"
+    _http_sync_binaries: "{{ server.sync_binaries | default(true) | bool }}"
+    _http_tls: "{{ (server.tls | default(false) | bool) or (server.tls_cert is defined) }}"
+    _http_tls_cert: "{{ server.tls_cert | default('') }}"
+    _http_tls_key: "{{ server.tls_key | default('') }}"
+    _http_auth: "{{ server.auth | default([]) }}"
+    _http_auth_env: "{{ server.auth_env | default([]) }}"
+    _http_auth_file: "{{ server.auth_file | default([]) }}"
+    _http_auth_env_map: {}
+    _http_force: "{{ server.force | default(false) | bool }}"
+    _http_auth_password_mismatch: false
+    _http_auth_file_mismatch: false
+    _http_expected_cert: >-
+      {{ (server.tls_cert | default('')) if (server.tls_cert is defined)
+         else ((_http_base_dir ~ '/http/tls/' ~ server.name ~ '/cert.pem')
+               if (server.tls | default(false) | bool) else '') }}
+    _http_expected_key: >-
+      {{ (server.tls_key | default('')) if (server.tls_key is defined)
+         else ((_http_base_dir ~ '/http/tls/' ~ server.name ~ '/key.pem')
+               if (server.tls | default(false) | bool) else '') }}
+    _http_registered: "{{ server.name in (_http_pgcli_cfg.http | default({}, true)) }}"
+    _http_current: "{{ (_http_pgcli_cfg.http | default({}, true)).get(server.name, {}) }}"
+
+- name: Resolve the upload limit in bytes
+  ansible.builtin.set_fact:
+    _http_max_upload_bytes: >-
+      {{ ((_http_max_upload | regex_replace('([KMGT])B?$', '') | float)
+          * ({'': 1, 'B': 1, 'K': 1024, 'KB': 1024, 'M': 1048576,
+              'MB': 1048576, 'G': 1073741824, 'GB': 1073741824,
+              'T': 1099511627776, 'TB': 1099511627776}
+             [_http_max_upload | regex_replace('^[0-9.]+', '')])) | int }}
+
+- name: Check the TLS certificate files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: >-
+    {{ ([_http_tls_cert, _http_tls_key]
+        if (_http_tls_cert | length) > 0 else []) }}
+  register: _http_tls_files
+  loop_control:
+    label: "{{ item }}"
+
+- name: Validate the TLS certificate files
+  ansible.builtin.assert:
+    that: item.stat.exists and item.stat.isreg
+    fail_msg: >-
+      TLS file {{ item.item }} must exist on the target host: the server runs
+      there, and tls_cert/tls_key are target paths, not controller paths.
+  loop: "{{ _http_tls_files.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Read the auth environment variables
+  ansible.builtin.set_fact:
+    _http_auth_env_map: "{{ _http_auth_env_map | combine({item: lookup('env', item)}) }}"
+  loop: "{{ _http_auth_env }}"
+  loop_control:
+    label: "{{ item }}"
+  no_log: "{{ (_http_auth_env | length) > 0 }}"
+
+- name: Validate the auth environment variables
+  ansible.builtin.assert:
+    that: (_http_auth_env_map[item] | default('')) is match('^[^:]+:.+$')
+    fail_msg: >-
+      auth_env {{ item }} must name a controller environment variable that
+      holds USER:PASSWORD; it is unset, empty or malformed.
+  loop: "{{ _http_auth_env }}"
+  loop_control:
+    label: "{{ item }}"
+  no_log: "{{ (_http_auth_env | length) > 0 }}"
+
+- name: Validate the inline auth entries
+  ansible.builtin.assert:
+    that: (item | string) is match('^[^:]+:.+$')
+    fail_msg: >-
+      auth entry for {{ item | regex_replace(':.*$', '') }} must be
+      USER:PASSWORD with a non-empty password (the password may contain ':').
+  loop: "{{ _http_auth }}"
+  loop_control:
+    label: "{{ item | regex_replace(':.*$', '') }}"
+  no_log: "{{ (_http_auth | length) > 0 }}"
+
+- name: Check the auth files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ _http_auth_file }}"
+  register: _http_auth_files
+  loop_control:
+    label: "{{ item }}"
+
+- name: Validate the auth files
+  ansible.builtin.assert:
+    that: item.stat.exists and item.stat.isreg
+    fail_msg: >-
+      auth_file {{ item.item }} must be an existing htpasswd file (bcrypt
+      entries, as written by `pg http htpasswd` or `htpasswd -B`) on the
+      target host.
+  loop: "{{ _http_auth_files.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Read the auth files
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop: "{{ _http_auth_file }}"
+  register: _http_auth_files_raw
+  loop_control:
+    label: "{{ item }}"
+  no_log: "{{ (_http_auth_file | length) > 0 }}"
+
+- name: Resolve the configured auth users
+  ansible.builtin.set_fact:
+    _http_auth_users: >-
+      {{ ((_http_auth | map('regex_replace', ':.*$', '') | list)
+          + (_http_auth_env_map.values()
+             | map('regex_replace', ':.*$', '') | list)
+          + ((_http_auth_files_raw.results | map(attribute='content')
+              | map('b64decode') | join('\n')).split('\n')
+             | map('trim') | reject('match', '^(#|$)')
+             | map('regex_replace', ':.*$', '') | list))
+         | unique | sort }}
+
+- name: Resolve the configured plaintext auth entries
+  ansible.builtin.set_fact:
+    _http_auth_plaintext: >-
+      {{ dict((_http_auth | map('split', ':', 1) | list)
+              + (_http_auth_env_map.values() | map('split', ':', 1) | list)) }}
+
+- name: Resolve the configured auth file entries
+  ansible.builtin.set_fact:
+    _http_auth_file_map: >-
+      {{ dict((_http_auth_files_raw.results | map(attribute='content')
+              | map('b64decode') | join('\n')).split('\n')
+             | map('trim') | reject('match', '^(#|$)')
+             | select('match', '^[^:]+:.+$')
+             | map('split', ':', 1) | list) }}
+
+- name: Resolve the repeated auth arguments
+  ansible.builtin.set_fact:
+    _http_auth_args: >-
+      {{ (['--auth'] | product(_http_auth) | map('list') | list | flatten)
+         + (['--auth-env'] | product(_http_auth_env) | map('list') | list | flatten)
+         + (['--auth-file'] | product(_http_auth_file) | map('list') | list | flatten) }}
+
+- name: Check the running server state file
+  ansible.builtin.stat:
+    path: "{{ _http_state_dir }}/{{ _http_name }}.json"
+  register: _http_state_file
+
+- name: Read the running server state
+  ansible.builtin.slurp:
+    src: "{{ _http_state_dir }}/{{ _http_name }}.json"
+  register: _http_state_raw
+  when: _http_state_file.stat.exists
+
+- name: Parse the running server state
+  ansible.builtin.set_fact:
+    _http_runtime: >-
+      {{ (_http_state_raw.content | b64decode | from_json)
+         if _http_state_file.stat.exists else {} }}
+
+- name: Read the running server process
+  ansible.builtin.slurp:
+    src: "/proc/{{ _http_runtime.pid }}/cmdline"
+  register: _http_cmdline
+  failed_when: false
+  when: (_http_runtime.pid | default(0) | int) > 0
+
+- name: Resolve the running server liveness
+  ansible.builtin.set_fact:
+    _http_alive: >-
+      {{ ((_http_cmdline.content | default('')) | b64decode) is search('http')
+         and ((_http_cmdline.content | default('')) | b64decode) is search('serve')
+         and (((_http_cmdline.content | default('')) | b64decode)
+              is search(_http_name | regex_escape)) }}
+
+- name: Verify the configured auth passwords against the running server
+  ansible.builtin.set_fact:
+    _http_auth_password_mismatch: >-
+      {{ (_http_auth_password_mismatch | bool)
+         or not (item.value | pgcli_bcrypt_verify(
+                  ((_http_runtime.auth | default({}, true))[item.key] | default('')))) }}
+  loop: "{{ _http_auth_plaintext | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  no_log: "{{ (_http_auth_plaintext | length) > 0 }}"
+
+- name: Verify the configured auth file entries against the running server
+  ansible.builtin.set_fact:
+    _http_auth_file_mismatch: >-
+      {{ (_http_auth_file_mismatch | bool)
+         or (((_http_runtime.auth | default({}, true))[item.key] | default(''))
+             != item.value) }}
+  loop: "{{ _http_auth_file_map | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  no_log: "{{ (_http_auth_file_map | length) > 0 }}"
+
+- name: Resolve whether the running server matches the spec
+  ansible.builtin.set_fact:
+    _http_spec_matches: >-
+      {{ (_http_state_file.stat.exists | bool)
+         and not (_http_force | bool)
+         and ((_http_runtime.dir | default('')) == _http_dir)
+         and ((_http_runtime.listen | default('')) == _http_listen)
+         and ((_http_runtime.port | default(0) | int) == (_http_port | int))
+         and (((_http_runtime.tls | default(false)) | bool) == (_http_tls | bool))
+         and ((_http_runtime.cert_file | default('')) == _http_expected_cert)
+         and ((_http_runtime.key_file | default('')) == _http_expected_key)
+         and (((_http_runtime.allow_delete | default(false)) | bool)
+              == (_http_allow_delete | bool))
+         and (((_http_runtime.allow_upload | default(false)) | bool)
+              == (_http_allow_upload | bool))
+         and (((_http_runtime.allow_dir | default(false)) | bool)
+              == (_http_allow_dir | bool))
+         and (((_http_runtime.admin_ips | default([])) | sort)
+              == (_http_admin_ips | sort))
+         and (((_http_runtime.max_upload_bytes | default(0)) | int)
+              == (_http_max_upload_bytes | int))
+         and ((((_http_runtime.auth | default({}, true)) | dict2items
+                | map(attribute='key') | list) | sort)
+              == _http_auth_users)
+         and not (_http_auth_password_mismatch | bool)
+         and not (_http_auth_file_mismatch | bool) }}
+
+- name: Stop the http server
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - http
+      - stop
+      - "{{ _http_name }}"
+  when:
+    - _http_state_file.stat.exists
+    - _http_desired_state != 'started'
+      or not ((_http_spec_matches | bool) and (_http_alive | bool))
+
+- name: Create the served directory
+  become_user: root
+  ansible.builtin.file:
+    path: "{{ _http_dir }}"
+    state: directory
+    owner: "{{ pgcli_deploy_become_user }}"
+    group: "{{ pgcli_deploy_become_user }}"
+    mode: '0755'
+  when: _http_desired_state != 'absent'
+
+- name: Copy the binaries into the served directory
+  ansible.builtin.copy:
+    src: "{{ pgcli_http_repo_root }}/images/{{ item }}"
+    dest: "{{ _http_dir }}/{{ item }}"
+    mode: '0755'
+  loop: "{{ pgcli_http_binaries }}"
+  when:
+    - _http_desired_state != 'absent'
+    - _http_sync_binaries | bool
+
+- name: Start the http server
+  ansible.builtin.command:
+    argv: >-
+      {{ [pgcli_install_path, '-c', pgcli_config_path, 'http', 'start',
+          '--name', _http_name, '--listen', _http_listen,
+          '--port', _http_port | string, '--dir', _http_dir,
+          '--max-upload', _http_max_upload]
+         + (['--allow-delete'] if (_http_allow_delete | bool) else [])
+         + (['--allow-upload'] if (_http_allow_upload | bool) else [])
+         + (['--allow-dir'] if (_http_allow_dir | bool) else [])
+         + (['--admin-ip', (_http_admin_ips | join(','))]
+            if ((_http_admin_ips | length) > 0) else [])
+         + (['--tls-cert', _http_tls_cert, '--tls-key', _http_tls_key]
+            if (_http_tls_cert | length) > 0
+            else (['--tls'] if (_http_tls | bool) else []))
+         + _http_auth_args }}
+  environment: "{{ _http_auth_env_map }}"
+  no_log: "{{ ((_http_auth | length) + (_http_auth_env | length)) > 0 }}"
+  register: _http_start
+  when:
+    - _http_desired_state == 'started'
+    - not ((_http_spec_matches | bool) and (_http_alive | bool))
+
+- name: Read the started server state
+  ansible.builtin.slurp:
+    src: "{{ _http_state_dir }}/{{ _http_name }}.json"
+  register: _http_started_raw
+  when: _http_start is changed
+
+- name: Parse the started server state
+  ansible.builtin.set_fact:
+    _http_started: "{{ _http_started_raw.content | b64decode | from_json }}"
+  when: _http_start is changed
+
+- name: Verify the bound port
+  ansible.builtin.assert:
+    that: ((_http_started.port | default(0)) | int) == (_http_port | int)
+    fail_msg: >-
+      {{ _http_name }} bound port {{ _http_started.port | default('?') }}
+      instead of {{ _http_port }}: another process holds the requested port.
+      Free it or change port in pgcli_http_servers.
+  when: _http_start is changed
+
+- name: Resolve the health check address
+  ansible.builtin.set_fact:
+    _http_health_host: >-
+      {{ '127.0.0.1' if (_http_listen == '0.0.0.0')
+         else ('[::1]' if (_http_listen in ['::', '[::]']) else _http_listen) }}
+
+- name: Wait for the http health endpoint
+  ansible.builtin.uri:
+    url: "{{ ('https' if (_http_tls | bool) else 'http') }}://{{ _http_health_host }}:{{ _http_port }}/__pgcli_health"
+    status_code: 200
+    use_proxy: false
+    validate_certs: false
+    return_content: false
+  register: _http_health
+  until: _http_health.status == 200
+  retries: 10
+  delay: 1
+  changed_when: false
+  when: _http_desired_state == 'started'
+
+- name: Enable http server autostart
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - autostart
+      - enable
+      - "--http"
+      - "--name"
+      - "{{ _http_name }}"
+  when:
+    - _http_desired_state == 'started'
+    - _http_autostart | bool
+    - not ((_http_current.autostart | default(false)) | bool)
+
+- name: Disable http server autostart
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - autostart
+      - disable
+      - "--http"
+      - "--name"
+      - "{{ _http_name }}"
+  when:
+    - _http_registered | bool
+    - (_http_current.autostart | default(false)) | bool
+    - _http_desired_state != 'started' or not (_http_autostart | bool)

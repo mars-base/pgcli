@@ -83,6 +83,14 @@ node2
 node3
 node4
 
+# ── HTTP file server ───────────────────────────────────────────────────────
+# Hosts that serve offline install assets (pg binary, podman launcher, image
+# tarballs) with `pg http`. Point pgcli_install_binary_url,
+# pgcli_podman_binary_url, pgcli_download_mirror and pgcli_images_http_url at
+# the server root in group_vars/all/main.yml.
+[http]
+node1
+
 # ── S3 store groups ────────────────────────────────────────────────────────
 # Standalone S3-compatible object store (minio/silo/rustfs) for the pgBackRest
 # s3 backup target; deploy with playbooks/deploy-s3.yaml. Store-type groups

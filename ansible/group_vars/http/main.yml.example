@@ -1,0 +1,78 @@
+---
+# `pg http` file servers managed by playbooks/deploy-http.yaml. Keep live
+# values in the gitignored main.yml, not here.
+#
+# Each entry reconciles one server by name: the role starts it, keeps the
+# running spec in sync (a changed field triggers stop + start), creates the
+# served directory, copies the offline binaries into it and optionally
+# registers boot autostart.
+#
+# Fields:
+#   name            server name used by `pg http status/stop` (required)
+#   host            limit the entry to one inventory host (optional)
+#   state           started (default) | stopped | absent
+#   autostart       register the server in pg.yaml for boot autostart
+#                   (default true, only with state: started)
+#   dir             served directory (default /srv/offline-images), created
+#                   with the deployment account as owner
+#   listen          listen address (default 127.0.0.1); 0.0.0.0 exposes it
+#   port            listen port (default 18080)
+#   allow_upload    enable the upload form (default false)
+#   allow_dir       enable the mkdir form (default false)
+#   allow_delete    enable the per-file delete button (default false)
+#   max_upload      per-request upload limit (default 1G), e.g. 512M
+#   admin_ips       restrict the write modes to these source addresses
+#   tls             serve HTTPS with a generated, self-renewing certificate
+#                   under the pgcli base dir (default false)
+#   tls_cert        target path of a PEM certificate; implies tls (optional)
+#   tls_key         target path of its PEM private key; required with tls_cert
+#   auth            Basic Auth users as USER:PASSWORD, one entry per user
+#   auth_env        controller env vars holding USER:PASSWORD; the role reads
+#                   them on the controller and passes only the variable names
+#   auth_file       htpasswd files with bcrypt entries on the target host
+#   force           restart even when the running spec matches (default false)
+#   sync_binaries   copy pgcli_http_binaries into dir (default true)
+#
+# Auth is compared by user name and password: adding or removing users, and
+# changing the password of an existing user, restart the server. auth_file
+# entries are compared by their bcrypt hash.
+# Secrets can also come from the controller environment (auth_env) so they
+# never appear in this file.
+pgcli_http_servers:
+  - name: images
+    dir: /srv/offline-images
+    listen: 0.0.0.0
+    port: 18080
+    autostart: true
+
+  # Write modes plus Basic Auth. Uncomment to use. A username may appear in
+  # only one source; all sources can be combined.
+  #  - name: share
+  #    dir: /srv/share
+  #    listen: 0.0.0.0
+  #    port: 18081
+  #    allow_upload: true
+  #    allow_dir: true
+  #    allow_delete: true
+  #    max_upload: 512M
+  #    admin_ips:
+  #      - 192.0.2.20
+  #      - 192.0.2.21
+  #    # Inline USER:PASSWORD entries (plaintext in this gitignored file; the
+  #    # start task runs with no_log so they stay out of the output).
+  #    auth:
+  #      - "alice:s3cret"
+  #    # Names of controller environment variables holding USER:PASSWORD; the
+  #    # role reads them on the controller and passes only the names.
+  #    auth_env:
+  #      - PGCLI_HTTP_AUTH
+  #    # htpasswd files on the target host (bcrypt entries); add accounts with
+  #    # `pg http htpasswd <user> --file <path>`.
+  #    auth_file:
+  #      - /home/pgcli/pg/data/http/htpasswd
+  #
+  # TLS example: tls: true uses the generated self-signed certificate; or
+  # point at a certificate/key pair that already exists on the target host.
+  #    tls: true
+  #    # tls_cert: /etc/pgcli-http/share.crt
+  #    # tls_key: /etc/pgcli-http/share.key

@@ -133,6 +133,12 @@ Enable it at boot if needed:
 pg autostart enable --http --name images
 ```
 
+The server can also be managed entirely from Ansible: see
+[HTTP file server](./http-server/). `playbooks/deploy-http.yaml` reconciles
+every `pg http` parameter from `group_vars/http/main.yml` (directory, write
+modes, TLS, auth), syncs the `pg` and podman binaries, and registers the
+autostart command above.
+
 Caveats:
 
 - **There is no authentication unless you add `--auth`.** Use `0.0.0.0` only

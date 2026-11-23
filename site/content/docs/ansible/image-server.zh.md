@@ -120,6 +120,11 @@ pg http start --name images --listen 0.0.0.0 --port 18080 \
 pg autostart enable --http --name images
 ```
 
+以上服务器也可以完全用 Ansible 声明式管理：见 [HTTP 文件服务器](./http-server/)。
+`playbooks/deploy-http.yaml` 按 `group_vars/http/main.yml` 协调 `pg http` 的全部
+参数（目录、写模式、TLS、认证），同步 `pg` 与 podman 二进制，并自动注册上面这条
+autostart。
+
 注意事项：
 
 - **不配置 `--auth` 就没有认证**。`0.0.0.0` 只应在可信网段使用，或由防火墙限制

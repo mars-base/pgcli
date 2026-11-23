@@ -1,0 +1,128 @@
+---
+# Reconcile the `pg http` file servers declared in pgcli_http_servers. An
+# entry may set host: <inventory host> to limit it to that host; entries
+# without host run everywhere, matching pgcli_daemons. The play runs as the
+# deployment account, so server state stays under that account's pg.yaml base
+# directory and home directory.
+# The validation below loops over the raw entries, and Ansible prints the
+# whole loop item on a passing assert; hide the output when an entry carries
+# inline USER:PASSWORD credentials.
+- name: Resolve whether entries carry inline credentials
+  ansible.builtin.set_fact:
+    _http_has_inline_auth: >-
+      {{ ((pgcli_http_servers | default([]))
+          | selectattr('auth', 'defined') | list | length) > 0 }}
+
+- name: Validate http server host assignments
+  ansible.builtin.assert:
+    that:
+      - item.host is not defined or item.host in groups['all']
+    fail_msg: >-
+      pgcli_http_servers entry {{ item.name | default('?') }} sets host={{
+      item.host | default('') }}, which is not an inventory host.
+  loop: "{{ pgcli_http_servers | default([]) }}"
+  loop_control:
+    label: "{{ item.name | default('?') }}"
+  no_log: "{{ _http_has_inline_auth | bool }}"
+
+- name: Select the http server entries for this host
+  ansible.builtin.set_fact:
+    _http_servers: >-
+      {{ ((pgcli_http_servers | default([])) | selectattr('host', 'defined')
+          | selectattr('host', 'equalto', inventory_hostname) | list)
+         + ((pgcli_http_servers | default([])) | rejectattr('host', 'defined') | list) }}
+
+- name: Validate http server names are unique
+  ansible.builtin.assert:
+    that:
+      - (_http_servers | selectattr('name', 'defined')
+         | map(attribute='name') | list | length)
+        == (_http_servers | selectattr('name', 'defined')
+            | map(attribute='name') | unique | list | length)
+    fail_msg: pgcli_http_servers has duplicate server names.
+
+- name: Check whether this host syncs binaries
+  ansible.builtin.set_fact:
+    _http_sync_needed: >-
+      {{ (_http_servers | map(attribute='sync_binaries', default=true)
+          | map('bool') | select | list | length) > 0 }}
+
+- name: Check the local pg build
+  ansible.builtin.stat:
+    path: "{{ pgcli_http_repo_root }}/bin/pg"
+  register: _http_local_pg
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: _http_sync_needed | bool
+
+- name: Require a local pg build before syncing binaries
+  ansible.builtin.assert:
+    that: _http_local_pg.stat.exists
+    fail_msg: >-
+      {{ pgcli_http_repo_root }}/bin/pg is missing. Run make build in the
+      repository root: the role refreshes images/pg from it before copying
+      the binaries to each served directory.
+  run_once: true
+  when: _http_sync_needed | bool
+
+- name: Sync the local pg build into the images directory
+  ansible.builtin.copy:
+    src: "{{ pgcli_http_repo_root }}/bin/pg"
+    dest: "{{ pgcli_http_repo_root }}/images/pg"
+    mode: '0755'
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: _http_sync_needed | bool
+
+- name: Check the binaries to distribute
+  ansible.builtin.stat:
+    path: "{{ pgcli_http_repo_root }}/images/{{ item }}"
+  loop: "{{ pgcli_http_binaries }}"
+  register: _http_local_binaries
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: _http_sync_needed | bool
+
+- name: Require every binary under images/
+  ansible.builtin.assert:
+    that:
+      - (_http_local_binaries.results | selectattr('stat.exists') | list | length)
+        == (_http_local_binaries.results | length)
+    fail_msg: >-
+      Missing binaries under {{ pgcli_http_repo_root }}/images: {{
+      _http_local_binaries.results | rejectattr('stat.exists')
+      | map(attribute='item') | join(', ') }}.
+  run_once: true
+  when: _http_sync_needed | bool
+
+- name: Read the pgcli config
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - config
+      - show
+  register: _http_config_raw
+  changed_when: false
+
+- name: Resolve the pgcli base directory
+  ansible.builtin.set_fact:
+    _http_pgcli_cfg: "{{ _http_config_raw.stdout | from_yaml }}"
+    _http_base_dir: >-
+      {{ (_http_config_raw.stdout | from_yaml).base_dir
+         | default(pgcli_deploy_home ~ '/.pgcli', true) }}
+
+- name: Resolve the http state directory
+  ansible.builtin.set_fact:
+    _http_state_dir: "{{ _http_base_dir }}/http/servers"
+
+- name: Reconcile http servers
+  ansible.builtin.include_tasks: server.yml
+  loop: "{{ _http_servers }}"
+  loop_control:
+    loop_var: server
+    label: "{{ server.name | default('?') }}"

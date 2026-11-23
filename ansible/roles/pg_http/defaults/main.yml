@@ -1,0 +1,17 @@
+---
+# `pg http` file servers reconciled by this role. Define the list in
+# group_vars/http/main.yml; see group_vars/http/main.yml.example.
+pgcli_http_servers: []
+
+# Directory served when an entry omits dir.
+pgcli_http_default_dir: /srv/offline-images
+
+# Binaries copied from the controller's images/ directory into every served
+# directory that enables sync_binaries. The role refreshes images/pg from the
+# local build first, so images/ only has to provide the other entries.
+pgcli_http_binaries:
+  - pg
+  - podman-launcher-linux_amd64
+
+# Repository checkout on the controller, used to find bin/pg and images/.
+pgcli_http_repo_root: "{{ playbook_dir | dirname | dirname }}"

@@ -127,10 +127,39 @@
         validate: "visudo -cf %s"
       when: _pgcli_deploy_sudo.rc | default(1) != 0
 
+    # Minimal Debian images ship the system dbus without the per-user session
+    # bus. Rootless podman and `pg autostart` need /run/user/<uid>/bus, so the
+    # wait below would otherwise never succeed.
+    - name: Ensure the per-user session bus is installed
+      ansible.builtin.package:
+        name: dbus-user-session
+        state: present
+
     - name: Enable lingering for the deployment account
       ansible.builtin.command: "loginctl enable-linger {{ pgcli_deploy_user }}"
       args:
         creates: "/var/lib/systemd/linger/{{ pgcli_deploy_user }}"
+
+    - name: Check for the deployment account's runtime bus
+      ansible.builtin.stat:
+        path: "{{ pgcli_deploy_run_dir }}/bus"
+      register: _pgcli_bus
+
+    # A user manager that was already running before dbus-user-session was
+    # installed keeps its old unit set until dbus.socket is started by hand.
+    - name: Start the deployment account's session bus
+      ansible.builtin.command: systemctl --user start dbus.socket
+      become: true
+      become_user: "{{ pgcli_deploy_user }}"
+      environment:
+        XDG_RUNTIME_DIR: "{{ pgcli_deploy_run_dir }}"
+      register: _pgcli_bus_start
+      changed_when: _pgcli_bus_start.rc == 0
+      failed_when: false
+      until: _pgcli_bus_start.rc == 0
+      retries: 15
+      delay: 2
+      when: not (_pgcli_bus.stat.exists | bool)
 
     - name: Wait for the deployment account's runtime bus
       ansible.builtin.wait_for:
@@ -139,10 +168,14 @@
         timeout: 30
 
 # Fail fast before installing or loading anything when the offline image
-# server is configured but unusable from this host.
+# server is configured but unusable from this host. Skipped when the caller
+# disables image handling: a host that only runs the pg binary (for example a
+# pg_http file server) needs neither the server nor its archives.
 - name: Verify the offline image source
   ansible.builtin.include_tasks: offline-check.yml
-  when: pgcli_images_http_url | length > 0
+  when:
+    - pgcli_images_http_url | length > 0
+    - pgcli_load_images | default(true) | bool
 
 - name: Check for an installed pg binary
   ansible.builtin.stat:
@@ -384,7 +417,9 @@
   block:
     - name: Load container images from the offline HTTP server
       ansible.builtin.include_tasks: images.yml
-      when: pgcli_images_http_url | length > 0
+      when:
+        - pgcli_images_http_url | length > 0
+        - pgcli_load_images | default(true) | bool
 
 - name: Configure pgcli for the deployment account
   become: true

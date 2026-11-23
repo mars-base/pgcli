@@ -30,6 +30,7 @@ pgcli 仓库的 `ansible/` 目录把 CLI 变成声明式部署工具。不必在
 | Patroni HA 集群及其 etcd DCS | `pg_ha_clusters`、`pgcli_addons`（etcd） | `pg_ha`、`pg_addon` |
 | HA 集群前置的 HAProxy | `pg_ha_haproxy` | `pg_ha_haproxy` |
 | 备份用的独立 S3 兼容存储 | `pgcli_s3_*` | `pg_s3` |
+| `pg http` 文件服务器（离线资产分发） | `pgcli_http_servers` | `pg_http` |
 
 所有变更任务都会先检查当前 pgcli 配置与容器状态，无变化的主机报告 `ok` 而不是
 `changed`。
@@ -52,17 +53,19 @@ ansible/
 │   ├── minio_s3/ silo_s3/ rustfs_s3/ # S3 存储类型
 │   ├── addon_<type>_single/         # 每种单机插件一个分组
 │   ├── addon_<type>_cluster/        # 每种多主机插件集群一个分组
-│   └── ha_etcd/ ha_cluster/          # 共享 DCS 与 Patroni 成员
+│   ├── ha_etcd/ ha_cluster/          # 共享 DCS 与 Patroni 成员
+│   └── http/                        # pg http 文件服务器声明
 ├── host_vars/               # 可选的单主机覆盖
 ├── misc/
 │   ├── prometheus/          # Prometheus 告警规则文件
 │   └── webhook/             # Alertmanager webhook 接收端
 ├── playbooks/
 │   ├── apply.yaml           # 安装 + 实例 + daemon + 插件 + HA
+│   ├── deploy-http.yaml     # pg http 文件服务器
 │   ├── deploy-s3.yaml       # 独立 S3 存储
 │   ├── ha-status.yaml       # 只读的 Patroni/HAProxy 状态
 │   └── ping.yaml            # 连通性冒烟测试
-└── roles/                   # pgcli、pg_instance、pg_daemon、pg_addon、addon_cluster_shared、pg_ha、pg_ha_haproxy、pg_s3
+└── roles/                   # pgcli、pg_instance、pg_daemon、pg_addon、addon_cluster_shared、pg_ha、pg_ha_haproxy、pg_s3、pg_http
 ```
 
 ## 子页面
@@ -73,6 +76,7 @@ ansible/
 | [安装与示例文件](./setup/) | 每个 `*.example` 对应哪个实际文件、`hosts.ini` 分组、`group_vars` 字段、首次运行 |
 | [离线与隔离环境安装](./offline/) | 局域网 HTTP 服务器：镜像清单与懒加载、`pg`/podman 二进制、运行时主机二进制与 DocumentDB DEB |
 | [离线镜像服务器](./image-server/) | 用 `export-images.sh` 从 `pgcli_images` 导出全部镜像 tar 包，`pg http` 提供服务并接入 Ansible |
+| [HTTP 文件服务器](./http-server/) | `pg_http` 角色与 `deploy-http.yaml`：覆盖 `pg http` 全部参数（TLS、认证、写模式、autostart），并同步离线二进制 |
 | [出网代理](./proxy/) | 隔离机房的出网通道：Privoxy add-on、全局变量、`NO_PROXY`、手动 SSH 用法与验证 |
 | [剧本](./playbooks/) | `ping.yaml`、`apply.yaml`、`resources.yaml`、`deploy-s3.yaml`、`ha-status.yaml`、`passwords.yaml`：tags、`--limit`、幂等、生命周期顺序 |
 | [实例与副本](./instances/) | `single`/`samehost`/`crosshost` 示例文件与 `pgcli_instances` 全部字段 |

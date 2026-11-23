@@ -1,0 +1,66 @@
+---
+# Manage `pg http` file servers declared in pgcli_http_servers (default:
+# group_vars/http/main.yml). The servers are host processes, not add-ons, so
+# this playbook is standalone and unrelated to apply.yaml.
+#
+# Each entry reconciles one server by name: the role starts or restarts it
+# when the spec differs from the running server, creates the served directory,
+# copies the offline binaries into it, and enables or disables boot autostart.
+#
+# Binaries: before distributing, the play refreshes the controller's images/pg
+# from bin/pg, then copies pgcli_http_binaries (default: pg and
+# podman-launcher-linux_amd64) from the controller's images/ directory into
+# every served directory. Run make build in the repository root first. Image
+# archives are not copied; export them with scripts/export-images.sh.
+#
+# pg http silently moves to the next free port when the requested port is
+# busy; the role fails instead when the bound port differs from the spec, so
+# consumers never use a URL the server did not bind.
+#
+# A file-server host only needs the pg binary and runs no containers, so the
+# install play skips the offline image check/load and the installer's image
+# pull. Override with -e pgcli_load_images=true (and
+# -e pgcli_install_skip_pull=false) when the host should also carry images.
+#
+# Usage:
+#   cd ansible
+#   uv run ansible-playbook playbooks/deploy-http.yaml
+#   uv run ansible-playbook playbooks/deploy-http.yaml --limit http
+#   uv run ansible-playbook playbooks/deploy-http.yaml -e HOSTS=debian12-01
+#
+# The play targets the [http] group by default; override with HOSTS or
+# --limit. Live settings live in group_vars/http/main.yml (gitignored; start
+# from the .example file).
+
+- name: Install and configure pgcli
+  hosts: "{{ HOSTS | default('http') }}"
+  gather_facts: false
+  vars:
+    pgcli_load_images: false
+    pgcli_install_skip_pull: true
+  environment: "{{ pgcli_proxy_env | combine({'PGCLI_DOWNLOAD_MIRROR': pgcli_download_mirror | default('')}) }}"
+  roles:
+    - role: pgcli
+      tags: [pgcli]
+
+- name: Deploy the http file servers
+  hosts: "{{ HOSTS | default('http') }}"
+  gather_facts: false
+  tags: [http]
+  become: true
+  become_user: "{{ pgcli_deploy_become_user }}"
+  module_defaults:
+    ansible.builtin.command:
+      chdir: "{{ pgcli_deploy_home }}"
+    ansible.builtin.shell:
+      chdir: "{{ pgcli_deploy_home }}"
+  environment: "{{ pgcli_deploy_env }}"
+  pre_tasks:
+    - name: Resolve the rootless deployment environment
+      ansible.builtin.include_role:
+        name: pgcli
+        tasks_from: deploy-env
+      when: pgcli_deploy_rootless | bool
+      tags: [always]
+  roles:
+    - role: pg_http

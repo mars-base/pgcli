@@ -159,6 +159,7 @@ Run every playbook from the repository root with `uv run`.
 | `ping.yaml` | Verifies SSH/Ansible connectivity to every selected host | No |
 | `apply.yaml` | Installs pgcli and reconciles instances, extensions, add-ons, host daemons and HA clusters | Yes |
 | `deploy-s3.yaml` | Deploys a standalone minio/silo/rustfs store as a pgBackRest S3 target | Yes |
+| `deploy-http.yaml` | Deploys the `pg http` file servers and syncs the offline binaries into the served directories | Yes |
 | `ha-status.yaml` | Shows the live Patroni topology and HAProxy endpoints | No |
 | `resources.yaml` | Shows host resources and, per namespace, instances, add-ons and HA status | No |
 | `nftables.yaml` | Applies the host nftables firewall from `group_vars/nftables` (Debian and RedHat families) | Yes |
@@ -229,6 +230,38 @@ uv run ansible-playbook playbooks/deploy-s3.yaml -e pgcli_s3_force=true
 unless overridden). `pgcli_s3_type` is optional when the group name already
 encodes the type. See the `*_s3` `main.yml.example` files for drives, TLS and
 endpoint options.
+
+### deploy-http.yaml
+
+Deploys the `pg http` file servers declared in `pgcli_http_servers` on the
+`[http]` inventory group and copies the offline binaries (`pg`,
+`podman-launcher-linux_amd64`) into each served directory. Every `pg http
+start` parameter is supported: directory, listen address/port, the three write
+modes plus `admin_ips` and `max_upload`, TLS (self-signed via `tls: true`, or
+`tls_cert`/`tls_key`), and Basic Auth via `auth`, `auth_env` or `auth_file`.
+Field documentation lives in `group_vars/http/main.yml.example`.
+
+Run `make build` in the repository root first: the role refreshes `images/pg`
+from `bin/pg` before copying anything, and the other binaries must already be
+under `images/`.
+
+A file-server host runs no containers, so the install play skips the offline
+image check/load (`pgcli_load_images: false`) and passes `--skip-pull` to the
+installer. Override with `-e pgcli_load_images=true -e
+pgcli_install_skip_pull=false` when the host must carry the images as well.
+
+```bash
+uv run ansible-playbook playbooks/deploy-http.yaml --limit http
+uv run ansible-playbook playbooks/deploy-http.yaml -e HOSTS=node-http
+uv run ansible-playbook playbooks/deploy-http.yaml --limit http --skip-tags pgcli
+```
+
+Tags: `pgcli` (install role) and `http` (reconcile servers). Servers are
+matched by name and restarted on any spec change; if the bound port differs
+from the declaration (`pg http` increments a busy port) the play fails. Auth is
+compared by username and password: adding/removing accounts and changing a
+password (inline, `auth_env`, or the bcrypt hash in an `auth_file`) restarts
+the server. `force: true` restarts unconditionally.
 
 ### ha-status.yaml
 
@@ -503,8 +536,8 @@ above; the role supports the `filter_default`, `filter_forward`,
 
 | Path | Description |
 |---|---|
-| `playbooks/` | Entry points: `apply.yaml`, `ping.yaml`, `resources.yaml`, `deploy-s3.yaml`, `ha-status.yaml`, `nftables.yaml`, `passwords.yaml` |
-| `roles/` | `pgcli`, `pg_instance`, `pg_addon`, `pg_daemon`, `pg_ha`, `pg_ha_haproxy`, `pg_s3`, `addon_cluster_shared`, `nftables` |
+| `playbooks/` | Entry points: `apply.yaml`, `ping.yaml`, `resources.yaml`, `deploy-s3.yaml`, `deploy-http.yaml`, `ha-status.yaml`, `nftables.yaml`, `passwords.yaml` |
+| `roles/` | `pgcli`, `pg_instance`, `pg_addon`, `pg_daemon`, `pg_ha`, `pg_ha_haproxy`, `pg_s3`, `pg_http`, `addon_cluster_shared`, `nftables` |
 | `group_vars/` | Per-scenario and per-add-on settings; only `main.yml.example` files are tracked |
 | `hosts.ini.example` | Inventory template (`hosts.ini` is gitignored) |
 | `ansible.cfg.example` | Ansible config template (`ansible.cfg` is gitignored) |

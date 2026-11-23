@@ -118,6 +118,12 @@ pgcli_sqlite_install: false
 # changing anything.
 pgcli_images_http_url: ""
 
+# Set to false for hosts that only need the pg binary and run no containers
+# (for example a pg_http file server): both the offline image check and the
+# image loading are skipped. playbooks/deploy-http.yaml sets this per play;
+# override there with -e pgcli_load_images=true.
+pgcli_load_images: true
+
 # ── Egress proxy ────────────────────────────────────────────────────────────
 # Forward HTTP proxy for steps that reach the internet: install.sh/apt,
 # get_url, podman pull, pg runtime downloads, and the podman build that

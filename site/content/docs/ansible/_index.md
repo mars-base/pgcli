@@ -32,6 +32,7 @@ the hosts to that state and is safe to repeat.
 | Patroni HA clusters and their etcd DCS | `pg_ha_clusters`, `pgcli_addons` (etcd) | `pg_ha`, `pg_addon` |
 | HAProxy in front of HA clusters | `pg_ha_haproxy` | `pg_ha_haproxy` |
 | Standalone S3-compatible stores for backups | `pgcli_s3_*` | `pg_s3` |
+| `pg http` file servers for offline asset distribution | `pgcli_http_servers` | `pg_http` |
 
 Every mutating task is guarded by the current pgcli config and container
 state, so an unchanged host reports `ok` rather than `changed`.
@@ -55,17 +56,19 @@ ansible/
 │   ├── minio_s3/ silo_s3/ rustfs_s3/ # S3 store types
 │   ├── addon_<type>_single/         # one group per standalone add-on
 │   ├── addon_<type>_cluster/        # one group per multi-host add-on cluster
-│   └── ha_etcd/ ha_cluster/          # shared DCS and Patroni members
+│   ├── ha_etcd/ ha_cluster/          # shared DCS and Patroni members
+│   └── http/                        # pg http file server declarations
 ├── host_vars/               # optional per-host overrides
 ├── misc/
 │   ├── prometheus/          # Prometheus alert rule files
 │   └── webhook/             # Alertmanager webhook receiver
 ├── playbooks/
 │   ├── apply.yaml           # install + instances + daemons + add-ons + HA
+│   ├── deploy-http.yaml     # pg http file servers
 │   ├── deploy-s3.yaml       # standalone S3 store
 │   ├── ha-status.yaml       # read-only Patroni/HAProxy status
 │   └── ping.yaml            # connectivity smoke test
-└── roles/                   # pgcli, pg_instance, pg_daemon, pg_addon, addon_cluster_shared, pg_ha, pg_ha_haproxy, pg_s3
+└── roles/                   # pgcli, pg_instance, pg_daemon, pg_addon, addon_cluster_shared, pg_ha, pg_ha_haproxy, pg_s3, pg_http
 ```
 
 ## Pages
@@ -76,6 +79,7 @@ ansible/
 | [Setup and example files](./setup/) | Which `*.example` file becomes which live file, `hosts.ini` groups, `group_vars` fields, first run |
 | [Offline and air-gapped installs](./offline/) | LAN HTTP server: image manifest and lazy loading, `pg`/podman binaries, runtime host binaries and DocumentDB DEBs |
 | [Offline image server](./image-server/) | Export all images from `pgcli_images` with `export-images.sh`, serve them with `pg http`, wire up Ansible |
+| [HTTP file server](./http-server/) | The `pg_http` role and `deploy-http.yaml`: every `pg http` parameter (TLS, auth, write modes, autostart) plus offline binary sync |
 | [Egress proxy](./proxy/) | Forward proxy for isolated data centers: Privoxy add-on, global variables, `NO_PROXY`, manual SSH usage, verification |
 | [Playbooks](./playbooks/) | `ping.yaml`, `apply.yaml`, `resources.yaml`, `deploy-s3.yaml`, `ha-status.yaml`, `passwords.yaml`: tags, `--limit`, idempotency, lifecycle orders |
 | [Instances and replicas](./instances/) | The `single`/`samehost`/`crosshost` example files and every `pgcli_instances` field |
