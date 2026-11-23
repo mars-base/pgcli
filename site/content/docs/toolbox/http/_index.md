@@ -189,15 +189,35 @@ pg http status
 ```
 
 ```
-NAME                     PID      STATUS    AUTOSTART DELETE  UPLOAD  MKDIR   AUTH                 ADMIN             URL                                      DIR
-http-18080               412345   running   -         -       -       -       -                    all               http://127.0.0.1:18080/                  /srv/share
-http-18081               412410   running   enabled   enabled enabled enabled alice,bob            192.0.2.10,192.0.2.11 https://0.0.0.0:18081/              /srv/docs
+  Name:      http-18080
+  PID:       412345
+  Status:    running
+  URL:       http://127.0.0.1:18080/
+  Dir:       /srv/share
+  Autostart: -
+  Delete:    -
+  Upload:    -
+  Mkdir:     -
+  Auth:      -
+  Admin:     all
+
+  Name:      http-18081
+  PID:       412410
+  Status:    running
+  URL:       https://0.0.0.0:18081/
+  Dir:       /srv/docs
+  Autostart: enabled
+  Delete:    enabled
+  Upload:    enabled
+  Mkdir:     enabled
+  Auth:      alice,bob
+  Admin:     192.0.2.10,192.0.2.11
 ```
 
-`AUTOSTART` shows whether the server is recorded in `pg.yaml` for boot
-autostart (see below); `DELETE`, `UPLOAD` and `MKDIR` show which write modes
-it was started with, `AUTH` lists the Basic Auth users it accepts (`-` when the
-site is open), and `ADMIN` lists the source IPs allowed to use the write modes
+`Autostart` shows whether the server is recorded in `pg.yaml` for boot
+autostart (see below); `Delete`, `Upload` and `Mkdir` show which write modes
+it was started with, `Auth` lists the Basic Auth users it accepts (`-` when the
+site is open), and `Admin` lists the source IPs allowed to use the write modes
 (`all` when unrestricted). `stop` prints a reminder for autostart servers,
 since they come back at the next boot.
 
@@ -341,7 +361,7 @@ pg http start --allow-upload --allow-dir --allow-delete \
   every request appears to come from the proxy's address, so the list must
   contain that address, and the per-client restriction does not work.
 - An invalid entry makes `pg http start` fail with an error rather than
-  silently dropping it. `pg http status` shows the list in the `ADMIN` column.
+  silently dropping it. `pg http status` shows the list in the `Admin` field.
 - This is a coarse network restriction, not authentication: addresses can be
   shared through NAT, and anyone who can legitimately reach from a listed
   address can write.
@@ -375,7 +395,7 @@ file and renamed, so a crash cannot leave a half-written state).
 skips broken ones, and treats an entry as `running` only when the recorded PID
 still exists and — on Linux — its `/proc/<pid>/cmdline` still contains `http`,
 `serve` and the server name, so a recycled PID is not mistaken for a server.
-The URL and directory come from the state file; `AUTOSTART` comes from
+The URL and directory come from the state file; `Autostart` comes from
 `pg.yaml`.
 
 ## Autostart

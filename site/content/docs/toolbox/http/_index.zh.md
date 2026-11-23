@@ -170,14 +170,34 @@ pg http status
 ```
 
 ```
-NAME                     PID      STATUS    AUTOSTART DELETE  UPLOAD  MKDIR   AUTH                 ADMIN             URL                                      DIR
-http-18080               412345   running   -         -       -       -       -                    all               http://127.0.0.1:18080/                  /srv/share
-http-18081               412410   running   enabled   enabled enabled enabled alice,bob            192.0.2.10,192.0.2.11 https://0.0.0.0:18081/              /srv/docs
+  Name:      http-18080
+  PID:       412345
+  Status:    running
+  URL:       http://127.0.0.1:18080/
+  Dir:       /srv/share
+  Autostart: -
+  Delete:    -
+  Upload:    -
+  Mkdir:     -
+  Auth:      -
+  Admin:     all
+
+  Name:      http-18081
+  PID:       412410
+  Status:    running
+  URL:       https://0.0.0.0:18081/
+  Dir:       /srv/docs
+  Autostart: enabled
+  Delete:    enabled
+  Upload:    enabled
+  Mkdir:     enabled
+  Auth:      alice,bob
+  Admin:     192.0.2.10,192.0.2.11
 ```
 
-`AUTOSTART` 表示该服务器是否已记录到 `pg.yaml` 用于开机自启（见下文）；
-`DELETE`、`UPLOAD`、`MKDIR` 分别表示它以哪些写模式启动，`AUTH` 列出它接受的
-Basic 认证用户（站点开放时为 `-`），`ADMIN` 列出允许使用这些写模式的来源 IP
+`Autostart` 表示该服务器是否已记录到 `pg.yaml` 用于开机自启（见下文）；
+`Delete`、`Upload`、`Mkdir` 分别表示它以哪些写模式启动，`Auth` 列出它接受的
+Basic 认证用户（站点开放时为 `-`），`Admin` 列出允许使用这些写模式的来源 IP
 （不限制时为 `all`）。`stop` 对启用自启的服务器会额外打印提示，因为它们会在
 下次开机时重新启动。
 
@@ -291,7 +311,7 @@ pg http start --allow-upload --allow-dir --allow-delete \
   `X-Forwarded-For`。如果前面有反向代理，所有请求看起来都来自代理地址，此时
   列表必须包含代理地址，按客户端区分就失效了。
 - 列表中有非法条目时 `pg http start` 直接报错，不会静默丢弃。`pg http status`
-  的 `ADMIN` 列会显示该列表。
+  的 `Admin` 字段会显示该列表。
 - 这是粗粒度的网络限制，不是认证：地址可能通过 NAT 被共享，能合法使用列表中
   地址的人都可以写入。
 
@@ -320,7 +340,7 @@ pg http start --allow-upload --allow-dir --allow-delete \
 `pg http status` 不会连接服务器，只读取这些 `*.json`，跳过损坏文件；只有当记录的
 PID 仍然存在、且（Linux 上）`/proc/<pid>/cmdline` 仍包含 `http`、`serve` 和服务器名
 时才判定为 `running`——因此被复用的 PID 不会被误认为存活。URL 与目录来自状态文件，
-`AUTOSTART` 来自 `pg.yaml`。
+`Autostart` 来自 `pg.yaml`。
 
 ## 开机自启
 

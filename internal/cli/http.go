@@ -1255,8 +1255,16 @@ func runHTTPStatus(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 	autos := httpAutostartNames()
-	fmt.Printf("%-24s %-8s %-9s %-9s %-7s %-7s %-7s %-20s %-16s %-40s %s\n", "NAME", "PID", "STATUS", "AUTOSTART", "DELETE", "UPLOAD", "MKDIR", "AUTH", "ADMIN", "URL", "DIR")
-	for _, st := range states {
+	onOff := func(on bool) string {
+		if on {
+			return "enabled"
+		}
+		return "-"
+	}
+	for i, st := range states {
+		if i > 0 {
+			fmt.Println()
+		}
 		status := "running"
 		if !httpServerAlive(&st) {
 			status = "stale"
@@ -1265,27 +1273,25 @@ func runHTTPStatus(cmd *cobra.Command, _ []string) error {
 		if autos[st.Name] {
 			auto = "enabled"
 		}
-		del := "-"
-		if st.AllowDelete {
-			del = "enabled"
-		}
-		up := "-"
-		if st.AllowUpload {
-			up = "enabled"
-		}
-		mkdir := "-"
-		if st.AllowDir {
-			mkdir = "enabled"
+		auth := "-"
+		if len(st.Auth) > 0 {
+			auth = authUserList(st.Auth)
 		}
 		admin := "all"
 		if len(st.AdminIPs) > 0 {
 			admin = strings.Join(st.AdminIPs, ",")
 		}
-		auth := "-"
-		if len(st.Auth) > 0 {
-			auth = authUserList(st.Auth)
-		}
-		fmt.Printf("%-24s %-8d %-9s %-9s %-7s %-7s %-7s %-20s %-16s %-40s %s\n", st.Name, st.PID, status, auto, del, up, mkdir, auth, admin, httpURL(&st), st.Dir)
+		fmt.Printf("  Name:      %s\n", st.Name)
+		fmt.Printf("  PID:       %d\n", st.PID)
+		fmt.Printf("  Status:    %s\n", status)
+		fmt.Printf("  URL:       %s\n", httpURL(&st))
+		fmt.Printf("  Dir:       %s\n", st.Dir)
+		fmt.Printf("  Autostart: %s\n", auto)
+		fmt.Printf("  Delete:    %s\n", onOff(st.AllowDelete))
+		fmt.Printf("  Upload:    %s\n", onOff(st.AllowUpload))
+		fmt.Printf("  Mkdir:     %s\n", onOff(st.AllowDir))
+		fmt.Printf("  Auth:      %s\n", auth)
+		fmt.Printf("  Admin:     %s\n", admin)
 	}
 	return nil
 }
