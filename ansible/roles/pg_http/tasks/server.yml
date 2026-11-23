@@ -42,6 +42,9 @@
     _http_desired_state: "{{ server.state | default('started') }}"
     _http_name: "{{ server.name }}"
     _http_dir: "{{ (server.dir | default(pgcli_http_default_dir)) | regex_replace('/+$', '') }}"
+    _http_dir_owner: "{{ server.dir_owner | default(pgcli_deploy_become_user) }}"
+    _http_dir_group: "{{ server.dir_group | default(pgcli_deploy_become_user) }}"
+    _http_dir_mode: "{{ server.dir_mode | default('0755') }}"
     _http_listen: "{{ server.listen | default('127.0.0.1') }}"
     _http_port: "{{ server.port | default(18080) | int }}"
     _http_allow_upload: "{{ server.allow_upload | default(false) | bool }}"
@@ -293,9 +296,9 @@
   ansible.builtin.file:
     path: "{{ _http_dir }}"
     state: directory
-    owner: "{{ pgcli_deploy_become_user }}"
-    group: "{{ pgcli_deploy_become_user }}"
-    mode: '0755'
+    owner: "{{ _http_dir_owner }}"
+    group: "{{ _http_dir_group }}"
+    mode: "{{ _http_dir_mode }}"
   when: _http_desired_state != 'absent'
 
 - name: Copy the binaries into the served directory

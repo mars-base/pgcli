@@ -36,7 +36,10 @@ parentheses:
 | `host` | — | Reconcile only on this inventory host; omitted means all target hosts |
 | `state` | — | `started` (default) / `stopped` / `absent` |
 | `autostart` | — | Register boot autostart (default `true`; only allowed with `state: started`) |
-| `dir` | `--dir` | Served directory (default `/srv/offline-images`), created with the deployment account as owner when missing |
+| `dir` | `--dir` | Served directory (default `/srv/offline-images`) |
+| `dir_owner` | — | Directory owner (default deployment account); applies to the directory only |
+| `dir_group` | — | Directory group (default deployment account); applies to the directory only |
+| `dir_mode` | — | Directory permissions (default `0755`); applies to the directory only |
 | `listen` | `--listen` | Listen address (default `127.0.0.1`) |
 | `port` | `--port` | Listen port (default `18080`) |
 | `allow_upload` | `--allow-upload` | Upload form (default `false`) |
@@ -54,6 +57,19 @@ parentheses:
 | `sync_binaries` | — | Copy the offline binaries into `dir` (default `false`) |
 
 ## Examples
+
+A directory writable by a scheduled job running as `http-writer`:
+
+```yaml
+pgcli_http_servers:
+  - name: review
+    dir: /data/www/lh3-review
+    dir_owner: http-writer
+    dir_group: http-writer
+    dir_mode: '0755'
+    listen: 0.0.0.0
+    port: 11235
+```
 
 Minimal: expose the offline directory over HTTP on the LAN and register boot
 autostart.

@@ -13,8 +13,11 @@
 #   state           started (default) | stopped | absent
 #   autostart       register the server in pg.yaml for boot autostart
 #                   (default true, only with state: started)
-#   dir             served directory (default /srv/offline-images), created
-#                   with the deployment account as owner
+#   dir             served directory (default /srv/offline-images)
+#   dir_owner       directory owner (default deployment account)
+#   dir_group       directory group (default deployment account)
+#   dir_mode        directory permissions (default 0755)
+#                   These settings apply to the directory itself, not contents.
 #   listen          listen address (default 127.0.0.1); 0.0.0.0 exposes it
 #   port            listen port (default 18080)
 #   allow_upload    enable the upload form (default false)

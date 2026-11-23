@@ -32,7 +32,10 @@ node-http ansible_host=192.0.2.11 ansible_user=root
 | `host` | — | 只在该 inventory 主机上协调；省略则在所有目标主机上 |
 | `state` | — | `started`（默认）/ `stopped` / `absent` |
 | `autostart` | — | 注册开机自启（默认 `true`，仅 `state: started` 时允许） |
-| `dir` | `--dir` | 被服务目录（默认 `/srv/offline-images`），不存在时创建并归属部署账号 |
+| `dir` | `--dir` | 被服务目录（默认 `/srv/offline-images`） |
+| `dir_owner` | — | 目录属主（默认部署账号）；仅作用于目录本身 |
+| `dir_group` | — | 目录属组（默认部署账号）；仅作用于目录本身 |
+| `dir_mode` | — | 目录权限（默认 `0755`）；仅作用于目录本身 |
 | `listen` | `--listen` | 监听地址（默认 `127.0.0.1`） |
 | `port` | `--port` | 监听端口（默认 `18080`） |
 | `allow_upload` | `--allow-upload` | 上传表单（默认 `false`） |
@@ -50,6 +53,19 @@ node-http ansible_host=192.0.2.11 ansible_user=root
 | `sync_binaries` | — | 是否把离线二进制复制进 `dir`（默认 `false`） |
 
 ## 示例
+
+为以 `http-writer` 身份运行的定时任务配置可写目录：
+
+```yaml
+pgcli_http_servers:
+  - name: review
+    dir: /data/www/lh3-review
+    dir_owner: http-writer
+    dir_group: http-writer
+    dir_mode: '0755'
+    listen: 0.0.0.0
+    port: 11235
+```
 
 最简：把离线目录通过 HTTP 暴露到局域网，并注册开机自启。
 
