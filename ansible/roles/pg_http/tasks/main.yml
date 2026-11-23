@@ -44,7 +44,7 @@
 - name: Check whether this host syncs binaries
   ansible.builtin.set_fact:
     _http_sync_needed: >-
-      {{ (_http_servers | map(attribute='sync_binaries', default=true)
+      {{ (_http_servers | map(attribute='sync_binaries', default=false)
           | map('bool') | select | list | length) > 0 }}
 
 - name: Check the local pg build

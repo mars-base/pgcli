@@ -12,9 +12,9 @@ organized.
 
 The role reconciles each server declared in `pgcli_http_servers`: it compares
 the running spec by name and runs `pg http stop` + `pg http start` when
-anything differs, creates the served directory, copies the offline binaries
-into it, and registers boot autostart as needed. Re-running converges to the
-declared state.
+anything differs, creates the served directory, optionally copies the offline
+binaries into it (`sync_binaries: true`), and registers boot autostart as needed.
+Binary copying is disabled by default. Re-running converges to the declared state.
 
 ## Configuration
 
@@ -51,7 +51,7 @@ parentheses:
 | `auth_env` | `--auth-env` | Names of controller environment variables holding `USER:PASSWORD` |
 | `auth_file` | `--auth-file` | htpasswd files on the target host (bcrypt entries) |
 | `force` | — | Restart even when the spec matches (default `false`) |
-| `sync_binaries` | — | Copy the offline binaries into `dir` (default `true`) |
+| `sync_binaries` | — | Copy the offline binaries into `dir` (default `false`) |
 
 ## Examples
 
@@ -122,16 +122,16 @@ printf '%s\n' "$PASSWORD" | pg http htpasswd alice
 
 ## Binary sync
 
-`pg http` usually distributes offline install assets. Before reconciling, the
-role refreshes the controller's `bin/pg` into `images/pg`, then copies only
-`pgcli_http_binaries` (default `pg` and `podman-launcher-linux_amd64`) into
-each `dir`. **Image tarballs are not copied here**; export them into that
-directory first with `scripts/export-images.sh` (see
-[Offline image server](./image-server/)).
+Binary copying is disabled by default. Set `sync_binaries: true` on a server
+to refresh the controller's `bin/pg` into `images/pg`, then copy only
+`pgcli_http_binaries` (default `pg` and `podman-launcher-linux_amd64`) into its
+`dir`. **Image tarballs are not copied here**; export them into that directory
+first with `scripts/export-images.sh` (see [Offline image server](./image-server/)).
 
 The controller therefore needs a `make build` first, and the other binaries
-must already exist under `images/`; otherwise the playbook fails before any
-host is modified. Override the variables in `group_vars/http/main.yml`:
+must already exist under `images/` when binary copying is enabled; otherwise the
+playbook fails before any host is modified. Override the variables in
+`group_vars/http/main.yml`:
 
 ```yaml
 pgcli_http_binaries: [pg, podman-launcher-linux_amd64]

@@ -4,8 +4,8 @@
 #
 # Each entry reconciles one server by name: the role starts it, keeps the
 # running spec in sync (a changed field triggers stop + start), creates the
-# served directory, copies the offline binaries into it and optionally
-# registers boot autostart.
+# served directory, and optionally registers boot autostart. Binary copying is
+# disabled by default; set sync_binaries: true to copy binaries into the dir.
 #
 # Fields:
 #   name            server name used by `pg http status/stop` (required)
@@ -31,7 +31,7 @@
 #                   them on the controller and passes only the variable names
 #   auth_file       htpasswd files with bcrypt entries on the target host
 #   force           restart even when the running spec matches (default false)
-#   sync_binaries   copy pgcli_http_binaries into dir (default true)
+#   sync_binaries   copy pgcli_http_binaries into dir (default false)
 #
 # Auth is compared by user name and password: adding or removing users, and
 # changing the password of an existing user, restart the server. auth_file

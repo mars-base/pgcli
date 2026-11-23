@@ -5,13 +5,12 @@
 #
 # Each entry reconciles one server by name: the role starts or restarts it
 # when the spec differs from the running server, creates the served directory,
-# copies the offline binaries into it, and enables or disables boot autostart.
+# optionally copies offline binaries into it (sync_binaries: true), and enables
+# or disables boot autostart.
 #
-# Binaries: before distributing, the play refreshes the controller's images/pg
-# from bin/pg, then copies pgcli_http_binaries (default: pg and
-# podman-launcher-linux_amd64) from the controller's images/ directory into
-# every served directory. Run make build in the repository root first. Image
-# archives are not copied; export them with scripts/export-images.sh.
+# Binary sync is disabled by default. To distribute pg and the podman launcher,
+# set sync_binaries: true on the server entry; the play then refreshes the
+# controller's images/pg from bin/pg before copying the configured binaries.
 #
 # pg http silently moves to the next free port when the requested port is
 # busy; the role fails instead when the bound port differs from the spec, so

@@ -234,16 +234,17 @@ endpoint options.
 ### deploy-http.yaml
 
 Deploys the `pg http` file servers declared in `pgcli_http_servers` on the
-`[http]` inventory group and copies the offline binaries (`pg`,
-`podman-launcher-linux_amd64`) into each served directory. Every `pg http
+`[http]` inventory group. Binary copying is disabled by default; set
+`sync_binaries: true` on a server to copy the offline binaries (`pg`,
+`podman-launcher-linux_amd64`) into its served directory. Every `pg http
 start` parameter is supported: directory, listen address/port, the three write
 modes plus `admin_ips` and `max_upload`, TLS (self-signed via `tls: true`, or
 `tls_cert`/`tls_key`), and Basic Auth via `auth`, `auth_env` or `auth_file`.
 Field documentation lives in `group_vars/http/main.yml.example`.
 
-Run `make build` in the repository root first: the role refreshes `images/pg`
-from `bin/pg` before copying anything, and the other binaries must already be
-under `images/`.
+When binary copying is enabled, run `make build` in the repository root first:
+the role refreshes `images/pg` from `bin/pg`, then copies the configured
+binaries. Any other configured binaries must already be under `images/`.
 
 A file-server host runs no containers, so the install play skips the offline
 image check/load (`pgcli_load_images: false`) and passes `--skip-pull` to the

@@ -50,7 +50,7 @@
     _http_max_upload: "{{ server.max_upload | default('1G') | string | trim | upper }}"
     _http_admin_ips: "{{ server.admin_ips | default([]) }}"
     _http_autostart: "{{ server.autostart | default(true) | bool }}"
-    _http_sync_binaries: "{{ server.sync_binaries | default(true) | bool }}"
+    _http_sync_binaries: "{{ server.sync_binaries | default(false) | bool }}"
     _http_tls: "{{ (server.tls | default(false) | bool) or (server.tls_cert is defined) }}"
     _http_tls_cert: "{{ server.tls_cert | default('') }}"
     _http_tls_key: "{{ server.tls_key | default('') }}"

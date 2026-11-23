@@ -10,8 +10,9 @@ Ansible 管理。`pg http` 是宿主机进程（不占容器、没有 add-on 类
 `deploy-s3.yaml` 的组织方式一致。
 
 角色逐条协调 `pgcli_http_servers` 中声明的服务器：按名字比对运行中的规格，有差异
-就 `pg http stop` + `pg http start`；创建被服务目录；把离线二进制复制进去；并按
-需要注册开机自启。重复运行会收敛到声明状态。
+就 `pg http stop` + `pg http start`；创建被服务目录；仅在配置
+`sync_binaries: true` 时复制离线二进制；并按需要注册开机自启。默认不复制二进制。
+重复运行会收敛到声明状态。
 
 ## 配置
 
@@ -46,7 +47,7 @@ node-http ansible_host=192.0.2.11 ansible_user=root
 | `auth_env` | `--auth-env` | 控制器上的环境变量名列表，值为 `USER:PASSWORD` |
 | `auth_file` | `--auth-file` | 目标主机上的 htpasswd 文件列表（bcrypt 条目） |
 | `force` | — | 规格一致也强制重启（默认 `false`） |
-| `sync_binaries` | — | 是否把离线二进制复制进 `dir`（默认 `true`） |
+| `sync_binaries` | — | 是否把离线二进制复制进 `dir`（默认 `false`） |
 
 ## 示例
 
@@ -112,13 +113,13 @@ printf '%s\n' "$PASSWORD" | pg http htpasswd alice
 
 ## 二进制同步
 
-`pg http` 通常用来分发离线安装资产。角色在协调前会把控制端的 `bin/pg` 刷新到
-`images/pg`，然后只把 `pgcli_http_binaries`（默认 `pg` 与
-`podman-launcher-linux_amd64`）复制进每个 `dir`。**镜像 tar 包不在这里搬运**，
+默认不复制二进制。若要分发，在对应 server 上设置 `sync_binaries: true`；角色会先把
+控制端的 `bin/pg` 刷新到 `images/pg`，然后只把 `pgcli_http_binaries`（默认 `pg` 与
+`podman-launcher-linux_amd64`）复制进该 server 的 `dir`。**镜像 tar 包不在这里搬运**，
 请先用 `scripts/export-images.sh` 导出到该目录（见[离线镜像服务器](./image-server/)）。
 
-因此控制端必须先 `make build`，且 `images/` 下要有其余二进制，否则 playbook 在
-任何主机被修改前就会失败。可以在 `group_vars/http/main.yml` 里覆盖：
+启用二进制复制时，控制端必须先 `make build`，且 `images/` 下要有其余二进制；否则
+playbook 会在修改任何主机前失败。可以在 `group_vars/http/main.yml` 里覆盖：
 
 ```yaml
 pgcli_http_binaries: [pg, podman-launcher-linux_amd64]
