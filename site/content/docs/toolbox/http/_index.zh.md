@@ -18,7 +18,8 @@ cascade:
 
 `pg http` 直接在宿主机上启动一个轻量静态文件服务器（不使用容器），用于在不同
 机器之间快速共享文件。目录会渲染成 nginx autoindex 风格的列表，每个文件行都带
-复制按钮；文件本身支持 `Range` 与 `HEAD` 请求。
+复制按钮；文件本身支持 `Range` 与 `HEAD` 请求。服务器默认只读，只有以
+`--allow-delete` 启动时才会在每个文件行提供删除按钮。
 
 默认监听 `127.0.0.1:18080` 并服务当前目录。服务器是脱离终端的独立进程，关闭
 终端不会影响它；同一主机可以同时运行多个服务器。
@@ -35,7 +36,7 @@ pg autostart enable --http --name <NAME>
 
 ```bash
 pg http start [--name NAME] [--port 18080] [--listen 127.0.0.1] \
-  [--dir .] [--tls] [--tls-cert FILE --tls-key FILE]
+  [--dir .] [--tls] [--tls-cert FILE --tls-key FILE] [--allow-delete]
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -46,6 +47,7 @@ pg http start [--name NAME] [--port 18080] [--listen 127.0.0.1] \
 | `--dir` | `.` | 要服务的目录；启动时解析为绝对路径，且必须存在 |
 | `--tls` | 关闭 | 使用自动生成的自签名证书提供 HTTPS |
 | `--tls-cert` / `--tls-key` | — | 改用现有证书/私钥对（隐含 `--tls`） |
+| `--allow-delete` | 关闭 | 在每个文件行提供删除按钮并接受 HTTP `DELETE`。没有认证，见「安全与限制」 |
 
 `--name` 允许字母、数字、`.`、`_` 和 `-`。
 
@@ -107,19 +109,21 @@ pg http status
 ```
 
 ```
-NAME                    PID      STATUS    AUTOSTART  URL                                      DIR
-http-18080              412345   running   -          http://127.0.0.1:18080/                  /srv/share
-http-18081              412410   running   enabled    https://0.0.0.0:18081/                   /srv/docs
+NAME                    PID      STATUS    AUTOSTART  DELETE   URL                                      DIR
+http-18080              412345   running   -          -        http://127.0.0.1:18080/                  /srv/share
+http-18081              412410   running   enabled    enabled  https://0.0.0.0:18081/                   /srv/docs
 ```
 
-`AUTOSTART` 表示该服务器是否已记录到 `pg.yaml` 用于开机自启（见下文）；`stop`
-这类服务器时会额外打印提示，因为它们会在下次开机时重新启动。
+`AUTOSTART` 表示该服务器是否已记录到 `pg.yaml` 用于开机自启（见下文）；
+`DELETE` 表示它是否以 `--allow-delete` 启动。`stop` 对启用自启的服务器会额外
+打印提示，因为它们会在下次开机时重新启动。
 
 进程已退出的状态文件会标记为 `stale`；下次 `stop` 时自动清理。
 
 重启会先按 `stop` 的方式优雅停止，再用状态文件里记录的名称、监听地址、目录、
-TLS 证书与端口重新拉起 —— 不需要重复传 `start` 的参数。原端口若已被占用，会
-自动尝试下一个空闲端口；自动生成的证书在临近过期或不再覆盖监听地址时重新签发：
+TLS 证书、删除模式和端口重新拉起 —— 不需要重复传 `start` 的参数。原端口若已被
+占用，会自动尝试下一个空闲端口；自动生成的证书在临近过期或不再覆盖监听地址时
+重新签发：
 
 ```bash
 pg http restart http-18080        # 重启一个
@@ -144,20 +148,39 @@ pg http stop --all
 - 目录排在文件之前，然后按名称不区分大小写排序。目录链接带尾部斜杠；面包屑和
   `..` 链接（根目录除外）用于向上导航。
 - **不会**自动服务 `index.html` —— 目录始终渲染列表。
-- 仅允许 `GET` 与 `HEAD`，其它方法返回 `405`。
-- `/__pgcli_health` 返回 `200 ok`，供就绪探测使用，并会屏蔽同名的真实文件。
-- 符号链接会被跟随，包括指向所服务目录之外的链接。
+- 仅允许 `GET` 与 `HEAD`，其它方法返回 `405`。启用 `--allow-delete` 后，文件
+  还允许 `DELETE`，其余方法仍返回 `405`，并在 `Allow` 头中列出
+  `GET, HEAD, DELETE`。
+- `/__pgcli_health` 返回 `200 ok`，供就绪探测使用，并会屏蔽同名的真实文件；
+  它永远不可删除。
+- 符号链接会被跟随，包括指向所服务目录之外的链接。指向目录的符号链接按目录
+  展示，`DELETE` 会像普通目录一样拒绝它。
 
 每个文件行都有一个 **copy** 按钮。点击后复制该文件的绝对 URL
 （`http(s)://host:port/path`），并在按钮旁显示 `copyed` 约 1.5 秒。Clipboard API
 只在安全上下文可用，因此通过普通 HTTP 访问时页面会回退到隐藏 textarea +
 `document.execCommand('copy')`；两条路径在仍支持 execCommand 的浏览器中均可工作。
 
+### 删除文件
+
+启用 `--allow-delete` 后，每个文件行的 copy 按钮右侧会多出一个 **delete**
+按钮。第一次点击会把它变成红色的 `confirm?` 并保持 3 秒；再次点击会发送
+`DELETE /path`，从页面移除该行并删除文件。未在 3 秒内确认则自动恢复为
+`delete`。
+
+- 目录（包括空目录）永远不会被删除，对目录 `DELETE` 返回 `405`。
+- 删除符号链接只解除链接本身，不影响它指向的文件；通过符号链接目录解析到
+  `--dir` 之外的路径会被拒绝（`403`）。
+- 删除成功返回 `204 No Content`，文件不存在返回 `404`。
+
+`pg http restart` 会保留状态文件中记录的删除模式。需要改变时，先 `stop`
+再用（或不用）`--allow-delete` 重新 `start`。
+
 ## 状态与生命周期
 
 | 路径 | 内容 |
 |---|---|
-| `<base>/http/servers/<name>.json` | 名称、pid、端口、监听地址、目录、TLS 路径、日志路径 |
+| `<base>/http/servers/<name>.json` | 名称、pid、端口、监听地址、目录、TLS 路径、删除模式、日志路径 |
 | `<base>/http/servers/<name>.log` | 服务器 stdout/stderr |
 | `<base>/http/tls/<name>/cert.pem`、`key.pem` | 自动生成的证书对（`--tls`） |
 
@@ -187,9 +210,10 @@ pg http start --name docs --dir /srv/docs --port 18080
 pg autostart enable --http --name docs
 ```
 
-启用时会把服务器的目录、监听地址、端口和 TLS 材料快照到 `pg.yaml` 顶层的
-`http` 段；开机服务据此重新创建服务器。若记录的端口在开机时已被占用，会尝试
-下一个空闲端口。之后用同名 `pg http start`/`pg http restart` 会刷新这份快照。
+启用时会把服务器的目录、监听地址、端口、TLS 材料和删除模式快照到 `pg.yaml`
+顶层的 `http` 段；开机服务据此重新创建服务器。若记录的端口在开机时已被占用，
+会尝试下一个空闲端口。之后用同名 `pg http start`/`pg http restart` 会刷新这份
+快照。
 
 ```bash
 pg autostart status                        # 显示 "http docs   enabled"
@@ -203,6 +227,9 @@ pg autostart disable --http --name docs    # 删除快照；不会停止正在�
 
 - **没有认证。** 任何能访问该端口的人都能读取所服务目录树中的全部文件。默认
   只监听回环是唯一防线；仅在受信网络中才使用 `0.0.0.0`。
+- **`--allow-delete` 本身也不带任何认证** —— 任何能访问该端口的人同样可以删除
+  `--dir` 下的文件。目录不可被删除、删除也不会逃逸出所服务目录树，但仍应像上文
+  一样保持回环监听。启用该参数且监听地址不是回环时，`pg http start` 会打印警告。
 - **`--tls` 只加密、不认证客户端** —— 它不是访问控制手段。
 - 符号链接可能暴露 `--dir` 之外的路径；把所服务的目录视为你愿意共享内容的边界。
 - 每个服务器服务一棵目录树；需要共享多个目录时启动多个服务器。

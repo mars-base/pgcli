@@ -16,6 +16,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 //go:embed assets/index.html
@@ -42,34 +43,70 @@ type entry struct {
 }
 
 type pageData struct {
-	Title      string
-	Path       string
-	Crumbs     []crumb
-	ParentHref string
-	HasParent  bool
-	Entries    []entry
+	Title       string
+	Path        string
+	Crumbs      []crumb
+	ParentHref  string
+	HasParent   bool
+	AllowDelete bool
+	Entries     []entry
+}
+
+// Options configures optional behavior of the file server.
+type Options struct {
+	// AllowDelete enables HTTP DELETE for individual files (never
+	// directories) and renders a delete button after copy on each file row.
+	AllowDelete bool
 }
 
 // Handler returns the read-only file server for root. Symlinks are followed,
 // including ones that point outside root — the same reach an nginx autoindex
 // setup gives you, and the reason the default listener is loopback-only.
 func Handler(root string) http.Handler {
+	return HandlerWithOptions(root, Options{})
+}
+
+// HandlerWithOptions is Handler with optional features turned on. Deletion is
+// confined to root by os.Root: a symlinked intermediate directory that points
+// outside root is rejected, and a symlink entry is unlinked itself, never the
+// file it targets.
+func HandlerWithOptions(root string, opts Options) http.Handler {
 	fsys := os.DirFS(root)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == HealthPath {
+		clean := path.Clean("/" + r.URL.Path)
+		if clean == HealthPath {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				w.Header().Set("Allow", "GET, HEAD")
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 			w.WriteHeader(http.StatusOK)
 			fmt.Fprintln(w, "ok")
 			return
 		}
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			w.Header().Set("Allow", "GET, HEAD")
+
+		switch r.Method {
+		case http.MethodGet, http.MethodHead:
+		case http.MethodDelete:
+			if !opts.AllowDelete {
+				w.Header().Set("Allow", "GET, HEAD")
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			handleDelete(w, root, fsys, clean, r.URL.Path)
+			return
+		default:
+			allow := "GET, HEAD"
+			if opts.AllowDelete {
+				allow = "GET, HEAD, DELETE"
+			}
+			w.Header().Set("Allow", allow)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
-		clean := path.Clean("/" + r.URL.Path)
 		name := strings.TrimPrefix(clean, "/")
 		if name == "" {
 			name = "."
@@ -88,51 +125,126 @@ func Handler(root string) http.Handler {
 			http.ServeFileFS(w, r, fsys, name)
 			return
 		}
-		serveListing(w, r, fsys, name, clean)
+		serveListing(w, fsys, name, clean, opts.AllowDelete)
 	})
 }
 
-func serveListing(w http.ResponseWriter, _ *http.Request, fsys fs.FS, name, clean string) {
+// handleDelete unlinks one file beneath root. Directories are refused so an
+// empty directory is never removed, and a symlink to a directory is refused
+// too, matching the listing (which offers delete only on files).
+func handleDelete(w http.ResponseWriter, root string, fsys fs.FS, clean, requestPath string) {
+	name := strings.TrimPrefix(clean, "/")
+	if name == "" {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "cannot delete a directory", http.StatusMethodNotAllowed)
+		return
+	}
+	rfs, err := os.OpenRoot(root)
+	if err != nil {
+		http.Error(w, "cannot open served directory", http.StatusInternalServerError)
+		return
+	}
+	defer rfs.Close()
+
+	info, err := rfs.Lstat(name)
+	if err != nil {
+		status := deleteErrorStatus(err)
+		http.Error(w, http.StatusText(status), status)
+		return
+	}
+	// A symlink is unlinked itself, never its target, so the type check below
+	// uses Lstat — except that a symlink to a directory is served (and listed)
+	// as a directory, so DELETE must refuse it the same way.
+	isDir := info.IsDir()
+	if !isDir && info.Mode()&fs.ModeSymlink != 0 {
+		if target, err := fs.Stat(fsys, name); err == nil && target.IsDir() {
+			isDir = true
+		}
+	}
+	if isDir {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "cannot delete a directory", http.StatusMethodNotAllowed)
+		return
+	}
+	if strings.HasSuffix(requestPath, "/") {
+		// "/file/" addresses a directory entry that does not exist.
+		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		return
+	}
+	if err := rfs.Remove(name); err != nil {
+		status := deleteErrorStatus(err)
+		http.Error(w, http.StatusText(status), status)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteErrorStatus maps a removal failure to a status. os.Root reports a path
+// resolving outside the root through an unexported sentinel whose text is the
+// only way to recognize it.
+func deleteErrorStatus(err error) int {
+	switch {
+	case errors.Is(err, fs.ErrNotExist), errors.Is(err, syscall.ENOTDIR):
+		return http.StatusNotFound
+	case errors.Is(err, fs.ErrPermission), strings.Contains(err.Error(), "path escapes from parent"):
+		return http.StatusForbidden
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+func serveListing(w http.ResponseWriter, fsys fs.FS, name, clean string, allowDelete bool) {
 	dirents, err := fs.ReadDir(fsys, name)
 	if err != nil {
 		http.Error(w, "cannot read directory", http.StatusInternalServerError)
 		return
 	}
-	sort.Slice(dirents, func(i, j int) bool {
-		di, dj := dirents[i].IsDir(), dirents[j].IsDir()
-		if di != dj {
-			return di
-		}
-		return strings.ToLower(dirents[i].Name()) < strings.ToLower(dirents[j].Name())
-	})
 
-	data := pageData{
-		Title:      "Index of " + clean,
-		Path:       clean,
-		Crumbs:     crumbsFor(clean),
-		HasParent:  clean != "/",
-		ParentHref: parentHref(clean),
-		Entries:    make([]entry, 0, len(dirents)),
-	}
+	entries := make([]entry, 0, len(dirents))
 	for _, d := range dirents {
 		info, err := d.Info()
 		if err != nil {
 			continue
 		}
+		isDir := info.IsDir()
+		if !isDir && info.Mode()&fs.ModeSymlink != 0 {
+			// d.Info reports the link itself; resolve it so a symlink to a
+			// directory is rendered (and sorted) like the directory GET
+			// navigates into. Dangling links stay files.
+			if target, err := fs.Stat(fsys, path.Join(name, d.Name())); err == nil && target.IsDir() {
+				isDir = true
+			}
+		}
 		rel := path.Join(clean, d.Name())
-		if info.IsDir() {
+		if isDir {
 			rel += "/"
 		}
 		e := entry{
 			Name:  d.Name(),
 			Href:  (&url.URL{Path: rel}).EscapedPath(),
-			IsDir: info.IsDir(),
+			IsDir: isDir,
 		}
-		if !info.IsDir() {
+		if !isDir {
 			e.Size = humanSize(info.Size())
 		}
 		e.ModTime = info.ModTime().Format("2006-01-02 15:04")
-		data.Entries = append(data.Entries, e)
+		entries = append(entries, e)
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].IsDir != entries[j].IsDir {
+			return entries[i].IsDir
+		}
+		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
+	})
+
+	data := pageData{
+		Title:       "Index of " + clean,
+		Path:        clean,
+		Crumbs:      crumbsFor(clean),
+		HasParent:   clean != "/",
+		ParentHref:  parentHref(clean),
+		AllowDelete: allowDelete,
+		Entries:     entries,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

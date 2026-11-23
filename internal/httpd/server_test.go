@@ -163,3 +163,185 @@ func TestCrumbsAndParent(t *testing.T) {
 		t.Errorf("parentHref = %q, want /a/", got)
 	}
 }
+
+func TestDeleteDisabledByDefault(t *testing.T) {
+	root := testTree(t)
+	h := Handler(root)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if strings.Contains(rec.Body.String(), `class="delete"`) {
+		t.Error("listing has a delete button although deletion is off")
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/a.txt", nil))
+	if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != "GET, HEAD" {
+		t.Errorf("DELETE = %d Allow=%q, want 405 with GET, HEAD", rec.Code, rec.Header().Get("Allow"))
+	}
+	if _, err := os.Stat(filepath.Join(root, "a.txt")); err != nil {
+		t.Errorf("a.txt was removed although deletion is off: %v", err)
+	}
+}
+
+func TestDeleteEnabledListingAndRemoval(t *testing.T) {
+	root := testTree(t)
+	mustWrite(t, filepath.Join(root, "my file.txt"), "spaced")
+	h := HandlerWithOptions(root, Options{AllowDelete: true})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := rec.Body.String()
+	copyIdx := strings.Index(body, `class="copy"`)
+	delIdx := strings.Index(body, `class="delete"`)
+	if copyIdx < 0 || delIdx < 0 || delIdx < copyIdx {
+		t.Fatalf("delete button missing or not after copy (copy=%d delete=%d)", copyIdx, delIdx)
+	}
+	if got, want := strings.Count(body, `class="delete"`), 4; got != want {
+		t.Errorf("delete buttons = %d, want %d (file rows only)", got, want)
+	}
+	if !strings.Contains(body, `data-name="&lt;img&gt;.txt"`) {
+		t.Errorf("delete button name is not HTML-escaped:\n%s", body)
+	}
+	if !strings.Contains(body, "delete enabled") {
+		t.Error("footer does not mention delete enabled")
+	}
+
+	for _, p := range []string{"/a.txt", "/sub/b.txt", "/my%20file.txt"} {
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, p, nil))
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("DELETE %s = %d, want 204", p, rec.Code)
+		}
+	}
+	for _, rel := range []string{"a.txt", "sub/b.txt", "my file.txt"} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+			t.Errorf("%s still exists after DELETE", rel)
+		}
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/a.txt", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("second DELETE = %d, want 404", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", nil))
+	if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != "GET, HEAD, DELETE" {
+		t.Errorf("POST = %d Allow=%q, want 405 with GET, HEAD, DELETE", rec.Code, rec.Header().Get("Allow"))
+	}
+}
+
+func TestDeleteRefusesDirectoriesAndReservedPaths(t *testing.T) {
+	root := testTree(t)
+	if err := os.Mkdir(filepath.Join(root, "emptydir"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(root, "__pgcli_health"), "shadow")
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "outside.txt")
+	mustWrite(t, outsideFile, "outside")
+	h := HandlerWithOptions(root, Options{AllowDelete: true})
+
+	cases := []struct {
+		path string
+		want int
+	}{
+		{"/", http.StatusMethodNotAllowed},
+		{"/sub", http.StatusMethodNotAllowed},
+		{"/sub/", http.StatusMethodNotAllowed},
+		{"/emptydir", http.StatusMethodNotAllowed},
+		{"/a.txt/", http.StatusNotFound},
+		{"/__pgcli_health", http.StatusMethodNotAllowed},
+		{"/./__pgcli_health", http.StatusMethodNotAllowed},
+		{"/nope.txt", http.StatusNotFound},
+	}
+	for _, tc := range cases {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, tc.path, nil))
+		if rec.Code != tc.want {
+			t.Errorf("DELETE %s = %d, want %d", tc.path, rec.Code, tc.want)
+		}
+	}
+	for _, rel := range []string{"a.txt", "sub/b.txt", "__pgcli_health", "emptydir"} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); err != nil {
+			t.Errorf("%s removed by a refused DELETE: %v", rel, err)
+		}
+	}
+
+	// Path traversal is cleaned to a path inside root, so it is a plain 404.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/../"+filepath.Base(outside)+"/outside.txt", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("traversal DELETE = %d, want 404", rec.Code)
+	}
+	if _, err := os.Stat(outsideFile); err != nil {
+		t.Errorf("outside file removed: %v", err)
+	}
+}
+
+func TestDeleteSymlinkSafety(t *testing.T) {
+	root := testTree(t)
+	outside := t.TempDir()
+	outsideDir := filepath.Join(outside, "share")
+	if err := os.Mkdir(outsideDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(outsideDir, "secret.txt"), "secret")
+	links := map[string]string{
+		"outlink":     outsideDir,
+		"relescape":   filepath.Join("..", filepath.Base(outside)),
+		"link.txt":    filepath.Join(outsideDir, "secret.txt"),
+		"subdir-link": "sub",
+	}
+	for name, target := range links {
+		if err := os.Symlink(target, filepath.Join(root, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := HandlerWithOptions(root, Options{AllowDelete: true})
+
+	for _, p := range []string{"/outlink/secret.txt", "/relescape/share/secret.txt"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, p, nil))
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("DELETE %s = %d, want 403", p, rec.Code)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(outsideDir, "secret.txt")); err != nil {
+		t.Errorf("outside file removed through a symlinked directory: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := rec.Body.String()
+	for _, href := range []string{`href="/outlink/"`, `href="/subdir-link/"`} {
+		if !strings.Contains(body, href) {
+			t.Errorf("symlink to a directory not listed as a directory (%s):\n%s", href, body)
+		}
+	}
+	for _, p := range []string{"/outlink", "/outlink/", "/subdir-link"} {
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, p, nil))
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Errorf("DELETE %s = %d, want 405", p, rec.Code)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(root, "outlink")); err != nil {
+		t.Errorf("directory symlink was removed: %v", err)
+	}
+
+	// A symlink to a file is unlinked itself; its target survives.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/link.txt", nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("DELETE /link.txt = %d, want 204", rec.Code)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "link.txt")); !os.IsNotExist(err) {
+		t.Error("link.txt still exists")
+	}
+	if _, err := os.Stat(filepath.Join(outsideDir, "secret.txt")); err != nil {
+		t.Errorf("symlink target was removed: %v", err)
+	}
+}

@@ -138,7 +138,8 @@ recovery.
 
 Enable auto-start for a `pg http` file server. Start the server once first —
 `pg autostart enable` snapshots its launch settings (directory, listen address,
-port, TLS material) into the top-level `http` section of the config:
+port, TLS material, and whether `--allow-delete` was given) into the top-level
+`http` section of the config:
 
 ```bash
 pg http start --name docs --dir /srv/docs --port 18080

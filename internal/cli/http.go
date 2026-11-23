@@ -52,6 +52,7 @@ func init() {
 	httpStartCmd.Flags().Bool("tls", false, "serve HTTPS with a generated self-signed certificate under <base_dir>/http/tls/<name>/")
 	httpStartCmd.Flags().String("tls-cert", "", "use this certificate file instead of generating one (implies --tls)")
 	httpStartCmd.Flags().String("tls-key", "", "private key for --tls-cert")
+	httpStartCmd.Flags().Bool("allow-delete", false, "expose a delete button per file in the listing and accept HTTP DELETE (no authentication — keep the loopback listener)")
 
 	httpStopCmd.Flags().Bool("all", false, "stop every pg http server")
 	httpStopCmd.Flags().Duration("timeout", httpStopGrace, "how long to wait for a graceful shutdown before SIGKILL")
@@ -65,6 +66,7 @@ func init() {
 	httpServeCmd.Flags().String("dir", ".", "directory to serve")
 	httpServeCmd.Flags().String("tls-cert", "", "certificate file")
 	httpServeCmd.Flags().String("tls-key", "", "private key file")
+	httpServeCmd.Flags().Bool("allow-delete", false, "allow HTTP DELETE of files")
 	httpServeCmd.Flags().String("ready-file", "", "write listen/port JSON here once the socket is bound, then delete on exit")
 	httpServeCmd.Hidden = true
 }
@@ -85,12 +87,15 @@ The default is 127.0.0.1:18080 serving the current directory. If the requested
 port is busy the next free one is used automatically (up to 100 attempts), and
 multiple servers may run at once. There is no authentication: keep the default
 loopback listener, or expose it only on a trusted network. --tls encrypts
-traffic but does not authenticate clients.
+traffic but does not authenticate clients. The server is read-only by default;
+--allow-delete adds a delete button to every file row and accepts HTTP DELETE,
+so anyone who can reach the port can remove files under --dir.
 
 Examples:
   pg http start
   pg http start --listen 0.0.0.0 --port 18080 --dir /srv/share
   pg http start --name docs --tls --dir ~/docs
+  pg http start --allow-delete --dir /tmp/share
   pg http status
   pg http restart docs
   pg http stop docs
@@ -140,16 +145,32 @@ var httpServeCmd = &cobra.Command{
 }
 
 type httpServerState struct {
-	Name      string    `json:"name"`
-	PID       int       `json:"pid"`
-	Port      int       `json:"port"`
-	Listen    string    `json:"listen"`
-	Dir       string    `json:"dir"`
-	TLS       bool      `json:"tls"`
-	CertFile  string    `json:"cert_file,omitempty"`
-	KeyFile   string    `json:"key_file,omitempty"`
-	LogFile   string    `json:"log_file"`
-	StartedAt time.Time `json:"started_at"`
+	Name        string    `json:"name"`
+	PID         int       `json:"pid"`
+	Port        int       `json:"port"`
+	Listen      string    `json:"listen"`
+	Dir         string    `json:"dir"`
+	TLS         bool      `json:"tls"`
+	CertFile    string    `json:"cert_file,omitempty"`
+	KeyFile     string    `json:"key_file,omitempty"`
+	AllowDelete bool      `json:"allow_delete,omitempty"`
+	LogFile     string    `json:"log_file"`
+	StartedAt   time.Time `json:"started_at"`
+}
+
+// httpLaunchOptions are the settings for one `pg http serve` child.
+type httpLaunchOptions struct {
+	Self        string
+	Name        string
+	Listen      string
+	Port        int
+	Dir         string
+	CertFile    string
+	KeyFile     string
+	TLS         bool
+	AllowDelete bool
+	LogPath     string
+	ReadyFile   string
 }
 
 type httpReady struct {
@@ -331,6 +352,7 @@ func runHTTPStart(cmd *cobra.Command, _ []string) error {
 	tlsEnabled, _ := cmd.Flags().GetBool("tls")
 	certFile, _ := cmd.Flags().GetString("tls-cert")
 	keyFile, _ := cmd.Flags().GetString("tls-key")
+	allowDelete, _ := cmd.Flags().GetBool("allow-delete")
 
 	if (certFile == "") != (keyFile == "") {
 		return fmt.Errorf("--tls-cert and --tls-key must be set together")
@@ -393,7 +415,19 @@ func runHTTPStart(cmd *cobra.Command, _ []string) error {
 
 	startPort := port
 	for p := startPort; p < startPort+httpPortTries; p++ {
-		st, err := launchHTTPServer(self, name, listen, p, absDir, certPath, keyPath, tlsEnabled, logPath, readyFile)
+		st, err := launchHTTPServer(httpLaunchOptions{
+			Self:        self,
+			Name:        name,
+			Listen:      listen,
+			Port:        p,
+			Dir:         absDir,
+			CertFile:    certPath,
+			KeyFile:     keyPath,
+			TLS:         tlsEnabled,
+			AllowDelete: allowDelete,
+			LogPath:     logPath,
+			ReadyFile:   readyFile,
+		})
 		if err != nil {
 			return err
 		}
@@ -417,27 +451,30 @@ func runHTTPStart(cmd *cobra.Command, _ []string) error {
 // launchHTTPServer forks `pg http serve` for one port. A nil state with a nil
 // error means the child exited before binding (port taken); the caller tries
 // the next port.
-func launchHTTPServer(self, name, listen string, port int, dir, certPath, keyPath string, tlsEnabled bool, logPath, readyFile string) (*httpServerState, error) {
-	_ = os.Remove(readyFile)
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+func launchHTTPServer(opts httpLaunchOptions) (*httpServerState, error) {
+	_ = os.Remove(opts.ReadyFile)
+	logFile, err := os.OpenFile(opts.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		return nil, fmt.Errorf("opening log %s: %w", logPath, err)
+		return nil, fmt.Errorf("opening log %s: %w", opts.LogPath, err)
 	}
 	defer logFile.Close()
 
 	args := []string{
 		"http", "serve",
-		"--name", name,
-		"--listen", listen,
-		"--port", strconv.Itoa(port),
-		"--dir", dir,
-		"--ready-file", readyFile,
+		"--name", opts.Name,
+		"--listen", opts.Listen,
+		"--port", strconv.Itoa(opts.Port),
+		"--dir", opts.Dir,
+		"--ready-file", opts.ReadyFile,
 	}
-	if tlsEnabled {
-		args = append(args, "--tls-cert", certPath, "--tls-key", keyPath)
+	if opts.TLS {
+		args = append(args, "--tls-cert", opts.CertFile, "--tls-key", opts.KeyFile)
+	}
+	if opts.AllowDelete {
+		args = append(args, "--allow-delete")
 	}
 
-	child := exec.Command(self, args...)
+	child := exec.Command(opts.Self, args...)
 	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	child.Stdout = logFile
 	child.Stderr = logFile
@@ -456,15 +493,15 @@ func launchHTTPServer(self, name, listen string, port int, dir, certPath, keyPat
 	for {
 		select {
 		case <-exited:
-			_ = os.Remove(readyFile)
+			_ = os.Remove(opts.ReadyFile)
 			return nil, nil
 		case <-deadline.C:
 			_ = child.Process.Kill()
 			<-exited
-			_ = os.Remove(readyFile)
-			return nil, fmt.Errorf("http server did not become ready within %s (see %s)", httpReadyTimeout, logPath)
+			_ = os.Remove(opts.ReadyFile)
+			return nil, fmt.Errorf("http server did not become ready within %s (see %s)", httpReadyTimeout, opts.LogPath)
 		case <-poll.C:
-			data, err := os.ReadFile(readyFile)
+			data, err := os.ReadFile(opts.ReadyFile)
 			if err != nil || len(data) == 0 {
 				continue
 			}
@@ -472,18 +509,19 @@ func launchHTTPServer(self, name, listen string, port int, dir, certPath, keyPat
 			if err := json.Unmarshal(data, &ready); err != nil || ready.Port == 0 {
 				continue
 			}
-			_ = os.Remove(readyFile)
+			_ = os.Remove(opts.ReadyFile)
 			return &httpServerState{
-				Name:      name,
-				PID:       child.Process.Pid,
-				Port:      ready.Port,
-				Listen:    ready.Listen,
-				Dir:       dir,
-				TLS:       tlsEnabled,
-				CertFile:  certPath,
-				KeyFile:   keyPath,
-				LogFile:   logPath,
-				StartedAt: time.Now(),
+				Name:        opts.Name,
+				PID:         child.Process.Pid,
+				Port:        ready.Port,
+				Listen:      ready.Listen,
+				Dir:         opts.Dir,
+				TLS:         opts.TLS,
+				CertFile:    opts.CertFile,
+				KeyFile:     opts.KeyFile,
+				AllowDelete: opts.AllowDelete,
+				LogFile:     opts.LogPath,
+				StartedAt:   time.Now(),
 			}, nil
 		}
 	}
@@ -496,6 +534,12 @@ func printHTTPStarted(st *httpServerState, certNotAfter time.Time) {
 	fmt.Printf("  Dir:  %s\n", st.Dir)
 	fmt.Printf("  PID:  %d\n", st.PID)
 	fmt.Printf("  Log:  %s\n", st.LogFile)
+	if st.AllowDelete {
+		fmt.Printf("  Del:  enabled (--allow-delete)\n")
+		if !httpListenLoopback(st.Listen) {
+			fmt.Printf("  [!] file deletion has no authentication: anyone who can reach %s can delete files under %s\n", httpURL(st), st.Dir)
+		}
+	}
 	if st.TLS {
 		if certNotAfter.IsZero() {
 			certNotAfter = certExpiry(st.CertFile)
@@ -504,6 +548,17 @@ func printHTTPStarted(st *httpServerState, certNotAfter time.Time) {
 	}
 	fmt.Println()
 	fmt.Printf("  Stop with: pg http stop %s\n", st.Name)
+}
+
+// httpListenLoopback reports whether a listen address only accepts local
+// clients. A host name other than localhost cannot be classified, so it is
+// treated as reachable from the network.
+func httpListenLoopback(listen string) bool {
+	if listen == "" || listen == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(listen, "[]"))
+	return ip != nil && ip.IsLoopback()
 }
 
 func certExpiry(path string) time.Time {
@@ -671,7 +726,19 @@ func relaunchHTTPServer(base string, st httpServerState) (*httpServerState, time
 	logPath := filepath.Join(serversDir, st.Name+".log")
 	readyFile := filepath.Join(serversDir, st.Name+".ready")
 	for p := port; p < port+httpPortTries; p++ {
-		newSt, err := launchHTTPServer(self, st.Name, listen, p, st.Dir, certPath, keyPath, st.TLS, logPath, readyFile)
+		newSt, err := launchHTTPServer(httpLaunchOptions{
+			Self:        self,
+			Name:        st.Name,
+			Listen:      listen,
+			Port:        p,
+			Dir:         st.Dir,
+			CertFile:    certPath,
+			KeyFile:     keyPath,
+			TLS:         st.TLS,
+			AllowDelete: st.AllowDelete,
+			LogPath:     logPath,
+			ReadyFile:   readyFile,
+		})
 		if err != nil {
 			return nil, time.Time{}, err
 		}
@@ -712,6 +779,7 @@ func syncHTTPAutostartEntry(st *httpServerState) {
 	}
 	hc.Dir, hc.Listen, hc.Port = st.Dir, st.Listen, st.Port
 	hc.TLS, hc.CertFile, hc.KeyFile = st.TLS, st.CertFile, st.KeyFile
+	hc.AllowDelete = st.AllowDelete
 	c.HTTP[st.Name] = hc
 	if err := c.Save(path); err != nil {
 		fmt.Printf("  [!] could not refresh autostart settings for %s: %v\n", st.Name, err)
@@ -749,13 +817,14 @@ func startAutostartHTTPServers(c *config.Config) error {
 			continue
 		}
 		st := httpServerState{
-			Name:     name,
-			Listen:   hc.Listen,
-			Port:     hc.Port,
-			Dir:      hc.Dir,
-			TLS:      hc.TLS,
-			CertFile: hc.CertFile,
-			KeyFile:  hc.KeyFile,
+			Name:        name,
+			Listen:      hc.Listen,
+			Port:        hc.Port,
+			Dir:         hc.Dir,
+			TLS:         hc.TLS,
+			CertFile:    hc.CertFile,
+			KeyFile:     hc.KeyFile,
+			AllowDelete: hc.AllowDelete,
 		}
 		fmt.Printf("-> Starting http server %q (autostart)...\n", name)
 		newSt, _, err := relaunchHTTPServer(base, st)
@@ -779,7 +848,7 @@ func runHTTPStatus(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 	autos := httpAutostartNames()
-	fmt.Printf("%-24s %-8s %-9s %-9s %-40s %s\n", "NAME", "PID", "STATUS", "AUTOSTART", "URL", "DIR")
+	fmt.Printf("%-24s %-8s %-9s %-9s %-7s %-40s %s\n", "NAME", "PID", "STATUS", "AUTOSTART", "DELETE", "URL", "DIR")
 	for _, st := range states {
 		status := "running"
 		if !httpServerAlive(&st) {
@@ -789,7 +858,11 @@ func runHTTPStatus(cmd *cobra.Command, _ []string) error {
 		if autos[st.Name] {
 			auto = "enabled"
 		}
-		fmt.Printf("%-24s %-8d %-9s %-9s %-40s %s\n", st.Name, st.PID, status, auto, httpURL(&st), st.Dir)
+		del := "-"
+		if st.AllowDelete {
+			del = "enabled"
+		}
+		fmt.Printf("%-24s %-8d %-9s %-9s %-7s %-40s %s\n", st.Name, st.PID, status, auto, del, httpURL(&st), st.Dir)
 	}
 	return nil
 }
@@ -802,6 +875,7 @@ func runHTTPServe(cmd *cobra.Command, _ []string) error {
 	dir, _ := cmd.Flags().GetString("dir")
 	certFile, _ := cmd.Flags().GetString("tls-cert")
 	keyFile, _ := cmd.Flags().GetString("tls-key")
+	allowDelete, _ := cmd.Flags().GetBool("allow-delete")
 	readyFile, _ := cmd.Flags().GetString("ready-file")
 	if (certFile == "") != (keyFile == "") {
 		return fmt.Errorf("--tls-cert and --tls-key must be set together")
@@ -827,7 +901,7 @@ func runHTTPServe(cmd *cobra.Command, _ []string) error {
 	}
 
 	srv := &http.Server{
-		Handler:           httpd.Handler(dir),
+		Handler:           httpd.HandlerWithOptions(dir, httpd.Options{AllowDelete: allowDelete}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	sigCh := make(chan os.Signal, 1)

@@ -12,6 +12,7 @@
     --bg: #ffffff;
     --row: #f6f8fa;
     --accent: #0969da;
+    --danger: #cf222e;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -21,6 +22,7 @@
       --bg: #0d1117;
       --row: #161b22;
       --accent: #4493f8;
+      --danger: #f85149;
     }
   }
   * { box-sizing: border-box; }
@@ -46,7 +48,7 @@
   td.name a.dir { font-weight: 600; }
   td.size, td.mtime { color: var(--muted); white-space: nowrap; }
   td.actions { width: 1%; white-space: nowrap; position: relative; }
-  button.copy {
+  button.copy, button.delete {
     font: inherit;
     font-size: .75rem;
     color: var(--muted);
@@ -57,6 +59,10 @@
     cursor: pointer;
   }
   button.copy:hover { color: var(--accent); border-color: var(--accent); }
+  button.delete { margin-left: .35rem; }
+  button.delete:hover, button.delete.confirming { color: var(--danger); border-color: var(--danger); }
+  button.delete.confirming { font-weight: 600; }
+  button.delete:disabled { opacity: .5; cursor: wait; }
   .copied-pop {
     position: absolute;
     right: 100%;
@@ -96,14 +102,14 @@
         <td class="name"><a class="{{if .IsDir}}dir{{else}}file{{end}}" href="{{.Href}}">{{.Name}}{{if .IsDir}}/{{end}}</a></td>
         <td class="size">{{.Size}}</td>
         <td class="mtime">{{.ModTime}}</td>
-        <td class="actions">{{if not .IsDir}}<button class="copy" type="button" data-url="{{.Href}}" title="Copy link">copy</button>{{end}}</td>
+        <td class="actions">{{if not .IsDir}}<button class="copy" type="button" data-url="{{.Href}}" title="Copy link">copy</button>{{if $.AllowDelete}}<button class="delete" type="button" data-url="{{.Href}}" data-name="{{.Name}}" title="Delete file">delete</button>{{end}}{{end}}</td>
       </tr>
       {{- else}}
       <tr><td colspan="4" class="empty">This directory is empty.</td></tr>
       {{- end}}
     </tbody>
   </table>
-  <footer>pg http</footer>
+  <footer>pg http{{if .AllowDelete}} · delete enabled{{end}}</footer>
 </div>
 <script>
 (function () {
@@ -146,6 +152,53 @@
       var url = location.origin + btn.getAttribute('data-url');
       var ok = await copyText(url);
       showPopup(btn, ok ? 'copyed' : 'copy failed');
+    });
+  });
+
+  var confirmTimer = null;
+
+  function disarmDelete(btn) {
+    btn.classList.remove('confirming');
+    btn.textContent = 'delete';
+    btn.title = 'Delete file';
+  }
+
+  document.querySelectorAll('button.delete').forEach(function (btn) {
+    btn.addEventListener('click', async function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!btn.classList.contains('confirming')) {
+        document.querySelectorAll('button.delete.confirming').forEach(disarmDelete);
+        if (confirmTimer) clearTimeout(confirmTimer);
+        btn.classList.add('confirming');
+        btn.textContent = 'confirm?';
+        btn.title = 'Click again to delete ' + (btn.getAttribute('data-name') || 'this file');
+        confirmTimer = setTimeout(function () { disarmDelete(btn); }, 3000);
+        return;
+      }
+      if (confirmTimer) clearTimeout(confirmTimer);
+      btn.disabled = true;
+      btn.textContent = 'deleting...';
+      try {
+        var res = await fetch(btn.getAttribute('data-url'), { method: 'DELETE', cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        var row = btn.closest('tr');
+        var tbody = row.parentElement;
+        row.remove();
+        if (!tbody.querySelector('tr')) {
+          var empty = document.createElement('tr');
+          var td = document.createElement('td');
+          td.colSpan = 4;
+          td.className = 'empty';
+          td.textContent = 'This directory is empty.';
+          empty.appendChild(td);
+          tbody.appendChild(empty);
+        }
+      } catch (err) {
+        btn.disabled = false;
+        disarmDelete(btn);
+        showPopup(btn, 'delete failed (' + err.message + ')');
+      }
     });
   });
 })();

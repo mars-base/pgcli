@@ -3,11 +3,65 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/mars-base/pgcli/internal/config"
 )
+
+func TestHTTPAllowDeleteFlag(t *testing.T) {
+	start := httpStartCmd.Flags().Lookup("allow-delete")
+	if start == nil || start.DefValue != "false" {
+		t.Fatalf("start: --allow-delete = %+v, want a flag defaulting to false", start)
+	}
+	serve := httpServeCmd.Flags().Lookup("allow-delete")
+	if serve == nil || serve.DefValue != "false" {
+		t.Fatalf("serve: --allow-delete = %+v, want a flag defaulting to false", serve)
+	}
+}
+
+func TestHTTPConfigAllowDeleteRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pg.yaml")
+	c := config.Default()
+	c.HTTP = map[string]config.HTTPServerConfig{
+		"docs": {Dir: "/srv/docs", AllowDelete: true, Autostart: true},
+		"ro":   {Dir: "/srv/ro"},
+	}
+	if err := c.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "allow_delete: true") {
+		t.Errorf("allow_delete not persisted:\n%s", data)
+	}
+	got, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.HTTP["docs"].AllowDelete {
+		t.Error("docs allow_delete lost on load")
+	}
+	if got.HTTP["ro"].AllowDelete {
+		t.Error("ro allow_delete should stay false")
+	}
+}
+
+func TestHTTPListenLoopback(t *testing.T) {
+	for _, listen := range []string{"", "localhost", "127.0.0.1", "::1", "[::1]"} {
+		if !httpListenLoopback(listen) {
+			t.Errorf("%q should count as loopback", listen)
+		}
+	}
+	for _, listen := range []string{"0.0.0.0", "::", "10.0.0.5", "example.test"} {
+		if httpListenLoopback(listen) {
+			t.Errorf("%q should not count as loopback", listen)
+		}
+	}
+}
 
 func TestValidHTTPName(t *testing.T) {
 	for _, name := range []string{"docs", "http-18080", "a.b_c-d"} {
@@ -63,16 +117,17 @@ func TestEnsureHTTPCertReuseAndRenewal(t *testing.T) {
 func TestHTTPStateRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	st := httpServerState{
-		Name:      "docs",
-		PID:       os.Getpid(),
-		Port:      18080,
-		Listen:    "127.0.0.1",
-		Dir:       "/srv/share",
-		TLS:       true,
-		CertFile:  "/tmp/cert.pem",
-		KeyFile:   "/tmp/key.pem",
-		LogFile:   "/tmp/http.log",
-		StartedAt: time.Unix(1700000000, 0).UTC(),
+		Name:        "docs",
+		PID:         os.Getpid(),
+		Port:        18080,
+		Listen:      "127.0.0.1",
+		Dir:         "/srv/share",
+		TLS:         true,
+		CertFile:    "/tmp/cert.pem",
+		KeyFile:     "/tmp/key.pem",
+		AllowDelete: true,
+		LogFile:     "/tmp/http.log",
+		StartedAt:   time.Unix(1700000000, 0).UTC(),
 	}
 	if err := writeHTTPState(dir, st); err != nil {
 		t.Fatal(err)
@@ -81,8 +136,20 @@ func TestHTTPStateRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Name != st.Name || got.Port != st.Port || !got.TLS || got.Dir != st.Dir {
+	if got.Name != st.Name || got.Port != st.Port || !got.TLS || got.Dir != st.Dir || !got.AllowDelete {
 		t.Errorf("round-trip = %+v, want %+v", got, st)
+	}
+
+	ro := httpServerState{Name: "ro", PID: 1, LogFile: "/tmp/ro.log"}
+	if err := writeHTTPState(dir, ro); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readHTTPState(filepath.Join(dir, "ro.json")); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, "ro.json"))
+	if strings.Contains(string(raw), "allow_delete") {
+		t.Errorf("allow_delete should be omitted when off: %s", raw)
 	}
 
 	if err := os.WriteFile(filepath.Join(dir, "broken.json"), []byte("{not json"), 0644); err != nil {
@@ -92,8 +159,8 @@ func TestHTTPStateRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	states := loadHTTPStates(dir)
-	if len(states) != 1 || states[0].Name != "docs" {
-		t.Errorf("loadHTTPStates = %+v, want the one valid entry", states)
+	if len(states) != 2 {
+		t.Errorf("loadHTTPStates = %+v, want the two valid entries", states)
 	}
 }
 

@@ -19,7 +19,8 @@ cascade:
 `pg http` starts a small static file server directly on the host — no container
 — for sharing files between machines. Directories render an nginx-style
 autoindex page with a copy button next to every file, and files are served with
-`Range`/`HEAD` support.
+`Range`/`HEAD` support. The server is read-only unless started with
+`--allow-delete`, which adds a delete button per file.
 
 The default is `127.0.0.1:18080` serving the current directory. Servers run as
 detached processes, so they survive the terminal that started them; several
@@ -37,7 +38,7 @@ pg autostart enable --http --name <NAME>
 
 ```bash
 pg http start [--name NAME] [--port 18080] [--listen 127.0.0.1] \
-  [--dir .] [--tls] [--tls-cert FILE --tls-key FILE]
+  [--dir .] [--tls] [--tls-cert FILE --tls-key FILE] [--allow-delete]
 ```
 
 | Flag | Default | Notes |
@@ -48,6 +49,7 @@ pg http start [--name NAME] [--port 18080] [--listen 127.0.0.1] \
 | `--dir` | `.` | Directory to serve; resolved to an absolute path at start and must exist |
 | `--tls` | off | Serve HTTPS with a generated self-signed certificate |
 | `--tls-cert` / `--tls-key` | — | Use an existing certificate/key pair instead (implies `--tls`) |
+| `--allow-delete` | off | Add a delete button per file and accept HTTP `DELETE`. There is no authentication — see Security |
 
 `--name` accepts letters, digits, `.`, `_` and `-`.
 
@@ -113,23 +115,25 @@ pg http status
 ```
 
 ```
-NAME                    PID      STATUS    AUTOSTART  URL                                      DIR
-http-18080              412345   running   -          http://127.0.0.1:18080/                  /srv/share
-http-18081              412410   running   enabled    https://0.0.0.0:18081/                   /srv/docs
+NAME                    PID      STATUS    AUTOSTART  DELETE   URL                                      DIR
+http-18080              412345   running   -          -        http://127.0.0.1:18080/                  /srv/share
+http-18081              412410   running   enabled    enabled  https://0.0.0.0:18081/                   /srv/docs
 ```
 
 `AUTOSTART` shows whether the server is recorded in `pg.yaml` for boot
-autostart (see below); `stop` prints a reminder for such servers, since they
+autostart (see below); `DELETE` shows whether it was started with
+`--allow-delete`. `stop` prints a reminder for autostart servers, since they
 come back at the next boot.
 
 A state file whose process is gone is marked `stale`; the next `stop` removes
 it.
 
 Restart stops the server gracefully like `stop`, then starts it again from the
-name, listen address, directory, TLS certificate and port recorded in its state
-file — no need to repeat the `start` flags. If the original port has been taken
-in the meantime, the next free port is used; a generated certificate is
-re-signed when it is close to expiry or no longer covers the listen address:
+name, listen address, directory, TLS certificate, delete mode and port recorded
+in its state file — no need to repeat the `start` flags. If the original port
+has been taken in the meantime, the next free port is used; a generated
+certificate is re-signed when it is close to expiry or no longer covers the
+listen address:
 
 ```bash
 pg http restart http-18080        # one server
@@ -157,10 +161,14 @@ and `--all` flags.
   at the root) navigate upward.
 - An `index.html` is **not** served automatically — a directory always
   renders its listing.
-- Only `GET` and `HEAD` are allowed; other methods get `405`.
+- Only `GET` and `HEAD` are allowed; other methods get `405`. With
+  `--allow-delete`, `DELETE` is allowed for files, and any other method still
+  gets `405` with an `Allow` header listing `GET, HEAD, DELETE`.
 - `/__pgcli_health` returns `200 ok` for readiness probes and shadows a real
-  file of that name.
+  file of that name. It is never deletable.
 - Symlinks are followed, including ones pointing outside the served directory.
+  A symlink to a directory is listed as a directory, and `DELETE` refuses it
+  like any other directory.
 
 Every file row has a **copy** button. Clicking it copies the file's absolute
 URL (`http(s)://host:port/path`) and shows `copyed` next to the button for
@@ -169,11 +177,29 @@ over plain HTTP the page falls back to a hidden textarea and
 `document.execCommand('copy')`; both paths work in browsers that still support
 execCommand.
 
+### Deleting files
+
+With `--allow-delete`, every file row also has a **delete** button to the right
+of copy. The first click turns it into `confirm?` (red) for three seconds; a
+second click sends `DELETE /path`, removes the row from the page, and unlinks
+the file. The button reverts to `delete` if not confirmed in time.
+
+- Directories are never deleted, including empty ones; `DELETE` on a directory
+  returns `405`.
+- A symlink is unlinked itself — its target file is untouched. A path that
+  resolves outside `--dir` through a symlinked directory is rejected with
+  `403`.
+- A successful delete returns `204 No Content`; a missing file returns `404`.
+
+`pg http restart` preserves the delete mode recorded in the state file. To
+change it, stop the server and start it again with or without
+`--allow-delete`.
+
 ## State and lifecycle
 
 | Path | Contents |
 |---|---|
-| `<base>/http/servers/<name>.json` | name, pid, port, listen address, dir, TLS paths, log path |
+| `<base>/http/servers/<name>.json` | name, pid, port, listen address, dir, TLS paths, delete mode, log path |
 | `<base>/http/servers/<name>.log` | server stdout/stderr |
 | `<base>/http/tls/<name>/cert.pem`, `key.pem` | generated certificate pair (with `--tls`) |
 
@@ -208,11 +234,11 @@ pg http start --name docs --dir /srv/docs --port 18080
 pg autostart enable --http --name docs
 ```
 
-The enable step snapshots the server's directory, listen address, port and TLS
-material into the top-level `http` section of `pg.yaml`; the boot service then
-re-creates the server from those settings. If the recorded port is taken at
-boot, the next free port is used. A later `pg http start`/`pg http restart` of
-the same name refreshes the snapshot.
+The enable step snapshots the server's directory, listen address, port, TLS
+material and delete mode into the top-level `http` section of `pg.yaml`; the
+boot service then re-creates the server from those settings. If the recorded
+port is taken at boot, the next free port is used. A later `pg http
+start`/`pg http restart` of the same name refreshes the snapshot.
 
 ```bash
 pg autostart status                        # shows "http docs   enabled"
@@ -228,6 +254,11 @@ servers survive the terminal but not a reboot.
 - **No authentication.** Anyone who can reach the port can read every file in
   the served tree. The default loopback listener is the only guard; expose
   `0.0.0.0` only on a trusted network.
+- **`--allow-delete` adds no authentication of its own** — anyone who can
+  reach the port can also delete files under `--dir`. Directories cannot be
+  removed and deletion never escapes the served tree, but combine it with the
+  loopback listener for the same reason as above. `pg http start` prints a
+  warning when the flag is on and the listener is not loopback.
 - **`--tls` encrypts but does not authenticate clients** — it is not an access
   control mechanism.
 - Symlinks can expose paths outside `--dir`; treat the served directory as the

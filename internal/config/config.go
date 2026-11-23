@@ -88,13 +88,14 @@ type Config struct {
 // HTTPServerConfig records a `pg http` server's launch settings so the boot
 // service can start it after a host reboot.
 type HTTPServerConfig struct {
-	Dir       string `yaml:"dir"`
-	Listen    string `yaml:"listen,omitempty"`
-	Port      int    `yaml:"port,omitempty"`
-	TLS       bool   `yaml:"tls,omitempty"`
-	CertFile  string `yaml:"cert_file,omitempty"`
-	KeyFile   string `yaml:"key_file,omitempty"`
-	Autostart bool   `yaml:"autostart,omitempty"`
+	Dir         string `yaml:"dir"`
+	Listen      string `yaml:"listen,omitempty"`
+	Port        int    `yaml:"port,omitempty"`
+	TLS         bool   `yaml:"tls,omitempty"`
+	CertFile    string `yaml:"cert_file,omitempty"`
+	KeyFile     string `yaml:"key_file,omitempty"`
+	AllowDelete bool   `yaml:"allow_delete,omitempty"`
+	Autostart   bool   `yaml:"autostart,omitempty"`
 }
 
 // DaemonConfig describes a long-running host process managed by `pg daemon`.
