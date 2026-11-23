@@ -53,6 +53,9 @@ func init() {
 	httpStartCmd.Flags().String("tls-cert", "", "use this certificate file instead of generating one (implies --tls)")
 	httpStartCmd.Flags().String("tls-key", "", "private key for --tls-cert")
 	httpStartCmd.Flags().Bool("allow-delete", false, "expose a delete button per file in the listing and accept HTTP DELETE (no authentication — keep the loopback listener)")
+	httpStartCmd.Flags().Bool("allow-upload", false, "expose an upload form in each listing and accept multipart POST into the listed directory (no authentication — keep the loopback listener)")
+	httpStartCmd.Flags().Bool("allow-dir", false, "expose a \"new folder\" form in each listing and accept creating directories from a relative path (no authentication — keep the loopback listener)")
+	httpStartCmd.Flags().String("max-upload", "1G", "maximum size of one upload request, all files combined (e.g. 512M, 2G, or a byte count)")
 
 	httpStopCmd.Flags().Bool("all", false, "stop every pg http server")
 	httpStopCmd.Flags().Duration("timeout", httpStopGrace, "how long to wait for a graceful shutdown before SIGKILL")
@@ -67,6 +70,9 @@ func init() {
 	httpServeCmd.Flags().String("tls-cert", "", "certificate file")
 	httpServeCmd.Flags().String("tls-key", "", "private key file")
 	httpServeCmd.Flags().Bool("allow-delete", false, "allow HTTP DELETE of files")
+	httpServeCmd.Flags().Bool("allow-upload", false, "allow multipart POST uploads")
+	httpServeCmd.Flags().Bool("allow-dir", false, "allow directory creation via POSTed relative path")
+	httpServeCmd.Flags().String("max-upload", "1G", "maximum size of one upload request, all files combined")
 	httpServeCmd.Flags().String("ready-file", "", "write listen/port JSON here once the socket is bound, then delete on exit")
 	httpServeCmd.Hidden = true
 }
@@ -89,13 +95,17 @@ multiple servers may run at once. There is no authentication: keep the default
 loopback listener, or expose it only on a trusted network. --tls encrypts
 traffic but does not authenticate clients. The server is read-only by default;
 --allow-delete adds a delete button to every file row and accepts HTTP DELETE,
-so anyone who can reach the port can remove files under --dir.
+--allow-upload adds an upload form and accepts multipart POST into the listed
+directory, and --allow-dir adds a "new folder" form. With any of them, anyone
+who can reach the port can change files under --dir. Uploads are capped at 1G
+per request by default; --max-upload changes the limit.
 
 Examples:
   pg http start
   pg http start --listen 0.0.0.0 --port 18080 --dir /srv/share
   pg http start --name docs --tls --dir ~/docs
   pg http start --allow-delete --dir /tmp/share
+  pg http start --allow-upload --allow-dir --max-upload 512M --dir /tmp/share
   pg http status
   pg http restart docs
   pg http stop docs
@@ -121,7 +131,8 @@ var httpRestartCmd = &cobra.Command{
 	Use:   "restart [NAME...]",
 	Short: "Restart one or more pg http servers with their recorded settings",
 	Long: `restart stops each server gracefully, then starts it again with the listen
-address, directory, TLS certificate and port recorded in its state file.
+address, directory, TLS certificate, write modes (delete/upload/mkdir), upload
+size limit and port recorded in its state file.
 
 If the original port was taken in the meantime, the next free port is used.
 Generated certificates are renewed when they are close to expiry or no longer
@@ -145,32 +156,38 @@ var httpServeCmd = &cobra.Command{
 }
 
 type httpServerState struct {
-	Name        string    `json:"name"`
-	PID         int       `json:"pid"`
-	Port        int       `json:"port"`
-	Listen      string    `json:"listen"`
-	Dir         string    `json:"dir"`
-	TLS         bool      `json:"tls"`
-	CertFile    string    `json:"cert_file,omitempty"`
-	KeyFile     string    `json:"key_file,omitempty"`
-	AllowDelete bool      `json:"allow_delete,omitempty"`
-	LogFile     string    `json:"log_file"`
-	StartedAt   time.Time `json:"started_at"`
+	Name           string    `json:"name"`
+	PID            int       `json:"pid"`
+	Port           int       `json:"port"`
+	Listen         string    `json:"listen"`
+	Dir            string    `json:"dir"`
+	TLS            bool      `json:"tls"`
+	CertFile       string    `json:"cert_file,omitempty"`
+	KeyFile        string    `json:"key_file,omitempty"`
+	AllowDelete    bool      `json:"allow_delete,omitempty"`
+	AllowUpload    bool      `json:"allow_upload,omitempty"`
+	AllowDir       bool      `json:"allow_dir,omitempty"`
+	MaxUploadBytes int64     `json:"max_upload_bytes,omitempty"`
+	LogFile        string    `json:"log_file"`
+	StartedAt      time.Time `json:"started_at"`
 }
 
 // httpLaunchOptions are the settings for one `pg http serve` child.
 type httpLaunchOptions struct {
-	Self        string
-	Name        string
-	Listen      string
-	Port        int
-	Dir         string
-	CertFile    string
-	KeyFile     string
-	TLS         bool
-	AllowDelete bool
-	LogPath     string
-	ReadyFile   string
+	Self           string
+	Name           string
+	Listen         string
+	Port           int
+	Dir            string
+	CertFile       string
+	KeyFile        string
+	TLS            bool
+	AllowDelete    bool
+	AllowUpload    bool
+	AllowDir       bool
+	MaxUploadBytes int64
+	LogPath        string
+	ReadyFile      string
 }
 
 type httpReady struct {
@@ -353,6 +370,13 @@ func runHTTPStart(cmd *cobra.Command, _ []string) error {
 	certFile, _ := cmd.Flags().GetString("tls-cert")
 	keyFile, _ := cmd.Flags().GetString("tls-key")
 	allowDelete, _ := cmd.Flags().GetBool("allow-delete")
+	allowUpload, _ := cmd.Flags().GetBool("allow-upload")
+	allowDir, _ := cmd.Flags().GetBool("allow-dir")
+	maxUploadStr, _ := cmd.Flags().GetString("max-upload")
+	maxUpload, err := parseRAM(maxUploadStr)
+	if err != nil {
+		return fmt.Errorf("--max-upload: %w", err)
+	}
 
 	if (certFile == "") != (keyFile == "") {
 		return fmt.Errorf("--tls-cert and --tls-key must be set together")
@@ -416,17 +440,20 @@ func runHTTPStart(cmd *cobra.Command, _ []string) error {
 	startPort := port
 	for p := startPort; p < startPort+httpPortTries; p++ {
 		st, err := launchHTTPServer(httpLaunchOptions{
-			Self:        self,
-			Name:        name,
-			Listen:      listen,
-			Port:        p,
-			Dir:         absDir,
-			CertFile:    certPath,
-			KeyFile:     keyPath,
-			TLS:         tlsEnabled,
-			AllowDelete: allowDelete,
-			LogPath:     logPath,
-			ReadyFile:   readyFile,
+			Self:           self,
+			Name:           name,
+			Listen:         listen,
+			Port:           p,
+			Dir:            absDir,
+			CertFile:       certPath,
+			KeyFile:        keyPath,
+			TLS:            tlsEnabled,
+			AllowDelete:    allowDelete,
+			AllowUpload:    allowUpload,
+			AllowDir:       allowDir,
+			MaxUploadBytes: maxUpload,
+			LogPath:        logPath,
+			ReadyFile:      readyFile,
 		})
 		if err != nil {
 			return err
@@ -459,12 +486,17 @@ func launchHTTPServer(opts httpLaunchOptions) (*httpServerState, error) {
 	}
 	defer logFile.Close()
 
+	maxUpload := opts.MaxUploadBytes
+	if maxUpload <= 0 {
+		maxUpload = httpd.DefaultMaxUploadBytes
+	}
 	args := []string{
 		"http", "serve",
 		"--name", opts.Name,
 		"--listen", opts.Listen,
 		"--port", strconv.Itoa(opts.Port),
 		"--dir", opts.Dir,
+		"--max-upload", strconv.FormatInt(maxUpload, 10),
 		"--ready-file", opts.ReadyFile,
 	}
 	if opts.TLS {
@@ -472,6 +504,12 @@ func launchHTTPServer(opts httpLaunchOptions) (*httpServerState, error) {
 	}
 	if opts.AllowDelete {
 		args = append(args, "--allow-delete")
+	}
+	if opts.AllowUpload {
+		args = append(args, "--allow-upload")
+	}
+	if opts.AllowDir {
+		args = append(args, "--allow-dir")
 	}
 
 	child := exec.Command(opts.Self, args...)
@@ -511,17 +549,20 @@ func launchHTTPServer(opts httpLaunchOptions) (*httpServerState, error) {
 			}
 			_ = os.Remove(opts.ReadyFile)
 			return &httpServerState{
-				Name:        opts.Name,
-				PID:         child.Process.Pid,
-				Port:        ready.Port,
-				Listen:      ready.Listen,
-				Dir:         opts.Dir,
-				TLS:         opts.TLS,
-				CertFile:    opts.CertFile,
-				KeyFile:     opts.KeyFile,
-				AllowDelete: opts.AllowDelete,
-				LogFile:     opts.LogPath,
-				StartedAt:   time.Now(),
+				Name:           opts.Name,
+				PID:            child.Process.Pid,
+				Port:           ready.Port,
+				Listen:         ready.Listen,
+				Dir:            opts.Dir,
+				TLS:            opts.TLS,
+				CertFile:       opts.CertFile,
+				KeyFile:        opts.KeyFile,
+				AllowDelete:    opts.AllowDelete,
+				AllowUpload:    opts.AllowUpload,
+				AllowDir:       opts.AllowDir,
+				MaxUploadBytes: maxUpload,
+				LogFile:        opts.LogPath,
+				StartedAt:      time.Now(),
 			}, nil
 		}
 	}
@@ -536,9 +577,19 @@ func printHTTPStarted(st *httpServerState, certNotAfter time.Time) {
 	fmt.Printf("  Log:  %s\n", st.LogFile)
 	if st.AllowDelete {
 		fmt.Printf("  Del:  enabled (--allow-delete)\n")
-		if !httpListenLoopback(st.Listen) {
-			fmt.Printf("  [!] file deletion has no authentication: anyone who can reach %s can delete files under %s\n", httpURL(st), st.Dir)
+	}
+	if st.AllowUpload {
+		maxUp := st.MaxUploadBytes
+		if maxUp <= 0 {
+			maxUp = httpd.DefaultMaxUploadBytes
 		}
+		fmt.Printf("  Up:   enabled (--allow-upload, max %s per request)\n", formatUploadLimit(maxUp))
+	}
+	if st.AllowDir {
+		fmt.Printf("  Mkdir: enabled (--allow-dir)\n")
+	}
+	if (st.AllowDelete || st.AllowUpload || st.AllowDir) && !httpListenLoopback(st.Listen) {
+		fmt.Printf("  [!] file changes have no authentication: anyone who can reach %s can modify files under %s\n", httpURL(st), st.Dir)
 	}
 	if st.TLS {
 		if certNotAfter.IsZero() {
@@ -548,6 +599,17 @@ func printHTTPStarted(st *httpServerState, certNotAfter time.Time) {
 	}
 	fmt.Println()
 	fmt.Printf("  Stop with: pg http stop %s\n", st.Name)
+}
+
+func formatUploadLimit(b int64) string {
+	switch {
+	case b%(1<<30) == 0:
+		return fmt.Sprintf("%dGiB", b>>30)
+	case b%(1<<20) == 0:
+		return fmt.Sprintf("%dMiB", b>>20)
+	default:
+		return fmt.Sprintf("%dB", b)
+	}
 }
 
 // httpListenLoopback reports whether a listen address only accepts local
@@ -727,17 +789,20 @@ func relaunchHTTPServer(base string, st httpServerState) (*httpServerState, time
 	readyFile := filepath.Join(serversDir, st.Name+".ready")
 	for p := port; p < port+httpPortTries; p++ {
 		newSt, err := launchHTTPServer(httpLaunchOptions{
-			Self:        self,
-			Name:        st.Name,
-			Listen:      listen,
-			Port:        p,
-			Dir:         st.Dir,
-			CertFile:    certPath,
-			KeyFile:     keyPath,
-			TLS:         st.TLS,
-			AllowDelete: st.AllowDelete,
-			LogPath:     logPath,
-			ReadyFile:   readyFile,
+			Self:           self,
+			Name:           st.Name,
+			Listen:         listen,
+			Port:           p,
+			Dir:            st.Dir,
+			CertFile:       certPath,
+			KeyFile:        keyPath,
+			TLS:            st.TLS,
+			AllowDelete:    st.AllowDelete,
+			AllowUpload:    st.AllowUpload,
+			AllowDir:       st.AllowDir,
+			MaxUploadBytes: st.MaxUploadBytes,
+			LogPath:        logPath,
+			ReadyFile:      readyFile,
 		})
 		if err != nil {
 			return nil, time.Time{}, err
@@ -780,6 +845,9 @@ func syncHTTPAutostartEntry(st *httpServerState) {
 	hc.Dir, hc.Listen, hc.Port = st.Dir, st.Listen, st.Port
 	hc.TLS, hc.CertFile, hc.KeyFile = st.TLS, st.CertFile, st.KeyFile
 	hc.AllowDelete = st.AllowDelete
+	hc.AllowUpload = st.AllowUpload
+	hc.AllowDir = st.AllowDir
+	hc.MaxUploadBytes = st.MaxUploadBytes
 	c.HTTP[st.Name] = hc
 	if err := c.Save(path); err != nil {
 		fmt.Printf("  [!] could not refresh autostart settings for %s: %v\n", st.Name, err)
@@ -817,14 +885,17 @@ func startAutostartHTTPServers(c *config.Config) error {
 			continue
 		}
 		st := httpServerState{
-			Name:        name,
-			Listen:      hc.Listen,
-			Port:        hc.Port,
-			Dir:         hc.Dir,
-			TLS:         hc.TLS,
-			CertFile:    hc.CertFile,
-			KeyFile:     hc.KeyFile,
-			AllowDelete: hc.AllowDelete,
+			Name:           name,
+			Listen:         hc.Listen,
+			Port:           hc.Port,
+			Dir:            hc.Dir,
+			TLS:            hc.TLS,
+			CertFile:       hc.CertFile,
+			KeyFile:        hc.KeyFile,
+			AllowDelete:    hc.AllowDelete,
+			AllowUpload:    hc.AllowUpload,
+			AllowDir:       hc.AllowDir,
+			MaxUploadBytes: hc.MaxUploadBytes,
 		}
 		fmt.Printf("-> Starting http server %q (autostart)...\n", name)
 		newSt, _, err := relaunchHTTPServer(base, st)
@@ -848,7 +919,7 @@ func runHTTPStatus(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 	autos := httpAutostartNames()
-	fmt.Printf("%-24s %-8s %-9s %-9s %-7s %-40s %s\n", "NAME", "PID", "STATUS", "AUTOSTART", "DELETE", "URL", "DIR")
+	fmt.Printf("%-24s %-8s %-9s %-9s %-7s %-7s %-7s %-40s %s\n", "NAME", "PID", "STATUS", "AUTOSTART", "DELETE", "UPLOAD", "MKDIR", "URL", "DIR")
 	for _, st := range states {
 		status := "running"
 		if !httpServerAlive(&st) {
@@ -862,7 +933,15 @@ func runHTTPStatus(cmd *cobra.Command, _ []string) error {
 		if st.AllowDelete {
 			del = "enabled"
 		}
-		fmt.Printf("%-24s %-8d %-9s %-9s %-7s %-40s %s\n", st.Name, st.PID, status, auto, del, httpURL(&st), st.Dir)
+		up := "-"
+		if st.AllowUpload {
+			up = "enabled"
+		}
+		mkdir := "-"
+		if st.AllowDir {
+			mkdir = "enabled"
+		}
+		fmt.Printf("%-24s %-8d %-9s %-9s %-7s %-7s %-7s %-40s %s\n", st.Name, st.PID, status, auto, del, up, mkdir, httpURL(&st), st.Dir)
 	}
 	return nil
 }
@@ -876,6 +955,13 @@ func runHTTPServe(cmd *cobra.Command, _ []string) error {
 	certFile, _ := cmd.Flags().GetString("tls-cert")
 	keyFile, _ := cmd.Flags().GetString("tls-key")
 	allowDelete, _ := cmd.Flags().GetBool("allow-delete")
+	allowUpload, _ := cmd.Flags().GetBool("allow-upload")
+	allowDir, _ := cmd.Flags().GetBool("allow-dir")
+	maxUploadStr, _ := cmd.Flags().GetString("max-upload")
+	maxUpload, err := parseRAM(maxUploadStr)
+	if err != nil {
+		return fmt.Errorf("--max-upload: %w", err)
+	}
 	readyFile, _ := cmd.Flags().GetString("ready-file")
 	if (certFile == "") != (keyFile == "") {
 		return fmt.Errorf("--tls-cert and --tls-key must be set together")
@@ -901,7 +987,12 @@ func runHTTPServe(cmd *cobra.Command, _ []string) error {
 	}
 
 	srv := &http.Server{
-		Handler:           httpd.HandlerWithOptions(dir, httpd.Options{AllowDelete: allowDelete}),
+		Handler: httpd.HandlerWithOptions(dir, httpd.Options{
+			AllowDelete:    allowDelete,
+			AllowUpload:    allowUpload,
+			AllowDir:       allowDir,
+			MaxUploadBytes: maxUpload,
+		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	sigCh := make(chan os.Signal, 1)

@@ -92,6 +92,19 @@ pg http start --name images --listen 0.0.0.0 --port 18080 --dir /srv/offline-ima
 pg http status
 ```
 
+To maintain the store from a browser, add the write-mode flags:
+
+```bash
+pg http start --name images --listen 0.0.0.0 --port 18080 \
+  --dir /srv/offline-images --allow-upload --allow-dir --allow-delete
+```
+
+The listing then offers an upload form, a "new folder" form and per-file delete
+buttons, so tarballs can be replaced or added without a shell. Uploads are
+capped at 1 GiB per request by default; raise it with `--max-upload` if the
+tarballs are larger. These modes come with no authentication either — see
+[HTTP file server](/docs/toolbox/http/).
+
 Enable it at boot if needed:
 
 ```bash

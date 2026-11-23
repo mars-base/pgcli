@@ -1,9 +1,13 @@
 package httpd
 
 import (
+	"bytes"
+	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -343,5 +347,460 @@ func TestDeleteSymlinkSafety(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(outsideDir, "secret.txt")); err != nil {
 		t.Errorf("symlink target was removed: %v", err)
+	}
+}
+
+type uploadFile struct {
+	name    string
+	content string
+}
+
+func uploadRequest(t *testing.T, target string, files []uploadFile) *http.Request {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	for _, f := range files {
+		fw, err := mw.CreateFormFile("files", f.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(fw, f.content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, target, &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("X-Requested-With", "fetch")
+	return req
+}
+
+func formRequest(t *testing.T, target, dir string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader("dir="+url.QueryEscape(dir)))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Requested-With", "fetch")
+	return req
+}
+
+func getBody(t *testing.T, h http.Handler, target string) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s = %d", target, rec.Code)
+	}
+	return rec.Body.String()
+}
+
+func noUploadTemps(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".pgcli-upload-") {
+			t.Errorf("leftover upload temp file %s", e.Name())
+		}
+	}
+}
+
+func TestUploadDisabledByDefault(t *testing.T) {
+	root := testTree(t)
+	h := Handler(root)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, uploadRequest(t, "/", []uploadFile{{"new.txt", "x"}}))
+	if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != "GET, HEAD" {
+		t.Errorf("POST = %d Allow=%q, want 405 with GET, HEAD", rec.Code, rec.Header().Get("Allow"))
+	}
+	if _, err := os.Stat(filepath.Join(root, "new.txt")); !os.IsNotExist(err) {
+		t.Error("file created although uploads are off")
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, formRequest(t, "/", "newdir"))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("form POST = %d, want 405", rec.Code)
+	}
+}
+
+func TestUploadWritesFiles(t *testing.T) {
+	root := testTree(t)
+	h := HandlerWithOptions(root, Options{AllowUpload: true})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, uploadRequest(t, "/", []uploadFile{
+		{"up.txt", "one"},
+		{"img/a.png", "png"},  // browser-supplied paths are reduced to the base name
+		{"win\\b.txt", "win"}, // backslash separators too
+	}))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("upload = %d %s", rec.Code, rec.Body.String())
+	}
+	for name, content := range map[string]string{"up.txt": "one", "a.png": "png", "b.txt": "win"} {
+		data, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil || string(data) != content {
+			t.Errorf("%s = %q, %v; want %q", name, data, err, content)
+		}
+	}
+	noUploadTemps(t, root)
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, uploadRequest(t, "/sub/", []uploadFile{{"c.txt", "charlie"}}))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("sub upload = %d", rec.Code)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "sub", "c.txt")); err != nil || string(data) != "charlie" {
+		t.Errorf("sub/c.txt = %q, %v", data, err)
+	}
+	noUploadTemps(t, filepath.Join(root, "sub"))
+}
+
+func TestUploadAtomicOverwrite(t *testing.T) {
+	root := testTree(t)
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	mustWrite(t, secret, "secret")
+	if err := os.Symlink(secret, filepath.Join(root, "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	h := HandlerWithOptions(root, Options{AllowUpload: true})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, uploadRequest(t, "/", []uploadFile{{"a.txt", "replaced"}, {"link.txt", "direct"}}))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("overwrite = %d %s", rec.Code, rec.Body.String())
+	}
+	if data, _ := os.ReadFile(filepath.Join(root, "a.txt")); string(data) != "replaced" {
+		t.Errorf("a.txt = %q, want replaced", data)
+	}
+	// The symlink itself is replaced by the uploaded file; its target survives.
+	info, err := os.Lstat(filepath.Join(root, "link.txt"))
+	if err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("link.txt is not a regular file after upload: %v", err)
+	}
+	if data, _ := os.ReadFile(secret); string(data) != "secret" {
+		t.Errorf("symlink target was modified: %q", data)
+	}
+	noUploadTemps(t, root)
+}
+
+func TestUploadRefusesDirectories(t *testing.T) {
+	root := testTree(t)
+	outsideDir := t.TempDir()
+	if err := os.Symlink(outsideDir, filepath.Join(root, "outlink")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("sub", filepath.Join(root, "subdir-link")); err != nil {
+		t.Fatal(err)
+	}
+	h := HandlerWithOptions(root, Options{AllowUpload: true})
+
+	for _, name := range []string{"sub", "outlink", "subdir-link"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, uploadRequest(t, "/", []uploadFile{{name, "data"}}))
+		if rec.Code != http.StatusConflict {
+			t.Errorf("upload over %s = %d, want 409", name, rec.Code)
+		}
+	}
+	noUploadTemps(t, root)
+}
+
+func TestUploadRefusesEscapes(t *testing.T) {
+	root := testTree(t)
+	outsideDir := t.TempDir()
+	if err := os.Symlink(outsideDir, filepath.Join(root, "outlink")); err != nil {
+		t.Fatal(err)
+	}
+	h := HandlerWithOptions(root, Options{AllowUpload: true})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, uploadRequest(t, "/outlink/", []uploadFile{{"evil.txt", "evil"}}))
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("upload through escaping symlink = %d, want 403", rec.Code)
+	}
+	if _, err := os.Stat(filepath.Join(outsideDir, "evil.txt")); !os.IsNotExist(err) {
+		t.Error("file written outside the served directory")
+	}
+}
+
+func TestCleanUploadName(t *testing.T) {
+	for _, raw := range []string{"", ".", "..", "/", ".pgcli-upload-abc", strings.Repeat("a", 256)} {
+		if name, ok := cleanUploadName(raw, false); ok {
+			t.Errorf("cleanUploadName(%q) = %q, want rejected", raw, name)
+		}
+	}
+	if name, ok := cleanUploadName("a\\b.txt", false); !ok || name != "b.txt" {
+		t.Errorf("cleanUploadName(backslash) = %q, %v; want b.txt", name, ok)
+	}
+	if _, ok := cleanUploadName("__pgcli_health", true); ok {
+		t.Error("reserved health name accepted at the root")
+	}
+	if name, ok := cleanUploadName("__pgcli_health", false); !ok || name != "__pgcli_health" {
+		t.Errorf("health name refused in a subdirectory: %q, %v", name, ok)
+	}
+}
+
+func TestUploadReservedHealthAtRootOnly(t *testing.T) {
+	root := testTree(t)
+	h := HandlerWithOptions(root, Options{AllowUpload: true})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, uploadRequest(t, "/", []uploadFile{{"__pgcli_health", "shadow"}}))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("root health upload = %d, want 400", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, uploadRequest(t, "/sub/", []uploadFile{{"__pgcli_health", "ok"}}))
+	if rec.Code != http.StatusCreated {
+		t.Errorf("subdirectory health upload = %d, want 201", rec.Code)
+	}
+}
+
+func TestUploadMaxBytes(t *testing.T) {
+	root := testTree(t)
+	h := HandlerWithOptions(root, Options{AllowUpload: true, MaxUploadBytes: 64})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, uploadRequest(t, "/", []uploadFile{{"big.txt", strings.Repeat("x", 256)}}))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized upload = %d, want 413", rec.Code)
+	}
+	if _, err := os.Stat(filepath.Join(root, "big.txt")); !os.IsNotExist(err) {
+		t.Error("oversized upload left a partial file")
+	}
+	noUploadTemps(t, root)
+}
+
+func TestUploadErrors(t *testing.T) {
+	root := testTree(t)
+	h := HandlerWithOptions(root, Options{AllowUpload: true})
+
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("x"))
+	req.Header.Set("Content-Type", "multipart/form-data")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("missing boundary = %d, want 400", rec.Code)
+	}
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("note", "no files")
+	_ = mw.Close()
+	req = httptest.NewRequest(http.MethodPost, "/", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("upload without files = %d, want 400", rec.Code)
+	}
+
+	for _, target := range []string{"/a.txt", "/a.txt/", "/nope/"} {
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, uploadRequest(t, target, []uploadFile{{"x.txt", "y"}}))
+		want := http.StatusMethodNotAllowed
+		if strings.HasSuffix(target, "/") {
+			want = http.StatusNotFound
+		}
+		if rec.Code != want {
+			t.Errorf("POST %s = %d, want %d", target, rec.Code, want)
+		}
+	}
+
+	// Form-encoded dir creation is refused while --allow-dir is off.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, formRequest(t, "/", "newdir"))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("mkdir while disabled = %d, want 405", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/", strings.NewReader("plain"))
+	req.Header.Set("Content-Type", "text/plain")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Errorf("unsupported content type = %d, want 415", rec.Code)
+	}
+}
+
+func TestUploadResponses(t *testing.T) {
+	root := testTree(t)
+	h := HandlerWithOptions(root, Options{AllowUpload: true})
+
+	req := uploadRequest(t, "/sub/", []uploadFile{{"r.txt", "r"}})
+	req.Header.Del("X-Requested-With")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/sub/" {
+		t.Errorf("plain upload = %d Location=%q, want 303 /sub/", rec.Code, rec.Header().Get("Location"))
+	}
+
+	req = uploadRequest(t, "/sub/", []uploadFile{{"j.txt", "j"}})
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("fetch upload = %d, want 201", rec.Code)
+	}
+	var payload struct {
+		Uploaded []string `json:"uploaded"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil || len(payload.Uploaded) != 1 || payload.Uploaded[0] != "j.txt" {
+		t.Errorf("upload JSON = %s (err %v)", rec.Body.String(), err)
+	}
+}
+
+func TestDirCreate(t *testing.T) {
+	root := testTree(t)
+	h := HandlerWithOptions(root, Options{AllowDir: true})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, formRequest(t, "/", "images/v2"))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("mkdir = %d %s", rec.Code, rec.Body.String())
+	}
+	if info, err := os.Stat(filepath.Join(root, "images", "v2")); err != nil || !info.IsDir() {
+		t.Fatalf("images/v2 not created: %v", err)
+	}
+
+	// The path is relative to the listing being viewed.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, formRequest(t, "/sub/", "deep/nested/"))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("sub mkdir = %d %s", rec.Code, rec.Body.String())
+	}
+	if info, err := os.Stat(filepath.Join(root, "sub", "deep", "nested")); err != nil || !info.IsDir() {
+		t.Fatalf("sub/deep/nested not created: %v", err)
+	}
+
+	for _, exists := range []string{"images/v2", "a.txt"} {
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, formRequest(t, "/", exists))
+		if rec.Code != http.StatusConflict {
+			t.Errorf("mkdir %s = %d, want 409", exists, rec.Code)
+		}
+	}
+
+	for _, bad := range []string{"", "  ", "/abs", "..", "../x", "a/../b", "a//b", "__pgcli_health", "__pgcli_health/x"} {
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, formRequest(t, "/", bad))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("mkdir %q = %d, want 400", bad, rec.Code)
+		}
+	}
+}
+
+func TestDirCreateEscape(t *testing.T) {
+	root := testTree(t)
+	outsideDir := t.TempDir()
+	if err := os.Symlink(outsideDir, filepath.Join(root, "outlink")); err != nil {
+		t.Fatal(err)
+	}
+	h := HandlerWithOptions(root, Options{AllowDir: true})
+
+	for _, req := range []*http.Request{
+		formRequest(t, "/", "outlink/newdir"),
+		formRequest(t, "/outlink/", "newdir"),
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("mkdir through escaping symlink = %d, want 403", rec.Code)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(outsideDir, "newdir")); !os.IsNotExist(err) {
+		t.Error("directory created outside the served tree")
+	}
+}
+
+func TestCrossOriginWritesRefused(t *testing.T) {
+	root := testTree(t)
+	h := HandlerWithOptions(root, Options{AllowDelete: true, AllowUpload: true, AllowDir: true})
+
+	req := uploadRequest(t, "/", []uploadFile{{"evil.txt", "x"}})
+	req.Header.Set("Origin", "http://evil.test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("cross-origin upload = %d, want 403", rec.Code)
+	}
+
+	req = formRequest(t, "/", "evil-dir")
+	req.Header.Set("Origin", "null")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("null-origin mkdir = %d, want 403", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/a.txt", nil)
+	req.Header.Set("Origin", "http://evil.test")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("cross-origin DELETE = %d, want 403", rec.Code)
+	}
+	if _, err := os.Stat(filepath.Join(root, "a.txt")); err != nil {
+		t.Error("file deleted by a cross-origin DELETE")
+	}
+
+	req = uploadRequest(t, "/", []uploadFile{{"ok.txt", "x"}})
+	req.Header.Set("Origin", "http://" + req.Host)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Errorf("same-origin upload = %d, want 201", rec.Code)
+	}
+}
+
+func TestListingForms(t *testing.T) {
+	root := testTree(t)
+	if body := getBody(t, Handler(root), "/"); strings.Contains(body, `class="tool`) {
+		t.Error("tool forms rendered although upload and dir are off")
+	}
+
+	h := HandlerWithOptions(root, Options{AllowUpload: true, AllowDir: true})
+	body := getBody(t, h, "/sub/")
+	for _, want := range []string{
+		`class="tool upload"`, `enctype="multipart/form-data"`, `name="files"`,
+		`class="tool mkdir"`, `name="dir"`, `action="/sub/"`,
+		"upload enabled", "mkdir enabled",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("listing missing %q", want)
+		}
+	}
+	if strings.Contains(body, "delete enabled") {
+		t.Error("footer mentions delete although it is off")
+	}
+
+	if err := os.MkdirAll(filepath.Join(root, "a b"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if body := getBody(t, h, "/a%20b/"); !strings.Contains(body, `action="/a%20b/"`) {
+		t.Errorf("form action is not the escaped listing path:\n%s", body)
+	}
+}
+
+func TestListingHidesUploadTemps(t *testing.T) {
+	root := testTree(t)
+	mustWrite(t, filepath.Join(root, ".pgcli-upload-deadbeef"), "partial")
+	if body := getBody(t, Handler(root), "/"); strings.Contains(body, ".pgcli-upload-") {
+		t.Error("in-flight upload temp file is listed")
+	}
+}
+
+func TestAllowHeaderComposition(t *testing.T) {
+	root := testTree(t)
+	h := HandlerWithOptions(root, Options{AllowDelete: true, AllowUpload: true, AllowDir: true})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/", nil))
+	if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != "GET, HEAD, DELETE, POST" {
+		t.Errorf("PUT = %d Allow=%q, want 405 with GET, HEAD, DELETE, POST", rec.Code, rec.Header().Get("Allow"))
 	}
 }

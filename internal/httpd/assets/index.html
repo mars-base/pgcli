@@ -78,6 +78,30 @@
     animation: fade .15s ease-out;
   }
   @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+  .tools { display: flex; flex-wrap: wrap; gap: .5rem 1.25rem; margin-bottom: .9rem; }
+  form.tool { display: inline-flex; align-items: center; gap: .4rem; position: relative; margin: 0; }
+  form.tool input[type="text"] {
+    font: inherit;
+    font-size: .8rem;
+    padding: .2rem .5rem;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  form.tool input[type="file"] { font: inherit; font-size: .8rem; color: var(--muted); max-width: 16rem; }
+  form.tool button {
+    font: inherit;
+    font-size: .8rem;
+    color: var(--accent);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: .15rem .6rem;
+    cursor: pointer;
+  }
+  form.tool button:hover { border-color: var(--accent); }
+  form.tool button:disabled { opacity: .5; cursor: wait; }
   .empty { color: var(--muted); padding: 1rem .6rem; }
   footer { margin-top: 1.5rem; color: var(--muted); font-size: .75rem; }
 </style>
@@ -92,6 +116,22 @@
     {{- end -}}
     {{- if .HasParent}}<span class="sep">·</span><a href="{{.ParentHref}}">Up directory</a>{{end -}}
   </nav>
+  {{- if or .AllowUpload .AllowDir}}
+  <div class="tools">
+    {{- if .AllowUpload}}
+    <form class="tool upload" method="post" enctype="multipart/form-data" action="{{.PostHref}}">
+      <input type="file" name="files" multiple required>
+      <button type="submit">upload</button>
+    </form>
+    {{- end}}
+    {{- if .AllowDir}}
+    <form class="tool mkdir" method="post" action="{{.PostHref}}">
+      <input type="text" name="dir" placeholder="new folder (relative path)" required>
+      <button type="submit">create</button>
+    </form>
+    {{- end}}
+  </div>
+  {{- end}}
   <table>
     <thead>
       <tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr>
@@ -109,7 +149,7 @@
       {{- end}}
     </tbody>
   </table>
-  <footer>pg http{{if .AllowDelete}} · delete enabled{{end}}</footer>
+  <footer>pg http{{if .AllowDelete}} · delete enabled{{end}}{{if .AllowUpload}} · upload enabled{{end}}{{if .AllowDir}} · mkdir enabled{{end}}</footer>
 </div>
 <script>
 (function () {
@@ -152,6 +192,33 @@
       var url = location.origin + btn.getAttribute('data-url');
       var ok = await copyText(url);
       showPopup(btn, ok ? 'copyed' : 'copy failed');
+    });
+  });
+
+  document.querySelectorAll('form.tool').forEach(function (form) {
+    form.addEventListener('submit', async function (e) {
+      e.preventDefault();
+      var btn = form.querySelector('button[type="submit"]');
+      var idle = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = form.classList.contains('upload') ? 'uploading...' : 'creating...';
+      try {
+        var res = await fetch(form.getAttribute('action'), {
+          method: 'POST',
+          body: new FormData(form),
+          headers: { 'X-Requested-With': 'fetch' },
+          cache: 'no-store'
+        });
+        if (!res.ok) {
+          var detail = (await res.text()).trim();
+          throw new Error('HTTP ' + res.status + (detail ? ': ' + detail : ''));
+        }
+        location.reload();
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = idle;
+        showPopup(btn, 'failed (' + err.message + ')');
+      }
     });
   });
 

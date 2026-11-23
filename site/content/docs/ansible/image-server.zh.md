@@ -83,6 +83,17 @@ pg http start --name images --listen 0.0.0.0 --port 18080 --dir /srv/offline-ima
 pg http status
 ```
 
+需要在浏览器里直接维护镜像目录时，加上写模式参数：
+
+```bash
+pg http start --name images --listen 0.0.0.0 --port 18080 \
+  --dir /srv/offline-images --allow-upload --allow-dir --allow-delete
+```
+
+列表页会多出上传表单、新建目录表单和每文件的删除按钮，不登录 shell 也能替换或
+补充 tar 包。上传上限默认 1 GiB，可用 `--max-upload` 调整。这些模式同样没有
+认证 —— 见 [HTTP 文件服务器](/docs/toolbox/http/)。
+
 需要开机自启时：
 
 ```bash

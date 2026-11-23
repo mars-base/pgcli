@@ -95,7 +95,12 @@ type HTTPServerConfig struct {
 	CertFile    string `yaml:"cert_file,omitempty"`
 	KeyFile     string `yaml:"key_file,omitempty"`
 	AllowDelete bool   `yaml:"allow_delete,omitempty"`
-	Autostart   bool   `yaml:"autostart,omitempty"`
+	AllowUpload bool   `yaml:"allow_upload,omitempty"`
+	AllowDir    bool   `yaml:"allow_dir,omitempty"`
+	// MaxUploadBytes caps one upload request, all files combined; 0 uses the
+	// built-in default.
+	MaxUploadBytes int64 `yaml:"max_upload_bytes,omitempty"`
+	Autostart      bool  `yaml:"autostart,omitempty"`
 }
 
 // DaemonConfig describes a long-running host process managed by `pg daemon`.

@@ -18,8 +18,9 @@ cascade:
 
 `pg http` 直接在宿主机上启动一个轻量静态文件服务器（不使用容器），用于在不同
 机器之间快速共享文件。目录会渲染成 nginx autoindex 风格的列表，每个文件行都带
-复制按钮；文件本身支持 `Range` 与 `HEAD` 请求。服务器默认只读，只有以
-`--allow-delete` 启动时才会在每个文件行提供删除按钮。
+复制按钮；文件本身支持 `Range` 与 `HEAD` 请求。服务器默认只读：以
+`--allow-delete` 启动时每个文件行会多出删除按钮，`--allow-upload` 会在列表页
+提供上传表单，`--allow-dir` 提供新建目录表单。
 
 默认监听 `127.0.0.1:18080` 并服务当前目录。服务器是脱离终端的独立进程，关闭
 终端不会影响它；同一主机可以同时运行多个服务器。
@@ -36,7 +37,8 @@ pg autostart enable --http --name <NAME>
 
 ```bash
 pg http start [--name NAME] [--port 18080] [--listen 127.0.0.1] \
-  [--dir .] [--tls] [--tls-cert FILE --tls-key FILE] [--allow-delete]
+  [--dir .] [--tls] [--tls-cert FILE --tls-key FILE] \
+  [--allow-delete] [--allow-upload] [--allow-dir] [--max-upload SIZE]
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -48,6 +50,9 @@ pg http start [--name NAME] [--port 18080] [--listen 127.0.0.1] \
 | `--tls` | 关闭 | 使用自动生成的自签名证书提供 HTTPS |
 | `--tls-cert` / `--tls-key` | — | 改用现有证书/私钥对（隐含 `--tls`） |
 | `--allow-delete` | 关闭 | 在每个文件行提供删除按钮并接受 HTTP `DELETE`。没有认证，见「安全与限制」 |
+| `--allow-upload` | 关闭 | 在列表页提供上传表单并接受 multipart `POST`，文件写入当前浏览的目录。没有认证，见「安全与限制」 |
+| `--allow-dir` | 关闭 | 在列表页提供新建目录表单，按相对路径创建目录。没有认证，见「安全与限制」 |
+| `--max-upload` | `1G` | 单个上传请求（所有文件合计）的大小上限，支持 `512M`、`2G` 或字节数 |
 
 `--name` 允许字母、数字、`.`、`_` 和 `-`。
 
@@ -109,21 +114,21 @@ pg http status
 ```
 
 ```
-NAME                    PID      STATUS    AUTOSTART  DELETE   URL                                      DIR
-http-18080              412345   running   -          -        http://127.0.0.1:18080/                  /srv/share
-http-18081              412410   running   enabled    enabled  https://0.0.0.0:18081/                   /srv/docs
+NAME                     PID      STATUS    AUTOSTART DELETE  UPLOAD  MKDIR   URL                                      DIR
+http-18080               412345   running   -         -       -       -       http://127.0.0.1:18080/                  /srv/share
+http-18081               412410   running   enabled   enabled enabled enabled https://0.0.0.0:18081/                   /srv/docs
 ```
 
 `AUTOSTART` 表示该服务器是否已记录到 `pg.yaml` 用于开机自启（见下文）；
-`DELETE` 表示它是否以 `--allow-delete` 启动。`stop` 对启用自启的服务器会额外
-打印提示，因为它们会在下次开机时重新启动。
+`DELETE`、`UPLOAD`、`MKDIR` 分别表示它以哪些写模式启动。`stop` 对启用自启的
+服务器会额外打印提示，因为它们会在下次开机时重新启动。
 
 进程已退出的状态文件会标记为 `stale`；下次 `stop` 时自动清理。
 
 重启会先按 `stop` 的方式优雅停止，再用状态文件里记录的名称、监听地址、目录、
-TLS 证书、删除模式和端口重新拉起 —— 不需要重复传 `start` 的参数。原端口若已被
-占用，会自动尝试下一个空闲端口；自动生成的证书在临近过期或不再覆盖监听地址时
-重新签发：
+TLS 证书、写模式（删除/上传/建目录）、上传大小上限和端口重新拉起 —— 不需要
+重复传 `start` 的参数。原端口若已被占用，会自动尝试下一个空闲端口；自动生成的证书在临近过期或
+不再覆盖监听地址时重新签发：
 
 ```bash
 pg http restart http-18080        # 重启一个
@@ -148,11 +153,11 @@ pg http stop --all
 - 目录排在文件之前，然后按名称不区分大小写排序。目录链接带尾部斜杠；面包屑和
   `..` 链接（根目录除外）用于向上导航。
 - **不会**自动服务 `index.html` —— 目录始终渲染列表。
-- 仅允许 `GET` 与 `HEAD`，其它方法返回 `405`。启用 `--allow-delete` 后，文件
-  还允许 `DELETE`，其余方法仍返回 `405`，并在 `Allow` 头中列出
-  `GET, HEAD, DELETE`。
+- 仅允许 `GET` 与 `HEAD`，其它方法返回 `405`。启用 `--allow-delete` 后文件还
+  允许 `DELETE`；启用 `--allow-upload` 或 `--allow-dir` 后目录允许 `POST`。
+  `405` 响应在 `Allow` 头中列出当前实际放行的方法组合。
 - `/__pgcli_health` 返回 `200 ok`，供就绪探测使用，并会屏蔽同名的真实文件；
-  它永远不可删除。
+  它永远不可删除，也不能被上传覆盖，或在根目录下创建同名目录。
 - 符号链接会被跟随，包括指向所服务目录之外的链接。指向目录的符号链接按目录
   展示，`DELETE` 会像普通目录一样拒绝它。
 
@@ -173,14 +178,43 @@ pg http stop --all
   `--dir` 之外的路径会被拒绝（`403`）。
 - 删除成功返回 `204 No Content`，文件不存在返回 `404`。
 
-`pg http restart` 会保留状态文件中记录的删除模式。需要改变时，先 `stop`
-再用（或不用）`--allow-delete` 重新 `start`。
+`pg http restart` 会保留状态文件中记录的删除/上传/建目录模式。需要改变时，
+先 `stop` 再用相应参数重新 `start`。
+
+### 上传文件
+
+启用 `--allow-upload` 后，列表表格上方会出现上传表单，可一次选择多个文件。
+上传目标就是页面标题 `Directory listing for /<路径>` 显示的目录——在哪个目录
+浏览，文件就落在哪个目录；不存在的子路径不会被自动创建。
+
+- `curl -F files=@a.txt -F files=@b.txt http://host:port/sub/` 等价于在 `/sub/`
+  页面上传。
+- 单个请求（所有文件合计）默认上限 1 GiB，可用 `--max-upload` 调整，超出返回
+  `413`。
+- 同名文件采用**原子覆盖**：先写入同目录的隐藏临时文件，完成后 rename 到目标
+  名，中断不会损坏原文件。目标是目录（含指向目录的符号链接）时返回 `409`。
+- 文件名只保留基础名（浏览器带来的路径会被丢弃）；以 `.pgcli-upload-` 开头的
+  名字，以及根目录下的 `__pgcli_health`，会被拒绝（`400`）。
+- 写入始终被限制在 `--dir` 之内：经过指向外部的符号链接目录会返回 `403`。
+- 页面通过 `fetch` 提交，成功后自动刷新列表；浏览器禁用 JS 时退化为普通表单，
+  完成后以 `303` 回到当前目录。多个文件中途失败时，已写入的文件保留。
+
+### 创建目录
+
+启用 `--allow-dir` 后，列表表格上方会出现新建目录表单。输入相对路径（如
+`images/v2`），目录会创建在当前浏览的目录下，缺失的中间目录一并创建。
+
+- 同一操作也接受普通表单：`curl -d 'dir=images/v2' http://host:port/sub/`。
+- 目标已存在（文件或目录）时返回 `409`，不会静默成功。
+- 绝对路径、任何 `..` 组件、空路径返回 `400`；根目录下的 `__pgcli_health`
+  为保留名，同样返回 `400`。
+- 创建成功后页面自动刷新；无 JS 时以 `303` 回到当前目录。
 
 ## 状态与生命周期
 
 | 路径 | 内容 |
 |---|---|
-| `<base>/http/servers/<name>.json` | 名称、pid、端口、监听地址、目录、TLS 路径、删除模式、日志路径 |
+| `<base>/http/servers/<name>.json` | 名称、pid、端口、监听地址、目录、TLS 路径、写模式（删除/上传/建目录）、上传大小上限、日志路径 |
 | `<base>/http/servers/<name>.log` | 服务器 stdout/stderr |
 | `<base>/http/tls/<name>/cert.pem`、`key.pem` | 自动生成的证书对（`--tls`） |
 
@@ -210,10 +244,10 @@ pg http start --name docs --dir /srv/docs --port 18080
 pg autostart enable --http --name docs
 ```
 
-启用时会把服务器的目录、监听地址、端口、TLS 材料和删除模式快照到 `pg.yaml`
-顶层的 `http` 段；开机服务据此重新创建服务器。若记录的端口在开机时已被占用，
-会尝试下一个空闲端口。之后用同名 `pg http start`/`pg http restart` 会刷新这份
-快照。
+启用时会把服务器的目录、监听地址、端口、TLS 材料、写模式（删除/上传/建目录）
+和上传大小上限快照到 `pg.yaml` 顶层的 `http` 段；开机服务据此重新创建服务器。
+若记录的端口在开机时已被占用，会尝试下一个空闲端口。之后用同名 `pg http
+start`/`pg http restart` 会刷新这份快照。
 
 ```bash
 pg autostart status                        # 显示 "http docs   enabled"
@@ -227,9 +261,11 @@ pg autostart disable --http --name docs    # 删除快照；不会停止正在�
 
 - **没有认证。** 任何能访问该端口的人都能读取所服务目录树中的全部文件。默认
   只监听回环是唯一防线；仅在受信网络中才使用 `0.0.0.0`。
-- **`--allow-delete` 本身也不带任何认证** —— 任何能访问该端口的人同样可以删除
-  `--dir` 下的文件。目录不可被删除、删除也不会逃逸出所服务目录树，但仍应像上文
-  一样保持回环监听。启用该参数且监听地址不是回环时，`pg http start` 会打印警告。
+- **写模式（`--allow-delete`、`--allow-upload`、`--allow-dir`）都不带认证** ——
+  任何能访问该端口的人都可以删除、上传文件，或在 `--dir` 下创建目录。写操作不会
+  逃逸所服务目录树，`POST` 还会校验浏览器 `Origin` 与请求 `Host` 一致以阻止
+  跨站表单提交，但仍应像上文一样保持回环监听。启用任一写参数且监听地址不是
+  回环时，`pg http start` 会打印警告。
 - **`--tls` 只加密、不认证客户端** —— 它不是访问控制手段。
 - 符号链接可能暴露 `--dir` 之外的路径；把所服务的目录视为你愿意共享内容的边界。
 - 每个服务器服务一棵目录树；需要共享多个目录时启动多个服务器。

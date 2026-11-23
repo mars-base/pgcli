@@ -19,8 +19,9 @@ cascade:
 `pg http` starts a small static file server directly on the host — no container
 — for sharing files between machines. Directories render an nginx-style
 autoindex page with a copy button next to every file, and files are served with
-`Range`/`HEAD` support. The server is read-only unless started with
-`--allow-delete`, which adds a delete button per file.
+`Range`/`HEAD` support. The server is read-only by default; `--allow-delete`
+adds a delete button per file, `--allow-upload` adds an upload form that writes
+into the listing's directory, and `--allow-dir` adds a "new folder" form.
 
 The default is `127.0.0.1:18080` serving the current directory. Servers run as
 detached processes, so they survive the terminal that started them; several
@@ -38,7 +39,8 @@ pg autostart enable --http --name <NAME>
 
 ```bash
 pg http start [--name NAME] [--port 18080] [--listen 127.0.0.1] \
-  [--dir .] [--tls] [--tls-cert FILE --tls-key FILE] [--allow-delete]
+  [--dir .] [--tls] [--tls-cert FILE --tls-key FILE] \
+  [--allow-delete] [--allow-upload] [--allow-dir] [--max-upload SIZE]
 ```
 
 | Flag | Default | Notes |
@@ -50,6 +52,9 @@ pg http start [--name NAME] [--port 18080] [--listen 127.0.0.1] \
 | `--tls` | off | Serve HTTPS with a generated self-signed certificate |
 | `--tls-cert` / `--tls-key` | — | Use an existing certificate/key pair instead (implies `--tls`) |
 | `--allow-delete` | off | Add a delete button per file and accept HTTP `DELETE`. There is no authentication — see Security |
+| `--allow-upload` | off | Add an upload form and accept multipart `POST` into the directory being listed. There is no authentication — see Security |
+| `--allow-dir` | off | Add a "new folder" form that creates directories from a relative path. There is no authentication — see Security |
+| `--max-upload` | `1G` | Maximum size of one upload request, all files combined (`512M`, `2G`, or a byte count) |
 
 `--name` accepts letters, digits, `.`, `_` and `-`.
 
@@ -115,25 +120,25 @@ pg http status
 ```
 
 ```
-NAME                    PID      STATUS    AUTOSTART  DELETE   URL                                      DIR
-http-18080              412345   running   -          -        http://127.0.0.1:18080/                  /srv/share
-http-18081              412410   running   enabled    enabled  https://0.0.0.0:18081/                   /srv/docs
+NAME                     PID      STATUS    AUTOSTART DELETE  UPLOAD  MKDIR   URL                                      DIR
+http-18080               412345   running   -         -       -       -       http://127.0.0.1:18080/                  /srv/share
+http-18081               412410   running   enabled   enabled enabled enabled https://0.0.0.0:18081/                   /srv/docs
 ```
 
 `AUTOSTART` shows whether the server is recorded in `pg.yaml` for boot
-autostart (see below); `DELETE` shows whether it was started with
-`--allow-delete`. `stop` prints a reminder for autostart servers, since they
+autostart (see below); `DELETE`, `UPLOAD` and `MKDIR` show which write modes
+it was started with. `stop` prints a reminder for autostart servers, since they
 come back at the next boot.
 
 A state file whose process is gone is marked `stale`; the next `stop` removes
 it.
 
 Restart stops the server gracefully like `stop`, then starts it again from the
-name, listen address, directory, TLS certificate, delete mode and port recorded
-in its state file — no need to repeat the `start` flags. If the original port
-has been taken in the meantime, the next free port is used; a generated
-certificate is re-signed when it is close to expiry or no longer covers the
-listen address:
+name, listen address, directory, TLS certificate, write modes
+(delete/upload/mkdir), upload size limit and port recorded in its state file —
+no need to repeat the `start` flags. If the original port has been taken in the meantime, the
+next free port is used; a generated certificate is re-signed when it is close
+to expiry or no longer covers the listen address:
 
 ```bash
 pg http restart http-18080        # one server
@@ -161,11 +166,13 @@ and `--all` flags.
   at the root) navigate upward.
 - An `index.html` is **not** served automatically — a directory always
   renders its listing.
-- Only `GET` and `HEAD` are allowed; other methods get `405`. With
-  `--allow-delete`, `DELETE` is allowed for files, and any other method still
-  gets `405` with an `Allow` header listing `GET, HEAD, DELETE`.
+- Only `GET` and `HEAD` are allowed by default; other methods get `405`.
+  `--allow-delete` allows `DELETE` for files, and `--allow-upload` or
+  `--allow-dir` allows `POST` on directories. The `Allow` header on a `405`
+  lists the method combination actually enabled.
 - `/__pgcli_health` returns `200 ok` for readiness probes and shadows a real
-  file of that name. It is never deletable.
+  file of that name. It is never deletable, cannot be overwritten by an
+  upload, and its name cannot be used for a root-level directory.
 - Symlinks are followed, including ones pointing outside the served directory.
   A symlink to a directory is listed as a directory, and `DELETE` refuses it
   like any other directory.
@@ -191,15 +198,55 @@ the file. The button reverts to `delete` if not confirmed in time.
   `403`.
 - A successful delete returns `204 No Content`; a missing file returns `404`.
 
-`pg http restart` preserves the delete mode recorded in the state file. To
-change it, stop the server and start it again with or without
-`--allow-delete`.
+`pg http restart` preserves the delete/upload/mkdir modes recorded in the state
+file. To change them, stop the server and start it again with the flags you
+want.
+
+### Uploading files
+
+With `--allow-upload`, every listing gets an upload form above the table and
+accepts multiple files at once. Files land in the directory shown in the
+`Directory listing for <path>` heading — whichever directory you are browsing
+is the destination, and missing subpaths are not created for you.
+
+- `curl -F files=@a.txt -F files=@b.txt http://host:port/sub/` is the
+  equivalent of uploading on the `/sub/` page.
+- One request (all files combined) is capped at 1 GiB by default and adjustable
+  with `--max-upload`; larger requests get `413`.
+- An existing file is **atomically overwritten**: the content is streamed to a
+  hidden temporary file in the same directory and renamed over the target, so
+  an interrupted upload never corrupts the old file. A directory target
+  (including a symlink to one) returns `409`.
+- Only the base name is kept (any path sent by the browser is dropped); names
+  starting with `.pgcli-upload-`, and `__pgcli_health` at the root, are
+  refused with `400`.
+- Writes are confined to `--dir`; a symlinked directory pointing outside the
+  served tree returns `403`.
+- The page submits via `fetch` and reloads the listing automatically on
+  success. Without JavaScript the plain form still works and a `303` returns
+  to the listing. If a multi-file upload fails midway, files already written
+  are kept.
+
+### Creating directories
+
+With `--allow-dir`, every listing gets a "new folder" form. Enter a relative
+path such as `images/v2`; it is created under the directory being browsed,
+along with any missing intermediate directories.
+
+- The same operation works without JavaScript:
+  `curl -d 'dir=images/v2' http://host:port/sub/`.
+- An existing target (file or directory) returns `409` rather than silently
+  succeeding.
+- Absolute paths, any `..` component, and empty paths return `400`;
+  `__pgcli_health` is reserved at the root and also returns `400`.
+- The page reloads automatically on success; without JavaScript a `303`
+  returns to the listing.
 
 ## State and lifecycle
 
 | Path | Contents |
 |---|---|
-| `<base>/http/servers/<name>.json` | name, pid, port, listen address, dir, TLS paths, delete mode, log path |
+| `<base>/http/servers/<name>.json` | name, pid, port, listen address, dir, TLS paths, write modes (delete/upload/mkdir), upload size limit, log path |
 | `<base>/http/servers/<name>.log` | server stdout/stderr |
 | `<base>/http/tls/<name>/cert.pem`, `key.pem` | generated certificate pair (with `--tls`) |
 
@@ -235,10 +282,11 @@ pg autostart enable --http --name docs
 ```
 
 The enable step snapshots the server's directory, listen address, port, TLS
-material and delete mode into the top-level `http` section of `pg.yaml`; the
-boot service then re-creates the server from those settings. If the recorded
-port is taken at boot, the next free port is used. A later `pg http
-start`/`pg http restart` of the same name refreshes the snapshot.
+material, write modes (delete/upload/mkdir) and upload size limit into the
+top-level `http` section of `pg.yaml`; the boot service then re-creates the
+server from those settings. If the recorded port is taken at boot, the next
+free port is used. A later `pg http start`/`pg http restart` of the same name
+refreshes the snapshot.
 
 ```bash
 pg autostart status                        # shows "http docs   enabled"
@@ -254,11 +302,13 @@ servers survive the terminal but not a reboot.
 - **No authentication.** Anyone who can reach the port can read every file in
   the served tree. The default loopback listener is the only guard; expose
   `0.0.0.0` only on a trusted network.
-- **`--allow-delete` adds no authentication of its own** — anyone who can
-  reach the port can also delete files under `--dir`. Directories cannot be
-  removed and deletion never escapes the served tree, but combine it with the
-  loopback listener for the same reason as above. `pg http start` prints a
-  warning when the flag is on and the listener is not loopback.
+- **The write modes (`--allow-delete`, `--allow-upload`, `--allow-dir`) add no
+  authentication** — anyone who can reach the port can delete or upload files
+  and create directories under `--dir`. Writes never escape the served tree,
+  and `POST` additionally requires the browser `Origin` to match the request
+  `Host` to block cross-site form submissions, but keep the loopback listener
+  for the same reason as above. `pg http start` prints a warning when any
+  write flag is on and the listener is not loopback.
 - **`--tls` encrypts but does not authenticate clients** — it is not an access
   control mechanism.
 - Symlinks can expose paths outside `--dir`; treat the served directory as the

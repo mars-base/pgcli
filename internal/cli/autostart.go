@@ -957,14 +957,17 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 				cfg.HTTP = map[string]config.HTTPServerConfig{}
 			}
 			cfg.HTTP[addonName] = config.HTTPServerConfig{
-				Dir:         st.Dir,
-				Listen:      st.Listen,
-				Port:        st.Port,
-				TLS:         st.TLS,
-				CertFile:    st.CertFile,
-				KeyFile:     st.KeyFile,
-				AllowDelete: st.AllowDelete,
-				Autostart:   true,
+				Dir:            st.Dir,
+				Listen:         st.Listen,
+				Port:           st.Port,
+				TLS:            st.TLS,
+				CertFile:       st.CertFile,
+				KeyFile:        st.KeyFile,
+				AllowDelete:    st.AllowDelete,
+				AllowUpload:    st.AllowUpload,
+				AllowDir:       st.AllowDir,
+				MaxUploadBytes: st.MaxUploadBytes,
+				Autostart:      true,
 			}
 		} else {
 			if _, ok := cfg.HTTP[addonName]; !ok {
