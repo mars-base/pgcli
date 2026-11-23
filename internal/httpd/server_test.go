@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 func testTree(t *testing.T) string {
@@ -937,5 +939,157 @@ func TestAdminIPMappedIPv4(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
 		t.Errorf("mapped-IPv4 admin upload = %d, want 201", rec.Code)
+	}
+}
+
+func basicAuthRequest(method, target, user, pass string) *http.Request {
+	req := httptest.NewRequest(method, target, nil)
+	req.SetBasicAuth(user, pass)
+	return req
+}
+
+func TestBasicAuthProtectsWholeSite(t *testing.T) {
+	root := testTree(t)
+	hashA, err := bcrypt.GenerateFromPassword([]byte("s3cret"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashB, err := bcrypt.GenerateFromPassword([]byte("hunter2"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := HandlerWithOptions(root, Options{
+		AllowDelete: true,
+		AllowUpload: true,
+		AllowDir:    true,
+		AuthUsers: map[string]string{
+			"alice": string(hashA),
+			"bob":   string(hashB),
+		},
+	})
+
+	// Every method is challenged before method gating: without credentials a
+	// disabled method is still 401, not 405.
+	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodDelete, http.MethodPost, http.MethodPut} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(method, "/", nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s without credentials = %d, want 401", method, rec.Code)
+		}
+		if got, want := rec.Header().Get("WWW-Authenticate"), `Basic realm="pg http", charset="UTF-8"`; got != want {
+			t.Errorf("%s WWW-Authenticate = %q, want %q", method, got, want)
+		}
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("%s Cache-Control = %q, want no-store", method, got)
+		}
+	}
+
+	// Each configured user gets the full site.
+	for user, pass := range map[string]string{"alice": "s3cret", "bob": "hunter2"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, basicAuthRequest(http.MethodGet, "/", user, pass))
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `href="/a.txt"`) {
+			t.Errorf("%s listing = %d, want 200 with the listing", user, rec.Code)
+		}
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, basicAuthRequest(http.MethodGet, "/a.txt", user, pass))
+		if rec.Code != http.StatusOK || rec.Body.String() != "alpha" {
+			t.Errorf("%s download = %d %q", user, rec.Code, rec.Body.String())
+		}
+	}
+
+	// Wrong passwords, unknown users and malformed headers are all refused.
+	for _, tc := range []struct{ user, pass string }{
+		{"alice", "wrong"},
+		{"mallory", "s3cret"},
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, basicAuthRequest(http.MethodGet, "/", tc.user, tc.pass))
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s/%s = %d, want 401", tc.user, tc.pass, rec.Code)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("bearer token = %d, want 401", rec.Code)
+	}
+
+	// Credentials authorize writes too, but only when the write mode is on.
+	req = httptest.NewRequest(http.MethodDelete, "/a.txt", nil)
+	req.SetBasicAuth("alice", "s3cret")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Errorf("authenticated DELETE = %d, want 204", rec.Code)
+	}
+}
+
+func TestBasicAuthHealthExempt(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := HandlerWithOptions(testTree(t), Options{AuthUsers: map[string]string{"alice": string(hash)}})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, HealthPath, nil))
+	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "ok" {
+		t.Errorf("health without credentials = %d %q, want 200 ok", rec.Code, rec.Body.String())
+	}
+}
+
+func TestBasicAuthWithAdminIP(t *testing.T) {
+	root := testTree(t)
+	hash, err := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := HandlerWithOptions(root, Options{
+		AllowUpload: true,
+		AdminIPs:    []netip.Addr{netip.MustParseAddr("10.0.0.5")},
+		AuthUsers:   map[string]string{"alice": string(hash)},
+	})
+
+	// Authentication comes first: no credentials is 401 even from an admin IP.
+	req := uploadRequest(t, "/", []uploadFile{{"x.txt", "x"}})
+	req.RemoteAddr = "10.0.0.5:5555"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated admin upload = %d, want 401", rec.Code)
+	}
+
+	// Authenticated non-admin sources read but cannot write.
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "192.0.2.1:1234"
+	req.SetBasicAuth("alice", "pw")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("authenticated outsider listing = %d, want 200", rec.Code)
+	}
+	req = uploadRequest(t, "/", []uploadFile{{"evil.txt", "x"}})
+	req.RemoteAddr = "192.0.2.1:1234"
+	req.SetBasicAuth("alice", "pw")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("authenticated outsider upload = %d, want 403", rec.Code)
+	}
+	if _, err := os.Stat(filepath.Join(root, "evil.txt")); !os.IsNotExist(err) {
+		t.Error("authenticated outsider upload wrote a file")
+	}
+
+	// Authenticated admin sources may write.
+	req = uploadRequest(t, "/", []uploadFile{{"ok.txt", "x"}})
+	req.RemoteAddr = "10.0.0.5:5555"
+	req.SetBasicAuth("alice", "pw")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Errorf("authenticated admin upload = %d, want 201", rec.Code)
 	}
 }

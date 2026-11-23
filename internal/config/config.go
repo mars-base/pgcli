@@ -102,8 +102,12 @@ type HTTPServerConfig struct {
 	MaxUploadBytes int64 `yaml:"max_upload_bytes,omitempty"`
 	// AdminIPs restricts the write modes to these source addresses; empty
 	// means no source restriction.
-	AdminIPs  []string `yaml:"admin_ips,omitempty"`
-	Autostart bool     `yaml:"autostart,omitempty"`
+	AdminIPs []string `yaml:"admin_ips,omitempty"`
+	// Auth maps Basic Auth usernames to bcrypt password hashes; empty leaves
+	// the server unauthenticated. Treat pg.yaml as a sensitive file: the
+	// hashes are not plain-text passwords but still credential material.
+	Auth      map[string]string `yaml:"auth,omitempty"`
+	Autostart bool              `yaml:"autostart,omitempty"`
 }
 
 // DaemonConfig describes a long-running host process managed by `pg daemon`.

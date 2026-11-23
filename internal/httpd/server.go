@@ -23,7 +23,10 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 //go:embed assets/index.html
@@ -93,7 +96,14 @@ type Options struct {
 	// source addresses. Empty means every source is allowed. Non-admin
 	// sources get a read-only listing and 403 on write requests.
 	AdminIPs []netip.Addr
+	// AuthUsers maps usernames to bcrypt password hashes. Empty leaves the
+	// whole site unauthenticated; otherwise every request except the health
+	// path requires valid HTTP Basic credentials.
+	AuthUsers map[string]string
 }
+
+// authRealm is the Basic Auth realm shown by browsers in their login prompt.
+const authRealm = "pg http"
 
 // Handler returns the read-only file server for root. Symlinks are followed,
 // including ones that point outside root — the same reach an nginx autoindex
@@ -120,6 +130,11 @@ func HandlerWithOptions(root string, opts Options) http.Handler {
 			w.Header().Set("Cache-Control", "no-store")
 			w.WriteHeader(http.StatusOK)
 			fmt.Fprintln(w, "ok")
+			return
+		}
+
+		if len(opts.AuthUsers) > 0 && !authenticate(r, opts.AuthUsers) {
+			unauthorized(w)
 			return
 		}
 
@@ -179,6 +194,38 @@ func allowHeader(opts Options) string {
 		allow += ", POST"
 	}
 	return allow
+}
+
+// dummyPasswordHash is compared against when a username is unknown, so the
+// response time does not reveal which usernames exist. It is generated lazily:
+// bcrypt is deliberately slow, and package init runs for every pg command.
+var dummyPasswordHash = sync.OnceValue(func() []byte {
+	h, err := bcrypt.GenerateFromPassword([]byte("pg-http-auth-timing-pad"), bcrypt.DefaultCost)
+	if err != nil {
+		panic(err)
+	}
+	return h
+})
+
+// authenticate reports whether the request carries valid Basic credentials.
+func authenticate(r *http.Request, users map[string]string) bool {
+	user, pass, ok := r.BasicAuth()
+	hash, known := users[user]
+	if !ok || !known {
+		if ok {
+			_ = bcrypt.CompareHashAndPassword(dummyPasswordHash(), []byte(pass))
+		}
+		return false
+	}
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(pass)) == nil
+}
+
+// unauthorized asks the client for Basic credentials, which makes browsers
+// show their native login prompt.
+func unauthorized(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", `Basic realm="`+authRealm+`", charset="UTF-8"`)
+	w.Header().Set("Cache-Control", "no-store")
+	http.Error(w, "authentication required", http.StatusUnauthorized)
 }
 
 // sameOrigin rejects browser requests that declare a foreign origin. POST with

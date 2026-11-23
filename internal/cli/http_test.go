@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/mars-base/pgcli/internal/config"
 )
 
@@ -81,7 +83,7 @@ func TestHTTPConfigAllowDeleteRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pg.yaml")
 	c := config.Default()
 	c.HTTP = map[string]config.HTTPServerConfig{
-		"docs": {Dir: "/srv/docs", AllowDelete: true, AllowUpload: true, AllowDir: true, MaxUploadBytes: 1 << 30, AdminIPs: []string{"10.0.0.5", "2001:db8::7"}, Autostart: true},
+		"docs": {Dir: "/srv/docs", AllowDelete: true, AllowUpload: true, AllowDir: true, MaxUploadBytes: 1 << 30, AdminIPs: []string{"10.0.0.5", "2001:db8::7"}, Auth: map[string]string{"alice": "$2a$10$abcdefghijklmnopqrstuv"}, Autostart: true},
 		"ro":   {Dir: "/srv/ro"},
 	}
 	if err := c.Save(path); err != nil {
@@ -91,7 +93,7 @@ func TestHTTPConfigAllowDeleteRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"allow_delete: true", "allow_upload: true", "allow_dir: true", "max_upload_bytes: 1073741824", "admin_ips:", "- 10.0.0.5", "- 2001:db8::7"} {
+	for _, key := range []string{"allow_delete: true", "allow_upload: true", "allow_dir: true", "max_upload_bytes: 1073741824", "admin_ips:", "- 10.0.0.5", "- 2001:db8::7", "auth:", "alice: $2a$10$abcdefghijklmnopqrstuv"} {
 		if !strings.Contains(string(data), key) {
 			t.Errorf("%s not persisted:\n%s", key, data)
 		}
@@ -106,7 +108,10 @@ func TestHTTPConfigAllowDeleteRoundTrip(t *testing.T) {
 	if ips := got.HTTP["docs"].AdminIPs; len(ips) != 2 || ips[0] != "10.0.0.5" || ips[1] != "2001:db8::7" {
 		t.Errorf("docs admin IPs = %v, want the two recorded addresses", ips)
 	}
-	if got.HTTP["ro"].AllowDelete || got.HTTP["ro"].AllowUpload || got.HTTP["ro"].AllowDir || got.HTTP["ro"].MaxUploadBytes != 0 || len(got.HTTP["ro"].AdminIPs) != 0 {
+	if auth := got.HTTP["docs"].Auth; len(auth) != 1 || auth["alice"] != "$2a$10$abcdefghijklmnopqrstuv" {
+		t.Errorf("docs auth = %v, want the recorded hash", auth)
+	}
+	if got.HTTP["ro"].AllowDelete || got.HTTP["ro"].AllowUpload || got.HTTP["ro"].AllowDir || got.HTTP["ro"].MaxUploadBytes != 0 || len(got.HTTP["ro"].AdminIPs) != 0 || len(got.HTTP["ro"].Auth) != 0 {
 		t.Error("ro write modes should stay false")
 	}
 }
@@ -191,11 +196,19 @@ func TestHTTPStateRoundTrip(t *testing.T) {
 		AllowDir:       true,
 		MaxUploadBytes: 2 << 30,
 		AdminIPs:       []string{"10.0.0.5", "2001:db8::7"},
+		Auth:           map[string]string{"alice": "$2a$10$abcdefghijklmnopqrstuv"},
 		LogFile:        "/tmp/http.log",
 		StartedAt:      time.Unix(1700000000, 0).UTC(),
 	}
 	if err := writeHTTPState(dir, st); err != nil {
 		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(dir, "docs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("state file mode = %o, want 600 (it holds bcrypt hashes)", perm)
 	}
 	got, err := readHTTPState(filepath.Join(dir, "docs.json"))
 	if err != nil {
@@ -208,6 +221,9 @@ func TestHTTPStateRoundTrip(t *testing.T) {
 	if ips := got.AdminIPs; len(ips) != 2 || ips[0] != "10.0.0.5" || ips[1] != "2001:db8::7" {
 		t.Errorf("admin IPs round-trip = %v", ips)
 	}
+	if auth := got.Auth; len(auth) != 1 || auth["alice"] != "$2a$10$abcdefghijklmnopqrstuv" {
+		t.Errorf("auth round-trip = %v", auth)
+	}
 
 	ro := httpServerState{Name: "ro", PID: 1, LogFile: "/tmp/ro.log"}
 	if err := writeHTTPState(dir, ro); err != nil {
@@ -217,7 +233,7 @@ func TestHTTPStateRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(filepath.Join(dir, "ro.json"))
-	for _, key := range []string{"allow_delete", "allow_upload", "allow_dir", "max_upload_bytes", "admin_ips"} {
+	for _, key := range []string{"allow_delete", "allow_upload", "allow_dir", "max_upload_bytes", "admin_ips", `"auth"`} {
 		if strings.Contains(string(raw), key) {
 			t.Errorf("%s should be omitted when off: %s", key, raw)
 		}
@@ -315,5 +331,125 @@ func TestHTTPCertHostsWildcardCoverLoopback(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("specific listen address missing from SANs: %v", specific)
+	}
+}
+
+func TestHTTPAuthFlags(t *testing.T) {
+	for _, name := range []string{"auth", "auth-env"} {
+		if f := httpStartCmd.Flags().Lookup(name); f == nil || f.DefValue != "[]" {
+			t.Errorf("start: --%s = %+v, want an empty string array", name, f)
+		}
+	}
+	if f := httpServeCmd.Flags().Lookup("auth-hash"); f == nil || f.DefValue != "[]" {
+		t.Errorf("serve: --auth-hash = %+v, want an empty string array", f)
+	}
+}
+
+func TestParseAuthEntries(t *testing.T) {
+	hashes, err := parseAuthEntries([]string{"alice:s3:cret", "bob:hunter2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hashes) != 2 {
+		t.Fatalf("parsed %d users, want 2", len(hashes))
+	}
+	for user, pass := range map[string]string{"alice": "s3:cret", "bob": "hunter2"} {
+		if err := bcrypt.CompareHashAndPassword([]byte(hashes[user]), []byte(pass)); err != nil {
+			t.Errorf("%s: hash does not match %q: %v (the password may contain ':')", user, pass, err)
+		}
+		if strings.Contains(hashes[user], pass) {
+			t.Errorf("%s: hash %q contains the plain password", user, hashes[user])
+		}
+	}
+
+	for _, bad := range [][]string{
+		{"alice"},
+		{"alice:"},
+		{":pw"},
+		{"alice:a", "alice:b"},
+		{"alice:" + strings.Repeat("x", 73)},
+	} {
+		if _, err := parseAuthEntries(bad); err == nil {
+			t.Errorf("parseAuthEntries(%q) accepted an invalid entry", bad)
+		}
+	}
+	if _, err := parseAuthEntries([]string{"alice:" + strings.Repeat("x", 73)}); err == nil || !strings.Contains(err.Error(), "72") {
+		t.Errorf("long password error = %v, want the 72-byte bcrypt limit", err)
+	}
+}
+
+func TestParseAuthEnv(t *testing.T) {
+	t.Setenv("PGCLI_TEST_AUTH", "carol:pw")
+	hashes, err := parseAuthEnv([]string{"PGCLI_TEST_AUTH"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(hashes["carol"]), []byte("pw")); err != nil {
+		t.Errorf("carol hash does not match: %v", err)
+	}
+
+	if _, err := parseAuthEnv([]string{"PGCLI_TEST_AUTH_UNSET"}); err == nil {
+		t.Error("unset variable was accepted")
+	}
+	t.Setenv("PGCLI_TEST_AUTH_EMPTY", "  ")
+	if _, err := parseAuthEnv([]string{"PGCLI_TEST_AUTH_EMPTY"}); err == nil {
+		t.Error("blank variable was accepted")
+	}
+}
+
+func TestMergeAuthRejectsDuplicateUsers(t *testing.T) {
+	if _, err := mergeAuth(map[string]string{"alice": "$2a$x"}, map[string]string{"alice": "$2a$y"}); err == nil {
+		t.Error("duplicate user across --auth and --auth-env was accepted")
+	}
+	merged, err := mergeAuth(map[string]string{"alice": "$2a$x"}, map[string]string{"bob": "$2a$y"})
+	if err != nil || len(merged) != 2 {
+		t.Errorf("mergeAuth = %v, %v; want both users", merged, err)
+	}
+	if merged, err := mergeAuth(nil, nil); err != nil || merged != nil {
+		t.Errorf("mergeAuth(nil, nil) = %v, %v; want no auth", merged, err)
+	}
+}
+
+func TestParseAuthHashesAndChildArgs(t *testing.T) {
+	hashes, err := parseAuthHashes([]string{"bob:$2a$10$b", "alice:$2b$10$a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := authHashArgs(hashes)
+	want := []string{"--auth-hash", "alice:$2b$10$a", "--auth-hash", "bob:$2a$10$b"}
+	if len(args) != len(want) {
+		t.Fatalf("args = %v, want %v", args, want)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Errorf("args[%d] = %q, want %q (users sorted)", i, args[i], want[i])
+		}
+	}
+
+	for _, bad := range [][]string{
+		{"alice"},
+		{"alice:plaintext"},
+		{":$2a$x"},
+		{"a:$2a$x", "a:$2a$y"},
+	} {
+		if _, err := parseAuthHashes(bad); err == nil {
+			t.Errorf("parseAuthHashes(%q) accepted an invalid entry", bad)
+		}
+	}
+}
+
+// The child command and the state file only ever see bcrypt hashes: the
+// plain-text password must not leak into the serve arguments.
+func TestAuthChildArgsContainNoPlaintext(t *testing.T) {
+	hashes, err := parseAuthEntries([]string{"alice:s3cret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(authHashArgs(hashes), " ")
+	if strings.Contains(joined, "s3cret") {
+		t.Errorf("child args leak the plain password: %s", joined)
+	}
+	if !strings.Contains(joined, "--auth-hash alice:$2") {
+		t.Errorf("child args missing the hashed credential: %s", joined)
 	}
 }

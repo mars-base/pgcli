@@ -96,6 +96,20 @@ pg http start --name images --listen 0.0.0.0 --port 18080 \
 这些写操作限定到列出的来源地址：其它来源只能看到普通的只读列表，写请求返回
 403。这些模式同样没有认证 —— 见 [HTTP 文件服务器](/docs/toolbox/http/)。
 
+加上 `--auth`（或 `--auth-env`）可以让整个站点启用 HTTP Basic 认证——列表、
+下载与写操作都要求登录：
+
+```bash
+pg http start --name images --listen 0.0.0.0 --port 18080 \
+  --dir /srv/offline-images --allow-upload --allow-dir --allow-delete \
+  --auth images:<密码> --auth-env PG_HTTP_AUTH
+```
+
+注意：Ansible 角色内置的任务（预检用的 `ansible.builtin.uri` 与下载用的
+`ansible.builtin.get_url`）不会携带凭据。若在镜像服务器上启用 Basic 认证，需要在
+自己的 task 覆盖里传入 `url_username` / `url_password`，或者让这台上游服务器
+保持无认证并只放在可信网络里。
+
 需要开机自启时：
 
 ```bash
@@ -104,8 +118,9 @@ pg autostart enable --http --name images
 
 注意事项：
 
-- **没有认证**。`0.0.0.0` 只应在可信网段使用，或由防火墙限制访问来源。`--tls`
-  只加密流量，不认证客户端；自签证书还需客户端信任。
+- **不配置 `--auth` 就没有认证**。`0.0.0.0` 只应在可信网段使用，或由防火墙限制
+  访问来源。`--tls` 只加密流量，不认证客户端；自签证书还需客户端信任。服务器
+  离开本机时应把 `--auth` 与 `--tls` 一起启用。
 - 端口被占用时 `pg http` 会自动尝试后续端口（最多 100 次）。务必用
   `pg http status` 核对实际端口，并让 `pgcli_images_http_url` 与之保持一致。
 - 文件必须直接位于被服务目录下：所有消费者请求的是 `<base>/<basename>`，不带

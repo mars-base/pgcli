@@ -108,6 +108,21 @@ source addresses: everyone else sees the plain read-only listing and gets 403
 on writes. These modes come with no authentication either — see
 [HTTP file server](/docs/toolbox/http/).
 
+Add `--auth` (or `--auth-env`) to put the whole site behind HTTP Basic Auth —
+listings, downloads and writes:
+
+```bash
+pg http start --name images --listen 0.0.0.0 --port 18080 \
+  --dir /srv/offline-images --allow-upload --allow-dir --allow-delete \
+  --auth images:<password> --auth-env PG_HTTP_AUTH
+```
+
+Note that the bundled Ansible tasks (`ansible.builtin.uri` for the HEAD
+pre-check, `ansible.builtin.get_url` for downloads) do not send credentials.
+If you enable Basic Auth on the image server, pass `url_username` /
+`url_password` in your own overrides of those tasks, or keep this particular
+server unauthenticated on a trusted network.
+
 Enable it at boot if needed:
 
 ```bash
@@ -116,9 +131,10 @@ pg autostart enable --http --name images
 
 Caveats:
 
-- **There is no authentication.** Use `0.0.0.0` only on a trusted network or
-  behind a firewall. `--tls` encrypts traffic but does not authenticate clients,
-  and its self-signed certificate must be trusted by the clients.
+- **There is no authentication unless you add `--auth`.** Use `0.0.0.0` only
+  on a trusted network or behind a firewall. `--tls` encrypts traffic but does
+  not authenticate clients, and its self-signed certificate must be trusted by
+  the clients. Combine `--auth` with `--tls` when the server leaves the host.
 - If the port is busy, `pg http` tries the next free one (up to 100 attempts).
   Always check `pg http status` and keep `pgcli_images_http_url` consistent with
   the port actually bound.

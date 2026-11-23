@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/netip"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/mars-base/pgcli/internal/certgen"
 	"github.com/mars-base/pgcli/internal/config"
@@ -53,11 +55,13 @@ func init() {
 	httpStartCmd.Flags().Bool("tls", false, "serve HTTPS with a generated self-signed certificate under <base_dir>/http/tls/<name>/")
 	httpStartCmd.Flags().String("tls-cert", "", "use this certificate file instead of generating one (implies --tls)")
 	httpStartCmd.Flags().String("tls-key", "", "private key for --tls-cert")
-	httpStartCmd.Flags().Bool("allow-delete", false, "expose a delete button per file in the listing and accept HTTP DELETE (no authentication — keep the loopback listener)")
-	httpStartCmd.Flags().Bool("allow-upload", false, "expose an upload form in each listing and accept multipart POST into the listed directory (no authentication — keep the loopback listener)")
-	httpStartCmd.Flags().Bool("allow-dir", false, "expose a \"new folder\" form in each listing and accept creating directories from a relative path (no authentication — keep the loopback listener)")
+	httpStartCmd.Flags().Bool("allow-delete", false, "expose a delete button per file in the listing and accept HTTP DELETE (combine with --auth to require a login)")
+	httpStartCmd.Flags().Bool("allow-upload", false, "expose an upload form in each listing and accept multipart POST into the listed directory (combine with --auth to require a login)")
+	httpStartCmd.Flags().Bool("allow-dir", false, "expose a \"new folder\" form in each listing and accept creating directories from a relative path (combine with --auth to require a login)")
 	httpStartCmd.Flags().String("max-upload", "1G", "maximum size of one upload request, all files combined (e.g. 512M, 2G, or a byte count)")
 	httpStartCmd.Flags().String("admin-ip", "", "restrict the write modes (delete/upload/mkdir) to these source IPs, comma separated; other sources get a read-only listing and 403 on writes (default: no restriction)")
+	httpStartCmd.Flags().StringArray("auth", nil, "require HTTP Basic Auth: USER:PASSWORD, repeatable for multiple users (the password may contain ':')")
+	httpStartCmd.Flags().StringArray("auth-env", nil, "read Basic Auth USER:PASSWORD from this environment variable, repeatable")
 
 	httpStopCmd.Flags().Bool("all", false, "stop every pg http server")
 	httpStopCmd.Flags().Duration("timeout", httpStopGrace, "how long to wait for a graceful shutdown before SIGKILL")
@@ -76,6 +80,7 @@ func init() {
 	httpServeCmd.Flags().Bool("allow-dir", false, "allow directory creation via POSTed relative path")
 	httpServeCmd.Flags().String("max-upload", "1G", "maximum size of one upload request, all files combined")
 	httpServeCmd.Flags().String("admin-ip", "", "restrict the write modes to these source IPs, comma separated")
+	httpServeCmd.Flags().StringArray("auth-hash", nil, "USER:BCRYPT_HASH for Basic Auth, repeatable (hashed by the parent process)")
 	httpServeCmd.Flags().String("ready-file", "", "write listen/port JSON here once the socket is bound, then delete on exit")
 	httpServeCmd.Hidden = true
 }
@@ -94,14 +99,19 @@ otherwise run ` + "`pg http start`" + ` again after a reboot.
 
 The default is 127.0.0.1:18080 serving the current directory. If the requested
 port is busy the next free one is used automatically (up to 100 attempts), and
-multiple servers may run at once. There is no authentication: keep the default
-loopback listener, or expose it only on a trusted network. --tls encrypts
-traffic but does not authenticate clients. The server is read-only by default;
+multiple servers may run at once. Without --auth the server is open to anyone
+who can reach the port: keep the default loopback listener, or expose it only
+on a trusted network. --auth USER:PASSWORD (repeatable) or --auth-env VAR
+enables HTTP Basic Auth for the whole site; credentials are stored as bcrypt
+hashes, never in plain text. The /__pgcli_health probe stays reachable without
+credentials. Basic Auth sends the password in clear text, so combine it with
+--tls on untrusted networks. --tls alone encrypts traffic but does not
+authenticate clients. The server is read-only by default;
 --allow-delete adds a delete button to every file row and accepts HTTP DELETE,
 --allow-upload adds an upload form and accepts multipart POST into the listed
 directory, and --allow-dir adds a "new folder" form. With any of them, anyone
-who can reach the port can change files under --dir. Uploads are capped at 1G
-per request by default; --max-upload changes the limit.
+who can pass authentication can change files under --dir. Uploads are capped
+at 1G per request by default; --max-upload changes the limit.
 
 --admin-ip restricts the write modes to the listed source addresses (comma
 separated, e.g. 192.0.2.10,192.0.2.11). Only the direct TCP peer address is
@@ -118,6 +128,7 @@ Examples:
   pg http start --allow-delete --dir /tmp/share
   pg http start --allow-upload --allow-dir --max-upload 512M --dir /tmp/share
   pg http start --allow-upload --admin-ip 192.0.2.10,192.0.2.11 --dir /tmp/share
+  pg http start --auth alice:s3cret --auth-env PG_HTTP_AUTH --dir /srv/share
   pg http status
   pg http restart docs
   pg http stop docs
@@ -144,7 +155,8 @@ var httpRestartCmd = &cobra.Command{
 	Short: "Restart one or more pg http servers with their recorded settings",
 	Long: `restart stops each server gracefully, then starts it again with the listen
 address, directory, TLS certificate, write modes (delete/upload/mkdir), upload
-size limit, admin-IP restriction and port recorded in its state file.
+size limit, admin-IP restriction, Basic Auth users (bcrypt hashes) and port
+recorded in its state file.
 
 If the original port was taken in the meantime, the next free port is used.
 Generated certificates are renewed when they are close to expiry or no longer
@@ -168,21 +180,22 @@ var httpServeCmd = &cobra.Command{
 }
 
 type httpServerState struct {
-	Name           string    `json:"name"`
-	PID            int       `json:"pid"`
-	Port           int       `json:"port"`
-	Listen         string    `json:"listen"`
-	Dir            string    `json:"dir"`
-	TLS            bool      `json:"tls"`
-	CertFile       string    `json:"cert_file,omitempty"`
-	KeyFile        string    `json:"key_file,omitempty"`
-	AllowDelete    bool      `json:"allow_delete,omitempty"`
-	AllowUpload    bool      `json:"allow_upload,omitempty"`
-	AllowDir       bool      `json:"allow_dir,omitempty"`
-	MaxUploadBytes int64     `json:"max_upload_bytes,omitempty"`
-	AdminIPs       []string  `json:"admin_ips,omitempty"`
-	LogFile        string    `json:"log_file"`
-	StartedAt      time.Time `json:"started_at"`
+	Name           string            `json:"name"`
+	PID            int               `json:"pid"`
+	Port           int               `json:"port"`
+	Listen         string            `json:"listen"`
+	Dir            string            `json:"dir"`
+	TLS            bool              `json:"tls"`
+	CertFile       string            `json:"cert_file,omitempty"`
+	KeyFile        string            `json:"key_file,omitempty"`
+	AllowDelete    bool              `json:"allow_delete,omitempty"`
+	AllowUpload    bool              `json:"allow_upload,omitempty"`
+	AllowDir       bool              `json:"allow_dir,omitempty"`
+	MaxUploadBytes int64             `json:"max_upload_bytes,omitempty"`
+	AdminIPs       []string          `json:"admin_ips,omitempty"`
+	Auth           map[string]string `json:"auth,omitempty"`
+	LogFile        string            `json:"log_file"`
+	StartedAt      time.Time         `json:"started_at"`
 }
 
 // httpLaunchOptions are the settings for one `pg http serve` child.
@@ -200,6 +213,7 @@ type httpLaunchOptions struct {
 	AllowDir       bool
 	MaxUploadBytes int64
 	AdminIPs       []netip.Addr
+	AuthHashes     map[string]string
 	LogPath        string
 	ReadyFile      string
 }
@@ -278,7 +292,9 @@ func writeHTTPState(serversDir string, st httpServerState) error {
 	}
 	final := filepath.Join(serversDir, st.Name+".json")
 	tmp := final + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0644); err != nil {
+	// The state file holds bcrypt hashes; keep it private like a credential
+	// file.
+	if err := os.WriteFile(tmp, append(data, '\n'), 0600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, final)
@@ -396,6 +412,20 @@ func runHTTPStart(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("--admin-ip: %w", err)
 	}
+	authEntries, _ := cmd.Flags().GetStringArray("auth")
+	authEnvVars, _ := cmd.Flags().GetStringArray("auth-env")
+	authFlags, err := parseAuthEntries(authEntries)
+	if err != nil {
+		return err
+	}
+	authEnv, err := parseAuthEnv(authEnvVars)
+	if err != nil {
+		return err
+	}
+	authHashes, err := mergeAuth(authFlags, authEnv)
+	if err != nil {
+		return err
+	}
 
 	if (certFile == "") != (keyFile == "") {
 		return fmt.Errorf("--tls-cert and --tls-key must be set together")
@@ -472,6 +502,7 @@ func runHTTPStart(cmd *cobra.Command, _ []string) error {
 			AllowDir:       allowDir,
 			MaxUploadBytes: maxUpload,
 			AdminIPs:       adminIPs,
+			AuthHashes:     authHashes,
 			LogPath:        logPath,
 			ReadyFile:      readyFile,
 		})
@@ -534,6 +565,7 @@ func launchHTTPServer(opts httpLaunchOptions) (*httpServerState, error) {
 	if len(opts.AdminIPs) > 0 {
 		args = append(args, "--admin-ip", strings.Join(adminIPStrings(opts.AdminIPs), ","))
 	}
+	args = append(args, authHashArgs(opts.AuthHashes)...)
 
 	child := exec.Command(opts.Self, args...)
 	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -585,6 +617,7 @@ func launchHTTPServer(opts httpLaunchOptions) (*httpServerState, error) {
 				AllowDir:       opts.AllowDir,
 				MaxUploadBytes: maxUpload,
 				AdminIPs:       adminIPStrings(opts.AdminIPs),
+				Auth:           cloneAuthMap(opts.AuthHashes),
 				LogFile:        opts.LogPath,
 				StartedAt:      time.Now(),
 			}, nil
@@ -615,8 +648,14 @@ func printHTTPStarted(st *httpServerState, certNotAfter time.Time) {
 	if len(st.AdminIPs) > 0 {
 		fmt.Printf("  Admin: writes restricted to %s (--admin-ip)\n", strings.Join(st.AdminIPs, ","))
 	}
-	if (st.AllowDelete || st.AllowUpload || st.AllowDir) && !httpListenLoopback(st.Listen) {
+	if len(st.Auth) > 0 {
+		fmt.Printf("  Auth: basic (users: %s)\n", authUserList(st.Auth))
+	}
+	if len(st.Auth) == 0 && (st.AllowDelete || st.AllowUpload || st.AllowDir) && !httpListenLoopback(st.Listen) {
 		fmt.Printf("  [!] file changes have no authentication: anyone who can reach %s can modify files under %s\n", httpURL(st), st.Dir)
+	}
+	if len(st.Auth) > 0 && !st.TLS && !httpListenLoopback(st.Listen) {
+		fmt.Printf("  [!] Basic Auth without --tls sends passwords in clear text over the network\n")
 	}
 	if st.TLS {
 		if certNotAfter.IsZero() {
@@ -675,6 +714,133 @@ func adminIPStrings(ips []netip.Addr) []string {
 	for i, ip := range ips {
 		out[i] = ip.Unmap().String()
 	}
+	return out
+}
+
+// parseAuthEntries turns --auth USER:PASSWORD values into bcrypt hashes. Only
+// the hashes leave this process: the child command and the state file never
+// see a plain-text password.
+func parseAuthEntries(entries []string) (map[string]string, error) {
+	return parseAuthPairs("--auth", entries)
+}
+
+// parseAuthEnv reads credentials from the environment variables named by
+// --auth-env; each value has the same USER:PASSWORD form as --auth.
+func parseAuthEnv(names []string) (map[string]string, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	entries := make([]string, 0, len(names))
+	for _, name := range names {
+		val, ok := os.LookupEnv(name)
+		if !ok || strings.TrimSpace(val) == "" {
+			return nil, fmt.Errorf("--auth-env %s: variable is not set or empty", name)
+		}
+		entries = append(entries, val)
+	}
+	return parseAuthPairs("--auth-env", entries)
+}
+
+func parseAuthPairs(flagName string, entries []string) (map[string]string, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		user, pass, ok := strings.Cut(entry, ":")
+		if !ok {
+			return nil, fmt.Errorf("%s: %q does not have the USER:PASSWORD form", flagName, entry)
+		}
+		if user == "" {
+			return nil, fmt.Errorf("%s: user name is empty", flagName)
+		}
+		if pass == "" {
+			return nil, fmt.Errorf("%s user %q: password is empty", flagName, user)
+		}
+		if _, dup := out[user]; dup {
+			return nil, fmt.Errorf("%s: user %q is listed more than once", flagName, user)
+		}
+		hash, err := bcrypt.GenerateFromPassword([]byte(pass), bcrypt.DefaultCost)
+		if err != nil {
+			if errors.Is(err, bcrypt.ErrPasswordTooLong) {
+				return nil, fmt.Errorf("%s user %q: password exceeds the 72-byte bcrypt limit", flagName, user)
+			}
+			return nil, fmt.Errorf("%s user %q: %w", flagName, user, err)
+		}
+		out[user] = string(hash)
+	}
+	return out, nil
+}
+
+// mergeAuth combines --auth and --auth-env users, rejecting a username that
+// appears in both.
+func mergeAuth(fromFlags, fromEnv map[string]string) (map[string]string, error) {
+	if len(fromFlags) == 0 && len(fromEnv) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(fromFlags)+len(fromEnv))
+	maps.Copy(out, fromFlags)
+	for user, hash := range fromEnv {
+		if _, dup := out[user]; dup {
+			return nil, fmt.Errorf("auth user %q is configured by both --auth and --auth-env", user)
+		}
+		out[user] = hash
+	}
+	return out, nil
+}
+
+// parseAuthHashes parses USER:BCRYPT_HASH values for the internal serve
+// command, where only hashes are available.
+func parseAuthHashes(entries []string) (map[string]string, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		user, hash, ok := strings.Cut(entry, ":")
+		if !ok || user == "" || !strings.HasPrefix(hash, "$2") {
+			return nil, fmt.Errorf("--auth-hash: %q is not in USER:BCRYPT_HASH form", entry)
+		}
+		if _, dup := out[user]; dup {
+			return nil, fmt.Errorf("--auth-hash: user %q is listed more than once", user)
+		}
+		out[user] = hash
+	}
+	return out, nil
+}
+
+// authHashArgs renders the child's --auth-hash arguments in a stable order.
+func authHashArgs(hashes map[string]string) []string {
+	if len(hashes) == 0 {
+		return nil
+	}
+	users := make([]string, 0, len(hashes))
+	for user := range hashes {
+		users = append(users, user)
+	}
+	sort.Strings(users)
+	out := make([]string, 0, 2*len(users))
+	for _, user := range users {
+		out = append(out, "--auth-hash", user+":"+hashes[user])
+	}
+	return out
+}
+
+func authUserList(hashes map[string]string) string {
+	users := make([]string, 0, len(hashes))
+	for user := range hashes {
+		users = append(users, user)
+	}
+	sort.Strings(users)
+	return strings.Join(users, ",")
+}
+
+func cloneAuthMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	maps.Copy(out, in)
 	return out
 }
 
@@ -872,6 +1038,7 @@ func relaunchHTTPServer(base string, st httpServerState) (*httpServerState, time
 			AllowDir:       st.AllowDir,
 			MaxUploadBytes: st.MaxUploadBytes,
 			AdminIPs:       adminIPs,
+			AuthHashes:     cloneAuthMap(st.Auth),
 			LogPath:        logPath,
 			ReadyFile:      readyFile,
 		})
@@ -920,6 +1087,7 @@ func syncHTTPAutostartEntry(st *httpServerState) {
 	hc.AllowDir = st.AllowDir
 	hc.MaxUploadBytes = st.MaxUploadBytes
 	hc.AdminIPs = append([]string(nil), st.AdminIPs...)
+	hc.Auth = cloneAuthMap(st.Auth)
 	c.HTTP[st.Name] = hc
 	if err := c.Save(path); err != nil {
 		fmt.Printf("  [!] could not refresh autostart settings for %s: %v\n", st.Name, err)
@@ -969,6 +1137,7 @@ func startAutostartHTTPServers(c *config.Config) error {
 			AllowDir:       hc.AllowDir,
 			MaxUploadBytes: hc.MaxUploadBytes,
 			AdminIPs:       append([]string(nil), hc.AdminIPs...),
+			Auth:           cloneAuthMap(hc.Auth),
 		}
 		fmt.Printf("-> Starting http server %q (autostart)...\n", name)
 		newSt, _, err := relaunchHTTPServer(base, st)
@@ -992,7 +1161,7 @@ func runHTTPStatus(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 	autos := httpAutostartNames()
-	fmt.Printf("%-24s %-8s %-9s %-9s %-7s %-7s %-7s %-16s %-40s %s\n", "NAME", "PID", "STATUS", "AUTOSTART", "DELETE", "UPLOAD", "MKDIR", "ADMIN", "URL", "DIR")
+	fmt.Printf("%-24s %-8s %-9s %-9s %-7s %-7s %-7s %-20s %-16s %-40s %s\n", "NAME", "PID", "STATUS", "AUTOSTART", "DELETE", "UPLOAD", "MKDIR", "AUTH", "ADMIN", "URL", "DIR")
 	for _, st := range states {
 		status := "running"
 		if !httpServerAlive(&st) {
@@ -1018,7 +1187,11 @@ func runHTTPStatus(cmd *cobra.Command, _ []string) error {
 		if len(st.AdminIPs) > 0 {
 			admin = strings.Join(st.AdminIPs, ",")
 		}
-		fmt.Printf("%-24s %-8d %-9s %-9s %-7s %-7s %-7s %-16s %-40s %s\n", st.Name, st.PID, status, auto, del, up, mkdir, admin, httpURL(&st), st.Dir)
+		auth := "-"
+		if len(st.Auth) > 0 {
+			auth = authUserList(st.Auth)
+		}
+		fmt.Printf("%-24s %-8d %-9s %-9s %-7s %-7s %-7s %-20s %-16s %-40s %s\n", st.Name, st.PID, status, auto, del, up, mkdir, auth, admin, httpURL(&st), st.Dir)
 	}
 	return nil
 }
@@ -1043,6 +1216,11 @@ func runHTTPServe(cmd *cobra.Command, _ []string) error {
 	adminIPs, err := parseAdminIPs(adminIPStr)
 	if err != nil {
 		return fmt.Errorf("--admin-ip: %w", err)
+	}
+	authHashEntries, _ := cmd.Flags().GetStringArray("auth-hash")
+	authUsers, err := parseAuthHashes(authHashEntries)
+	if err != nil {
+		return err
 	}
 	readyFile, _ := cmd.Flags().GetString("ready-file")
 	if (certFile == "") != (keyFile == "") {
@@ -1075,6 +1253,7 @@ func runHTTPServe(cmd *cobra.Command, _ []string) error {
 			AllowDir:       allowDir,
 			MaxUploadBytes: maxUpload,
 			AdminIPs:       adminIPs,
+			AuthUsers:      authUsers,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

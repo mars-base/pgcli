@@ -22,7 +22,8 @@ autoindex page with a copy button next to every file, and files are served with
 `Range`/`HEAD` support. The server is read-only by default; `--allow-delete`
 adds a delete button per file, `--allow-upload` adds an upload form that writes
 into the listing's directory, and `--allow-dir` adds a "new folder" form.
-`--admin-ip` optionally restricts all three write modes to a list of source IPs.
+`--admin-ip` optionally restricts all three write modes to a list of source IPs,
+and `--auth` / `--auth-env` put the whole site behind HTTP Basic Auth.
 
 The default is `127.0.0.1:18080` serving the current directory. Servers run as
 detached processes, so they survive the terminal that started them; several
@@ -42,7 +43,7 @@ pg autostart enable --http --name <NAME>
 pg http start [--name NAME] [--port 18080] [--listen 127.0.0.1] \
   [--dir .] [--tls] [--tls-cert FILE --tls-key FILE] \
   [--allow-delete] [--allow-upload] [--allow-dir] [--max-upload SIZE] \
-  [--admin-ip IP[,IP...]]
+  [--admin-ip IP[,IP...]] [--auth USER:PASSWORD]... [--auth-env VAR]...
 ```
 
 | Flag | Default | Notes |
@@ -53,11 +54,13 @@ pg http start [--name NAME] [--port 18080] [--listen 127.0.0.1] \
 | `--dir` | `.` | Directory to serve; resolved to an absolute path at start and must exist |
 | `--tls` | off | Serve HTTPS with a generated self-signed certificate |
 | `--tls-cert` / `--tls-key` | — | Use an existing certificate/key pair instead (implies `--tls`) |
-| `--allow-delete` | off | Add a delete button per file and accept HTTP `DELETE`. There is no authentication — see Security |
-| `--allow-upload` | off | Add an upload form and accept multipart `POST` into the directory being listed. There is no authentication — see Security |
-| `--allow-dir` | off | Add a "new folder" form that creates directories from a relative path. There is no authentication — see Security |
+| `--allow-delete` | off | Add a delete button per file and accept HTTP `DELETE`. Combine with `--auth` — see Security |
+| `--allow-upload` | off | Add an upload form and accept multipart `POST` into the directory being listed. Combine with `--auth` — see Security |
+| `--allow-dir` | off | Add a "new folder" form that creates directories from a relative path. Combine with `--auth` — see Security |
 | `--max-upload` | `1G` | Maximum size of one upload request, all files combined (`512M`, `2G`, or a byte count) |
 | `--admin-ip` | empty | Comma-separated source IPs allowed to use the write modes. Empty means no source restriction. Other sources get a read-only listing and `403` on writes |
+| `--auth` | empty | Require HTTP Basic Auth. `USER:PASSWORD`, repeat the flag for several users; the password may contain `:` |
+| `--auth-env` | empty | Read `USER:PASSWORD` from this environment variable, repeatable. Useful to keep passwords out of shell history |
 
 `--name` accepts letters, digits, `.`, `_` and `-`.
 
@@ -116,6 +119,47 @@ To use a certificate from `pg cert` or another tool, pass `--tls-cert` and
 used in place (not copied). Include every address clients will use in the
 certificate's SANs.
 
+### Basic Auth
+
+`--auth USER:PASSWORD` requires HTTP Basic Auth for the **whole site**:
+listings, downloads and the write modes all answer `401` with a
+`WWW-Authenticate` challenge until valid credentials arrive, so browsers show
+their native login prompt. Repeat the flag for several users:
+
+```bash
+pg http start --auth alice:s3cret --auth bob:pa:ssword --dir /srv/share
+```
+
+To keep a password out of shell history and `ps` output, put it in an
+environment variable and name the variable with `--auth-env` (the value has the
+same `USER:PASSWORD` form; an unset or empty variable is an error):
+
+```bash
+export PG_HTTP_AUTH='carol:pw'
+pg http start --auth alice:s3cret --auth-env PG_HTTP_AUTH --dir /srv/share
+```
+
+- The first `:` separates the user name from the password; the password itself
+  may contain `:`. Empty user names or passwords and duplicate users (whether
+  from `--auth` or `--auth-env`) are rejected at start.
+- Passwords are turned into bcrypt hashes when the server starts. Only the
+  hashes are written to the state file and to `pg.yaml`, and only hashes are
+  passed to the detached `pg http serve` child — the plain password never
+  appears in the state or the process list. Passwords are limited to the
+  bcrypt maximum of 72 bytes.
+- `/__pgcli_health` stays reachable **without** credentials so readiness probes
+  keep working.
+- `restart` and autostart reuse the recorded hashes, so they need neither the
+  original flags nor the environment variable. To change a password, stop the
+  server and start it again with the new `--auth`/`--auth-env` values.
+- Basic Auth is cleartext without TLS: over plain HTTP anyone on the path can
+  read the credentials, and `pg http start` prints a warning when `--auth` is
+  used on a non-loopback listener without `--tls`. Combine the two when the
+  server leaves the host.
+- Browsers cache Basic credentials per origin; after a password change they
+  only re-prompt once the server rejects the cached credentials, which a
+  browser restart forces. There is no logout.
+
 ## Inspect, restart and stop
 
 ```bash
@@ -123,14 +167,15 @@ pg http status
 ```
 
 ```
-NAME                     PID      STATUS    AUTOSTART DELETE  UPLOAD  MKDIR   ADMIN             URL                                      DIR
-http-18080               412345   running   -         -       -       -       all               http://127.0.0.1:18080/                  /srv/share
-http-18081               412410   running   enabled   enabled enabled enabled 192.0.2.10,192.0.2.11 https://0.0.0.0:18081/              /srv/docs
+NAME                     PID      STATUS    AUTOSTART DELETE  UPLOAD  MKDIR   AUTH                 ADMIN             URL                                      DIR
+http-18080               412345   running   -         -       -       -       -                    all               http://127.0.0.1:18080/                  /srv/share
+http-18081               412410   running   enabled   enabled enabled enabled alice,bob            192.0.2.10,192.0.2.11 https://0.0.0.0:18081/              /srv/docs
 ```
 
 `AUTOSTART` shows whether the server is recorded in `pg.yaml` for boot
 autostart (see below); `DELETE`, `UPLOAD` and `MKDIR` show which write modes
-it was started with, and `ADMIN` lists the source IPs allowed to use them
+it was started with, `AUTH` lists the Basic Auth users it accepts (`-` when the
+site is open), and `ADMIN` lists the source IPs allowed to use the write modes
 (`all` when unrestricted). `stop` prints a reminder for autostart servers,
 since they come back at the next boot.
 
@@ -139,8 +184,8 @@ it.
 
 Restart stops the server gracefully like `stop`, then starts it again from the
 name, listen address, directory, TLS certificate, write modes
-(delete/upload/mkdir), upload size limit, admin-IP restriction and port
-recorded in its state file —
+(delete/upload/mkdir), upload size limit, admin-IP restriction, Basic Auth
+users (bcrypt hashes) and port recorded in its state file —
 no need to repeat the `start` flags. If the original port has been taken in the meantime, the
 next free port is used; a generated certificate is re-signed when it is close
 to expiry or no longer covers the listen address:
@@ -176,15 +221,16 @@ and `--all` flags.
   `--allow-dir` allows `POST` on directories. The `Allow` header on a `405`
   lists the method combination actually enabled.
 - `/__pgcli_health` returns `200 ok` for readiness probes and shadows a real
-  file of that name. It is never deletable, cannot be overwritten by an
-  upload, and its name cannot be used for a root-level directory.
+  file of that name. It never requires Basic Auth credentials. It is never
+  deletable, cannot be overwritten by an upload, and its name cannot be used
+  for a root-level directory.
 - Symlinks are followed, including ones pointing outside the served directory.
   A symlink to a directory is listed as a directory, and `DELETE` refuses it
   like any other directory.
 
 Every file row has a **copy** button. Clicking it copies the file's absolute
 URL (`http(s)://host:port/path`) and shows `copyed` next to the button for
-about 1.5 seconds. The Clipboard API is only available in secure contexts, so
+about 2 seconds. The Clipboard API is only available in secure contexts, so
 over plain HTTP the page falls back to a hidden textarea and
 `document.execCommand('copy')`; both paths work in browsers that still support
 execCommand.
@@ -282,12 +328,15 @@ pg http start --allow-upload --allow-dir --allow-delete \
 
 | Path | Contents |
 |---|---|
-| `<base>/http/servers/<name>.json` | name, pid, port, listen address, dir, TLS paths, write modes (delete/upload/mkdir), upload size limit, admin IPs, log path |
+| `<base>/http/servers/<name>.json` | name, pid, port, listen address, dir, TLS paths, write modes (delete/upload/mkdir), upload size limit, admin IPs, Basic Auth users with bcrypt hashes, log path |
 | `<base>/http/servers/<name>.log` | server stdout/stderr |
 | `<base>/http/tls/<name>/cert.pem`, `key.pem` | generated certificate pair (with `--tls`) |
 
 `<base>` is `base_dir` from `pg.yaml` when the config exists, otherwise the
 platform default (usually `~/.pgcli`). `pg http` works without a config file.
+
+The state file is written with mode `0600` because it carries the Basic Auth
+hashes.
 
 Servers are launched with `setsid`, so closing the terminal does not stop them.
 They are **not** started at boot by default; after a reboot, either run
@@ -318,11 +367,11 @@ pg autostart enable --http --name docs
 ```
 
 The enable step snapshots the server's directory, listen address, port, TLS
-material, write modes (delete/upload/mkdir), upload size limit and admin IP
-list into the top-level `http` section of `pg.yaml`; the boot service then
-re-creates the server from those settings. If the recorded port is taken at
-boot, the next free port is used. A later `pg http start`/`pg http restart` of
-the same name refreshes the snapshot.
+material, write modes (delete/upload/mkdir), upload size limit, admin IP list
+and Basic Auth users (bcrypt hashes) into the top-level `http` section of
+`pg.yaml`; the boot service then re-creates the server from those settings. If
+the recorded port is taken at boot, the next free port is used. A later
+`pg http start`/`pg http restart` of the same name refreshes the snapshot.
 
 ```bash
 pg autostart status                        # shows "http docs   enabled"
@@ -335,21 +384,30 @@ servers survive the terminal but not a reboot.
 
 ## Security and limits
 
-- **No authentication.** Anyone who can reach the port can read every file in
-  the served tree. The default loopback listener is the only guard; expose
-  `0.0.0.0` only on a trusted network.
+- **No authentication by default.** Without `--auth`/`--auth-env`, anyone who
+  can reach the port can read every file in the served tree. The default
+  loopback listener is the only guard; expose `0.0.0.0` only on a trusted
+  network or turn on Basic Auth.
+- **Basic Auth is a full-site gate, not a strong access control.** It protects
+  listings, downloads and writes alike, and `pg http start` warns when it is
+  used without `--tls` on a non-loopback listener: over plain HTTP the
+  credentials travel in clear text. The bcrypt hashes in the state file and in
+  `pg.yaml` are not plain passwords but are still credential material — treat
+  those files as sensitive.
 - **The write modes (`--allow-delete`, `--allow-upload`, `--allow-dir`) add no
-  authentication** — anyone who can reach the port can delete or upload files
-  and create directories under `--dir`. Writes never escape the served tree,
-  and `POST` additionally requires the browser `Origin` to match the request
-  `Host` to block cross-site form submissions, but keep the loopback listener
-  for the same reason as above. `pg http start` prints a warning when any
-  write flag is on and the listener is not loopback. `--admin-ip` narrows
+  separate authentication** — anyone who can pass Basic Auth (or reach the
+  port when auth is off) can delete or upload files and create directories
+  under `--dir`. Writes never escape the served tree, and `POST` additionally
+  requires the browser `Origin` to match the request `Host` to block
+  cross-site form submissions, but keep the loopback listener for the same
+  reason as above. `pg http start` prints a warning when any write flag is on
+  without `--auth` and the listener is not loopback. `--admin-ip` narrows
   writes to the listed source addresses and hides the write UI from everyone
-  else, but it is still not authentication — see Restricting writes by source
-  IP above.
+  else, but it is not authentication — see Restricting writes by source IP
+  above.
 - **`--tls` encrypts but does not authenticate clients** — it is not an access
-  control mechanism.
+  control mechanism, though it is what keeps Basic Auth credentials from
+  traveling in clear text.
 - Symlinks can expose paths outside `--dir`; treat the served directory as the
   boundary of what you are willing to share.
 - One directory tree per server; start several servers to share several trees.

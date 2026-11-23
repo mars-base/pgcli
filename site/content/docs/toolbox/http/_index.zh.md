@@ -21,7 +21,7 @@ cascade:
 复制按钮；文件本身支持 `Range` 与 `HEAD` 请求。服务器默认只读：以
 `--allow-delete` 启动时每个文件行会多出删除按钮，`--allow-upload` 会在列表页
 提供上传表单，`--allow-dir` 提供新建目录表单；`--admin-ip` 可把这三种写模式
-限制到指定来源 IP。
+限制到指定来源 IP，`--auth` / `--auth-env` 则让整个站点启用 HTTP Basic 认证。
 
 默认监听 `127.0.0.1:18080` 并服务当前目录。服务器是脱离终端的独立进程，关闭
 终端不会影响它；同一主机可以同时运行多个服务器。
@@ -40,7 +40,7 @@ pg autostart enable --http --name <NAME>
 pg http start [--name NAME] [--port 18080] [--listen 127.0.0.1] \
   [--dir .] [--tls] [--tls-cert FILE --tls-key FILE] \
   [--allow-delete] [--allow-upload] [--allow-dir] [--max-upload SIZE] \
-  [--admin-ip IP[,IP...]]
+  [--admin-ip IP[,IP...]] [--auth USER:PASSWORD]... [--auth-env VAR]...
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -51,11 +51,13 @@ pg http start [--name NAME] [--port 18080] [--listen 127.0.0.1] \
 | `--dir` | `.` | 要服务的目录；启动时解析为绝对路径，且必须存在 |
 | `--tls` | 关闭 | 使用自动生成的自签名证书提供 HTTPS |
 | `--tls-cert` / `--tls-key` | — | 改用现有证书/私钥对（隐含 `--tls`） |
-| `--allow-delete` | 关闭 | 在每个文件行提供删除按钮并接受 HTTP `DELETE`。没有认证，见「安全与限制」 |
-| `--allow-upload` | 关闭 | 在列表页提供上传表单并接受 multipart `POST`，文件写入当前浏览的目录。没有认证，见「安全与限制」 |
-| `--allow-dir` | 关闭 | 在列表页提供新建目录表单，按相对路径创建目录。没有认证，见「安全与限制」 |
+| `--allow-delete` | 关闭 | 在每个文件行提供删除按钮并接受 HTTP `DELETE`。配合 `--auth` 使用——见「安全与限制」 |
+| `--allow-upload` | 关闭 | 在列表页提供上传表单并接受 multipart `POST`，文件写入当前浏览的目录。配合 `--auth` 使用——见「安全与限制」 |
+| `--allow-dir` | 关闭 | 在列表页提供新建目录表单，按相对路径创建目录。配合 `--auth` 使用——见「安全与限制」 |
 | `--max-upload` | `1G` | 单个上传请求（所有文件合计）的大小上限，支持 `512M`、`2G` 或字节数 |
 | `--admin-ip` | 空 | 允许使用写模式的来源 IP，逗号分隔；空表示不限制来源。其它来源只能看到只读列表，写请求返回 `403` |
+| `--auth` | 空 | 要求 HTTP Basic 认证。`USER:PASSWORD` 形式，可重复以添加多个用户；密码可以包含 `:` |
+| `--auth-env` | 空 | 从该环境变量读取 `USER:PASSWORD`，可重复。用于避免密码进入 shell 历史记录 |
 
 `--name` 允许字母、数字、`.`、`_` 和 `-`。
 
@@ -110,6 +112,38 @@ curl --cacert ~/.pgcli/http/tls/http-18080/cert.pem \
 会校验证书与私钥匹配、处于有效期内，并直接引用（不复制）。请确保证书 SAN 包含
 客户端会使用的所有地址。
 
+### Basic 认证
+
+`--auth USER:PASSWORD` 为**整个站点**启用 HTTP Basic 认证：列表、下载与写模式
+在没有有效凭据时一律返回 `401` 并带 `WWW-Authenticate` 质询，浏览器会弹出原生
+登录框。重复该参数可添加多个用户：
+
+```bash
+pg http start --auth alice:s3cret --auth bob:pa:ssword --dir /srv/share
+```
+
+为避免密码进入 shell 历史和 `ps` 输出，可以把密码放进环境变量，用 `--auth-env`
+指定变量名（变量值同样是 `USER:PASSWORD` 形式；变量未设置或为空时报错）：
+
+```bash
+export PG_HTTP_AUTH='carol:pw'
+pg http start --auth alice:s3cret --auth-env PG_HTTP_AUTH --dir /srv/share
+```
+
+- 以**第一个** `:` 分隔用户名与密码，密码本身可以包含 `:`。用户名为空、密码为
+  空，或用户名重复（无论来自 `--auth` 还是 `--auth-env`）都会在启动时报错。
+- 启动时把密码转换成 bcrypt 哈希。状态文件和 `pg.yaml` 中只写入哈希，传给脱离
+  终端的 `pg http serve` 子进程的也只有哈希——明文密码不会出现在状态文件或进程
+  列表中。密码长度受 bcrypt 72 字节上限约束。
+- `/__pgcli_health` **无需**凭据即可访问，就绪探测不受影响。
+- `restart` 与开机自启直接复用记录的哈希，不需要重新提供参数或环境变量。修改
+  密码时先 `stop` 服务器，再用新的 `--auth`/`--auth-env` 值重新 `start`。
+- 没有 TLS 时 Basic 认证是明文的：走普通 HTTP 时路径上任何人都能读到凭据，
+  因此在非回环监听且未启用 `--tls` 时，`pg http start` 会打印警告。服务器离开
+  本机时应同时启用两者。
+- 浏览器按 origin 缓存 Basic 凭据；修改密码后，只有服务器拒绝缓存凭据时才会
+  重新弹出登录框，重启浏览器可以强制触发。没有登出功能。
+
 ## 查看、重启与停止
 
 ```bash
@@ -117,21 +151,22 @@ pg http status
 ```
 
 ```
-NAME                     PID      STATUS    AUTOSTART DELETE  UPLOAD  MKDIR   ADMIN             URL                                      DIR
-http-18080               412345   running   -         -       -       -       all               http://127.0.0.1:18080/                  /srv/share
-http-18081               412410   running   enabled   enabled enabled enabled 192.0.2.10,192.0.2.11 https://0.0.0.0:18081/              /srv/docs
+NAME                     PID      STATUS    AUTOSTART DELETE  UPLOAD  MKDIR   AUTH                 ADMIN             URL                                      DIR
+http-18080               412345   running   -         -       -       -       -                    all               http://127.0.0.1:18080/                  /srv/share
+http-18081               412410   running   enabled   enabled enabled enabled alice,bob            192.0.2.10,192.0.2.11 https://0.0.0.0:18081/              /srv/docs
 ```
 
 `AUTOSTART` 表示该服务器是否已记录到 `pg.yaml` 用于开机自启（见下文）；
-`DELETE`、`UPLOAD`、`MKDIR` 分别表示它以哪些写模式启动，`ADMIN` 列出允许使用
-这些模式的来源 IP（不限制时为 `all`）。`stop` 对启用自启的服务器会额外打印
-提示，因为它们会在下次开机时重新启动。
+`DELETE`、`UPLOAD`、`MKDIR` 分别表示它以哪些写模式启动，`AUTH` 列出它接受的
+Basic 认证用户（站点开放时为 `-`），`ADMIN` 列出允许使用这些写模式的来源 IP
+（不限制时为 `all`）。`stop` 对启用自启的服务器会额外打印提示，因为它们会在
+下次开机时重新启动。
 
 进程已退出的状态文件会标记为 `stale`；下次 `stop` 时自动清理。
 
 重启会先按 `stop` 的方式优雅停止，再用状态文件里记录的名称、监听地址、目录、
-TLS 证书、写模式（删除/上传/建目录）、上传大小上限、admin IP 限制和端口重新
-拉起 —— 不需要重复传 `start` 的参数。原端口若已被占用，会自动尝试下一个空闲端口；自动生成的证书在临近过期或
+TLS 证书、写模式（删除/上传/建目录）、上传大小上限、admin IP 限制、Basic 认证
+用户（bcrypt 哈希）和端口重新拉起 —— 不需要重复传 `start` 的参数。原端口若已被占用，会自动尝试下一个空闲端口；自动生成的证书在临近过期或
 不再覆盖监听地址时重新签发：
 
 ```bash
@@ -161,12 +196,13 @@ pg http stop --all
   允许 `DELETE`；启用 `--allow-upload` 或 `--allow-dir` 后目录允许 `POST`。
   `405` 响应在 `Allow` 头中列出当前实际放行的方法组合。
 - `/__pgcli_health` 返回 `200 ok`，供就绪探测使用，并会屏蔽同名的真实文件；
-  它永远不可删除，也不能被上传覆盖，或在根目录下创建同名目录。
+  它永远不需要 Basic 认证凭据，永远不可删除，也不能被上传覆盖，或在根目录下创建
+  同名目录。
 - 符号链接会被跟随，包括指向所服务目录之外的链接。指向目录的符号链接按目录
   展示，`DELETE` 会像普通目录一样拒绝它。
 
 每个文件行都有一个 **copy** 按钮。点击后复制该文件的绝对 URL
-（`http(s)://host:port/path`），并在按钮旁显示 `copyed` 约 1.5 秒。Clipboard API
+（`http(s)://host:port/path`），并在按钮旁显示 `copyed` 约 2 秒。Clipboard API
 只在安全上下文可用，因此通过普通 HTTP 访问时页面会回退到隐藏 textarea +
 `document.execCommand('copy')`；两条路径在仍支持 execCommand 的浏览器中均可工作。
 
@@ -244,12 +280,14 @@ pg http start --allow-upload --allow-dir --allow-delete \
 
 | 路径 | 内容 |
 |---|---|
-| `<base>/http/servers/<name>.json` | 名称、pid、端口、监听地址、目录、TLS 路径、写模式（删除/上传/建目录）、上传大小上限、admin IP、日志路径 |
+| `<base>/http/servers/<name>.json` | 名称、pid、端口、监听地址、目录、TLS 路径、写模式（删除/上传/建目录）、上传大小上限、admin IP、Basic 认证用户及其 bcrypt 哈希、日志路径 |
 | `<base>/http/servers/<name>.log` | 服务器 stdout/stderr |
 | `<base>/http/tls/<name>/cert.pem`、`key.pem` | 自动生成的证书对（`--tls`） |
 
 `<base>` 取 `pg.yaml` 中的 `base_dir`（配置存在时），否则用平台默认目录（通常
 为 `~/.pgcli`）。`pg http` 无需配置文件也能工作。
+
+状态文件带有 Basic 认证哈希，因此以 `0600` 权限写入。
 
 服务器以 `setsid` 启动，关闭终端不会停止它们。默认**不会**开机自启；重启主机后
 需要再次执行 `pg http start`，或启用下面的自动启动。
@@ -275,8 +313,8 @@ pg autostart enable --http --name docs
 ```
 
 启用时会把服务器的目录、监听地址、端口、TLS 材料、写模式（删除/上传/建目录）、
-上传大小上限和 admin IP 列表快照到 `pg.yaml` 顶层的 `http` 段；开机服务据此
-重新创建服务器。
+上传大小上限、admin IP 列表和 Basic 认证用户（bcrypt 哈希）快照到 `pg.yaml`
+顶层的 `http` 段；开机服务据此重新创建服务器。
 若记录的端口在开机时已被占用，会尝试下一个空闲端口。之后用同名 `pg http
 start`/`pg http restart` 会刷新这份快照。
 
@@ -290,16 +328,22 @@ pg autostart disable --http --name docs    # 删除快照；不会停止正在�
 
 ## 安全与限制
 
-- **没有认证。** 任何能访问该端口的人都能读取所服务目录树中的全部文件。默认
-  只监听回环是唯一防线；仅在受信网络中才使用 `0.0.0.0`。
-- **写模式（`--allow-delete`、`--allow-upload`、`--allow-dir`）都不带认证** ——
-  任何能访问该端口的人都可以删除、上传文件，或在 `--dir` 下创建目录。写操作不会
-  逃逸所服务目录树，`POST` 还会校验浏览器 `Origin` 与请求 `Host` 一致以阻止
-  跨站表单提交，但仍应像上文一样保持回环监听。启用任一写参数且监听地址不是
-  回环时，`pg http start` 会打印警告。`--admin-ip` 可以把写操作收窄到列出的
-  来源地址，并对其它来源隐藏写 UI，但它仍然不是认证——见上文「按来源 IP 限制
-  写操作」。
-- **`--tls` 只加密、不认证客户端** —— 它不是访问控制手段。
+- **默认没有认证。** 未配置 `--auth`/`--auth-env` 时，任何能访问该端口的人都能
+  读取所服务目录树中的全部文件。默认只监听回环是唯一防线；仅在受信网络中才使用
+  `0.0.0.0`，或者启用 Basic 认证。
+- **Basic 认证是全站门槛，不是强访问控制。** 它同时保护列表、下载与写操作；
+  在非回环监听且未启用 `--tls` 时 `pg http start` 会警告：走普通 HTTP 时凭据以
+  明文传输。状态文件和 `pg.yaml` 中的 bcrypt 哈希不是明文密码，但仍属凭据材料
+  ——应把这些文件按敏感文件对待。
+- **写模式（`--allow-delete`、`--allow-upload`、`--allow-dir`）不带额外的认证**
+  —— 能通过 Basic 认证（或未启用认证时能访问该端口）的人都可以删除、上传文件，
+  或在 `--dir` 下创建目录。写操作不会逃逸所服务目录树，`POST` 还会校验浏览器
+  `Origin` 与请求 `Host` 一致以阻止跨站表单提交，但仍应像上文一样保持回环监听。
+  启用任一写参数且监听地址不是回环、又未配置 `--auth` 时，`pg http start` 会
+  打印警告。`--admin-ip` 可以把写操作收窄到列出的来源地址，并对其它来源隐藏写
+  UI，但它仍然不是认证——见上文「按来源 IP 限制写操作」。
+- **`--tls` 只加密、不认证客户端** —— 它不是访问控制手段，但它是让 Basic 认证
+  凭据不经过明文传输的手段。
 - 符号链接可能暴露 `--dir` 之外的路径；把所服务的目录视为你愿意共享内容的边界。
 - 每个服务器服务一棵目录树；需要共享多个目录时启动多个服务器。
 - 日志只追加，pgcli 不做轮转。
