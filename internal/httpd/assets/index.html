@@ -77,8 +77,39 @@
     pointer-events: none;
     animation: fade .15s ease-out;
   }
+  .copied-pop.center {
+    position: fixed;
+    left: 50%;
+    right: auto;
+    top: 1.25rem;
+    transform: translateX(-50%);
+    font-size: .8rem;
+    padding: .35rem .7rem;
+    max-width: calc(100vw - 2rem);
+    white-space: normal;
+    text-align: center;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, .18);
+    z-index: 10;
+  }
   @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
   .tools { display: flex; flex-wrap: wrap; gap: .5rem 1.25rem; margin-bottom: .9rem; }
+  .upload-progress { flex-basis: 100%; display: flex; align-items: center; gap: .6rem; }
+  .upload-progress[hidden] { display: none; }
+  .upload-progress-track {
+    flex: 1;
+    height: 6px;
+    background: var(--row);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+  .upload-progress-bar { height: 100%; width: 0; background: var(--accent); transition: width .1s linear; }
+  .upload-progress-text {
+    color: var(--muted);
+    font-size: .75rem;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
   form.tool { display: inline-flex; align-items: center; gap: .4rem; position: relative; margin: 0; }
   form.tool input[type="text"] {
     font: inherit;
@@ -119,10 +150,14 @@
   {{- if or .AllowUpload .AllowDir}}
   <div class="tools">
     {{- if .AllowUpload}}
-    <form class="tool upload" method="post" enctype="multipart/form-data" action="{{.PostHref}}">
+    <form class="tool upload" method="post" enctype="multipart/form-data" action="{{.PostHref}}" data-max-upload="{{.MaxUploadBytes}}">
       <input type="file" name="files" multiple required>
       <button type="submit">upload</button>
     </form>
+    <div class="upload-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" hidden>
+      <div class="upload-progress-track"><div class="upload-progress-bar"></div></div>
+      <span class="upload-progress-text"></span>
+    </div>
     {{- end}}
     {{- if .AllowDir}}
     <form class="tool mkdir" method="post" action="{{.PostHref}}">
@@ -179,10 +214,12 @@
     var old = btn.parentElement.querySelector('.copied-pop');
     if (old) old.remove();
     var pop = document.createElement('span');
-    pop.className = 'copied-pop';
+    // Errors raised by the tool forms become a centered toast; copy/delete
+    // feedback stays next to its row button.
+    pop.className = btn.closest('form.tool') ? 'copied-pop center' : 'copied-pop';
     pop.textContent = text;
     btn.parentElement.appendChild(pop);
-    setTimeout(function () { pop.remove(); }, 1500);
+    setTimeout(function () { pop.remove(); }, 2000);
   }
 
   document.querySelectorAll('button.copy').forEach(function (btn) {
@@ -195,26 +232,94 @@
     });
   });
 
+  function formatBytes(n) {
+    if (!isFinite(n) || n < 0) return '?';
+    var units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+    var i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return (i === 0 ? String(Math.round(n)) : n.toFixed(n >= 10 ? 0 : 1)) + ' ' + units[i];
+  }
+
+  // XHR rather than fetch: only xhr.upload reports transfer progress.
+  function sendUpload(action, formData, fallbackTotal, showProgress) {
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', action);
+      xhr.setRequestHeader('X-Requested-With', 'fetch');
+      xhr.upload.onprogress = function (e) {
+        showProgress(e.loaded, e.lengthComputable ? e.total : fallbackTotal);
+      };
+      xhr.onload = function () {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve();
+          return;
+        }
+        var detail = (xhr.responseText || '').trim();
+        reject(new Error('HTTP ' + xhr.status + (detail ? ': ' + detail : '')));
+      };
+      xhr.onerror = function () { reject(new Error('network error')); };
+      xhr.send(formData);
+    });
+  }
+
   document.querySelectorAll('form.tool').forEach(function (form) {
     form.addEventListener('submit', async function (e) {
       e.preventDefault();
+      var isUpload = form.classList.contains('upload');
       var btn = form.querySelector('button[type="submit"]');
       var idle = btn.textContent;
+      var progress = isUpload ? document.querySelector('.upload-progress') : null;
+      var bar = progress ? progress.querySelector('.upload-progress-bar') : null;
+      var text = progress ? progress.querySelector('.upload-progress-text') : null;
+
+      function showProgress(loaded, total) {
+        if (!progress) return;
+        var pct = total > 0 ? Math.min(100, Math.floor(loaded * 100 / total)) : 0;
+        progress.hidden = false;
+        progress.setAttribute('aria-valuenow', pct);
+        bar.style.width = pct + '%';
+        text.textContent = pct + '% · ' + formatBytes(loaded) + ' / ' + formatBytes(total);
+      }
+
+      function resetProgress() {
+        if (!progress) return;
+        progress.hidden = true;
+        bar.style.width = '0';
+        text.textContent = '';
+      }
+
+      var input = isUpload ? form.querySelector('input[type="file"]') : null;
+      var total = 0;
+      for (var i = 0; input && i < input.files.length; i++) total += input.files[i].size;
+      var limit = Number(form.getAttribute('data-max-upload')) || 0;
+      if (isUpload && limit > 0 && total > limit) {
+        showPopup(btn, 'too large: ' + formatBytes(total) + ' selected, limit ' + formatBytes(limit));
+        return;
+      }
+
       btn.disabled = true;
-      btn.textContent = form.classList.contains('upload') ? 'uploading...' : 'creating...';
+      btn.textContent = isUpload ? 'uploading...' : 'creating...';
       try {
-        var res = await fetch(form.getAttribute('action'), {
-          method: 'POST',
-          body: new FormData(form),
-          headers: { 'X-Requested-With': 'fetch' },
-          cache: 'no-store'
-        });
-        if (!res.ok) {
-          var detail = (await res.text()).trim();
-          throw new Error('HTTP ' + res.status + (detail ? ': ' + detail : ''));
+        if (isUpload) {
+          showProgress(0, total);
+          await sendUpload(form.getAttribute('action'), new FormData(form), total, showProgress);
+        } else {
+          // FormData always encodes as multipart, which the server treats as an
+          // upload; the mkdir form must go as urlencoded like its native POST.
+          var res = await fetch(form.getAttribute('action'), {
+            method: 'POST',
+            body: new URLSearchParams(new FormData(form)),
+            headers: { 'X-Requested-With': 'fetch' },
+            cache: 'no-store'
+          });
+          if (!res.ok) {
+            var detail = (await res.text()).trim();
+            throw new Error('HTTP ' + res.status + (detail ? ': ' + detail : ''));
+          }
         }
         location.reload();
       } catch (err) {
+        resetProgress();
         btn.disabled = false;
         btn.textContent = idle;
         showPopup(btn, 'failed (' + err.message + ')');

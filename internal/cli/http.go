@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -56,6 +57,7 @@ func init() {
 	httpStartCmd.Flags().Bool("allow-upload", false, "expose an upload form in each listing and accept multipart POST into the listed directory (no authentication — keep the loopback listener)")
 	httpStartCmd.Flags().Bool("allow-dir", false, "expose a \"new folder\" form in each listing and accept creating directories from a relative path (no authentication — keep the loopback listener)")
 	httpStartCmd.Flags().String("max-upload", "1G", "maximum size of one upload request, all files combined (e.g. 512M, 2G, or a byte count)")
+	httpStartCmd.Flags().String("admin-ip", "", "restrict the write modes (delete/upload/mkdir) to these source IPs, comma separated; other sources get a read-only listing and 403 on writes (default: no restriction)")
 
 	httpStopCmd.Flags().Bool("all", false, "stop every pg http server")
 	httpStopCmd.Flags().Duration("timeout", httpStopGrace, "how long to wait for a graceful shutdown before SIGKILL")
@@ -73,6 +75,7 @@ func init() {
 	httpServeCmd.Flags().Bool("allow-upload", false, "allow multipart POST uploads")
 	httpServeCmd.Flags().Bool("allow-dir", false, "allow directory creation via POSTed relative path")
 	httpServeCmd.Flags().String("max-upload", "1G", "maximum size of one upload request, all files combined")
+	httpServeCmd.Flags().String("admin-ip", "", "restrict the write modes to these source IPs, comma separated")
 	httpServeCmd.Flags().String("ready-file", "", "write listen/port JSON here once the socket is bound, then delete on exit")
 	httpServeCmd.Hidden = true
 }
@@ -100,12 +103,21 @@ directory, and --allow-dir adds a "new folder" form. With any of them, anyone
 who can reach the port can change files under --dir. Uploads are capped at 1G
 per request by default; --max-upload changes the limit.
 
+--admin-ip restricts the write modes to the listed source addresses (comma
+separated, e.g. 192.0.2.10,192.0.2.11). Only the direct TCP peer address is
+checked, so behind a reverse proxy every request appears to come from the
+proxy and the option has no effect. Other sources still get the read-only
+listing, without the forms or delete buttons, and receive 403 for write
+requests. Reads are never restricted. The default is empty: no source
+restriction, the write-mode flags alone decide.
+
 Examples:
   pg http start
   pg http start --listen 0.0.0.0 --port 18080 --dir /srv/share
   pg http start --name docs --tls --dir ~/docs
   pg http start --allow-delete --dir /tmp/share
   pg http start --allow-upload --allow-dir --max-upload 512M --dir /tmp/share
+  pg http start --allow-upload --admin-ip 192.0.2.10,192.0.2.11 --dir /tmp/share
   pg http status
   pg http restart docs
   pg http stop docs
@@ -132,7 +144,7 @@ var httpRestartCmd = &cobra.Command{
 	Short: "Restart one or more pg http servers with their recorded settings",
 	Long: `restart stops each server gracefully, then starts it again with the listen
 address, directory, TLS certificate, write modes (delete/upload/mkdir), upload
-size limit and port recorded in its state file.
+size limit, admin-IP restriction and port recorded in its state file.
 
 If the original port was taken in the meantime, the next free port is used.
 Generated certificates are renewed when they are close to expiry or no longer
@@ -168,6 +180,7 @@ type httpServerState struct {
 	AllowUpload    bool      `json:"allow_upload,omitempty"`
 	AllowDir       bool      `json:"allow_dir,omitempty"`
 	MaxUploadBytes int64     `json:"max_upload_bytes,omitempty"`
+	AdminIPs       []string  `json:"admin_ips,omitempty"`
 	LogFile        string    `json:"log_file"`
 	StartedAt      time.Time `json:"started_at"`
 }
@@ -186,6 +199,7 @@ type httpLaunchOptions struct {
 	AllowUpload    bool
 	AllowDir       bool
 	MaxUploadBytes int64
+	AdminIPs       []netip.Addr
 	LogPath        string
 	ReadyFile      string
 }
@@ -377,6 +391,11 @@ func runHTTPStart(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("--max-upload: %w", err)
 	}
+	adminIPStr, _ := cmd.Flags().GetString("admin-ip")
+	adminIPs, err := parseAdminIPs(adminIPStr)
+	if err != nil {
+		return fmt.Errorf("--admin-ip: %w", err)
+	}
 
 	if (certFile == "") != (keyFile == "") {
 		return fmt.Errorf("--tls-cert and --tls-key must be set together")
@@ -452,6 +471,7 @@ func runHTTPStart(cmd *cobra.Command, _ []string) error {
 			AllowUpload:    allowUpload,
 			AllowDir:       allowDir,
 			MaxUploadBytes: maxUpload,
+			AdminIPs:       adminIPs,
 			LogPath:        logPath,
 			ReadyFile:      readyFile,
 		})
@@ -511,6 +531,9 @@ func launchHTTPServer(opts httpLaunchOptions) (*httpServerState, error) {
 	if opts.AllowDir {
 		args = append(args, "--allow-dir")
 	}
+	if len(opts.AdminIPs) > 0 {
+		args = append(args, "--admin-ip", strings.Join(adminIPStrings(opts.AdminIPs), ","))
+	}
 
 	child := exec.Command(opts.Self, args...)
 	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -561,6 +584,7 @@ func launchHTTPServer(opts httpLaunchOptions) (*httpServerState, error) {
 				AllowUpload:    opts.AllowUpload,
 				AllowDir:       opts.AllowDir,
 				MaxUploadBytes: maxUpload,
+				AdminIPs:       adminIPStrings(opts.AdminIPs),
 				LogFile:        opts.LogPath,
 				StartedAt:      time.Now(),
 			}, nil
@@ -588,6 +612,9 @@ func printHTTPStarted(st *httpServerState, certNotAfter time.Time) {
 	if st.AllowDir {
 		fmt.Printf("  Mkdir: enabled (--allow-dir)\n")
 	}
+	if len(st.AdminIPs) > 0 {
+		fmt.Printf("  Admin: writes restricted to %s (--admin-ip)\n", strings.Join(st.AdminIPs, ","))
+	}
 	if (st.AllowDelete || st.AllowUpload || st.AllowDir) && !httpListenLoopback(st.Listen) {
 		fmt.Printf("  [!] file changes have no authentication: anyone who can reach %s can modify files under %s\n", httpURL(st), st.Dir)
 	}
@@ -610,6 +637,45 @@ func formatUploadLimit(b int64) string {
 	default:
 		return fmt.Sprintf("%dB", b)
 	}
+}
+
+// parseAdminIPs splits a comma-separated --admin-ip value. An empty value
+// means no source restriction. IPv4-mapped IPv6 forms are unmapped so they
+// compare equal to the plain IPv4 address; duplicates are dropped.
+func parseAdminIPs(s string) ([]netip.Addr, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
+	var out []netip.Addr
+	seen := map[netip.Addr]bool{}
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, fmt.Errorf("empty entry in %q", s)
+		}
+		ip, err := netip.ParseAddr(part)
+		if err != nil {
+			return nil, fmt.Errorf("%q is not an IP address", part)
+		}
+		ip = ip.Unmap()
+		if seen[ip] {
+			continue
+		}
+		seen[ip] = true
+		out = append(out, ip)
+	}
+	return out, nil
+}
+
+func adminIPStrings(ips []netip.Addr) []string {
+	if len(ips) == 0 {
+		return nil
+	}
+	out := make([]string, len(ips))
+	for i, ip := range ips {
+		out[i] = ip.Unmap().String()
+	}
+	return out
 }
 
 // httpListenLoopback reports whether a listen address only accepts local
@@ -785,6 +851,10 @@ func relaunchHTTPServer(base string, st httpServerState) (*httpServerState, time
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("locating the pg executable: %w", err)
 	}
+	adminIPs, err := parseAdminIPs(strings.Join(st.AdminIPs, ","))
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("server %q state: admin IPs: %w", st.Name, err)
+	}
 	logPath := filepath.Join(serversDir, st.Name+".log")
 	readyFile := filepath.Join(serversDir, st.Name+".ready")
 	for p := port; p < port+httpPortTries; p++ {
@@ -801,6 +871,7 @@ func relaunchHTTPServer(base string, st httpServerState) (*httpServerState, time
 			AllowUpload:    st.AllowUpload,
 			AllowDir:       st.AllowDir,
 			MaxUploadBytes: st.MaxUploadBytes,
+			AdminIPs:       adminIPs,
 			LogPath:        logPath,
 			ReadyFile:      readyFile,
 		})
@@ -848,6 +919,7 @@ func syncHTTPAutostartEntry(st *httpServerState) {
 	hc.AllowUpload = st.AllowUpload
 	hc.AllowDir = st.AllowDir
 	hc.MaxUploadBytes = st.MaxUploadBytes
+	hc.AdminIPs = append([]string(nil), st.AdminIPs...)
 	c.HTTP[st.Name] = hc
 	if err := c.Save(path); err != nil {
 		fmt.Printf("  [!] could not refresh autostart settings for %s: %v\n", st.Name, err)
@@ -896,6 +968,7 @@ func startAutostartHTTPServers(c *config.Config) error {
 			AllowUpload:    hc.AllowUpload,
 			AllowDir:       hc.AllowDir,
 			MaxUploadBytes: hc.MaxUploadBytes,
+			AdminIPs:       append([]string(nil), hc.AdminIPs...),
 		}
 		fmt.Printf("-> Starting http server %q (autostart)...\n", name)
 		newSt, _, err := relaunchHTTPServer(base, st)
@@ -919,7 +992,7 @@ func runHTTPStatus(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 	autos := httpAutostartNames()
-	fmt.Printf("%-24s %-8s %-9s %-9s %-7s %-7s %-7s %-40s %s\n", "NAME", "PID", "STATUS", "AUTOSTART", "DELETE", "UPLOAD", "MKDIR", "URL", "DIR")
+	fmt.Printf("%-24s %-8s %-9s %-9s %-7s %-7s %-7s %-16s %-40s %s\n", "NAME", "PID", "STATUS", "AUTOSTART", "DELETE", "UPLOAD", "MKDIR", "ADMIN", "URL", "DIR")
 	for _, st := range states {
 		status := "running"
 		if !httpServerAlive(&st) {
@@ -941,7 +1014,11 @@ func runHTTPStatus(cmd *cobra.Command, _ []string) error {
 		if st.AllowDir {
 			mkdir = "enabled"
 		}
-		fmt.Printf("%-24s %-8d %-9s %-9s %-7s %-7s %-7s %-40s %s\n", st.Name, st.PID, status, auto, del, up, mkdir, httpURL(&st), st.Dir)
+		admin := "all"
+		if len(st.AdminIPs) > 0 {
+			admin = strings.Join(st.AdminIPs, ",")
+		}
+		fmt.Printf("%-24s %-8d %-9s %-9s %-7s %-7s %-7s %-16s %-40s %s\n", st.Name, st.PID, status, auto, del, up, mkdir, admin, httpURL(&st), st.Dir)
 	}
 	return nil
 }
@@ -961,6 +1038,11 @@ func runHTTPServe(cmd *cobra.Command, _ []string) error {
 	maxUpload, err := parseRAM(maxUploadStr)
 	if err != nil {
 		return fmt.Errorf("--max-upload: %w", err)
+	}
+	adminIPStr, _ := cmd.Flags().GetString("admin-ip")
+	adminIPs, err := parseAdminIPs(adminIPStr)
+	if err != nil {
+		return fmt.Errorf("--admin-ip: %w", err)
 	}
 	readyFile, _ := cmd.Flags().GetString("ready-file")
 	if (certFile == "") != (keyFile == "") {
@@ -992,6 +1074,7 @@ func runHTTPServe(cmd *cobra.Command, _ []string) error {
 			AllowUpload:    allowUpload,
 			AllowDir:       allowDir,
 			MaxUploadBytes: maxUpload,
+			AdminIPs:       adminIPs,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

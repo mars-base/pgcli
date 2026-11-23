@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -571,6 +572,12 @@ func TestUploadMaxBytes(t *testing.T) {
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized upload = %d, want 413", rec.Code)
 	}
+	if body := rec.Body.String(); !strings.Contains(body, "--max-upload") || !strings.Contains(body, "64 B") {
+		t.Errorf("413 body = %q, want the configured limit named", body)
+	}
+	if body := getBody(t, h, "/"); !strings.Contains(body, `data-max-upload="64"`) {
+		t.Error("listing does not advertise the upload limit")
+	}
 	if _, err := os.Stat(filepath.Join(root, "big.txt")); !os.IsNotExist(err) {
 		t.Error("oversized upload left a partial file")
 	}
@@ -750,7 +757,7 @@ func TestCrossOriginWritesRefused(t *testing.T) {
 	}
 
 	req = uploadRequest(t, "/", []uploadFile{{"ok.txt", "x"}})
-	req.Header.Set("Origin", "http://" + req.Host)
+	req.Header.Set("Origin", "http://"+req.Host)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
@@ -768,6 +775,7 @@ func TestListingForms(t *testing.T) {
 	body := getBody(t, h, "/sub/")
 	for _, want := range []string{
 		`class="tool upload"`, `enctype="multipart/form-data"`, `name="files"`,
+		`data-max-upload="1073741824"`,
 		`class="tool mkdir"`, `name="dir"`, `action="/sub/"`,
 		"upload enabled", "mkdir enabled",
 	} {
@@ -802,5 +810,132 @@ func TestAllowHeaderComposition(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/", nil))
 	if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != "GET, HEAD, DELETE, POST" {
 		t.Errorf("PUT = %d Allow=%q, want 405 with GET, HEAD, DELETE, POST", rec.Code, rec.Header().Get("Allow"))
+	}
+}
+
+func TestAdminIPRestrictsWrites(t *testing.T) {
+	root := testTree(t)
+	h := HandlerWithOptions(root, Options{
+		AllowDelete: true,
+		AllowUpload: true,
+		AllowDir:    true,
+		AdminIPs: []netip.Addr{
+			netip.MustParseAddr("10.0.0.5"),
+			netip.MustParseAddr("2001:db8::7"),
+		},
+	})
+	const outsider = "192.0.2.1:1234"
+
+	// Non-admin sources still read, but the listing is stripped of every
+	// management control.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = outsider
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("outsider listing = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, banned := range []string{`class="tool upload"`, `class="tool mkdir"`, `class="delete"`, "upload enabled", "mkdir enabled", "delete enabled"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("outsider listing contains %q", banned)
+		}
+	}
+
+	req = uploadRequest(t, "/", []uploadFile{{"evil.txt", "x"}})
+	req.RemoteAddr = outsider
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("outsider upload = %d, want 403", rec.Code)
+	}
+	if _, err := os.Stat(filepath.Join(root, "evil.txt")); !os.IsNotExist(err) {
+		t.Error("outsider upload wrote a file")
+	}
+
+	req = formRequest(t, "/", "evil-dir")
+	req.RemoteAddr = outsider
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("outsider mkdir = %d, want 403", rec.Code)
+	}
+	if _, err := os.Stat(filepath.Join(root, "evil-dir")); !os.IsNotExist(err) {
+		t.Error("outsider mkdir created a directory")
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/a.txt", nil)
+	req.RemoteAddr = outsider
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("outsider DELETE = %d, want 403", rec.Code)
+	}
+	if _, err := os.Stat(filepath.Join(root, "a.txt")); err != nil {
+		t.Error("outsider DELETE removed a file")
+	}
+
+	// Listed sources get the management page and may write. Both address
+	// families are matched.
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.0.0.5:5555"
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body = rec.Body.String()
+	for _, want := range []string{`class="tool upload"`, `class="tool mkdir"`, `class="delete"`, "delete enabled"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("admin listing missing %q", want)
+		}
+	}
+
+	req = uploadRequest(t, "/", []uploadFile{{"ok.txt", "x"}})
+	req.RemoteAddr = "[2001:db8::7]:6666"
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Errorf("admin upload = %d, want 201", rec.Code)
+	}
+
+	req = formRequest(t, "/", "newdir")
+	req.RemoteAddr = "10.0.0.5:5555"
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Errorf("admin mkdir = %d, want 201", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/a.txt", nil)
+	req.RemoteAddr = "10.0.0.5:5555"
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Errorf("admin DELETE = %d, want 204", rec.Code)
+	}
+}
+
+func TestAdminIPEmptyMeansUnrestricted(t *testing.T) {
+	root := testTree(t)
+	h := HandlerWithOptions(root, Options{AllowUpload: true})
+	req := uploadRequest(t, "/", []uploadFile{{"open.txt", "x"}})
+	req.RemoteAddr = "203.0.113.9:1234"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Errorf("upload with no admin list = %d, want 201", rec.Code)
+	}
+}
+
+func TestAdminIPMappedIPv4(t *testing.T) {
+	root := testTree(t)
+	h := HandlerWithOptions(root, Options{
+		AllowUpload: true,
+		AdminIPs:    []netip.Addr{netip.MustParseAddr("10.0.0.5")},
+	})
+	req := uploadRequest(t, "/", []uploadFile{{"mapped.txt", "x"}})
+	req.RemoteAddr = "[::ffff:10.0.0.5]:1234"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Errorf("mapped-IPv4 admin upload = %d, want 201", rec.Code)
 	}
 }

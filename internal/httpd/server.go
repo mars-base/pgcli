@@ -15,7 +15,9 @@ import (
 	"io"
 	"io/fs"
 	"mime"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path"
@@ -60,16 +62,17 @@ type entry struct {
 }
 
 type pageData struct {
-	Title       string
-	Path        string
-	Crumbs      []crumb
-	ParentHref  string
-	HasParent   bool
-	AllowDelete bool
-	AllowUpload bool
-	AllowDir    bool
-	PostHref    string
-	Entries     []entry
+	Title          string
+	Path           string
+	Crumbs         []crumb
+	ParentHref     string
+	HasParent      bool
+	AllowDelete    bool
+	AllowUpload    bool
+	AllowDir       bool
+	MaxUploadBytes int64
+	PostHref       string
+	Entries        []entry
 }
 
 // Options configures optional write features of the file server. Everything is
@@ -86,6 +89,10 @@ type Options struct {
 	AllowDir bool
 	// MaxUploadBytes caps one upload request; 0 means DefaultMaxUploadBytes.
 	MaxUploadBytes int64
+	// AdminIPs restricts the write modes (delete, upload, mkdir) to these
+	// source addresses. Empty means every source is allowed. Non-admin
+	// sources get a read-only listing and 403 on write requests.
+	AdminIPs []netip.Addr
 }
 
 // Handler returns the read-only file server for root. Symlinks are followed,
@@ -158,7 +165,7 @@ func HandlerWithOptions(root string, opts Options) http.Handler {
 			http.ServeFileFS(w, r, fsys, name)
 			return
 		}
-		serveListing(w, fsys, name, clean, opts)
+		serveListing(w, r, fsys, name, clean, opts)
 	})
 }
 
@@ -193,12 +200,41 @@ func sameOrigin(r *http.Request) bool {
 	return strings.EqualFold(u.Host, r.Host)
 }
 
+// adminAllowed reports whether the request's source address may use the write
+// modes. An empty AdminIPs list allows every source. Only the direct TCP peer
+// (RemoteAddr) is consulted: a reverse proxy in front of the server makes every
+// request appear to come from the proxy's address.
+func adminAllowed(r *http.Request, opts Options) bool {
+	if len(opts.AdminIPs) == 0 {
+		return true
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	ip = ip.Unmap()
+	for _, allowed := range opts.AdminIPs {
+		if allowed.Unmap() == ip {
+			return true
+		}
+	}
+	return false
+}
+
 // handleDelete unlinks one file beneath root. Directories are refused so an
 // empty directory is never removed, and a symlink to a directory is refused
 // too, matching the listing (which offers delete only on files).
 func handleDelete(w http.ResponseWriter, root string, fsys fs.FS, clean string, r *http.Request, opts Options) {
 	if !sameOrigin(r) {
 		http.Error(w, "cross-origin request refused", http.StatusForbidden)
+		return
+	}
+	if !adminAllowed(r, opts) {
+		http.Error(w, "write access is restricted to admin IPs", http.StatusForbidden)
 		return
 	}
 	name := strings.TrimPrefix(clean, "/")
@@ -270,6 +306,10 @@ func handlePost(w http.ResponseWriter, root string, fsys fs.FS, clean string, r 
 		http.Error(w, "cross-origin request refused", http.StatusForbidden)
 		return
 	}
+	if !adminAllowed(r, opts) {
+		http.Error(w, "write access is restricted to admin IPs", http.StatusForbidden)
+		return
+	}
 	name := strings.TrimPrefix(clean, "/")
 	if name == "" {
 		name = "."
@@ -304,7 +344,7 @@ func handlePost(w http.ResponseWriter, root string, fsys fs.FS, clean string, r 
 			limit = DefaultMaxUploadBytes
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, limit)
-		handleUpload(w, root, fsys, name, clean, r)
+		handleUpload(w, root, fsys, name, clean, r, limit)
 	case "application/x-www-form-urlencoded":
 		if !opts.AllowDir {
 			http.Error(w, "directory creation is disabled", http.StatusMethodNotAllowed)
@@ -321,7 +361,7 @@ func handlePost(w http.ResponseWriter, root string, fsys fs.FS, clean string, r 
 // addressed directory and renames it over the final name once complete, so an
 // interrupted upload never corrupts an existing file. Later parts overwrite
 // earlier ones with the same name.
-func handleUpload(w http.ResponseWriter, root string, fsys fs.FS, dir, clean string, r *http.Request) {
+func handleUpload(w http.ResponseWriter, root string, fsys fs.FS, dir, clean string, r *http.Request, limit int64) {
 	mr, err := r.MultipartReader()
 	if err != nil {
 		status := http.StatusUnsupportedMediaType
@@ -345,8 +385,7 @@ func handleUpload(w http.ResponseWriter, root string, fsys fs.FS, dir, clean str
 			break
 		}
 		if err != nil {
-			status := uploadErrorStatus(err)
-			http.Error(w, http.StatusText(status), status)
+			writeUploadError(w, err, limit)
 			return
 		}
 		if part.FileName() == "" {
@@ -358,8 +397,7 @@ func handleUpload(w http.ResponseWriter, root string, fsys fs.FS, dir, clean str
 			return
 		}
 		if err := saveUpload(rfs, fsys, dir, fname, part); err != nil {
-			status := uploadErrorStatus(err)
-			http.Error(w, http.StatusText(status), status)
+			writeUploadError(w, err, limit)
 			return
 		}
 		uploaded = append(uploaded, fname)
@@ -546,6 +584,17 @@ func uploadErrorStatus(err error) int {
 	}
 }
 
+// writeUploadError reports a failed upload part. The size cap is spelled out
+// so the page can tell the user which --max-upload value was exceeded.
+func writeUploadError(w http.ResponseWriter, err error, limit int64) {
+	status := uploadErrorStatus(err)
+	if status == http.StatusRequestEntityTooLarge {
+		http.Error(w, fmt.Sprintf("upload exceeds the %s limit (--max-upload)", humanSize(limit)), status)
+		return
+	}
+	http.Error(w, http.StatusText(status), status)
+}
+
 // wantsJSON distinguishes the page's fetch calls (which reload on success)
 // from plain form submissions (which follow the 303 back to the listing).
 func wantsJSON(r *http.Request) bool {
@@ -571,7 +620,7 @@ func dirHref(clean string) string {
 	return (&url.URL{Path: clean + "/"}).EscapedPath()
 }
 
-func serveListing(w http.ResponseWriter, fsys fs.FS, name, clean string, opts Options) {
+func serveListing(w http.ResponseWriter, r *http.Request, fsys fs.FS, name, clean string, opts Options) {
 	dirents, err := fs.ReadDir(fsys, name)
 	if err != nil {
 		http.Error(w, "cannot read directory", http.StatusInternalServerError)
@@ -618,17 +667,23 @@ func serveListing(w http.ResponseWriter, fsys fs.FS, name, clean string, opts Op
 		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
 	})
 
+	admin := adminAllowed(r, opts)
+	limit := opts.MaxUploadBytes
+	if limit <= 0 {
+		limit = DefaultMaxUploadBytes
+	}
 	data := pageData{
-		Title:       "Index of " + clean,
-		Path:        clean,
-		Crumbs:      crumbsFor(clean),
-		HasParent:   clean != "/",
-		ParentHref:  parentHref(clean),
-		AllowDelete: opts.AllowDelete,
-		AllowUpload: opts.AllowUpload,
-		AllowDir:    opts.AllowDir,
-		PostHref:    dirHref(clean),
-		Entries:     entries,
+		Title:          "Index of " + clean,
+		Path:           clean,
+		Crumbs:         crumbsFor(clean),
+		HasParent:      clean != "/",
+		ParentHref:     parentHref(clean),
+		AllowDelete:    opts.AllowDelete && admin,
+		AllowUpload:    opts.AllowUpload && admin,
+		AllowDir:       opts.AllowDir && admin,
+		MaxUploadBytes: limit,
+		PostHref:       dirHref(clean),
+		Entries:        entries,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

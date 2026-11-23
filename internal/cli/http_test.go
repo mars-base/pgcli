@@ -38,6 +38,31 @@ func TestHTTPAllowUploadDirFlags(t *testing.T) {
 	if f := httpServeCmd.Flags().Lookup("max-upload"); f == nil || f.DefValue != "1G" {
 		t.Errorf("serve: --max-upload = %+v, want default 1G", f)
 	}
+	if f := httpStartCmd.Flags().Lookup("admin-ip"); f == nil || f.DefValue != "" {
+		t.Errorf("start: --admin-ip = %+v, want an empty default (no restriction)", f)
+	}
+	if f := httpServeCmd.Flags().Lookup("admin-ip"); f == nil || f.DefValue != "" {
+		t.Errorf("serve: --admin-ip = %+v, want an empty default", f)
+	}
+}
+
+func TestParseAdminIPs(t *testing.T) {
+	if ips, err := parseAdminIPs(""); err != nil || len(ips) != 0 {
+		t.Errorf("empty value = %v, %v; want no restriction", ips, err)
+	}
+	ips, err := parseAdminIPs(" 10.0.0.5 , 2001:db8::7 ,::ffff:10.0.0.5,10.0.0.5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"10.0.0.5", "2001:db8::7"}
+	if got := adminIPStrings(ips); len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("parsed = %v, want %v (trimmed, unmapped, deduped)", got, want)
+	}
+	for _, bad := range []string{"nope", "10.0.0.5,", ",10.0.0.5", "10.0.0.5, bad", "10.0.0.0/24"} {
+		if _, err := parseAdminIPs(bad); err == nil {
+			t.Errorf("parseAdminIPs(%q) accepted an invalid list", bad)
+		}
+	}
 }
 
 func TestFormatUploadLimit(t *testing.T) {
@@ -56,7 +81,7 @@ func TestHTTPConfigAllowDeleteRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pg.yaml")
 	c := config.Default()
 	c.HTTP = map[string]config.HTTPServerConfig{
-		"docs": {Dir: "/srv/docs", AllowDelete: true, AllowUpload: true, AllowDir: true, MaxUploadBytes: 1 << 30, Autostart: true},
+		"docs": {Dir: "/srv/docs", AllowDelete: true, AllowUpload: true, AllowDir: true, MaxUploadBytes: 1 << 30, AdminIPs: []string{"10.0.0.5", "2001:db8::7"}, Autostart: true},
 		"ro":   {Dir: "/srv/ro"},
 	}
 	if err := c.Save(path); err != nil {
@@ -66,7 +91,7 @@ func TestHTTPConfigAllowDeleteRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"allow_delete: true", "allow_upload: true", "allow_dir: true", "max_upload_bytes: 1073741824"} {
+	for _, key := range []string{"allow_delete: true", "allow_upload: true", "allow_dir: true", "max_upload_bytes: 1073741824", "admin_ips:", "- 10.0.0.5", "- 2001:db8::7"} {
 		if !strings.Contains(string(data), key) {
 			t.Errorf("%s not persisted:\n%s", key, data)
 		}
@@ -78,7 +103,10 @@ func TestHTTPConfigAllowDeleteRoundTrip(t *testing.T) {
 	if !got.HTTP["docs"].AllowDelete || !got.HTTP["docs"].AllowUpload || !got.HTTP["docs"].AllowDir {
 		t.Error("docs write modes lost on load")
 	}
-	if got.HTTP["ro"].AllowDelete || got.HTTP["ro"].AllowUpload || got.HTTP["ro"].AllowDir || got.HTTP["ro"].MaxUploadBytes != 0 {
+	if ips := got.HTTP["docs"].AdminIPs; len(ips) != 2 || ips[0] != "10.0.0.5" || ips[1] != "2001:db8::7" {
+		t.Errorf("docs admin IPs = %v, want the two recorded addresses", ips)
+	}
+	if got.HTTP["ro"].AllowDelete || got.HTTP["ro"].AllowUpload || got.HTTP["ro"].AllowDir || got.HTTP["ro"].MaxUploadBytes != 0 || len(got.HTTP["ro"].AdminIPs) != 0 {
 		t.Error("ro write modes should stay false")
 	}
 }
@@ -162,6 +190,7 @@ func TestHTTPStateRoundTrip(t *testing.T) {
 		AllowUpload:    true,
 		AllowDir:       true,
 		MaxUploadBytes: 2 << 30,
+		AdminIPs:       []string{"10.0.0.5", "2001:db8::7"},
 		LogFile:        "/tmp/http.log",
 		StartedAt:      time.Unix(1700000000, 0).UTC(),
 	}
@@ -176,6 +205,9 @@ func TestHTTPStateRoundTrip(t *testing.T) {
 		!got.AllowDelete || !got.AllowUpload || !got.AllowDir || got.MaxUploadBytes != st.MaxUploadBytes {
 		t.Errorf("round-trip = %+v, want %+v", got, st)
 	}
+	if ips := got.AdminIPs; len(ips) != 2 || ips[0] != "10.0.0.5" || ips[1] != "2001:db8::7" {
+		t.Errorf("admin IPs round-trip = %v", ips)
+	}
 
 	ro := httpServerState{Name: "ro", PID: 1, LogFile: "/tmp/ro.log"}
 	if err := writeHTTPState(dir, ro); err != nil {
@@ -185,7 +217,7 @@ func TestHTTPStateRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(filepath.Join(dir, "ro.json"))
-	for _, key := range []string{"allow_delete", "allow_upload", "allow_dir", "max_upload_bytes"} {
+	for _, key := range []string{"allow_delete", "allow_upload", "allow_dir", "max_upload_bytes", "admin_ips"} {
 		if strings.Contains(string(raw), key) {
 			t.Errorf("%s should be omitted when off: %s", key, raw)
 		}

@@ -87,12 +87,14 @@ pg http status
 
 ```bash
 pg http start --name images --listen 0.0.0.0 --port 18080 \
-  --dir /srv/offline-images --allow-upload --allow-dir --allow-delete
+  --dir /srv/offline-images --allow-upload --allow-dir --allow-delete \
+  --admin-ip 192.0.2.20,192.0.2.21
 ```
 
 列表页会多出上传表单、新建目录表单和每文件的删除按钮，不登录 shell 也能替换或
-补充 tar 包。上传上限默认 1 GiB，可用 `--max-upload` 调整。这些模式同样没有
-认证 —— 见 [HTTP 文件服务器](/docs/toolbox/http/)。
+补充 tar 包。上传上限默认 1 GiB，可用 `--max-upload` 调整。`--admin-ip` 会把
+这些写操作限定到列出的来源地址：其它来源只能看到普通的只读列表，写请求返回
+403。这些模式同样没有认证 —— 见 [HTTP 文件服务器](/docs/toolbox/http/)。
 
 需要开机自启时：
 

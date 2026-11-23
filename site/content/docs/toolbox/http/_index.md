@@ -22,6 +22,7 @@ autoindex page with a copy button next to every file, and files are served with
 `Range`/`HEAD` support. The server is read-only by default; `--allow-delete`
 adds a delete button per file, `--allow-upload` adds an upload form that writes
 into the listing's directory, and `--allow-dir` adds a "new folder" form.
+`--admin-ip` optionally restricts all three write modes to a list of source IPs.
 
 The default is `127.0.0.1:18080` serving the current directory. Servers run as
 detached processes, so they survive the terminal that started them; several
@@ -40,7 +41,8 @@ pg autostart enable --http --name <NAME>
 ```bash
 pg http start [--name NAME] [--port 18080] [--listen 127.0.0.1] \
   [--dir .] [--tls] [--tls-cert FILE --tls-key FILE] \
-  [--allow-delete] [--allow-upload] [--allow-dir] [--max-upload SIZE]
+  [--allow-delete] [--allow-upload] [--allow-dir] [--max-upload SIZE] \
+  [--admin-ip IP[,IP...]]
 ```
 
 | Flag | Default | Notes |
@@ -55,6 +57,7 @@ pg http start [--name NAME] [--port 18080] [--listen 127.0.0.1] \
 | `--allow-upload` | off | Add an upload form and accept multipart `POST` into the directory being listed. There is no authentication — see Security |
 | `--allow-dir` | off | Add a "new folder" form that creates directories from a relative path. There is no authentication — see Security |
 | `--max-upload` | `1G` | Maximum size of one upload request, all files combined (`512M`, `2G`, or a byte count) |
+| `--admin-ip` | empty | Comma-separated source IPs allowed to use the write modes. Empty means no source restriction. Other sources get a read-only listing and `403` on writes |
 
 `--name` accepts letters, digits, `.`, `_` and `-`.
 
@@ -120,22 +123,24 @@ pg http status
 ```
 
 ```
-NAME                     PID      STATUS    AUTOSTART DELETE  UPLOAD  MKDIR   URL                                      DIR
-http-18080               412345   running   -         -       -       -       http://127.0.0.1:18080/                  /srv/share
-http-18081               412410   running   enabled   enabled enabled enabled https://0.0.0.0:18081/                   /srv/docs
+NAME                     PID      STATUS    AUTOSTART DELETE  UPLOAD  MKDIR   ADMIN             URL                                      DIR
+http-18080               412345   running   -         -       -       -       all               http://127.0.0.1:18080/                  /srv/share
+http-18081               412410   running   enabled   enabled enabled enabled 192.0.2.10,192.0.2.11 https://0.0.0.0:18081/              /srv/docs
 ```
 
 `AUTOSTART` shows whether the server is recorded in `pg.yaml` for boot
 autostart (see below); `DELETE`, `UPLOAD` and `MKDIR` show which write modes
-it was started with. `stop` prints a reminder for autostart servers, since they
-come back at the next boot.
+it was started with, and `ADMIN` lists the source IPs allowed to use them
+(`all` when unrestricted). `stop` prints a reminder for autostart servers,
+since they come back at the next boot.
 
 A state file whose process is gone is marked `stale`; the next `stop` removes
 it.
 
 Restart stops the server gracefully like `stop`, then starts it again from the
 name, listen address, directory, TLS certificate, write modes
-(delete/upload/mkdir), upload size limit and port recorded in its state file —
+(delete/upload/mkdir), upload size limit, admin-IP restriction and port
+recorded in its state file —
 no need to repeat the `start` flags. If the original port has been taken in the meantime, the
 next free port is used; a generated certificate is re-signed when it is close
 to expiry or no longer covers the listen address:
@@ -212,7 +217,9 @@ is the destination, and missing subpaths are not created for you.
 - `curl -F files=@a.txt -F files=@b.txt http://host:port/sub/` is the
   equivalent of uploading on the `/sub/` page.
 - One request (all files combined) is capped at 1 GiB by default and adjustable
-  with `--max-upload`; larger requests get `413`.
+  with `--max-upload`; larger requests get `413` with the configured limit in
+  the message. The page adds up the selected file sizes before submitting and
+  refuses an over-limit selection without sending any request.
 - An existing file is **atomically overwritten**: the content is streamed to a
   hidden temporary file in the same directory and renamed over the target, so
   an interrupted upload never corrupts the old file. A directory target
@@ -222,10 +229,12 @@ is the destination, and missing subpaths are not created for you.
   refused with `400`.
 - Writes are confined to `--dir`; a symlinked directory pointing outside the
   served tree returns `403`.
-- The page submits via `fetch` and reloads the listing automatically on
-  success. Without JavaScript the plain form still works and a `303` returns
-  to the listing. If a multi-file upload fails midway, files already written
-  are kept.
+- The page submits via `XMLHttpRequest` and shows a progress bar (percentage
+  plus bytes sent of the total) below the form while the transfer runs; on
+  success the listing reloads automatically, on failure the button is restored
+  and the reason is shown. Without JavaScript the plain form still works and a
+  `303` returns to the listing. If a multi-file upload fails midway, files
+  already written are kept.
 
 ### Creating directories
 
@@ -242,11 +251,38 @@ along with any missing intermediate directories.
 - The page reloads automatically on success; without JavaScript a `303`
   returns to the listing.
 
+### Restricting writes by source IP
+
+`--admin-ip` limits who may use the write modes. Pass one address or a
+comma-separated list; IPv4 and IPv6 are both accepted and surrounding spaces
+are ignored:
+
+```bash
+pg http start --allow-upload --allow-dir --allow-delete \
+  --admin-ip 192.0.2.10,192.0.2.11,2001:db8::7 --dir /srv/share
+```
+
+- With an empty value (the default) there is **no source restriction**: the
+  write-mode flags alone decide, exactly as before.
+- Once set, every other source still gets the normal read-only listing — no
+  upload form, no "new folder" form, no delete buttons, and no `delete
+  enabled`/`upload enabled`/`mkdir enabled` footer — and receives `403` for
+  `POST` and `DELETE`. Reads are never restricted by this flag.
+- The check uses the source address of the direct TCP connection
+  (`RemoteAddr`); `X-Forwarded-For` is not trusted. Behind a reverse proxy
+  every request appears to come from the proxy's address, so the list must
+  contain that address, and the per-client restriction does not work.
+- An invalid entry makes `pg http start` fail with an error rather than
+  silently dropping it. `pg http status` shows the list in the `ADMIN` column.
+- This is a coarse network restriction, not authentication: addresses can be
+  shared through NAT, and anyone who can legitimately reach from a listed
+  address can write.
+
 ## State and lifecycle
 
 | Path | Contents |
 |---|---|
-| `<base>/http/servers/<name>.json` | name, pid, port, listen address, dir, TLS paths, write modes (delete/upload/mkdir), upload size limit, log path |
+| `<base>/http/servers/<name>.json` | name, pid, port, listen address, dir, TLS paths, write modes (delete/upload/mkdir), upload size limit, admin IPs, log path |
 | `<base>/http/servers/<name>.log` | server stdout/stderr |
 | `<base>/http/tls/<name>/cert.pem`, `key.pem` | generated certificate pair (with `--tls`) |
 
@@ -282,11 +318,11 @@ pg autostart enable --http --name docs
 ```
 
 The enable step snapshots the server's directory, listen address, port, TLS
-material, write modes (delete/upload/mkdir) and upload size limit into the
-top-level `http` section of `pg.yaml`; the boot service then re-creates the
-server from those settings. If the recorded port is taken at boot, the next
-free port is used. A later `pg http start`/`pg http restart` of the same name
-refreshes the snapshot.
+material, write modes (delete/upload/mkdir), upload size limit and admin IP
+list into the top-level `http` section of `pg.yaml`; the boot service then
+re-creates the server from those settings. If the recorded port is taken at
+boot, the next free port is used. A later `pg http start`/`pg http restart` of
+the same name refreshes the snapshot.
 
 ```bash
 pg autostart status                        # shows "http docs   enabled"
@@ -308,7 +344,10 @@ servers survive the terminal but not a reboot.
   and `POST` additionally requires the browser `Origin` to match the request
   `Host` to block cross-site form submissions, but keep the loopback listener
   for the same reason as above. `pg http start` prints a warning when any
-  write flag is on and the listener is not loopback.
+  write flag is on and the listener is not loopback. `--admin-ip` narrows
+  writes to the listed source addresses and hides the write UI from everyone
+  else, but it is still not authentication — see Restricting writes by source
+  IP above.
 - **`--tls` encrypts but does not authenticate clients** — it is not an access
   control mechanism.
 - Symlinks can expose paths outside `--dir`; treat the served directory as the

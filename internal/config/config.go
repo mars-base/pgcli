@@ -100,7 +100,10 @@ type HTTPServerConfig struct {
 	// MaxUploadBytes caps one upload request, all files combined; 0 uses the
 	// built-in default.
 	MaxUploadBytes int64 `yaml:"max_upload_bytes,omitempty"`
-	Autostart      bool  `yaml:"autostart,omitempty"`
+	// AdminIPs restricts the write modes to these source addresses; empty
+	// means no source restriction.
+	AdminIPs  []string `yaml:"admin_ips,omitempty"`
+	Autostart bool     `yaml:"autostart,omitempty"`
 }
 
 // DaemonConfig describes a long-running host process managed by `pg daemon`.

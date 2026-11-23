@@ -131,8 +131,8 @@ pg autostart enable --daemon --name webhook
 
 为 `pg http` 文件服务器启用开机自启。先启动一次服务器——`pg autostart enable`
 会把它的启动参数（目录、监听地址、端口、TLS 材料、`--allow-delete`、
-`--allow-upload`、`--allow-dir` 等写模式开关和上传大小上限）快照到配置顶层的
-`http` 段：
+`--allow-upload`、`--allow-dir` 等写模式开关、上传大小上限和 `--admin-ip`
+来源限制）快照到配置顶层的 `http` 段：
 
 ```bash
 pg http start --name docs --dir /srv/docs --port 18080
