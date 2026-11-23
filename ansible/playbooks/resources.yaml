@@ -7,10 +7,12 @@
 #
 # Shows live host resources (CPU, load, memory, swap, filesystems and the top
 # memory consumers) plus the pgcli version and, for every namespace in
-# pgcli_namespaces, its configured instances, installed add-ons and Patroni
-# cluster status. Only hosts that carry the pgcli binary at pgcli_install_path
-# are reported; other selected hosts are skipped with a short message. Override
-# the path with -e pgcli_install_path=/path/to/pg if it is installed elsewhere.
+# pgcli_namespaces, its configured instances, installed add-ons, Patroni
+# cluster status and pg http file servers (wildcard 0.0.0.0 URLs rewritten to
+# the host's private_ip, falling back to ansible_host). Only hosts that carry
+# the pgcli binary at pgcli_install_path are reported; other selected hosts
+# are skipped with a short message. Override the path with
+# -e pgcli_install_path=/path/to/pg if it is installed elsewhere.
 
 - name: Host and pgcli resources
   hosts: "{{ HOSTS | default('all') }}"
@@ -97,9 +99,13 @@
           {{ pgcli_install_path | quote }} -c {{ _resources_cfg | quote }} addon list 2>&1 || true
           printf '\nha:\n'
           {{ pgcli_install_path | quote }} -c {{ _resources_cfg | quote }} ha status 2>&1 || true
+          printf '\nhttp:\n'
+          {{ pgcli_install_path | quote }} -c {{ _resources_cfg | quote }} http status 2>&1 \
+            | sed -E "s#(https?://)0\.0\.0\.0([:/])#\1{{ _resources_url_host }}\2#g" || true
         executable: /bin/bash
       vars:
         _resources_cfg: "{{ (item.item.path | regex_replace('/+$', '')) ~ '/pg.yaml' }}"
+        _resources_url_host: "{{ private_ip | default(ansible_host, true) }}"
       loop: "{{ _resources_namespace_configs.results }}"
       loop_control:
         label: "{{ item.item.name }}"

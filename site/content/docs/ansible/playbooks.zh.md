@@ -115,7 +115,9 @@ uv run ansible-playbook playbooks/ha-status.yaml -l db-02
 ## `resources.yaml`
 
 只读。输出 CPU、负载、内存、swap、文件系统与内存占用最高的进程，以及 pgcli
-版本和 `pgcli_namespaces` 中每个 namespace 的实例、插件与 Patroni 状态。未在
+版本和 `pgcli_namespaces` 中每个 namespace 的实例、插件、Patroni 状态与
+`pg http` 文件服务器。监听通配地址的 HTTP URL 会改写为主机的 `private_ip`
+（未定义时回退 `ansible_host`），便于从其它机器直接访问。未在
 `pgcli_install_path` 找到 pgcli 的主机会被跳过并给出提示。
 
 ```bash

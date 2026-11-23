@@ -125,8 +125,10 @@ uv run ansible-playbook playbooks/ha-status.yaml -l db-02
 
 Read-only. Reports CPU, load, memory, swap, filesystems and the top memory
 processes, plus the pgcli version and, for every namespace in
-`pgcli_namespaces`, its instances, add-ons and Patroni status. Hosts without
-the pgcli binary at `pgcli_install_path` are skipped with a short message.
+`pgcli_namespaces`, its instances, add-ons, Patroni status and pg http file
+servers. HTTP server URLs on the wildcard address are rewritten to the host's
+`private_ip` (falling back to `ansible_host`). Hosts without the pgcli binary
+at `pgcli_install_path` are skipped with a short message.
 
 ```bash
 uv run ansible-playbook playbooks/resources.yaml

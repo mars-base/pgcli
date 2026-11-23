@@ -278,8 +278,10 @@ uv run ansible-playbook playbooks/ha-status.yaml -l debian12-02
 ### resources.yaml
 
 Reports CPU, load, memory, filesystems, the pgcli version, and per-namespace
-instances, add-ons and HA status. Hosts without the pgcli binary at
-`pgcli_install_path` are skipped. Read-only:
+instances, add-ons, HA status and pg http file servers. HTTP server URLs on
+the wildcard address are rewritten to the host's `private_ip` (falling back
+to `ansible_host`) so they are usable from another host. Hosts without the
+pgcli binary at `pgcli_install_path` are skipped. Read-only:
 
 ```bash
 uv run ansible-playbook playbooks/resources.yaml
