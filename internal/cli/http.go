@@ -137,7 +137,7 @@ Examples:
   pg http start --allow-delete --dir /tmp/share
   pg http start --allow-upload --allow-dir --max-upload 512M --dir /tmp/share
   pg http start --allow-upload --admin-ip 192.0.2.10,192.0.2.11 --dir /tmp/share
-  pg http start --auth alice:s3cret --auth-env PG_HTTP_AUTH --dir /srv/share
+  pg http start --auth alice:s3cret --auth-env PGCLI_HTTP_AUTH --dir /srv/share
   pg http htpasswd alice --file /srv/share.htpasswd
   pg http start --auth-file /srv/share.htpasswd --dir /srv/share
   pg http status

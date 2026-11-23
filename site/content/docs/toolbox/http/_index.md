@@ -139,8 +139,8 @@ environment variable and name the variable with `--auth-env` (the value has the
 same `USER:PASSWORD` form; an unset or empty variable is an error):
 
 ```bash
-export PG_HTTP_AUTH='carol:pw'
-pg http start --auth alice:s3cret --auth-env PG_HTTP_AUTH --dir /srv/share
+export PGCLI_HTTP_AUTH='carol:pw'
+pg http start --auth alice:s3cret --auth-env PGCLI_HTTP_AUTH --dir /srv/share
 ```
 
 Credentials can also come from an htpasswd file. Create or update it with the
@@ -149,8 +149,13 @@ reads one line from stdin when it is piped) and writes the file with mode
 `0600`:
 
 ```bash
+# interactive: the password is prompted twice with no echo
 pg http htpasswd alice                        # default <base>/http/htpasswd
-pg http htpasswd bob --file /srv/share.htpasswd
+
+# non-interactive: the first line of stdin is used as the password
+printf '%s\n' "$PASSWORD" | pg http htpasswd bob --file /srv/share.htpasswd
+echo 'x123' | pg http htpasswd carol --file /srv/share.htpasswd
+
 pg http start --auth-file /srv/share.htpasswd --dir /srv/share
 ```
 

@@ -114,7 +114,7 @@ listings, downloads and writes:
 ```bash
 pg http start --name images --listen 0.0.0.0 --port 18080 \
   --dir /srv/offline-images --allow-upload --allow-dir --allow-delete \
-  --auth images:<password> --auth-env PG_HTTP_AUTH
+  --auth images:<password> --auth-env PGCLI_HTTP_AUTH
 ```
 
 Accounts can also live in an htpasswd file:

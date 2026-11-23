@@ -102,7 +102,7 @@ pg http start --name images --listen 0.0.0.0 --port 18080 \
 ```bash
 pg http start --name images --listen 0.0.0.0 --port 18080 \
   --dir /srv/offline-images --allow-upload --allow-dir --allow-delete \
-  --auth images:<密码> --auth-env PG_HTTP_AUTH
+  --auth images:<密码> --auth-env PGCLI_HTTP_AUTH
 ```
 
 账号也可以放在 htpasswd 文件里：先

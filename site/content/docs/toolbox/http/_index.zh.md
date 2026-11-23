@@ -130,16 +130,21 @@ pg http start --auth alice:s3cret --auth bob:pa:ssword --dir /srv/share
 指定变量名（变量值同样是 `USER:PASSWORD` 形式；变量未设置或为空时报错）：
 
 ```bash
-export PG_HTTP_AUTH='carol:pw'
-pg http start --auth alice:s3cret --auth-env PG_HTTP_AUTH --dir /srv/share
+export PGCLI_HTTP_AUTH='carol:pw'
+pg http start --auth alice:s3cret --auth-env PGCLI_HTTP_AUTH --dir /srv/share
 ```
 
 凭据也可以来自 htpasswd 文件。用 `htpasswd` 子命令创建或更新：交互式输入密码
 两次（不回显），或从管道读取一行，文件以 `0600` 权限写入：
 
 ```bash
+# 交互式：提示两次输入密码，不回显
 pg http htpasswd alice                        # 默认 <base>/http/htpasswd
-pg http htpasswd bob --file /srv/share.htpasswd
+
+# 非交互式：stdin 的第一行作为密码
+printf '%s\n' "$PASSWORD" | pg http htpasswd bob --file /srv/share.htpasswd
+echo 'x123' | pg http htpasswd carol --file /srv/share.htpasswd
+
 pg http start --auth-file /srv/share.htpasswd --dir /srv/share
 ```
 
