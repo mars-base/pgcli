@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -8,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net"
 	"net/http"
@@ -24,6 +26,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/term"
 
 	"github.com/mars-base/pgcli/internal/certgen"
 	"github.com/mars-base/pgcli/internal/config"
@@ -46,6 +49,7 @@ func init() {
 	httpCmd.AddCommand(httpStopCmd)
 	httpCmd.AddCommand(httpRestartCmd)
 	httpCmd.AddCommand(httpStatusCmd)
+	httpCmd.AddCommand(httpHtpasswdCmd)
 	httpCmd.AddCommand(httpServeCmd)
 
 	httpStartCmd.Flags().String("name", "", "server name used by status/stop (default \"http-<requested-port>\"; a running server with the same name gets a -2/-3 suffix)")
@@ -62,6 +66,9 @@ func init() {
 	httpStartCmd.Flags().String("admin-ip", "", "restrict the write modes (delete/upload/mkdir) to these source IPs, comma separated; other sources get a read-only listing and 403 on writes (default: no restriction)")
 	httpStartCmd.Flags().StringArray("auth", nil, "require HTTP Basic Auth: USER:PASSWORD, repeatable for multiple users (the password may contain ':')")
 	httpStartCmd.Flags().StringArray("auth-env", nil, "read Basic Auth USER:PASSWORD from this environment variable, repeatable")
+	httpStartCmd.Flags().StringArray("auth-file", nil, "read Basic Auth users from an htpasswd file with bcrypt entries (as written by 'htpasswd -B' or 'pg http htpasswd'), repeatable")
+
+	httpHtpasswdCmd.Flags().String("file", "", "htpasswd file to create or update (default <base_dir>/http/htpasswd)")
 
 	httpStopCmd.Flags().Bool("all", false, "stop every pg http server")
 	httpStopCmd.Flags().Duration("timeout", httpStopGrace, "how long to wait for a graceful shutdown before SIGKILL")
@@ -101,12 +108,14 @@ The default is 127.0.0.1:18080 serving the current directory. If the requested
 port is busy the next free one is used automatically (up to 100 attempts), and
 multiple servers may run at once. Without --auth the server is open to anyone
 who can reach the port: keep the default loopback listener, or expose it only
-on a trusted network. --auth USER:PASSWORD (repeatable) or --auth-env VAR
-enables HTTP Basic Auth for the whole site; credentials are stored as bcrypt
-hashes, never in plain text. The /__pgcli_health probe stays reachable without
-credentials. Basic Auth sends the password in clear text, so combine it with
---tls on untrusted networks. --tls alone encrypts traffic but does not
-authenticate clients. The server is read-only by default;
+on a trusted network. --auth USER:PASSWORD (repeatable), --auth-env VAR or
+--auth-file FILE (an htpasswd file with bcrypt entries, as written by
+` + "`pg http htpasswd USER`" + `) enables HTTP Basic Auth for the whole site;
+credentials are stored as bcrypt hashes, never in plain text. The
+/__pgcli_health probe stays reachable without credentials. Basic Auth sends
+the password in clear text, so combine it with --tls on untrusted networks.
+--tls alone encrypts traffic but does not authenticate clients. The server is
+read-only by default;
 --allow-delete adds a delete button to every file row and accepts HTTP DELETE,
 --allow-upload adds an upload form and accepts multipart POST into the listed
 directory, and --allow-dir adds a "new folder" form. With any of them, anyone
@@ -129,6 +138,8 @@ Examples:
   pg http start --allow-upload --allow-dir --max-upload 512M --dir /tmp/share
   pg http start --allow-upload --admin-ip 192.0.2.10,192.0.2.11 --dir /tmp/share
   pg http start --auth alice:s3cret --auth-env PG_HTTP_AUTH --dir /srv/share
+  pg http htpasswd alice --file /srv/share.htpasswd
+  pg http start --auth-file /srv/share.htpasswd --dir /srv/share
   pg http status
   pg http restart docs
   pg http stop docs
@@ -169,6 +180,25 @@ var httpStatusCmd = &cobra.Command{
 	Short: "List pg http servers and whether they are running",
 	Args:  cobra.NoArgs,
 	RunE:  runHTTPStatus,
+}
+
+var httpHtpasswdCmd = &cobra.Command{
+	Use:   "htpasswd USER",
+	Short: "Create or update a bcrypt entry in an htpasswd file for --auth-file",
+	Long: `htpasswd adds USER to an htpasswd file used with ` + "`pg http start --auth-file`" + `,
+or replaces the existing entry for that user. The file defaults to
+<base_dir>/http/htpasswd and is written with mode 0600; comments and other
+users already in the file are preserved.
+
+The password is read interactively (prompted twice, no echo) or, when stdin
+is not a terminal, as the first line from stdin:
+
+  printf '%s\n' "$PASSWORD" | pg http htpasswd alice
+
+Only bcrypt entries are written, and ` + "`--auth-file`" + ` only accepts bcrypt
+entries (create files with 'htpasswd -B' if you use Apache's tool).`,
+	Args: cobra.ExactArgs(1),
+	RunE: runHTTPHtpasswd,
 }
 
 var httpServeCmd = &cobra.Command{
@@ -414,6 +444,7 @@ func runHTTPStart(cmd *cobra.Command, _ []string) error {
 	}
 	authEntries, _ := cmd.Flags().GetStringArray("auth")
 	authEnvVars, _ := cmd.Flags().GetStringArray("auth-env")
+	authFiles, _ := cmd.Flags().GetStringArray("auth-file")
 	authFlags, err := parseAuthEntries(authEntries)
 	if err != nil {
 		return err
@@ -422,7 +453,11 @@ func runHTTPStart(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	authHashes, err := mergeAuth(authFlags, authEnv)
+	authFile, err := parseAuthFile(authFiles)
+	if err != nil {
+		return err
+	}
+	authHashes, err := mergeAuth(authFlags, authEnv, authFile)
 	if err != nil {
 		return err
 	}
@@ -772,19 +807,65 @@ func parseAuthPairs(flagName string, entries []string) (map[string]string, error
 	return out, nil
 }
 
-// mergeAuth combines --auth and --auth-env users, rejecting a username that
-// appears in both.
-func mergeAuth(fromFlags, fromEnv map[string]string) (map[string]string, error) {
-	if len(fromFlags) == 0 && len(fromEnv) == 0 {
+// parseAuthFile reads the htpasswd-formatted files named by --auth-file. Only
+// bcrypt entries are accepted; blank lines and lines starting with '#' are
+// ignored.
+func parseAuthFile(paths []string) (map[string]string, error) {
+	if len(paths) == 0 {
 		return nil, nil
 	}
-	out := make(map[string]string, len(fromFlags)+len(fromEnv))
-	maps.Copy(out, fromFlags)
-	for user, hash := range fromEnv {
-		if _, dup := out[user]; dup {
-			return nil, fmt.Errorf("auth user %q is configured by both --auth and --auth-env", user)
+	out := make(map[string]string)
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("--auth-file: %w", err)
 		}
-		out[user] = hash
+		for i, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			user, hash, ok := strings.Cut(line, ":")
+			if !ok || user == "" {
+				return nil, fmt.Errorf("%s:%d: expected USER:BCRYPT_HASH", path, i+1)
+			}
+			if !isBcryptHash(hash) {
+				return nil, fmt.Errorf("%s:%d: user %q: only bcrypt entries are supported (create the file with 'pg http htpasswd' or 'htpasswd -B')", path, i+1, user)
+			}
+			if _, dup := out[user]; dup {
+				return nil, fmt.Errorf("%s:%d: user %q is listed more than once", path, i+1, user)
+			}
+			out[user] = hash
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("--auth-file: no users found (blank lines and '#' comments are ignored)")
+	}
+	return out, nil
+}
+
+func isBcryptHash(hash string) bool {
+	return strings.HasPrefix(hash, "$2")
+}
+
+// mergeAuth combines users from --auth, --auth-env and --auth-file, rejecting
+// a username that appears in more than one source.
+func mergeAuth(sources ...map[string]string) (map[string]string, error) {
+	var total int
+	for _, src := range sources {
+		total += len(src)
+	}
+	if total == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, total)
+	for _, src := range sources {
+		for user, hash := range src {
+			if _, dup := out[user]; dup {
+				return nil, fmt.Errorf("auth user %q is configured more than once (check --auth, --auth-env and --auth-file)", user)
+			}
+			out[user] = hash
+		}
 	}
 	return out, nil
 }
@@ -798,7 +879,7 @@ func parseAuthHashes(entries []string) (map[string]string, error) {
 	out := make(map[string]string, len(entries))
 	for _, entry := range entries {
 		user, hash, ok := strings.Cut(entry, ":")
-		if !ok || user == "" || !strings.HasPrefix(hash, "$2") {
+		if !ok || user == "" || !isBcryptHash(hash) {
 			return nil, fmt.Errorf("--auth-hash: %q is not in USER:BCRYPT_HASH form", entry)
 		}
 		if _, dup := out[user]; dup {
@@ -1060,6 +1141,25 @@ func relaunchHTTPServer(base string, st httpServerState) (*httpServerState, time
 	return nil, time.Time{}, fmt.Errorf("no free port in %d..%d", port, port+httpPortTries-1)
 }
 
+// httpConfigFromState turns a server state file into the pg.yaml snapshot used
+// by the boot service. Autostart is left to the caller.
+func httpConfigFromState(st *httpServerState) config.HTTPServerConfig {
+	return config.HTTPServerConfig{
+		Dir:            st.Dir,
+		Listen:         st.Listen,
+		Port:           st.Port,
+		TLS:            st.TLS,
+		CertFile:       st.CertFile,
+		KeyFile:        st.KeyFile,
+		AllowDelete:    st.AllowDelete,
+		AllowUpload:    st.AllowUpload,
+		AllowDir:       st.AllowDir,
+		MaxUploadBytes: st.MaxUploadBytes,
+		AdminIPs:       append([]string(nil), st.AdminIPs...),
+		Auth:           cloneAuthMap(st.Auth),
+	}
+}
+
 // syncHTTPAutostartEntry refreshes the pg.yaml snapshot used by the boot
 // service when this server has an autostart entry. Servers without an entry
 // are left alone; pg http keeps working without a config file.
@@ -1080,15 +1180,9 @@ func syncHTTPAutostartEntry(st *httpServerState) {
 	if !ok {
 		return
 	}
-	hc.Dir, hc.Listen, hc.Port = st.Dir, st.Listen, st.Port
-	hc.TLS, hc.CertFile, hc.KeyFile = st.TLS, st.CertFile, st.KeyFile
-	hc.AllowDelete = st.AllowDelete
-	hc.AllowUpload = st.AllowUpload
-	hc.AllowDir = st.AllowDir
-	hc.MaxUploadBytes = st.MaxUploadBytes
-	hc.AdminIPs = append([]string(nil), st.AdminIPs...)
-	hc.Auth = cloneAuthMap(st.Auth)
-	c.HTTP[st.Name] = hc
+	updated := httpConfigFromState(st)
+	updated.Autostart = hc.Autostart
+	c.HTTP[st.Name] = updated
 	if err := c.Save(path); err != nil {
 		fmt.Printf("  [!] could not refresh autostart settings for %s: %v\n", st.Name, err)
 	}
@@ -1194,6 +1288,133 @@ func runHTTPStatus(cmd *cobra.Command, _ []string) error {
 		fmt.Printf("%-24s %-8d %-9s %-9s %-7s %-7s %-7s %-20s %-16s %-40s %s\n", st.Name, st.PID, status, auto, del, up, mkdir, auth, admin, httpURL(&st), st.Dir)
 	}
 	return nil
+}
+
+func runHTTPHtpasswd(cmd *cobra.Command, args []string) error {
+	user := args[0]
+	if strings.HasPrefix(user, "#") || strings.ContainsAny(user, ":\r\n") {
+		return fmt.Errorf("user name %q must not contain ':' or line breaks, or start with '#'", user)
+	}
+	file, _ := cmd.Flags().GetString("file")
+	if file == "" {
+		file = filepath.Join(httpBaseDir(), "http", "htpasswd")
+	}
+	absFile, err := filepath.Abs(file)
+	if err != nil {
+		return err
+	}
+	pass, err := readHtpasswdPassword(cmd)
+	if err != nil {
+		return err
+	}
+	if len(pass) > 72 {
+		return fmt.Errorf("password exceeds the 72-byte bcrypt limit")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(pass), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	replaced, err := upsertHtpasswd(absFile, user, string(hash))
+	if err != nil {
+		return err
+	}
+	verb := "added"
+	if replaced {
+		verb = "updated"
+	}
+	fmt.Printf("✓ %s %q in %s\n", verb, user, absFile)
+	return nil
+}
+
+// readHtpasswdPassword prompts twice with hidden input on a terminal, or
+// reads one line from stdin when it is not a terminal.
+func readHtpasswdPassword(cmd *cobra.Command) (string, error) {
+	fd := int(os.Stdin.Fd())
+	if term.IsTerminal(fd) {
+		fmt.Fprint(cmd.ErrOrStderr(), "Password: ")
+		first, err := term.ReadPassword(fd)
+		fmt.Fprintln(cmd.ErrOrStderr())
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprint(cmd.ErrOrStderr(), "Confirm password: ")
+		second, err := term.ReadPassword(fd)
+		fmt.Fprintln(cmd.ErrOrStderr())
+		if err != nil {
+			return "", err
+		}
+		if string(first) != string(second) {
+			return "", fmt.Errorf("passwords do not match")
+		}
+		if len(first) == 0 {
+			return "", fmt.Errorf("password is empty")
+		}
+		return string(first), nil
+	}
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	pass := strings.TrimRight(line, "\r\n")
+	if pass == "" {
+		return "", fmt.Errorf("password is empty (write it as one line to stdin)")
+	}
+	return pass, nil
+}
+
+// upsertHtpasswd writes user:hash into path, replacing existing entries for
+// the same user and preserving every other line. The file is written
+// atomically with mode 0600.
+func upsertHtpasswd(path, user, hash string) (bool, error) {
+	entry := user + ":" + hash
+	var lines []string
+	replaced := false
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		trimmed := strings.TrimRight(string(data), "\r\n")
+		if trimmed != "" {
+			lines = strings.Split(trimmed, "\n")
+		}
+		for i, line := range lines {
+			name, _, ok := strings.Cut(strings.TrimSpace(line), ":")
+			if !ok || strings.HasPrefix(strings.TrimSpace(line), "#") || name != user {
+				continue
+			}
+			lines[i] = entry
+			replaced = true
+		}
+	case errors.Is(err, os.ErrNotExist):
+	default:
+		return false, err
+	}
+	if !replaced {
+		lines = append(lines, entry)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return false, err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	if err != nil {
+		return false, err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return false, err
+	}
+	if _, err := tmp.WriteString(strings.Join(lines, "\n") + "\n"); err != nil {
+		tmp.Close()
+		return false, err
+	}
+	if err := tmp.Close(); err != nil {
+		return false, err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return false, err
+	}
+	return replaced, nil
 }
 
 // runHTTPServe is the detached child. It binds the socket, writes the ready

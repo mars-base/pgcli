@@ -335,13 +335,16 @@ func TestHTTPCertHostsWildcardCoverLoopback(t *testing.T) {
 }
 
 func TestHTTPAuthFlags(t *testing.T) {
-	for _, name := range []string{"auth", "auth-env"} {
+	for _, name := range []string{"auth", "auth-env", "auth-file"} {
 		if f := httpStartCmd.Flags().Lookup(name); f == nil || f.DefValue != "[]" {
 			t.Errorf("start: --%s = %+v, want an empty string array", name, f)
 		}
 	}
 	if f := httpServeCmd.Flags().Lookup("auth-hash"); f == nil || f.DefValue != "[]" {
 		t.Errorf("serve: --auth-hash = %+v, want an empty string array", f)
+	}
+	if f := httpHtpasswdCmd.Flags().Lookup("file"); f == nil || f.DefValue != "" {
+		t.Errorf("htpasswd: --file = %+v, want an empty default (base dir)", f)
 	}
 }
 
@@ -401,12 +404,178 @@ func TestMergeAuthRejectsDuplicateUsers(t *testing.T) {
 	if _, err := mergeAuth(map[string]string{"alice": "$2a$x"}, map[string]string{"alice": "$2a$y"}); err == nil {
 		t.Error("duplicate user across --auth and --auth-env was accepted")
 	}
+	if _, err := mergeAuth(map[string]string{"alice": "$2a$x"}, nil, map[string]string{"alice": "$2a$y"}); err == nil {
+		t.Error("duplicate user across --auth and --auth-file was accepted")
+	}
 	merged, err := mergeAuth(map[string]string{"alice": "$2a$x"}, map[string]string{"bob": "$2a$y"})
 	if err != nil || len(merged) != 2 {
 		t.Errorf("mergeAuth = %v, %v; want both users", merged, err)
 	}
 	if merged, err := mergeAuth(nil, nil); err != nil || merged != nil {
 		t.Errorf("mergeAuth(nil, nil) = %v, %v; want no auth", merged, err)
+	}
+}
+
+func TestParseAuthFile(t *testing.T) {
+	hashA, err := bcrypt.GenerateFromPassword([]byte("a-pass"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashB, err := bcrypt.GenerateFromPassword([]byte("b-pass"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+
+	path := filepath.Join(dir, "htpasswd")
+	content := "# managed by hand\n\nalice:" + string(hashA) + "\r\nbob:" + string(hashB) + "\n"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	users, err := parseAuthFile([]string{path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 2 {
+		t.Fatalf("parsed %d users, want 2", len(users))
+	}
+	for user, pass := range map[string]string{"alice": "a-pass", "bob": "b-pass"} {
+		if err := bcrypt.CompareHashAndPassword([]byte(users[user]), []byte(pass)); err != nil {
+			t.Errorf("%s: stored hash does not match: %v", user, err)
+		}
+	}
+
+	// $2y$ entries, as written by Apache's htpasswd -B, are accepted.
+	yPath := filepath.Join(dir, "apache")
+	yHash := strings.Replace(string(hashA), "$2a$", "$2y$", 1)
+	if err := os.WriteFile(yPath, []byte("carol:"+yHash+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	yUsers, err := parseAuthFile([]string{yPath})
+	if err != nil {
+		t.Fatalf("$2y$ entry rejected: %v", err)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(yUsers["carol"]), []byte("a-pass")); err != nil {
+		t.Errorf("$2y$ entry does not verify: %v", err)
+	}
+
+	for name, body := range map[string]string{
+		"nocolon":   "alice\n",
+		"emptyuser": ":" + string(hashA) + "\n",
+		"apr1":      "dave:$apr1$abcdefgh$0123456789abcdefghijkl\n",
+		"sha":       "dave:{SHA}qUqP5cyxm6YcTAhz05Hph5gvu9M=\n",
+		"dup":       "alice:" + string(hashA) + "\nalice:" + string(hashB) + "\n",
+		"onlycmts":  "# nobody here\n\n",
+	} {
+		badPath := filepath.Join(dir, name)
+		if err := os.WriteFile(badPath, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := parseAuthFile([]string{badPath}); err == nil {
+			t.Errorf("%s: accepted an invalid htpasswd file", name)
+		}
+	}
+	if _, err := parseAuthFile([]string{filepath.Join(dir, "missing")}); err == nil {
+		t.Error("missing file was accepted")
+	}
+	if _, err := parseAuthFile([]string{path, yPath}); err != nil {
+		t.Errorf("multi-file parse with distinct users failed: %v", err)
+	}
+	dupPath := filepath.Join(dir, "dupfiles")
+	if err := os.WriteFile(dupPath, []byte("alice:"+string(hashB)+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseAuthFile([]string{path, dupPath}); err == nil {
+		t.Error("duplicate user across two files was accepted")
+	}
+}
+
+func TestHtpasswdUpsert(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nested", "htpasswd")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("# team share\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	hashA, err := bcrypt.GenerateFromPassword([]byte("a-pass"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashB, err := bcrypt.GenerateFromPassword([]byte("b-pass"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if replaced, err := upsertHtpasswd(path, "alice", string(hashA)); err != nil || replaced {
+		t.Fatalf("add alice = replaced %v, %v; want a new entry", replaced, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("mode = %o, want 600", perm)
+	}
+	users, err := parseAuthFile([]string{path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 1 || users["alice"] != string(hashA) {
+		t.Errorf("after add = %v, want only alice", users)
+	}
+
+	if _, err := upsertHtpasswd(path, "bob", string(hashA)); err != nil {
+		t.Fatal(err)
+	}
+	if replaced, err := upsertHtpasswd(path, "alice", string(hashB)); err != nil || !replaced {
+		t.Fatalf("update alice = replaced %v, %v; want a replacement", replaced, err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "# team share") {
+		t.Errorf("comment lost:\n%s", raw)
+	}
+	users, err = parseAuthFile([]string{path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 2 || users["alice"] != string(hashB) || users["bob"] != string(hashA) {
+		t.Errorf("after update = %v, want the new alice hash and bob intact", users)
+	}
+}
+
+func TestHTTPConfigFromState(t *testing.T) {
+	st := httpServerState{
+		Dir:            "/srv/share",
+		Listen:         "127.0.0.1",
+		Port:           18080,
+		AllowUpload:    true,
+		MaxUploadBytes: 1 << 30,
+		AdminIPs:       []string{"10.0.0.5"},
+		Auth:           map[string]string{"alice": "$2a$10$x"},
+	}
+	hc := httpConfigFromState(&st)
+	if hc.Dir != st.Dir || hc.Port != st.Port || !hc.AllowUpload || hc.MaxUploadBytes != st.MaxUploadBytes {
+		t.Errorf("snapshot = %+v, want the state settings", hc)
+	}
+	if len(hc.AdminIPs) != 1 || hc.AdminIPs[0] != "10.0.0.5" {
+		t.Errorf("snapshot admin IPs = %v, want the recorded address", hc.AdminIPs)
+	}
+	if len(hc.Auth) != 1 || hc.Auth["alice"] != "$2a$10$x" {
+		t.Errorf("snapshot auth = %v, want the recorded hash", hc.Auth)
+	}
+	if hc.Autostart {
+		t.Error("snapshot should not enable autostart on its own")
+	}
+
+	st.AdminIPs[0] = "192.0.2.1"
+	st.Auth["alice"] = "changed"
+	if hc.AdminIPs[0] != "10.0.0.5" || hc.Auth["alice"] != "$2a$10$x" {
+		t.Error("snapshot aliases the state maps")
 	}
 }
 

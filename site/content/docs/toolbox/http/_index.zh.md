@@ -21,7 +21,8 @@ cascade:
 复制按钮；文件本身支持 `Range` 与 `HEAD` 请求。服务器默认只读：以
 `--allow-delete` 启动时每个文件行会多出删除按钮，`--allow-upload` 会在列表页
 提供上传表单，`--allow-dir` 提供新建目录表单；`--admin-ip` 可把这三种写模式
-限制到指定来源 IP，`--auth` / `--auth-env` 则让整个站点启用 HTTP Basic 认证。
+限制到指定来源 IP，`--auth` / `--auth-env` / `--auth-file` 则让整个站点启用
+HTTP Basic 认证。
 
 默认监听 `127.0.0.1:18080` 并服务当前目录。服务器是脱离终端的独立进程，关闭
 终端不会影响它；同一主机可以同时运行多个服务器。
@@ -31,6 +32,7 @@ pg http start
 pg http status
 pg http restart <NAME>
 pg http stop
+pg http htpasswd <USER>
 pg autostart enable --http --name <NAME>
 ```
 
@@ -40,7 +42,8 @@ pg autostart enable --http --name <NAME>
 pg http start [--name NAME] [--port 18080] [--listen 127.0.0.1] \
   [--dir .] [--tls] [--tls-cert FILE --tls-key FILE] \
   [--allow-delete] [--allow-upload] [--allow-dir] [--max-upload SIZE] \
-  [--admin-ip IP[,IP...]] [--auth USER:PASSWORD]... [--auth-env VAR]...
+  [--admin-ip IP[,IP...]] [--auth USER:PASSWORD]... [--auth-env VAR]... \
+  [--auth-file FILE]...
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -58,6 +61,7 @@ pg http start [--name NAME] [--port 18080] [--listen 127.0.0.1] \
 | `--admin-ip` | 空 | 允许使用写模式的来源 IP，逗号分隔；空表示不限制来源。其它来源只能看到只读列表，写请求返回 `403` |
 | `--auth` | 空 | 要求 HTTP Basic 认证。`USER:PASSWORD` 形式，可重复以添加多个用户；密码可以包含 `:` |
 | `--auth-env` | 空 | 从该环境变量读取 `USER:PASSWORD`，可重复。用于避免密码进入 shell 历史记录 |
+| `--auth-file` | 空 | 从包含 bcrypt 条目的 htpasswd 文件读取用户，可重复——见「Basic 认证」 |
 
 `--name` 允许字母、数字、`.`、`_` 和 `-`。
 
@@ -130,11 +134,26 @@ export PG_HTTP_AUTH='carol:pw'
 pg http start --auth alice:s3cret --auth-env PG_HTTP_AUTH --dir /srv/share
 ```
 
+凭据也可以来自 htpasswd 文件。用 `htpasswd` 子命令创建或更新：交互式输入密码
+两次（不回显），或从管道读取一行，文件以 `0600` 权限写入：
+
+```bash
+pg http htpasswd alice                        # 默认 <base>/http/htpasswd
+pg http htpasswd bob --file /srv/share.htpasswd
+pg http start --auth-file /srv/share.htpasswd --dir /srv/share
+```
+
+文件中已有的注释和其它用户会保留；用户名已存在时替换该条目。`--auth-file` 只
+接受 bcrypt 条目（`pg http htpasswd` 或 `htpasswd -B` 写出的 `$2a$`/`$2b$`/
+`$2y$` 哈希）；空行和以 `#` 开头的行会被忽略，没有任何用户的文件视为错误。
+
 - 以**第一个** `:` 分隔用户名与密码，密码本身可以包含 `:`。用户名为空、密码为
-  空，或用户名重复（无论来自 `--auth` 还是 `--auth-env`）都会在启动时报错。
-- 启动时把密码转换成 bcrypt 哈希。状态文件和 `pg.yaml` 中只写入哈希，传给脱离
-  终端的 `pg http serve` 子进程的也只有哈希——明文密码不会出现在状态文件或进程
-  列表中。密码长度受 bcrypt 72 字节上限约束。
+  空，或用户名重复（无论来自 `--auth`、`--auth-env` 还是 `--auth-file`）都会在
+  启动时报错。
+- 以 `USER:PASSWORD` 提供的密码会在启动时转换成 bcrypt 哈希；htpasswd 条目本身
+  已是哈希，直接使用。状态文件和 `pg.yaml` 中只写入哈希，传给脱离终端的
+  `pg http serve` 子进程的也只有哈希——明文密码不会出现在状态文件或进程列表中。
+  密码长度受 bcrypt 72 字节上限约束。
 - `/__pgcli_health` **无需**凭据即可访问，就绪探测不受影响。
 - `restart` 与开机自启直接复用记录的哈希，不需要重新提供参数或环境变量。修改
   密码时先 `stop` 服务器，再用新的 `--auth`/`--auth-env` 值重新 `start`。
@@ -328,9 +347,9 @@ pg autostart disable --http --name docs    # 删除快照；不会停止正在�
 
 ## 安全与限制
 
-- **默认没有认证。** 未配置 `--auth`/`--auth-env` 时，任何能访问该端口的人都能
-  读取所服务目录树中的全部文件。默认只监听回环是唯一防线；仅在受信网络中才使用
-  `0.0.0.0`，或者启用 Basic 认证。
+- **默认没有认证。** 未配置 `--auth`/`--auth-env`/`--auth-file` 时，任何能访问
+  该端口的人都能读取所服务目录树中的全部文件。默认只监听回环是唯一防线；仅在
+  受信网络中才使用 `0.0.0.0`，或者启用 Basic 认证。
 - **Basic 认证是全站门槛，不是强访问控制。** 它同时保护列表、下载与写操作；
   在非回环监听且未启用 `--tls` 时 `pg http start` 会警告：走普通 HTTP 时凭据以
   明文传输。状态文件和 `pg.yaml` 中的 bcrypt 哈希不是明文密码，但仍属凭据材料

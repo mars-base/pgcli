@@ -23,7 +23,8 @@ autoindex page with a copy button next to every file, and files are served with
 adds a delete button per file, `--allow-upload` adds an upload form that writes
 into the listing's directory, and `--allow-dir` adds a "new folder" form.
 `--admin-ip` optionally restricts all three write modes to a list of source IPs,
-and `--auth` / `--auth-env` put the whole site behind HTTP Basic Auth.
+and `--auth` / `--auth-env` / `--auth-file` put the whole site behind HTTP
+Basic Auth.
 
 The default is `127.0.0.1:18080` serving the current directory. Servers run as
 detached processes, so they survive the terminal that started them; several
@@ -34,6 +35,7 @@ pg http start
 pg http status
 pg http restart <NAME>
 pg http stop
+pg http htpasswd <USER>
 pg autostart enable --http --name <NAME>
 ```
 
@@ -43,7 +45,8 @@ pg autostart enable --http --name <NAME>
 pg http start [--name NAME] [--port 18080] [--listen 127.0.0.1] \
   [--dir .] [--tls] [--tls-cert FILE --tls-key FILE] \
   [--allow-delete] [--allow-upload] [--allow-dir] [--max-upload SIZE] \
-  [--admin-ip IP[,IP...]] [--auth USER:PASSWORD]... [--auth-env VAR]...
+  [--admin-ip IP[,IP...]] [--auth USER:PASSWORD]... [--auth-env VAR]... \
+  [--auth-file FILE]...
 ```
 
 | Flag | Default | Notes |
@@ -61,6 +64,7 @@ pg http start [--name NAME] [--port 18080] [--listen 127.0.0.1] \
 | `--admin-ip` | empty | Comma-separated source IPs allowed to use the write modes. Empty means no source restriction. Other sources get a read-only listing and `403` on writes |
 | `--auth` | empty | Require HTTP Basic Auth. `USER:PASSWORD`, repeat the flag for several users; the password may contain `:` |
 | `--auth-env` | empty | Read `USER:PASSWORD` from this environment variable, repeatable. Useful to keep passwords out of shell history |
+| `--auth-file` | empty | Read users from an htpasswd file with bcrypt entries, repeatable — see Basic Auth |
 
 `--name` accepts letters, digits, `.`, `_` and `-`.
 
@@ -139,12 +143,30 @@ export PG_HTTP_AUTH='carol:pw'
 pg http start --auth alice:s3cret --auth-env PG_HTTP_AUTH --dir /srv/share
 ```
 
+Credentials can also come from an htpasswd file. Create or update it with the
+`htpasswd` subcommand, which prompts for the password twice with no echo (or
+reads one line from stdin when it is piped) and writes the file with mode
+`0600`:
+
+```bash
+pg http htpasswd alice                        # default <base>/http/htpasswd
+pg http htpasswd bob --file /srv/share.htpasswd
+pg http start --auth-file /srv/share.htpasswd --dir /srv/share
+```
+
+Existing comments and other users in the file are preserved; naming an
+existing user replaces that entry. `--auth-file` accepts only bcrypt entries
+(the `$2a$`/`$2b$`/`$2y$` hashes written by `pg http htpasswd` or
+`htpasswd -B`); blank lines and lines starting with `#` are ignored, and a
+file without any users is an error.
+
 - The first `:` separates the user name from the password; the password itself
   may contain `:`. Empty user names or passwords and duplicate users (whether
-  from `--auth` or `--auth-env`) are rejected at start.
-- Passwords are turned into bcrypt hashes when the server starts. Only the
-  hashes are written to the state file and to `pg.yaml`, and only hashes are
-  passed to the detached `pg http serve` child — the plain password never
+  from `--auth`, `--auth-env` or `--auth-file`) are rejected at start.
+- Passwords given as `USER:PASSWORD` are turned into bcrypt hashes when the
+  server starts; htpasswd entries are already hashed and are used as-is. Only
+  the hashes are written to the state file and to `pg.yaml`, and only hashes
+  are passed to the detached `pg http serve` child — the plain password never
   appears in the state or the process list. Passwords are limited to the
   bcrypt maximum of 72 bytes.
 - `/__pgcli_health` stays reachable **without** credentials so readiness probes
@@ -384,10 +406,10 @@ servers survive the terminal but not a reboot.
 
 ## Security and limits
 
-- **No authentication by default.** Without `--auth`/`--auth-env`, anyone who
-  can reach the port can read every file in the served tree. The default
-  loopback listener is the only guard; expose `0.0.0.0` only on a trusted
-  network or turn on Basic Auth.
+- **No authentication by default.** Without `--auth`/`--auth-env`/`--auth-file`,
+  anyone who can reach the port can read every file in the served tree. The
+  default loopback listener is the only guard; expose `0.0.0.0` only on a
+  trusted network or turn on Basic Auth.
 - **Basic Auth is a full-site gate, not a strong access control.** It protects
   listings, downloads and writes alike, and `pg http start` warns when it is
   used without `--tls` on a non-loopback listener: over plain HTTP the

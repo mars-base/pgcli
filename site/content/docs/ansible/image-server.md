@@ -117,6 +117,10 @@ pg http start --name images --listen 0.0.0.0 --port 18080 \
   --auth images:<password> --auth-env PG_HTTP_AUTH
 ```
 
+Accounts can also live in an htpasswd file:
+`pg http htpasswd images --file /srv/offline-images.htpasswd`, then start with
+`--auth-file /srv/offline-images.htpasswd`.
+
 Note that the bundled Ansible tasks (`ansible.builtin.uri` for the HEAD
 pre-check, `ansible.builtin.get_url` for downloads) do not send credentials.
 If you enable Basic Auth on the image server, pass `url_username` /

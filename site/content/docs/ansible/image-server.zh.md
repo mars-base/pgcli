@@ -105,6 +105,10 @@ pg http start --name images --listen 0.0.0.0 --port 18080 \
   --auth images:<密码> --auth-env PG_HTTP_AUTH
 ```
 
+账号也可以放在 htpasswd 文件里：先
+`pg http htpasswd images --file /srv/offline-images.htpasswd`，然后用
+`--auth-file /srv/offline-images.htpasswd` 启动。
+
 注意：Ansible 角色内置的任务（预检用的 `ansible.builtin.uri` 与下载用的
 `ansible.builtin.get_url`）不会携带凭据。若在镜像服务器上启用 Basic 认证，需要在
 自己的 task 覆盖里传入 `url_username` / `url_password`，或者让这台上游服务器
