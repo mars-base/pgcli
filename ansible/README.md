@@ -342,7 +342,7 @@ entirely. The same operations are available directly through
 
 ## Add-ons
 
-pgcli manages 39 add-on types — PostgreSQL sidecars, storage systems,
+pgcli manages 40 add-on types — PostgreSQL sidecars, storage systems,
 observability stacks, messaging systems and supporting services. Most run as
 managed host-network containers; JuiceFS, ZeroFS and DuckDB are installed as
 host binaries.
@@ -356,6 +356,7 @@ host binaries.
 | Databases and analytics | `clickhouse`, `clickhouse-keeper`, `influxdb`, `influx2tsdb`, `documentdb`, `duckdb` |
 | Messaging and coordination | `etcd`, `redis`, `kafka`, `rabbitmq`, `rocketmq` |
 | Web and admin | `gitea`, `pgadmin`, `postgrest` |
+| Web application firewall | `safeline` |
 
 Each add-on has an inventory group with a fixed topology: `addon_<type>_single`
 (one host) or `addon_<type>_cluster` (multi-host; `etcd`, `minio`, `silo`,

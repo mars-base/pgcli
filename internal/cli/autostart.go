@@ -27,7 +27,7 @@ func init() {
 		c.Flags().Bool("postgrest", false, "select the PostgREST addon (use with -i for a local one, --pg-name for a remote one)")
 		c.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST (top-level addons)")
 		c.Flags().Bool("etcd", false, "select an etcd member (top-level addons)")
-		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs or vlagent or vmalert instance, gitea, beegfs, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, nginx, privoxy, daemon or SQLite database, or Patroni member")
+		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs or vlagent or vmalert instance, gitea, beegfs, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, safeline, nginx, privoxy, daemon or SQLite database, or Patroni member")
 		c.Flags().Bool("pgdog", false, "select a PgDog proxy (top-level addons)")
 		c.Flags().Bool("ha", false, "select Patroni HA members (top-level addons; requires --scope)")
 		c.Flags().Bool("haproxy", false, "select an HAProxy instance (top-level addons)")
@@ -62,6 +62,7 @@ func init() {
 		c.Flags().Bool("kafka", false, "select a Kafka instance (containerized addon; autostart starts the container)")
 		c.Flags().Bool("rabbitmq", false, "select a RabbitMQ instance (containerized addon; autostart starts the container)")
 		c.Flags().Bool("rocketmq", false, "select a RocketMQ instance (containerized addon; autostart starts the 3-container instance)")
+		c.Flags().Bool("safeline", false, "select a SafeLine WAF instance (top-level addon; autostart starts the whole 7-container stack)")
 		c.Flags().Bool("sqlite", false, "select a SQLite database (top-level host-binary addons; autostart restarts Litestream replication)")
 		c.Flags().Bool("daemon", false, "select a pg daemon (host command managed by 'pg daemon'; requires --name)")
 		c.Flags().Bool("http", false, "select a pg http server (host process managed by 'pg http'; requires --name)")
@@ -84,7 +85,7 @@ Use 'pg autostart disable' to opt out.`,
 
 var autostartEnableCmd = &cobra.Command{
 	Use:   "enable",
-	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/victoriametrics/nodeexporter/pgexporter/documentdb/vmcluster/vlcluster/victorialogs/vlagent/vmalert/gitea/beegfs/juicefs/zerofs/influxdb/influx2tsdb/clickhouse/clickhouse-keeper/kafka/rabbitmq/rocketmq/nginx/privoxy instance, a pg daemon, a pg http server, a SQLite database, or a Patroni member",
+	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/victoriametrics/nodeexporter/pgexporter/documentdb/vmcluster/vlcluster/victorialogs/vlagent/vmalert/gitea/beegfs/juicefs/zerofs/influxdb/influx2tsdb/clickhouse/clickhouse-keeper/kafka/rabbitmq/rocketmq/safeline/nginx/privoxy instance, a pg daemon, a pg http server, a SQLite database, or a Patroni member",
 	Long: `Enable auto-start on boot for exactly one target:
 
   pg autostart enable -i myinst          # instance
@@ -124,6 +125,7 @@ var autostartEnableCmd = &cobra.Command{
   pg autostart enable --kafka --name k1              # Kafka — starts the container (default name "kafka")
   pg autostart enable --rabbitmq --name rmq          # RabbitMQ — starts the container (default name "rabbitmq")
   pg autostart enable --rocketmq --name rmq          # RocketMQ — starts namesrv+broker+proxy (default name "rocketmq")
+  pg autostart enable --safeline --name waf1         # SafeLine WAF — starts the whole 7-container stack (default name "safeline")
   pg autostart enable --privoxy --name p1           # Privoxy forward proxy — starts the container (default name "privoxy")
   pg autostart enable --sqlite --name appdb          # SQLite database — restarts Litestream replication
   pg autostart enable --daemon --name webhook        # pg daemon — starts the registered host command
@@ -259,6 +261,9 @@ cluster member the embedded controller may need its peers before the broker
 registers, so a reboot does not wait for full cluster readiness; check
 "pg addon rocketmq cluster status" after the other members are up. Install the
 instance first (pg addon install rocketmq).
+SafeLine autostart starts the seven containers in postgres→mgt→…→tengine
+order; the per-site traffic ports are still configured in the console. Install
+the instance first (pg addon install safeline).
 Patroni member autostart only brings that member's existing container up,
 reading the patroni.yml already on disk — create the member first (pg ha
 create). Start order relative to the DCS doesn't matter: Patroni retries until
@@ -359,6 +364,7 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	kafkaSel, _ := cmd.Flags().GetBool("kafka")
 	rabbitmqSel, _ := cmd.Flags().GetBool("rabbitmq")
 	rocketmqSel, _ := cmd.Flags().GetBool("rocketmq")
+	safelineSel, _ := cmd.Flags().GetBool("safeline")
 	sqliteSel, _ := cmd.Flags().GetBool("sqlite")
 	daemonSel, _ := cmd.Flags().GetBool("daemon")
 	httpSel, _ := cmd.Flags().GetBool("http")
@@ -486,6 +492,9 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	if rocketmqSel {
 		sel++
 	}
+	if safelineSel {
+		sel++
+	}
 	if sqliteSel {
 		sel++
 	}
@@ -502,13 +511,13 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		sel++
 	}
 	if sel != 1 {
-		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --nodeexporter, --pgexporter, --documentdb, --vmcluster, --vlcluster, --victorialogs, --vlagent, --vmalert, --gitea, --beegfs, --juicefs, --zerofs, --influxdb, --influx2tsdb, --clickhouse, --clickhouse-keeper, --kafka, --rabbitmq, --rocketmq, --sqlite, --daemon, --http, --nginx, or --privoxy")
+		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --nodeexporter, --pgexporter, --documentdb, --vmcluster, --vlcluster, --victorialogs, --vlagent, --vmalert, --gitea, --beegfs, --juicefs, --zerofs, --influxdb, --influx2tsdb, --clickhouse, --clickhouse-keeper, --kafka, --rabbitmq, --rocketmq, --safeline, --sqlite, --daemon, --http, --nginx, or --privoxy")
 	}
 	if pgName != "" && !pgbSel && !prSel {
 		return fmt.Errorf("--pg-name requires --pgbouncer or --postgrest")
 	}
-	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !garageSel && !seaweedfsSel && !redisSel && !predixySel && !pgadminSel && !grafanaSel && !prometheusSel && !alertmanagerSel && !victoriaMetricsSel && !nodeExporterSel && !pgExporterSel && !documentDBSel && !vmclusterSel && !vlclusterSel && !victoriaLogsSel && !vlagentSel && !vmalertSel && !giteaSel && !beegfsSel && !juicefsSel && !zerofsSel && !influxdbSel && !influx2tsdbSel && !clickhouseSel && !clickHouseKeeperSel && !kafkaSel && !rabbitmqSel && !rocketmqSel && !sqliteSel && !daemonSel && !httpSel && !nginxSel && !privoxySel {
-		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --nodeexporter, --pgexporter, --documentdb, --vmcluster, --vlcluster, --victorialogs, --vlagent, --vmalert, --gitea, --beegfs, --juicefs, --zerofs, --influxdb, --influx2tsdb, --clickhouse, --clickhouse-keeper, --kafka, --rabbitmq, --rocketmq, --sqlite, --daemon, --http, --nginx, or --privoxy")
+	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !garageSel && !seaweedfsSel && !redisSel && !predixySel && !pgadminSel && !grafanaSel && !prometheusSel && !alertmanagerSel && !victoriaMetricsSel && !nodeExporterSel && !pgExporterSel && !documentDBSel && !vmclusterSel && !vlclusterSel && !victoriaLogsSel && !vlagentSel && !vmalertSel && !giteaSel && !beegfsSel && !juicefsSel && !zerofsSel && !influxdbSel && !influx2tsdbSel && !clickhouseSel && !clickHouseKeeperSel && !kafkaSel && !rabbitmqSel && !rocketmqSel && !safelineSel && !sqliteSel && !daemonSel && !httpSel && !nginxSel && !privoxySel {
+		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --nodeexporter, --pgexporter, --documentdb, --vmcluster, --vlcluster, --victorialogs, --vlagent, --vmalert, --gitea, --beegfs, --juicefs, --zerofs, --influxdb, --influx2tsdb, --clickhouse, --clickhouse-keeper, --kafka, --rabbitmq, --rocketmq, --safeline, --sqlite, --daemon, --http, --nginx, or --privoxy")
 	}
 	if sqliteSel && addonName == "" {
 		return fmt.Errorf("--sqlite requires --name <database>")
@@ -915,6 +924,18 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		rc.Autostart = enable
 		cfg.Addons.RocketMQ[proxyName] = rc
 		targetDesc = fmt.Sprintf("rocketmq instance %q", proxyName)
+	case safelineSel:
+		proxyName := addonName
+		if proxyName == "" {
+			proxyName = "safeline"
+		}
+		sc, ok := cfg.Addons.Safeline[proxyName]
+		if !ok {
+			return fmt.Errorf("safeline instance %q not found in config", proxyName)
+		}
+		sc.Autostart = enable
+		cfg.Addons.Safeline[proxyName] = sc
+		targetDesc = fmt.Sprintf("safeline instance %q", proxyName)
 	case sqliteSel:
 		db, ok := cfg.Addons.SQLite[addonName]
 		if !ok {
@@ -1422,6 +1443,9 @@ func runAutostartStatus(cmd *cobra.Command, args []string) error {
 	}
 	for name, rc := range cfg.Addons.RocketMQ {
 		fmt.Printf("  rocketmq %-12s %s\n", name, onOff(rc.Autostart))
+	}
+	for name, sc := range cfg.Addons.Safeline {
+		fmt.Printf("  safeline %-12s %s\n", name, onOff(sc.Autostart))
 	}
 	for name, db := range cfg.Addons.SQLite {
 		fmt.Printf("  sqlite %-14s %s\n", name, onOff(db.Autostart))

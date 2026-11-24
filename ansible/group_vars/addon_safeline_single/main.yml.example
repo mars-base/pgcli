@@ -1,0 +1,26 @@
+---
+# safeline standalone add-on group (addon_safeline_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_safeline_single --tags addon
+#
+# SafeLine WAF runs a seven-container stack per instance (bundled PostgreSQL,
+# console, detector, tengine traffic proxy, luigi, fvm, chaos) on a dedicated
+# bridge network with fixed container addresses. It needs Linux and rootful
+# podman. The console listens on HTTPS (self-signed certificate) and publishes
+# one host port; the protected sites' traffic ports (default 80/443) are
+# configured per site in the console.
+
+# Default flags for safeline entries that do not set their own params.
+addon_safeline_single_params: []
+# Example:
+#   - "--data-dir=/data/pg/addon/safeline/safeline1"
+#   - "--port=9443"                 # console HTTPS host port
+#   - "--listen=0.0.0.0"
+#   - "--subnet-prefix=172.22.222"  # each stack needs its own /24
+#   - "--version=9.4.7"             # SafeLine release tag
+#   - "--postgres-version=15.18"    # bundled PostgreSQL tag
+
+addon_safeline_single_addons:
+  - type: safeline
+    state: present
+    name: safeline1

@@ -353,6 +353,34 @@ pgcli_images:
     archive: pg_exporter_1.5.0.tar
     auto_load: true
     addons: [pgexporter]
+  - image: docker.io/chaitin/safeline-postgres:15.18
+    archive: safeline-postgres_15.18.tar
+    auto_load: true
+    addons: [safeline]
+  - image: docker.io/chaitin/safeline-mgt:9.4.7
+    archive: safeline-mgt_9.4.7.tar
+    auto_load: true
+    addons: [safeline]
+  - image: docker.io/chaitin/safeline-detector:9.4.7
+    archive: safeline-detector_9.4.7.tar
+    auto_load: true
+    addons: [safeline]
+  - image: docker.io/chaitin/safeline-tengine:9.4.7
+    archive: safeline-tengine_9.4.7.tar
+    auto_load: true
+    addons: [safeline]
+  - image: docker.io/chaitin/safeline-luigi:9.4.7
+    archive: safeline-luigi_9.4.7.tar
+    auto_load: true
+    addons: [safeline]
+  - image: docker.io/chaitin/safeline-fvm:9.4.7
+    archive: safeline-fvm_9.4.7.tar
+    auto_load: true
+    addons: [safeline]
+  - image: docker.io/chaitin/safeline-chaos:9.4.7
+    archive: safeline-chaos_9.4.7.tar
+    auto_load: true
+    addons: [safeline]
 
 # Install-time subset: everything the pgcli role must have before instances
 # and add-ons are reconciled. Entries with auto_load: true are excluded here

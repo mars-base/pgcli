@@ -40,6 +40,7 @@ type Config struct {
 	RedisStartPort           int                         `yaml:"redis_start_port,omitempty"`                   // starting Redis host port, default 6379
 	PredixyStartPort         int                         `yaml:"predixy_start_port,omitempty"`                 // starting Predixy proxy listener host port, default 7617
 	PgAdminStartPort         int                         `yaml:"pgadmin_start_port,omitempty"`                 // starting pgAdmin 4 web host port, default 5050
+	SafelineStartPort        int                         `yaml:"safeline_start_port,omitempty"`                // starting SafeLine WAF console host port, default 9443
 	GrafanaStartPort         int                         `yaml:"grafana_start_port,omitempty"`                 // starting Grafana web host port, default 3000
 	PrometheusStartPort      int                         `yaml:"prometheus_start_port,omitempty"`              // starting Prometheus web host port, default 9090
 	AlertmanagerStartPort    int                         `yaml:"alertmanager_start_port,omitempty"`            // starting Alertmanager web host port, default 9093
@@ -228,6 +229,7 @@ type TopAddonsConfig struct {
 	Kafka            map[string]KafkaConfig            `yaml:"kafka,omitempty"`
 	RabbitMQ         map[string]RabbitMQConfig         `yaml:"rabbitmq,omitempty"`
 	RocketMQ         map[string]RocketMQConfig         `yaml:"rocketmq,omitempty"`
+	Safeline         map[string]SafelineConfig         `yaml:"safeline,omitempty"`
 }
 
 // PgBouncerConfig holds the per-instance PgBouncer connection pooler settings.
@@ -3156,6 +3158,105 @@ func ParseRocketMQHeap(value string) (string, error) {
 	return v, nil
 }
 
+// SafeLine (雷池 WAF) Community Edition constants. The component images share
+// one release tag; the stack ships its own PostgreSQL 15 container because
+// upstream has not validated PostgreSQL 18 yet (chaitin/SafeLine#1250), so the
+// bundled database version is pinned separately.
+const (
+	DefaultSafelineVersion              = "9.4.7"
+	DefaultSafelinePostgresVersion      = "15.18"
+	DefaultSafelineSubnetPrefix         = "172.22.222"
+	DefaultSafelineConsolePort          = 9443 // mgt's container port 1443 published here
+	DefaultSafelineConsoleContainerPort = 1443
+)
+
+// SafelineConfig holds a SafeLine WAF addon: a seven-container stack
+// (postgres, mgt, detector, tengine, luigi, fvm, chaos) on a dedicated bridge
+// network with fixed static addresses. The mgt console is the only published
+// port; tengine protects traffic on ports configured per site in the console.
+type SafelineConfig struct {
+	Name            string `yaml:"name,omitempty"`             // addon key, defaults to the map key
+	Version         string `yaml:"version,omitempty"`          // component tag, e.g. "9.4.7"
+	PostgresVersion string `yaml:"postgres_version,omitempty"` // bundled PostgreSQL tag, e.g. "15.18"
+
+	// ContainerPrefix names the seven role containers (<prefix>-<role>);
+	// NetworkName is the dedicated bridge network. Defaults derive both from
+	// the addon name.
+	ContainerPrefix string `yaml:"container_prefix,omitempty"`
+	NetworkName     string `yaml:"network_name,omitempty"`
+
+	// SubnetPrefix is the first three octets of the stack's /24 bridge
+	// subnet: <prefix>.0/24 with the gateway at .1 and fixed container
+	// addresses above it (postgres .2, mgt .4, detector .5, luigi .7,
+	// fvm .8, chaos .10).
+	SubnetPrefix string `yaml:"subnet_prefix,omitempty"`
+
+	ConsolePort int    `yaml:"console_port,omitempty"` // mgt HTTPS console host port, 9443+ auto-assigned
+	Listen      string `yaml:"listen,omitempty"`       // console bind address, default 0.0.0.0
+
+	DataDir string `yaml:"data_dir,omitempty"` // stack data root, default <base>/addon/safeline/<name>
+
+	// PostgresPassword feeds the bundled database (POSTGRES_PASSWORD and the
+	// component DSNs). Generated on first install.
+	PostgresPassword string `yaml:"postgres_password,omitempty"`
+
+	// AdminUser/AdminPassword are the console credentials captured from the
+	// mgt container's resetadmin bootstrap command.
+	AdminUser     string `yaml:"admin_user,omitempty"`
+	AdminPassword string `yaml:"admin_password,omitempty"`
+
+	// Autostart starts the whole stack on host boot (pg autostart enable --safeline).
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// SafelineContainerName returns the container name for one role.
+func SafelineContainerName(c SafelineConfig, role string) string {
+	return c.ContainerPrefix + "-" + role
+}
+
+// SafelineSubnet is the stack's bridge CIDR.
+func SafelineSubnet(c SafelineConfig) string { return c.SubnetPrefix + ".0/24" }
+
+// SafelineGateway is the bridge gateway (first host address).
+func SafelineGateway(c SafelineConfig) string { return c.SubnetPrefix + ".1" }
+
+// SafelineStaticIP is one fixed container address inside the subnet.
+func SafelineStaticIP(c SafelineConfig, host int) string {
+	return fmt.Sprintf("%s.%d", c.SubnetPrefix, host)
+}
+
+// ValidSafelineName reports whether name is a safe SafeLine addon key.
+func ValidSafelineName(name string) bool {
+	ok, _ := regexp.MatchString(`^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$`, name)
+	return ok
+}
+
+var safelineVersionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+(\.[0-9]+)?$`)
+
+// ValidSafelineVersion reports whether v is a dot-separated release tag such
+// as "9.4.7" or "15.18". The bundled PostgreSQL tag is two-part upstream
+// ("15.18"), so both forms are accepted.
+func ValidSafelineVersion(v string) bool {
+	return safelineVersionRe.MatchString(v)
+}
+
+// ValidSafelineSubnetPrefix reports whether p is three usable octets: the /24
+// needs .0 (network), .1 (gateway) and the fixed container addresses, so each
+// octet must leave room above it.
+func ValidSafelineSubnetPrefix(p string) bool {
+	parts := strings.Split(p, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, part := range parts {
+		n, err := strconv.Atoi(part)
+		if err != nil || n < 0 || n > 255 || part != strconv.Itoa(n) {
+			return false
+		}
+	}
+	return true
+}
+
 // influxDBManagedKeys are the config keys pgcli renders itself; a
 // --config-option override would either duplicate a TOML key (a parse error)
 // or silently fight the instance's stored paths/ports.
@@ -4721,6 +4822,7 @@ func Default() *Config {
 		RedisStartPort:           6379,
 		PredixyStartPort:         7617,
 		PgAdminStartPort:         5050,
+		SafelineStartPort:        DefaultSafelineConsolePort,
 		GrafanaStartPort:         3000,
 		PrometheusStartPort:      9090,
 		AlertmanagerStartPort:    9093,
@@ -4978,6 +5080,7 @@ type displayConfig struct {
 	RedisStartPort           int                         `yaml:"redis_start_port,omitempty"`
 	PredixyStartPort         int                         `yaml:"predixy_start_port,omitempty"`
 	PgAdminStartPort         int                         `yaml:"pgadmin_start_port,omitempty"`
+	SafelineStartPort        int                         `yaml:"safeline_start_port,omitempty"`
 	GrafanaStartPort         int                         `yaml:"grafana_start_port,omitempty"`
 	PrometheusStartPort      int                         `yaml:"prometheus_start_port,omitempty"`
 	AlertmanagerStartPort    int                         `yaml:"alertmanager_start_port,omitempty"`
@@ -5037,6 +5140,7 @@ func (c *Config) Display() displayConfig {
 		RedisStartPort:           c.RedisStartPort,
 		PredixyStartPort:         c.PredixyStartPort,
 		PgAdminStartPort:         c.PgAdminStartPort,
+		SafelineStartPort:        c.SafelineStartPort,
 		GrafanaStartPort:         c.GrafanaStartPort,
 		PrometheusStartPort:      c.PrometheusStartPort,
 		AlertmanagerStartPort:    c.AlertmanagerStartPort,
@@ -6037,6 +6141,42 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	// SafeLine stacks: release tags, console port range, subnet shape and
+	// uniqueness. The subnet is the whole stack's identity (every container
+	// address derives from it), so two stacks must never share one.
+	safelinePorts := map[int]string{}
+	safelineSubnets := map[string]string{}
+	for name, sc := range c.Addons.Safeline {
+		if !ValidSafelineName(sc.Name) {
+			return fmt.Errorf("addons.safeline.%s.name %q must match [A-Za-z0-9][A-Za-z0-9_-]{0,47}", name, sc.Name)
+		}
+		if !ValidSafelineVersion(sc.Version) {
+			return fmt.Errorf("addons.safeline.%s.version %q must look like 9.4.7", name, sc.Version)
+		}
+		if !ValidSafelineVersion(sc.PostgresVersion) {
+			return fmt.Errorf("addons.safeline.%s.postgres_version %q must look like 15.18", name, sc.PostgresVersion)
+		}
+		if sc.ConsolePort < 1 || sc.ConsolePort > 65535 {
+			return fmt.Errorf("addons.safeline.%s.console_port must be between 1 and 65535, got %d", name, sc.ConsolePort)
+		}
+		if prev, dup := safelinePorts[sc.ConsolePort]; dup {
+			return fmt.Errorf("addons.safeline.%s.console_port %d is already used by %s (SafeLine console ports must be unique)", name, sc.ConsolePort, prev)
+		}
+		safelinePorts[sc.ConsolePort] = name
+		if !ValidSafelineSubnetPrefix(sc.SubnetPrefix) {
+			return fmt.Errorf("addons.safeline.%s.subnet_prefix %q must be three octets such as 172.22.222", name, sc.SubnetPrefix)
+		}
+		if prev, dup := safelineSubnets[sc.SubnetPrefix]; dup {
+			return fmt.Errorf("addons.safeline.%s.subnet_prefix %s.0/24 is already used by %s (each SafeLine stack needs its own subnet)", name, sc.SubnetPrefix, prev)
+		}
+		safelineSubnets[sc.SubnetPrefix] = name
+		if sc.ContainerPrefix == "" || sc.NetworkName == "" {
+			return fmt.Errorf("addons.safeline.%s.container_prefix and network_name must not be empty", name)
+		}
+		if sc.DataDir == "" || !filepath.IsAbs(sc.DataDir) {
+			return fmt.Errorf("addons.safeline.%s.data_dir must be an absolute path, got %q", name, sc.DataDir)
+		}
+	}
 	for name, ec := range c.Addons.Etcd {
 		if (ec.TLSCertFile == "") != (ec.TLSKeyFile == "") {
 			return fmt.Errorf("addons.etcd.%s.tls_cert_file and tls_key_file must be set together", name)
@@ -6180,6 +6320,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.PgAdminStartPort == 0 {
 		c.PgAdminStartPort = d.PgAdminStartPort
+	}
+	if c.SafelineStartPort == 0 {
+		c.SafelineStartPort = d.SafelineStartPort
 	}
 	if c.GrafanaStartPort == 0 {
 		c.GrafanaStartPort = d.GrafanaStartPort
@@ -7696,6 +7839,45 @@ func (c *Config) ApplyDefaults() {
 		c.Addons.RocketMQ[name] = addon
 	}
 
+	// Top-level SafeLine WAF stacks. Seven containers share one data root at
+	// <base>/addon/safeline/<name>/ (bundled PostgreSQL, console state, nginx
+	// config, logs). Console ports are assigned by autoAssignPorts so multiple
+	// stacks can coexist on one host.
+	safelineBaseDir := platform.DefaultConfigDir()
+	if c.BaseDir != "" {
+		safelineBaseDir = c.BaseDir
+	}
+	for name, addon := range c.Addons.Safeline {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.Version == "" {
+			addon.Version = DefaultSafelineVersion
+		}
+		if addon.PostgresVersion == "" {
+			addon.PostgresVersion = DefaultSafelinePostgresVersion
+		}
+		if addon.ContainerPrefix == "" {
+			addon.ContainerPrefix = "pgcli-safeline" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.NetworkName == "" {
+			addon.NetworkName = addon.ContainerPrefix
+		}
+		if addon.SubnetPrefix == "" {
+			addon.SubnetPrefix = DefaultSafelineSubnetPrefix
+		}
+		if addon.Listen == "" {
+			addon.Listen = "0.0.0.0"
+		}
+		if addon.AdminUser == "" {
+			addon.AdminUser = "admin"
+		}
+		if addon.DataDir == "" {
+			addon.DataDir = filepath.Join(safelineBaseDir, "addon", "safeline", name)
+		}
+		c.Addons.Safeline[name] = addon
+	}
+
 	// Auto-assign host, SSH and PgBouncer ports for instances that don't have one set.
 	c.autoAssignPorts()
 }
@@ -8665,6 +8847,43 @@ func (c *Config) autoAssignPorts() {
 				next = addon.HostPort + 1
 			}
 			c.Addons.PgAdmin[name] = addon
+		}
+	}
+
+	// Allocate console ports for SafeLine stacks from their own pool
+	// (safeline_start_port, default 9443 — the upstream console's default host
+	// port). One published port per stack: tengine's protected-traffic ports
+	// are configured per site in the console, not published here.
+	{
+		safelineBase := c.SafelineStartPort
+		assignedSafeline := map[int]bool{}
+		for _, addon := range c.Addons.Safeline {
+			if addon.ConsolePort != 0 {
+				assignedSafeline[addon.ConsolePort] = true
+			}
+		}
+		next := safelineBase
+		nextFreeSafeline := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedSafeline[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.Safeline))
+		for name := range c.Addons.Safeline {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.Safeline[name]
+			if addon.ConsolePort == 0 && safelineBase > 0 {
+				addon.ConsolePort = nextFreeSafeline()
+			} else if addon.ConsolePort >= next {
+				next = addon.ConsolePort + 1
+			}
+			c.Addons.Safeline[name] = addon
 		}
 	}
 

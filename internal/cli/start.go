@@ -80,8 +80,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartNodeExporter(c) && !hasAutostartPGExporter(c) && !hasAutostartDocumentDB(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartVmalert(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouseKeeper(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartRabbitMQ(c) && !hasAutostartRocketMQ(c) && !hasAutostartNginx(c) && !hasAutostartPrivoxy(c) && !hasAutostartHTTP(c) && !hasAutostartDaemons(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --vmalert / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --kafka / --rabbitmq / --nginx / --nodeexporter / --pgexporter / --documentdb / --daemon / --http / --privoxy)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartNodeExporter(c) && !hasAutostartPGExporter(c) && !hasAutostartDocumentDB(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartVmalert(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouseKeeper(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartRabbitMQ(c) && !hasAutostartRocketMQ(c) && !hasAutostartSafeline(c) && !hasAutostartNginx(c) && !hasAutostartPrivoxy(c) && !hasAutostartHTTP(c) && !hasAutostartDaemons(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --vmalert / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --kafka / --rabbitmq / --safeline / --nginx / --nodeexporter / --pgexporter / --documentdb / --daemon / --http / --privoxy)")
 		return nil
 	}
 
@@ -373,6 +373,12 @@ func startAutostart() error {
 	// starts namesrv -> broker -> proxy; a cluster member may wait for the
 	// controller quorum, which StartContainers tolerates.
 	if err := startAutostartRocketMQ(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// safeline WAF stacks. StartContainers brings the bundled PostgreSQL up
+	// before the rest of the roles; no dependency on other addons.
+	if err := startAutostartSafeline(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -1697,6 +1703,75 @@ func startAutostartRocketMQ(c *config.Config) error {
 		}
 		fmt.Printf("  [OK] rocketmq %q started (namesrv %s, proxy %s:%d)\n", name,
 			strings.Join(mustRocketMQNamesrvAddrs(rc), ";"), rc.AdvertiseHost, rc.ProxyPort)
+	}
+	return firstErr
+}
+
+func hasAutostartSafeline(c *config.Config) bool {
+	for _, sc := range c.Addons.Safeline {
+		if sc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartSafeline starts each autostart-enabled SafeLine stack.
+// StartContainers is idempotent and starts postgres first; if the console
+// password was never captured (an install that failed short) resetadmin
+// recovers it here.
+func startAutostartSafeline(c *config.Config) error {
+	var names []string
+	for name, sc := range c.Addons.Safeline {
+		if sc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	m, err := podman.NewSafelineManager(c)
+	if err != nil {
+		fmt.Printf("  [X] safeline autostart: %v\n", err)
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		sc := c.Addons.Safeline[name]
+		already, err := m.StartContainers(&sc)
+		if err != nil {
+			fmt.Printf("  [X] safeline autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if sc.AdminPassword == "" {
+			user, pw, err := m.ResetAdmin(&sc)
+			if err != nil {
+				fmt.Printf("  [X] safeline autostart (%s): resetadmin: %v\n", name, err)
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			sc.AdminUser = user
+			sc.AdminPassword = pw
+			c.Addons.Safeline[name] = sc
+			if err := c.Save(cfgPath); err != nil {
+				fmt.Printf("  [X] safeline autostart (%s): saving config: %v\n", name, err)
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+		}
+		if already {
+			fmt.Printf("  [OK] safeline %q already running\n", name)
+			continue
+		}
+		fmt.Printf("  [OK] safeline %q started (console %s)\n", name, podman.ConsoleURL(&sc))
 	}
 	return firstErr
 }

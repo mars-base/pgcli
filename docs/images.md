@@ -55,6 +55,13 @@ pgcli 使用的容器镜像及其默认 tag。
 | `docker.io/victoriametrics/victoria-logs` | `v1.53.0` | VictoriaLogs（VictoriaMetrics 家族的日志数据库），纯上游官方镜像无 wrapper；多架构，以 root 运行 | `DefaultVictoriaLogsImageTag` |
 | `docker.io/victoriametrics/vlagent` | `v1.53.0` | vlagent（VictoriaLogs 官方日志 agent），纯上游官方镜像无 wrapper；多架构，以 root 运行；文件采集由 pgcli 的 `--log-path`/`--include`/`--exclude` 接线 | `DefaultVlagentImageTag` |
 | `docker.io/victoriametrics/vmalert` | `v1.133.0` | vmalert（VictoriaMetrics 规则求值引擎），纯上游官方镜像无 wrapper；linux/amd64，以 root 运行；规则/模板目录由 pgcli 只读挂载，重载走 `GET /-/reload` | `DefaultVmalertImageTag` |
+| `docker.io/chaitin/safeline-postgres` | `15.18` | SafeLine（雷池 WAF CE）栈内置 PostgreSQL 15——上游尚未验证 PG 18（chaitin/SafeLine#1250），仅 linux/amd64；rootful，固定静态 IP | `DefaultSafelinePostgresVersion` |
+| `docker.io/chaitin/safeline-mgt` | `9.4.7` | SafeLine 管理台（HTTPS 控制台，容器内 1443 发布到宿主 9443），仅 linux/amd64；rootful bridge 静态 IP | `DefaultSafelineVersion` |
+| `docker.io/chaitin/safeline-detector` | `9.4.7` | SafeLine 检测引擎，仅 linux/amd64；rootful bridge 静态 IP | 同上 |
+| `docker.io/chaitin/safeline-tengine` | `9.4.7` | SafeLine 流量反向代理（host 网络，站点监听端口在控制台按应用配置，默认 80/443），仅 linux/amd64 | 同上 |
+| `docker.io/chaitin/safeline-luigi` | `9.4.7` | SafeLine 控制台辅助服务，仅 linux/amd64；rootful bridge 静态 IP | 同上 |
+| `docker.io/chaitin/safeline-fvm` | `9.4.7` | SafeLine 文件/版本管理服务，仅 linux/amd64；rootful bridge 静态 IP | 同上 |
+| `docker.io/chaitin/safeline-chaos` | `9.4.7` | SafeLine 流量仿真服务，仅 linux/amd64；rootful bridge 静态 IP | 同上 |
 
 ## 镜像导出
 
@@ -154,6 +161,13 @@ podman save -o "$TARGET/rabbitmq_4.4.0-management.tar" \
 # rocketmq 上游镜像先按 amd64 pull 再 save
 podman pull --platform linux/amd64 docker.io/apache/rocketmq:5.5.0
 podman save -o "$TARGET/rocketmq_5.5.0.tar" docker.io/apache/rocketmq:5.5.0
+
+# safeline 全栈（雷池 WAF CE）上游镜像仅 linux/amd64，逐个 pull + save
+for img in safeline-postgres:15.18 safeline-mgt:9.4.7 safeline-detector:9.4.7 \
+           safeline-tengine:9.4.7 safeline-luigi:9.4.7 safeline-fvm:9.4.7 safeline-chaos:9.4.7; do
+  podman pull --platform linux/amd64 docker.io/chaitin/"$img"
+  podman save -o "$TARGET/$(echo "$img" | tr : _).tar" docker.io/chaitin/"$img"
+done
 
 # pgAdmin 上游镜像与 redis 一样是双架构 manifest list，先按 amd64 pull 再 save
 podman pull --platform linux/amd64 docker.io/dpage/pgadmin4:9.18

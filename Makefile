@@ -397,7 +397,14 @@ IMAGES := \
 	docker.io/library/rabbitmq:4.4.0-management \
 	docker.io/apache/rocketmq:5.5.0 \
 	docker.io/prom/node-exporter:v1.12.1 \
-	docker.io/pgsty/pg_exporter:1.5.0
+	docker.io/pgsty/pg_exporter:1.5.0 \
+	docker.io/chaitin/safeline-postgres:15.18 \
+	docker.io/chaitin/safeline-mgt:9.4.7 \
+	docker.io/chaitin/safeline-detector:9.4.7 \
+	docker.io/chaitin/safeline-tengine:9.4.7 \
+	docker.io/chaitin/safeline-luigi:9.4.7 \
+	docker.io/chaitin/safeline-fvm:9.4.7 \
+	docker.io/chaitin/safeline-chaos:9.4.7
 
 container-images-export:
 	@mkdir -p images

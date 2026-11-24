@@ -282,6 +282,9 @@ ansible_group_priority=20
 # [addon_rustfs_single]
 # node1
 
+# [addon_safeline_single]
+# node1
+
 # [addon_seaweedfs_single]
 # node1
 
