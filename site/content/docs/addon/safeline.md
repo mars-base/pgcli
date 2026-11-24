@@ -78,12 +78,7 @@ The console serves HTTPS with a self-signed certificate; browsers show the usual
 
 ## Protected sites and traffic ports
 
-Applications (protected sites) are configured **in the console**, not with pgcli flags. Each site gets an entry port on the host — 80/443 by default — served by the host-networked **tengine** container. Before adding a site, make sure the port is free on the host (`ss -tlnp`), and open it in the firewall together with the console port:
-
-```bash
-# example with nftables; adjust to your firewall
-nft add rule inet filter input tcp dport { 80, 443, 9443 } accept
-```
+Applications (protected sites) are configured **in the console**, not with pgcli flags. Each site gets an entry port on the host — 80/443 by default — served by the host-networked **tengine** container. Before adding a site, make sure the port is free on the host (`ss -tlnp`). In the firewall, open the console port and each site's entry port (80 and 443 by default).
 
 ## Container layout and networking
 

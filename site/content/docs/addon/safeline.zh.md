@@ -92,12 +92,7 @@ podman exec pgcli-safeline-waf1-mgt resetadmin
 
 受防护应用（站点）在**控制台里**配置，不通过 pgcli 参数。每个站点在宿主机上获得一个入口端口
 （默认 80/443），由 host 网络的 **tengine** 容器监听。添加站点前先确认宿主机端口空闲
-（`ss -tlnp`），并在防火墙放行该端口与控制台端口：
-
-```bash
-# nftables 示例，按实际防火墙调整
-nft add rule inet filter input tcp dport { 80, 443, 9443 } accept
-```
+（`ss -tlnp`）。防火墙需放行控制台端口以及各站点的入口端口（默认 80、443）。
 
 ## 容器布局与网络
 
