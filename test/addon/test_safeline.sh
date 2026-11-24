@@ -141,7 +141,10 @@ cid_of() { podman inspect "$(cname "$1")" --format '{{.Id}}' 2>/dev/null; }
 # few seconds before declaring a miss. Diagnostics from the last attempt are
 # printed only when the deadline expires.
 eventually() {  # eventually <func> [args...]
-    local deadline=$((SECONDS + 3)) err
+    # podman 4.9's sqlite backend can serve stale or empty reads for a few
+    # seconds right after container churn, so give the retries room to outlast
+    # it; a healthy stack answers on the first attempt.
+    local deadline=$((SECONDS + 10)) err
     while :; do
         err="$("$@" 2>&1)" && return 0
         [ "$SECONDS" -ge "$deadline" ] && { [ -n "$err" ] && echo "$err" >&2; return 1; }
@@ -176,8 +179,17 @@ none_running() { local r; for r in $ROLES; do is_running "$r" && return 1; done;
 all_absent()  { local r; for r in $ROLES; do is_absent  "$r" || return 1; done; }
 ip_of() { podman inspect "$(cname "$1")" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null; }
 # podman records "bridge" (the driver) in HostConfig.NetworkMode for --network
-# <name>:ip=…, so attachment must be read from NetworkSettings.Networks.
-net_attached() { podman inspect "$(cname "$1")" --format '{{range $k,$v := .NetworkSettings.Networks}}{{println $k}}{{end}}' 2>/dev/null | grep -qx "$PREFIX"; }
+# <name>:ip=…, so attachment must be read from NetworkSettings.Networks. A
+# failed inspect is retried once and its raw output kept for the diagnostic,
+# since the sqlite backend occasionally errors or reads empty after churn.
+net_attached() {
+    local out
+    for _ in 1 2; do
+        out="$(podman inspect "$(cname "$1")" --format '{{range $k,$v := .NetworkSettings.Networks}}{{println $k}}{{end}}' 2>&1)" && break
+        sleep 0.5
+    done
+    grep -qx "$PREFIX" <<<"$out" || { echo "not attached: $1 (networks: $(echo "$out" | tr '\n' ' '))" >&2; return 1; }
+}
 bridge_roles_attached() { local r; for r in postgres mgt detector luigi fvm chaos; do net_attached "$r" || { echo "not attached: $r" >&2; return 1; }; done; }
 restart_policy_of() { podman inspect "$(cname "$1")" --format '{{.HostConfig.RestartPolicy.Name}}' 2>/dev/null; }
 env_of() { podman inspect "$(cname "$1")" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null; }
