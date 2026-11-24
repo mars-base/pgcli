@@ -34,6 +34,12 @@
 #   6. FLAG CONTRACT — flags owned by other addons (--password, --image, --dsn,
 #      ...) are rejected up front, and subnet/port conflicts and malformed
 #      values fail during validation, before any image is pulled.
+#   7. TRAFFIC — the console web API is driven the way the UI drives it (AES
+#      encrypted admin login with the csrf token, POST /api/open/site), local
+#      upstream HTTP servers on this host and a public HTTPS upstream
+#      (www.baidu.com) are proxied through tengine on the new sites' entry
+#      ports, and a hostname upstream picks up its new address only after
+#      `pg addon reload`.
 #
 # Usage:
 #   bash test/addon/test_safeline.sh                   # full test, cleans up
@@ -261,8 +267,121 @@ autostart_safeline() {  # autostart_safeline <enable|disable> <true|false>
     [ -z "$v" ] && v=false
     [ "$v" = "$2" ]
 }
+# The detector image enables DETECTOR_MGMT_AUTH by default and only accepts
+# callers that present the shared token fvm/luigi read from
+# DETECTOR_MGMT_TOKEN, so all three roles must carry the stored value.
+detector_token_wired() {
+    local tok
+    tok="$(sf_field "$STACK" detector_mgmt_token)"
+    [ -n "$tok" ] || return 1
+    env_has detector "DETECTOR_MGMT_TOKEN=$tok" &&
+        env_has fvm "DETECTOR_MGMT_TOKEN=$tok" &&
+        env_has luigi "DETECTOR_MGMT_TOKEN=$tok" &&
+        ! env_has mgt "DETECTOR_MGMT_TOKEN=" &&
+        ! env_has tengine "DETECTOR_MGMT_TOKEN="
+}
+
+# --- console web API fixtures -------------------------------------------
+API_BASE="https://127.0.0.1:$CONSOLE_PORT/api"
+UPSTREAM_PORT=""
+UPSTREAM_PIDS=""
+
+# json_get <dotted.path> — read stdin as JSON and print the value (empty for a
+# missing path or null).
+json_get() {
+    python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+for k in sys.argv[1].split("."):
+    d = d.get(k) if isinstance(d, dict) else None
+print("" if d is None else d)' "$1"
+}
+
+# console_token logs in exactly like the console web UI: fetch the AES key and
+# a csrf token, AES-CBC encrypt the admin password with a random salt whose hex
+# string doubles as the IV, then exchange the base64(salt + ciphertext) blob
+# for a JWT.
+console_token() {
+    local pw key csrf salt keyhex ivhex enc
+    pw="$(pg addon password safeline --name "$STACK" 2>/dev/null)" || return 1
+    key="$(curl -sk "$API_BASE/open/system/key" | json_get data)" || return 1
+    csrf="$(curl -sk "$API_BASE/open/auth/csrf" | json_get data.csrf_token)" || return 1
+    [ -n "$pw" ] && [ -n "$key" ] && [ -n "$csrf" ] || return 1
+    salt="$(openssl rand -hex 8)"
+    keyhex="$(printf '%s' "$key" | od -An -tx1 | tr -d ' \n')"
+    ivhex="$(printf '%s' "$salt" | od -An -tx1 | tr -d ' \n')"
+    enc="$( { printf '%s' "$salt"; printf '%s' "$pw" | openssl enc -aes-128-cbc -K "$keyhex" -iv "$ivhex" -nosalt; } | base64 -w0)"
+    curl -sk -X POST "$API_BASE/open/auth/login" -H 'Content-Type: application/json' \
+        --data "{\"username\":\"admin\",\"password\":\"$enc\",\"csrf_token\":\"$csrf\"}" | json_get data.jwt
+}
+
+# site_create <token> <entry-port> <upstream-url> [server-name] — POST the same
+# payload the console's site form sends; echoes the new site id. server-name
+# defaults to "*"; a real upstream vhost needs the site to own its domain,
+# otherwise the original Host header (entry port) reaches the upstream. On
+# failure the full API response (including msg) goes to stderr.
+site_create() {
+    local token="$1" port="$2" upstream="$3" name="${4:-*}" body resp id
+    body="$(printf '{"server_names":["%s"],"ports":["%s"],"upstreams":["%s"],"comment":"e2e-traffic","email":"","cert_id":0,"load_balance":{"balance_type":1},"health_check":false,"index":"","static_default":1,"type":0}' "$name" "$port" "$upstream")"
+    resp="$(curl -sk -X POST "$API_BASE/open/site" -H 'Content-Type: application/json' \
+        -H "Authorization: Bearer $token" --data "$body")" || { echo "create request failed" >&2; return 1; }
+    id="$(printf '%s' "$resp" | json_get data)"
+    [[ "$id" =~ ^[0-9]+$ ]] || { echo "create failed: $resp" >&2; return 1; }
+    echo "$id"
+}
+
+site_delete() {  # site_delete <token> <id>
+    curl -sk -X DELETE "$API_BASE/open/site" -H 'Content-Type: application/json' \
+        -H "Authorization: Bearer $1" --data "{\"ids\":[$2]}" >/dev/null || true
+}
+
+# free_port picks a host port that is free right now.
+free_port() {
+    local p
+    for _ in $(seq 1 50); do
+        p="$(shuf -i 20000-29999 -n 1)"
+        ss -tln 2>/dev/null | grep -q ":$p " || { echo "$p"; return 0; }
+    done
+    return 1
+}
+
+# tengine_hosts_add <address> <name> — rewrite the name's entry in the tengine
+# container's /etc/hosts. It is a bind mount, so the file is overwritten in
+# place (sed -i's rename fails with EBUSY).
+tengine_hosts_add() {
+    podman exec "$(cname tengine)" sh -c \
+        "grep -v '$2' /etc/hosts > /tmp/hosts.new; echo '$1 $2' >> /tmp/hosts.new; cat /tmp/hosts.new > /etc/hosts; rm -f /tmp/hosts.new; grep -qx '$1 $2' /etc/hosts"
+}
+
+# wait_body <url> <marker> [host] — poll until the response body contains
+# marker, sending a Host header when one is given.
+wait_body() {
+    local url="$1" marker="$2" host="${3:-}" deadline=$((SECONDS + 30))
+    while :; do
+        if [ -n "$host" ]; then
+            [[ "$(curl -s --max-time 3 -H "Host: $host" "$url" 2>/dev/null)" == *"$marker"* ]] && return 0
+        else
+            [[ "$(curl -s --max-time 3 "$url" 2>/dev/null)" == *"$marker"* ]] && return 0
+        fi
+        [ "$SECONDS" -ge "$deadline" ] && return 1
+        sleep 1
+    done
+}
+
+stop_upstreams() {
+    if [ -n "$UPSTREAM_PIDS" ]; then
+        kill $UPSTREAM_PIDS 2>/dev/null || true
+    fi
+    if [ -n "$UPSTREAM_PORT" ]; then
+        pkill -f "http.server $UPSTREAM_PORT" 2>/dev/null || true
+    fi
+    UPSTREAM_PIDS=""
+    UPSTREAM_PORT=""
+    return 0
+}
 
 cleanup() {
+    stop_upstreams
     if [ "$SKIP_DESTROY" = true ]; then
         yellow "Skipping cleanup (--skip-destroy)"; return
     fi
@@ -294,6 +413,8 @@ main() {
     [ -x "$BINARY" ] || { red "Binary not found: $BINARY (run 'make build' first)"; exit 1; }
     command -v podman &>/dev/null || { red "podman is not installed"; exit 1; }
     command -v curl   &>/dev/null || { red "curl is not installed"; exit 1; }
+    command -v python3 &>/dev/null || { red "python3 is not installed (console API login + upstream servers)"; exit 1; }
+    command -v openssl &>/dev/null || { red "openssl is not installed (console API password encryption)"; exit 1; }
     [ "$(uname -s)" = "Linux" ] || { red "SafeLine requires Linux"; exit 1; }
 
     # ---- Setup ----
@@ -385,6 +506,103 @@ main() {
     run_test "addon password --reset rotates and stores the new password" admin_reset_rotates
     run_test "addon list shows 7/7 running" addon_list_ok
     run_test "addon reload hot-reloads tengine (nginx -t + reload)" reload_ok
+    run_test "detector, fvm and luigi share the stored management token" detector_token_wired
+
+    # ---- Protected site traffic ----
+    section "Protected site traffic"
+    # Drive the console the way its web UI does: log in through the API, create
+    # a site, and let tengine proxy the upstream. Two upstream servers answer on
+    # the same port from different addresses so the hostname site can be moved
+    # by rewriting tengine's /etc/hosts, which is what a DNS change looks like
+    # to the resolver nginx uses.
+    HOST_IP="$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')"
+    [ -n "$HOST_IP" ] || HOST_IP="$(hostname -I | awk '{print $1}')"
+    UPSTREAM_PORT="$(free_port)" || { red "no free port for the upstream servers"; return 1; }
+    SITE_PORT="$(free_port)"
+    while [ "$SITE_PORT" = "$UPSTREAM_PORT" ]; do SITE_PORT="$(free_port)"; done
+    DNS_SITE_PORT="$(free_port)"
+    while [ "$DNS_SITE_PORT" = "$UPSTREAM_PORT" ] || [ "$DNS_SITE_PORT" = "$SITE_PORT" ]; do DNS_SITE_PORT="$(free_port)"; done
+
+    mkdir -p "$TEST_DIR/upstream-a" "$TEST_DIR/upstream-b"
+    printf 'e2e-upstream-a\n' > "$TEST_DIR/upstream-a/index.html"
+    printf 'e2e-upstream-b\n' > "$TEST_DIR/upstream-b/index.html"
+    ( cd "$TEST_DIR/upstream-a" && exec python3 -m http.server "$UPSTREAM_PORT" --bind "$HOST_IP" ) >"$LOG_DIR/upstream-a.log" 2>&1 &
+    UPSTREAM_PIDS="$!"
+    ( cd "$TEST_DIR/upstream-b" && exec python3 -m http.server "$UPSTREAM_PORT" --bind 127.0.0.2 ) >"$LOG_DIR/upstream-b.log" 2>&1 &
+    UPSTREAM_PIDS="$UPSTREAM_PIDS $!"
+
+    TOKEN=""
+    login_ok() { local t; t="$(console_token)"; [ -n "$t" ] || return 1; TOKEN="$t"; }
+    run_test "console login via the web API (AES password + csrf)" login_ok
+    run_test "upstream servers answer on $HOST_IP:$UPSTREAM_PORT and 127.0.0.2:$UPSTREAM_PORT" \
+        bash -c "[[ \"\$(curl -s --max-time 3 http://$HOST_IP:$UPSTREAM_PORT/)\" == *e2e-upstream-a* && \"\$(curl -s --max-time 3 http://127.0.0.2:$UPSTREAM_PORT/)\" == *e2e-upstream-b* ]]"
+
+    SITE_ID=""
+    create_ip_site() {
+        local id; id="$(site_create "$TOKEN" "$SITE_PORT" "http://$HOST_IP:$UPSTREAM_PORT")"
+        [[ "$id" =~ ^[0-9]+$ ]] || { echo "create failed: $id" >&2; return 1; }
+        SITE_ID="$id"
+    }
+    run_test "site with an IP upstream created through the console API" create_ip_site
+    run_test "tengine proxies the new site on its entry port" wait_body "http://127.0.0.1:$SITE_PORT/" "e2e-upstream-a"
+
+    DNS_SITE_ID=""
+    create_dns_site() {
+        tengine_hosts_add "$HOST_IP" sfe2e-upstream.test || return 1
+        local id; id="$(site_create "$TOKEN" "$DNS_SITE_PORT" "http://sfe2e-upstream.test:$UPSTREAM_PORT")"
+        [[ "$id" =~ ^[0-9]+$ ]] || { echo "create failed: $id" >&2; return 1; }
+        DNS_SITE_ID="$id"
+    }
+    run_test "site with a hostname upstream created through the console API" create_dns_site
+    run_test "hostname upstream resolves inside tengine" wait_body "http://127.0.0.1:$DNS_SITE_PORT/" "e2e-upstream-a"
+
+    # A real public domain over TLS, the shape operators use for external
+    # sites. The site must own www.baidu.com: the upstream vhost rejects
+    # requests whose Host header is the bare entry port.
+    BAIDU_SITE_PORT="$(free_port)"
+    while [ "$BAIDU_SITE_PORT" = "$UPSTREAM_PORT" ] || [ "$BAIDU_SITE_PORT" = "$SITE_PORT" ] || [ "$BAIDU_SITE_PORT" = "$DNS_SITE_PORT" ]; do
+        BAIDU_SITE_PORT="$(free_port)"
+    done
+    BAIDU_SITE_ID=""
+    if curl -sk -o /dev/null --max-time 8 https://www.baidu.com; then
+        create_baidu_site() {
+            local id; id="$(site_create "$TOKEN" "$BAIDU_SITE_PORT" "https://www.baidu.com" www.baidu.com)" || return 1
+            BAIDU_SITE_ID="$id"
+        }
+        run_test "site with a public HTTPS upstream created through the console API" create_baidu_site
+        run_test "tengine proxies www.baidu.com over TLS on its entry port" \
+            wait_body "http://127.0.0.1:$BAIDU_SITE_PORT/" "百度一下" www.baidu.com
+    else
+        yellow "  [SKIP] public HTTPS upstream (www.baidu.com unreachable from this host)"
+    fi
+
+    dns_move_cached() {
+        tengine_hosts_add 127.0.0.2 sfe2e-upstream.test || return 1
+        # nginx resolves upstream host names when its config loads, so the old
+        # address keeps serving until the config is reloaded.
+        [[ "$(curl -s --max-time 5 "http://127.0.0.1:$DNS_SITE_PORT/")" == *e2e-upstream-a* ]]
+    }
+    run_test "moved hostname keeps the old upstream until reload" dns_move_cached
+    dns_reload() {
+        local out
+        out="$(pg addon reload safeline --name "$STACK" 2>&1)" || { echo "$out" >&2; return 1; }
+        [[ "$out" == *"tengine reloaded"* ]] || { echo "$out" >&2; return 1; }
+        wait_body "http://127.0.0.1:$DNS_SITE_PORT/" "e2e-upstream-b"
+    }
+    run_test "addon reload re-resolves the hostname to the new address" dns_reload
+
+    site_delete "$TOKEN" "$SITE_ID"
+    site_delete "$TOKEN" "$DNS_SITE_ID"
+    if [ -n "$BAIDU_SITE_ID" ]; then
+        site_delete "$TOKEN" "$BAIDU_SITE_ID"
+    fi
+    sites_gone() {
+        ! curl -s --max-time 2 "http://127.0.0.1:$SITE_PORT/" | grep -q e2e-upstream-a &&
+            ! curl -s --max-time 2 "http://127.0.0.1:$DNS_SITE_PORT/" | grep -q e2e-upstream-b &&
+            ! curl -s --max-time 2 -H "Host: www.baidu.com" "http://127.0.0.1:$BAIDU_SITE_PORT/" | grep -q 百度一下
+    }
+    run_test "deleted sites stop being served" eventually sites_gone
+    stop_upstreams
 
     # ---- Idempotency and drift ----
     section "Idempotency and drift"
@@ -424,6 +642,7 @@ main() {
     echo "$FORCE_OUT" | sed 's/^/      /'
     run_test "force rebuilt all seven containers" eventually all_running
     run_test "force replaced the mgt container" test "$(cid_of mgt)" != "$MGTCID_BEFORE"
+    run_test "force keeps the detector management token" detector_token_wired
     run_test "force kept the bundled PostgreSQL data" pg_data_present
     run_test "force rotated the console password" test "$(sf_field "$STACK" admin_password)" != "$PW_BEFORE_FORCE"
     run_test "rotated password is what addon password prints" admin_pw_matches_config
@@ -475,6 +694,7 @@ main() {
         return 1
     fi
     run_test "reinstall brought all seven containers up" eventually all_running
+    run_test "reinstall wired the detector management token" detector_token_wired
     run_test "console healthy after reinstall" health_ok
     run_test "reinstall captured a console password" admin_pw_matches_config
 

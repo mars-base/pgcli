@@ -37,7 +37,7 @@ weight: 70
 pg addon install safeline --name waf1
 ```
 
-The install pulls the seven images if needed, creates the directories and the dedicated bridge network, generates the bundled-database password, starts the containers in dependency order (postgres → mgt console → detector → fvm → chaos → luigi → tengine), waits for PostgreSQL and the console health endpoint, captures the console admin password from the `resetadmin` bootstrap, saves `pg.yaml`, and prints a summary:
+The install pulls the seven images if needed, creates the directories and the dedicated bridge network, generates the bundled-database password, starts the containers in dependency order (postgres → mgt console → detector → fvm → chaos → luigi → tengine), waits for PostgreSQL, the console health endpoint and tengine's control socket, captures the console admin password from the `resetadmin` bootstrap, saves `pg.yaml`, and prints a summary:
 
 ```text
 ✓ SafeLine WAF "waf1" installed
@@ -51,6 +51,8 @@ The install pulls the seven images if needed, creates the directories and the de
   Traffic:     tengine listens on host networking — add protected sites in the console;
                their entry ports default to 80/443 and must be free on this host
 ```
+
+The install also generates the internal detector management token (`detector_mgmt_token` in `pg.yaml`) and passes it to the detector, fvm and luigi containers. The detector image authenticates management-API calls by default, and the console publishes site rules through that API — without the shared token, creating a site fails. A stack installed by an older pgcli is migrated on its next `pg addon start`, which generates the token and recreates those containers.
 
 A second instance needs its own subnet and console port (the pool advances automatically):
 
@@ -128,7 +130,7 @@ pg addon logs safeline --name waf1 --service tengine -f   # traffic proxy log
 pg addon reload safeline --name waf1            # nginx -t + graceful tengine reload (re-resolves site upstream DNS)
 ```
 
-`--service` accepts `postgres`, `mgt`, `detector`, `tengine`, `luigi`, `fvm` or `chaos`; the default is `mgt`. `start` waits for PostgreSQL and the console health endpoint before returning.
+`--service` accepts `postgres`, `mgt`, `detector`, `tengine`, `luigi`, `fvm` or `chaos`; the default is `mgt`. `start` waits for PostgreSQL and the console health endpoint — and for tengine's control socket when tengine (re)starts — before returning.
 
 Autostart starts the whole stack on boot in dependency order, and recovers the console password if it was never captured:
 
@@ -161,5 +163,5 @@ The dedicated bridge network is removed once no containers are attached. Without
 - **Linux + rootful podman only** (static IPs; host-network traffic proxy).
 - Only the console port is published by pgcli; the per-site traffic ports are managed in the console.
 - The console uses SafeLine's own self-signed certificate; no `--tls` integration.
-- The optional upstream secrets (`MGT_INTERNAL_TOKEN`, `DETECTOR_AES_KEY`, `MGT_LICENSE_INTEGRITY_KEY`, `RIVER_*`) are left at their upstream defaults; pgcli does not manage them.
+- pgcli generates and manages the internal detector management token; the other optional upstream secrets (`MGT_INTERNAL_TOKEN`, `DETECTOR_AES_KEY`, `MGT_LICENSE_INTEGRITY_KEY`, `RIVER_*`) are left at their upstream defaults.
 - SafeLine keeps its state in the bundled PostgreSQL inside `--data-dir`; pgcli's PITR/backup add-ons target pgcli instances and do not back this database up.

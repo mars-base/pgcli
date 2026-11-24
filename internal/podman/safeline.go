@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -278,7 +279,10 @@ func (m *SafelineManager) EnsureContainers(sc *config.SafelineConfig) error {
 	if err := m.WaitConsole(sc); err != nil {
 		return err
 	}
-	return m.recreateContainer(sc, SafelineRoleTengine)
+	if err := m.recreateContainer(sc, SafelineRoleTengine); err != nil {
+		return err
+	}
+	return m.WaitTengine(sc)
 }
 
 // recreateContainer removes the role's container when it exists and creates it
@@ -333,6 +337,9 @@ func (m *SafelineManager) StartContainers(sc *config.SafelineConfig) (bool, erro
 	}
 	if !wasRunning {
 		allRunning = false
+		if err := m.WaitTengine(sc); err != nil {
+			return false, err
+		}
 	}
 	return allRunning, nil
 }
@@ -548,6 +555,30 @@ func (m *SafelineManager) WaitConsole(sc *config.SafelineConfig) error {
 	}
 }
 
+// WaitTengine waits until tengine's tcd daemon accepts connections on the
+// control socket it shares with mgt. The console publishes site rules through
+// this socket, so creating a site right after an install or start fails until
+// tcd has bound it (the container is up but the daemon needs a few seconds).
+// A stale socket file left by a stopped container refuses connections, so
+// dialing tells genuine readiness apart from leftovers.
+func (m *SafelineManager) WaitTengine(sc *config.SafelineConfig) error {
+	sock := filepath.Join(sc.DataDir, "resources", "sock", "tcd.sock")
+	deadline := time.Now().Add(120 * time.Second)
+	var lastErr error
+	for {
+		conn, err := net.DialTimeout("unix", sock, 2*time.Second)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return fmt.Errorf("SafeLine tengine control socket did not accept connections within 120s (%v); check `pg addon logs safeline --service tengine`", lastErr)
+		}
+		time.Sleep(time.Second)
+	}
+}
+
 var (
 	safelineResetAdminUserRe     = regexp.MustCompile(`(?mi)Initial username\s*[:：]\s*(\S+)`)
 	safelineResetAdminPasswordRe = regexp.MustCompile(`(?mi)Initial password\s*[:：]\s*(\S+)`)
@@ -735,6 +766,7 @@ func safelineCreateArgs(sc config.SafelineConfig, role string) ([]string, error)
 		args = append(args,
 			"-e", "LOG_DIR=/logs/detector",
 			"-e", "DETECTOR_MGMT_AUTH=on",
+			"-e", "DETECTOR_MGMT_TOKEN="+sc.DetectorMgmtToken,
 			"-e", "DETECTOR_UPDATE_VERIFY=on",
 			"-v", fmt.Sprintf("%s:/resources/detector:z", resources("detector")),
 			"-v", fmt.Sprintf("%s:/logs/detector:z", logs("detector")),
@@ -763,12 +795,16 @@ func safelineCreateArgs(sc config.SafelineConfig, role string) ([]string, error)
 		args = append(args,
 			"-e", "MGT_IP="+config.SafelineStaticIP(sc, safelineMgtHost),
 			"-e", "LUIGI_PG="+safelineDSN(sc),
+			"-e", "DETECTOR_MGMT_TOKEN="+sc.DetectorMgmtToken,
 			"-e", "ENTITLEMENT_CONSUMER_VERIFY=off",
 			"-v", fmt.Sprintf("%s:/app/data:z", resources("luigi")),
 			safelineImageRef(sc, role),
 		)
 	case SafelineRoleFvm:
-		args = append(args, safelineImageRef(sc, role))
+		args = append(args,
+			"-e", "DETECTOR_MGMT_TOKEN="+sc.DetectorMgmtToken,
+			safelineImageRef(sc, role),
+		)
 	case SafelineRoleChaos:
 		args = append(args,
 			"-e", "DB_ADDR="+safelineDSN(sc),

@@ -1,6 +1,7 @@
 package podman
 
 import (
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,17 +17,18 @@ import (
 func safelineTestConfig(t *testing.T) config.SafelineConfig {
 	t.Helper()
 	return config.SafelineConfig{
-		Name:             "waf1",
-		Version:          config.DefaultSafelineVersion,
-		PostgresVersion:  config.DefaultSafelinePostgresVersion,
-		ContainerPrefix:  "pgcli-safeline-waf1",
-		NetworkName:      "pgcli-safeline-waf1",
-		SubnetPrefix:     "172.22.222",
-		ConsolePort:      config.DefaultSafelineConsolePort,
-		Listen:           "0.0.0.0",
-		DataDir:          t.TempDir(),
-		PostgresPassword: "p@ss:w/rd?x#y",
-		AdminUser:        "admin",
+		Name:              "waf1",
+		Version:           config.DefaultSafelineVersion,
+		PostgresVersion:   config.DefaultSafelinePostgresVersion,
+		ContainerPrefix:   "pgcli-safeline-waf1",
+		NetworkName:       "pgcli-safeline-waf1",
+		SubnetPrefix:      "172.22.222",
+		ConsolePort:       config.DefaultSafelineConsolePort,
+		Listen:            "0.0.0.0",
+		DataDir:           t.TempDir(),
+		PostgresPassword:  "p@ss:w/rd?x#y",
+		DetectorMgmtToken: "tok-abc123",
+		AdminUser:         "admin",
 	}
 }
 
@@ -254,6 +256,29 @@ func TestSafelineMgtArgs(t *testing.T) {
 	}
 }
 
+func TestSafelineDetectorMgmtToken(t *testing.T) {
+	sc := safelineTestConfig(t)
+	want := "DETECTOR_MGMT_TOKEN=" + sc.DetectorMgmtToken
+	for _, role := range []string{SafelineRoleDetector, SafelineRoleFvm, SafelineRoleLuigi} {
+		args, err := safelineCreateArgs(sc, role)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Contains(args, want) {
+			t.Errorf("%s missing %q", role, want)
+		}
+	}
+	for _, role := range []string{SafelineRolePostgres, SafelineRoleMgt, SafelineRoleChaos, SafelineRoleTengine} {
+		args, err := safelineCreateArgs(sc, role)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(args, want) {
+			t.Errorf("%s must not receive the detector management token", role)
+		}
+	}
+}
+
 func TestSafelineTengineArgs(t *testing.T) {
 	sc := safelineTestConfig(t)
 	args, err := safelineCreateArgs(sc, SafelineRoleTengine)
@@ -421,6 +446,23 @@ func TestSafelineConsoleURL(t *testing.T) {
 	sc.Listen = "::"
 	if got := safelineProbeHost(&sc); got != "127.0.0.1" {
 		t.Errorf("wildcard v6 probe host = %q, want 127.0.0.1", got)
+	}
+}
+
+func TestSafelineWaitTengine(t *testing.T) {
+	sc := safelineTestConfig(t)
+	sockDir := filepath.Join(sc.DataDir, "resources", "sock")
+	if err := os.MkdirAll(sockDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", filepath.Join(sockDir, "tcd.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	m := &SafelineManager{}
+	if err := m.WaitTengine(&sc); err != nil {
+		t.Fatalf("WaitTengine on a listening socket: %v", err)
 	}
 }
 

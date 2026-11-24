@@ -44,8 +44,9 @@ pg addon install safeline --name waf1
 ```
 
 安装会按需拉取七个镜像、创建目录与专用 bridge 网络、生成内置数据库密码，按依赖顺序启动容器
-（postgres → mgt 控制台 → detector → fvm → chaos → luigi → tengine），等待 PostgreSQL 与
-控制台健康检查通过，从 `resetadmin` 引导输出中捕获控制台管理员密码，写入 `pg.yaml`，并打印摘要：
+（postgres → mgt 控制台 → detector → fvm → chaos → luigi → tengine），等待 PostgreSQL、控制台
+健康检查与 tengine 控制 socket 就绪，从 `resetadmin` 引导输出中捕获控制台管理员密码，写入
+`pg.yaml`，并打印摘要：
 
 ```text
 ✓ SafeLine WAF "waf1" installed
@@ -59,6 +60,11 @@ pg addon install safeline --name waf1
   Traffic:     tengine listens on host networking — add protected sites in the console;
                their entry ports default to 80/443 and must be free on this host
 ```
+
+安装还会生成内部 detector 管理令牌（`detector_mgmt_token`，写入 `pg.yaml`）并传给 detector、
+fvm、luigi 三个容器。detector 镜像默认对其管理 API 开启鉴权，控制台通过该 API 发布站点规则——
+没有共享令牌时建站会失败。旧版 pgcli 安装的栈会在下一次 `pg addon start` 时自动迁移：生成令牌并
+重建这些容器。
 
 第二个实例需要独立子网与控制台端口（端口池自动递增）：
 
@@ -149,7 +155,7 @@ pg addon reload safeline --name waf1            # nginx -t + 平滑重载 tengin
 ```
 
 `--service` 可选 `postgres`、`mgt`、`detector`、`tengine`、`luigi`、`fvm`、`chaos`，默认
-`mgt`。`start` 返回前会等待 PostgreSQL 与控制台健康检查就绪。
+`mgt`。`start` 返回前会等待 PostgreSQL 与控制台健康检查就绪，tengine 重启时还会等待其控制 socket。
 
 开机自启会按依赖顺序拉起整栈；若控制台密码从未被捕获，也会在这里补录：
 
@@ -187,7 +193,7 @@ pg addon remove safeline --name waf1 --clean-data   # 同时删除 <data-dir>
 - **仅 Linux + rootful podman**（静态 IP；host 网络流量代理）。
 - pgcli 只发布控制台端口；受防护站点的流量端口在控制台管理。
 - 控制台使用 SafeLine 自带自签证书，不参与 `--tls` 体系。
-- 上游可选密钥（`MGT_INTERNAL_TOKEN`、`DETECTOR_AES_KEY`、`MGT_LICENSE_INTEGRITY_KEY`、
-  `RIVER_*`）保持上游默认值，pgcli 不管理。
+- pgcli 生成并管理内部 detector 管理令牌；其余上游可选密钥（`MGT_INTERNAL_TOKEN`、
+  `DETECTOR_AES_KEY`、`MGT_LICENSE_INTEGRITY_KEY`、`RIVER_*`）保持上游默认值。
 - SafeLine 的状态保存在 `--data-dir` 内的自带 PostgreSQL 中；pgcli 的 PITR/备份插件面向 pgcli
   实例，不会备份这个数据库。

@@ -210,6 +210,17 @@ func runAddonInstallSafeline(cmd *cobra.Command) error {
 	} else if err := m.WriteBundledPassword(&sc, sc.PostgresPassword); err != nil {
 		return fmt.Errorf("  [X] %v", err)
 	}
+	if sc.DetectorMgmtToken == "" {
+		// The detector image gates its management API (fvm pushes rules there,
+		// luigi polls it) on a shared token; without one the console cannot
+		// publish site rules.
+		tok, err := generatePassword(32)
+		if err != nil {
+			return err
+		}
+		sc.DetectorMgmtToken = tok
+		c.Addons.Safeline[name] = sc
+	}
 	// Persist before starting so a failed first boot stays inspectable.
 	if err := c.Save(path); err != nil {
 		return fmt.Errorf("  [X] saving config: %w", err)
@@ -298,9 +309,27 @@ func runAddonStartSafeline(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	already, err := m.StartContainers(&sc)
-	if err != nil {
-		return err
+	var already bool
+	if sc.DetectorMgmtToken == "" {
+		// Installs made before pgcli managed the token: generate one and
+		// recreate the containers so detector, fvm and luigi share it.
+		tok, err := generatePassword(32)
+		if err != nil {
+			return err
+		}
+		sc.DetectorMgmtToken = tok
+		c.Addons.Safeline[name] = sc
+		if err := c.Save(path); err != nil {
+			return fmt.Errorf("saving config: %w", err)
+		}
+		if err := m.EnsureContainers(&sc); err != nil {
+			return err
+		}
+	} else {
+		already, err = m.StartContainers(&sc)
+		if err != nil {
+			return err
+		}
 	}
 	if sc.AdminPassword == "" {
 		user, pw, err := m.ResetAdmin(&sc)

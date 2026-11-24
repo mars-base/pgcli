@@ -3200,6 +3200,13 @@ type SafelineConfig struct {
 	// component DSNs). Generated on first install.
 	PostgresPassword string `yaml:"postgres_password,omitempty"`
 
+	// DetectorMgmtToken authenticates the detector's management API: the
+	// detector image enables DETECTOR_MGMT_AUTH by default and rejects
+	// non-loopback callers without the X-Safeline-Internal-Token header that
+	// fvm and luigi derive from DETECTOR_MGMT_TOKEN. Generated on first
+	// install and shared by those three containers.
+	DetectorMgmtToken string `yaml:"detector_mgmt_token,omitempty"`
+
 	// AdminUser/AdminPassword are the console credentials captured from the
 	// mgt container's resetadmin bootstrap command.
 	AdminUser     string `yaml:"admin_user,omitempty"`
