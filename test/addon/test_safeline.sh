@@ -205,6 +205,16 @@ admin_pw_differs_from_db() {
     b="$(sf_field "$STACK" postgres_password)"
     [ -n "$a" ] && [ -n "$b" ] && [ "$a" != "$b" ]
 }
+# --reset reruns resetadmin: the printed password must differ from the stored
+# one, and pg.yaml's admin_password must move along with it.
+admin_reset_rotates() {
+    local old new stored
+    old="$(pg addon password safeline --name "$STACK" 2>/dev/null)" || return 1
+    new="$(pg addon password safeline --name "$STACK" --reset 2>/dev/null)" || return 1
+    [ -n "$new" ] && [ "$new" != "$old" ] || return 1
+    stored="$(pg addon password safeline --name "$STACK" 2>/dev/null)" || return 1
+    [ "$stored" = "$new" ] && admin_pw_matches_config
+}
 # create_order_ok <install output> — the six "container ... created" lines (and
 # tengine's) appear in role order.
 create_order_ok() {
@@ -353,6 +363,7 @@ main() {
     run_test "admin user is admin" test "$(sf_field "$STACK" admin_user)" = "admin"
     run_test "admin password captured from resetadmin" admin_pw_matches_config
     run_test "bundled PostgreSQL password never doubles as the console one" admin_pw_differs_from_db
+    run_test "addon password --reset rotates and stores the new password" admin_reset_rotates
     run_test "addon list shows 7/7 running" addon_list_ok
 
     # ---- Idempotency and drift ----

@@ -245,3 +245,21 @@ func TestAddonPasswordsIncludesSafeline(t *testing.T) {
 		}
 	}
 }
+
+func TestAddonPasswordResetRejectsOtherAddons(t *testing.T) {
+	// The rejection must come before any config load, so this needs no pg.yaml.
+	err := runAddonPassword("redis", "cache", "", true)
+	if err == nil || !strings.Contains(err.Error(), "--reset is only supported for safeline") {
+		t.Errorf("reset on redis = %v, want --reset rejection", err)
+	}
+}
+
+func TestAddonPasswordResetFlagRegistered(t *testing.T) {
+	f := addonPasswordCmd.Flags().Lookup("reset")
+	if f == nil {
+		t.Fatal("password --reset flag not registered")
+	}
+	if f.Value.Type() != "bool" {
+		t.Errorf("--reset type = %q, want bool", f.Value.Type())
+	}
+}

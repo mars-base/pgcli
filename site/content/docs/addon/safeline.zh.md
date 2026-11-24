@@ -80,11 +80,14 @@ pg addon password safeline --name waf1
 
 密码来自 mgt 容器的 `resetadmin` 引导输出，而该命令**每次调用都会轮换管理员密码**。pgcli 只在
 没有记录密码时运行它（安装时，或安装中途失败后第一次 `start` 时），以及 `--force` 重建时运行。
-手动重置：
+需要主动重置时：
 
 ```bash
-podman exec pgcli-safeline-waf1-mgt resetadmin
+pg addon password safeline --name waf1 --reset
 ```
+
+该命令重新执行引导，把新的 `admin_password` 写回 `pg.yaml` 并打印出来，之后
+`pg addon password safeline --name waf1` 读到的就是新密码。执行时栈必须处于运行状态。
 
 控制台使用自签证书提供 HTTPS，浏览器会给出常规警告。
 
@@ -170,9 +173,8 @@ pg addon remove safeline --name waf1 --clean-data   # 同时删除 <data-dir>
 - **控制台健康检查不通过** —— 查看 `pg addon logs safeline --name <name> --service mgt` 与
   `--service postgres`。首次启动要跑 schema 迁移，可能需要一分钟。
 - **站点端口被占用** —— tengine 直接在宿主机绑定受防护站点端口；先释放端口或改控制台里的入口端口。
-- **密码丢失** —— 执行 `podman exec <prefix>-mgt resetadmin`，它会轮换密码并打印新密码。此时
-  pgcli 里存的副本已过期——重新执行 `pg addon install safeline --name <name> --force`（重建七个
-  容器、保留数据、重新捕获密码），或继续使用打印出来的密码。
+- **密码丢失** —— 执行 `pg addon password safeline --name <name> --reset`，它会轮换控制台密码、
+  更新存储的 `admin_password` 并打印新密码（要求栈处于运行状态）。
 - **镜像** —— SafeLine CE 镜像只发布 `linux/amd64`，请在 amd64 主机运行。
 
 ## 限制

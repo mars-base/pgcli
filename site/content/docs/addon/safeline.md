@@ -68,11 +68,13 @@ Open `https://<listen>:<port>` (default `https://<host>:9443`) and log in as `ad
 pg addon password safeline --name waf1
 ```
 
-The password is captured from the mgt container's `resetadmin` bootstrap, which **rotates the admin password on every call**. pgcli runs it only when no password is recorded (install, or a later `start` if the install failed short) and on `--force` re-installs. To reset it by hand:
+The password is captured from the mgt container's `resetadmin` bootstrap, which **rotates the admin password on every call**. pgcli runs it only when no password is recorded (install, or a later `start` if the install failed short) and on `--force` re-installs. To rotate it yourself:
 
 ```bash
-podman exec pgcli-safeline-waf1-mgt resetadmin
+pg addon password safeline --name waf1 --reset
 ```
+
+The command reruns the bootstrap, saves the new `admin_password` back to `pg.yaml` and prints it, so `pg addon password safeline --name waf1` keeps returning the current password. The stack must be running.
 
 The console serves HTTPS with a self-signed certificate; browsers show the usual warning.
 
@@ -148,7 +150,7 @@ The dedicated bridge network is removed once no containers are attached. Without
 - **“network … already exists with subnet …”** — another stack or a stale network owns that subnet or name. Install with a different `--subnet-prefix`/`--name`, or remove the stale network first.
 - **Console does not become healthy** — check `pg addon logs safeline --name <name> --service mgt` and `--service postgres`. The first boot runs schema migrations and can take a minute.
 - **Site ports busy** — tengine binds protected sites directly on the host; free the port or pick another entry port in the console.
-- **Password lost** — run `podman exec <prefix>-mgt resetadmin`; it rotates the console password and prints the new one. pgcli's stored copy is now stale — either re-run `pg addon install safeline --name <name> --force` (recreates the seven containers, keeps the data, recaptures the password) or keep using the printed password.
+- **Password lost** — run `pg addon password safeline --name <name> --reset`; it rotates the console password, saves it to the stored `admin_password` and prints the new one (the stack must be running).
 - **Images** — the SafeLine CE images are published for `linux/amd64` only; the stack runs on amd64 hosts.
 
 ## Limitations

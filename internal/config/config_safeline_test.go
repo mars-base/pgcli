@@ -104,18 +104,30 @@ func TestSafelineValidate(t *testing.T) {
 			wantSub: "must match",
 		},
 		{
-			name:    "bad version",
-			mutate:  func(c *Config) { sc := c.Addons.Safeline["waf1"]; sc.Version = "9.4.7-rc1"; c.Addons.Safeline["waf1"] = sc },
+			name: "bad version",
+			mutate: func(c *Config) {
+				sc := c.Addons.Safeline["waf1"]
+				sc.Version = "9.4.7-rc1"
+				c.Addons.Safeline["waf1"] = sc
+			},
 			wantSub: "version",
 		},
 		{
-			name:    "bad postgres version",
-			mutate:  func(c *Config) { sc := c.Addons.Safeline["waf1"]; sc.PostgresVersion = "15"; c.Addons.Safeline["waf1"] = sc },
+			name: "bad postgres version",
+			mutate: func(c *Config) {
+				sc := c.Addons.Safeline["waf1"]
+				sc.PostgresVersion = "15"
+				c.Addons.Safeline["waf1"] = sc
+			},
 			wantSub: "postgres_version",
 		},
 		{
-			name:    "console port range",
-			mutate:  func(c *Config) { sc := c.Addons.Safeline["waf1"]; sc.ConsolePort = 70000; c.Addons.Safeline["waf1"] = sc },
+			name: "console port range",
+			mutate: func(c *Config) {
+				sc := c.Addons.Safeline["waf1"]
+				sc.ConsolePort = 70000
+				c.Addons.Safeline["waf1"] = sc
+			},
 			wantSub: "console_port",
 		},
 		{
@@ -131,8 +143,12 @@ func TestSafelineValidate(t *testing.T) {
 			wantSub: "already used by",
 		},
 		{
-			name:    "bad subnet",
-			mutate:  func(c *Config) { sc := c.Addons.Safeline["waf1"]; sc.SubnetPrefix = "172.22"; c.Addons.Safeline["waf1"] = sc },
+			name: "bad subnet",
+			mutate: func(c *Config) {
+				sc := c.Addons.Safeline["waf1"]
+				sc.SubnetPrefix = "172.22"
+				c.Addons.Safeline["waf1"] = sc
+			},
 			wantSub: "subnet_prefix",
 		},
 		{
@@ -148,13 +164,21 @@ func TestSafelineValidate(t *testing.T) {
 			wantSub: "needs its own subnet",
 		},
 		{
-			name:    "empty container prefix",
-			mutate:  func(c *Config) { sc := c.Addons.Safeline["waf1"]; sc.ContainerPrefix = ""; c.Addons.Safeline["waf1"] = sc },
+			name: "empty container prefix",
+			mutate: func(c *Config) {
+				sc := c.Addons.Safeline["waf1"]
+				sc.ContainerPrefix = ""
+				c.Addons.Safeline["waf1"] = sc
+			},
 			wantSub: "container_prefix",
 		},
 		{
-			name:    "relative data dir",
-			mutate:  func(c *Config) { sc := c.Addons.Safeline["waf1"]; sc.DataDir = "relative/path"; c.Addons.Safeline["waf1"] = sc },
+			name: "relative data dir",
+			mutate: func(c *Config) {
+				sc := c.Addons.Safeline["waf1"]
+				sc.DataDir = "relative/path"
+				c.Addons.Safeline["waf1"] = sc
+			},
 			wantSub: "absolute",
 		},
 	}

@@ -999,12 +999,19 @@ scripts and app config:
   mc alias set local http://127.0.0.1:9000 admin "$(pg addon password minio --name store)"
 
 The default "pg addon list" never prints passwords; this command is the
-explicit, opt-in way to reveal one without opening pg.yaml.`,
+explicit, opt-in way to reveal one without opening pg.yaml.
+
+Pass --reset to rotate the SafeLine WAF console password instead of reading
+it: pgcli reruns the mgt container's resetadmin bootstrap, stores the new
+credentials in pg.yaml (admin_password), and prints the new password. The
+stack must be running. Other add-ons store operator-supplied or one-time
+generated secrets and cannot be rotated this way.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name, _ := cmd.Flags().GetString("name")
 		file, _ := cmd.Flags().GetString("file")
-		return runAddonPassword(args[0], name, file)
+		reset, _ := cmd.Flags().GetBool("reset")
+		return runAddonPassword(args[0], name, file, reset)
 	},
 }
 
@@ -1432,6 +1439,7 @@ func init() {
 	addonListCmd.Flags().Bool("show-password", false, "also print stored credentials (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin/Grafana/Gitea web login password, BeeGFS conn-auth secret, etcd auth password) — off by default so the listing stays paste-safe")
 	addonPasswordCmd.Flags().String("name", "", "instance to reveal (redis/predixy/minio/silo/rustfs/garage/seaweedfs/pgadmin/grafana/gitea/influxdb/beegfs/etcd; default \"redis\"/\"predixy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"pgadmin\"/\"grafana\"/\"gitea\"/\"influxdb\"/\"beegfs\"/\"etcd\")")
 	addonPasswordCmd.Flags().String("file", "", "write the password to this file (mode 0600) instead of stdout, keeping it out of shell history and scrollback")
+	addonPasswordCmd.Flags().Bool("reset", false, "rotate and store a new password (SafeLine WAF only: reruns the console resetadmin bootstrap, saves admin_user/admin_password in pg.yaml and prints the new password; the stack must be running)")
 
 	// pgdog flags (top-level shared Postgres proxy addon)
 	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port) / PostgREST HTTP host port (0=auto-assign from postgrest_start_port) / Redis host port (0=auto-assign from redis_start_port, default 6379) / Predixy proxy host port (0=auto-assign from predixy_start_port, default 7617) / pgAdmin web host port (0=auto-assign from pgadmin_start_port, default 5050) / Grafana web host port (0=auto-assign from grafana_start_port, default 3000) / Prometheus web host port (0=auto-assign from prometheus_start_port, default 9090) / Alertmanager web host port (0=auto-assign from alertmanager_start_port, default 9093) / vmalert web/API host port (0=auto-assign from vmalert_start_port, default 8880) / Gitea web host port (0=auto-assign from gitea_start_port, default 3080) / influx2tsdb InfluxDB-protocol HTTP host port (0=auto-assign from influx2tsdb_start_port, default 8087) / Privoxy proxy host port (0=auto-assign from privoxy_start_port, default 8118; multiple instances increment from there and skip ports already listening on the host) / SafeLine console HTTPS host port (0=auto-assign from safeline_start_port, default 9443)")
@@ -7097,10 +7105,14 @@ func addonPasswords(cfg *config.Config) map[string]string {
 
 // runAddonPassword resolves "<addon>" (plus --name, defaulting to the addon's
 // own name) to the stored password and prints it bare on stdout, or to --file
-// mode 0600 following the `pg ha passwords` precedent.
-func runAddonPassword(addon, name, file string) error {
+// mode 0600 following the `pg ha passwords` precedent. With reset it rotates
+// the SafeLine console password instead of reading one.
+func runAddonPassword(addon, name, file string, reset bool) error {
 	if name == "" {
 		name = addon
+	}
+	if reset && addon != "safeline" {
+		return fmt.Errorf("--reset is only supported for safeline: its mgt container exposes a resetadmin bootstrap; other add-ons' stored passwords cannot be rotated from pgcli")
 	}
 	path := cfgPath
 	if path == "" {
@@ -7109,6 +7121,9 @@ func runAddonPassword(addon, name, file string) error {
 	cfg, err := config.Load(path)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
+	}
+	if reset {
+		return resetSafelineAdminPassword(cfg, path, name, file)
 	}
 
 	all := addonPasswords(cfg)
@@ -7145,6 +7160,40 @@ func runAddonPassword(addon, name, file string) error {
 		return nil
 	}
 	fmt.Println(entry)
+	return nil
+}
+
+// resetSafelineAdminPassword reruns the console's resetadmin bootstrap and
+// writes the rotated credentials back to pg.yaml, so the stored admin_password
+// stays the source of truth for `pg addon password` and later installs.
+func resetSafelineAdminPassword(cfg *config.Config, path, name, file string) error {
+	cfg.ApplyDefaults()
+	sc, ok := cfg.Addons.Safeline[name]
+	if !ok {
+		return fmt.Errorf("no safeline instance %q installed; see 'pg addon list'", name)
+	}
+	m, err := podman.NewSafelineManager(cfg)
+	if err != nil {
+		return err
+	}
+	user, password, err := m.ResetAdmin(&sc)
+	if err != nil {
+		return fmt.Errorf("rotating the SafeLine console password: %w", err)
+	}
+	sc.AdminUser = user
+	sc.AdminPassword = password
+	cfg.Addons.Safeline[name] = sc
+	if err := cfg.Save(path); err != nil {
+		return fmt.Errorf("saving config: %w", err)
+	}
+	if file != "" {
+		if err := os.WriteFile(file, []byte(password+"\n"), 0600); err != nil {
+			return fmt.Errorf("writing %s: %w", file, err)
+		}
+		fmt.Printf("[OK] new console password for safeline:%s written to %s (mode 0600)\n", name, file)
+		return nil
+	}
+	fmt.Println(password)
 	return nil
 }
 
