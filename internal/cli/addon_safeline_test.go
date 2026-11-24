@@ -263,3 +263,28 @@ func TestAddonPasswordResetFlagRegistered(t *testing.T) {
 		t.Errorf("--reset type = %q, want bool", f.Value.Type())
 	}
 }
+
+func TestAddonReloadRejectsOtherAddons(t *testing.T) {
+	// The rejection must come before any config load, so this needs no pg.yaml.
+	err := runAddonReload("redis", "cache")
+	if err == nil || !strings.Contains(err.Error(), "reload is only supported for safeline") {
+		t.Errorf("reload on redis = %v, want reload rejection", err)
+	}
+}
+
+func TestAddonReloadCommandRegistered(t *testing.T) {
+	found := false
+	for _, c := range addonCmd.Commands() {
+		if c.Name() == "reload" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("pg addon reload is not registered")
+	}
+	f := addonReloadCmd.Flags().Lookup("name")
+	if f == nil || f.Value.Type() != "string" {
+		t.Errorf("reload --name flag = %+v, want a string flag", f)
+	}
+}

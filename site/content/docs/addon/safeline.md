@@ -82,6 +82,8 @@ The console serves HTTPS with a self-signed certificate; browsers show the usual
 
 Applications (protected sites) are configured **in the console**, not with pgcli flags. Each site gets an entry port on the host — 80/443 by default — served by the host-networked **tengine** container. Before adding a site, make sure the port is free on the host (`ss -tlnp`). In the firewall, open the console port and each site's entry port (80 and 443 by default).
 
+A site's upstream can be an IP or a host name (for example a load-balancer domain). tengine resolves host names from the host's DNS **when its config loads**, so after the load balancer's DNS records change, run `pg addon reload safeline --name waf1` to re-test and gracefully reload the tengine config — the new addresses take effect without restarting the stack or dropping in-flight requests.
+
 ## Container layout and networking
 
 | Role | Network | Address | Purpose |
@@ -123,6 +125,7 @@ pg addon start safeline --name waf1             # start the stack (creates missi
 pg addon stop safeline --name waf1              # stop in reverse order
 pg addon logs safeline --name waf1              # mgt console log (default service)
 pg addon logs safeline --name waf1 --service tengine -f   # traffic proxy log
+pg addon reload safeline --name waf1            # nginx -t + graceful tengine reload (re-resolves site upstream DNS)
 ```
 
 `--service` accepts `postgres`, `mgt`, `detector`, `tengine`, `luigi`, `fvm` or `chaos`; the default is `mgt`. `start` waits for PostgreSQL and the console health endpoint before returning.

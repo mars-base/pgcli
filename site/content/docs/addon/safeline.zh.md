@@ -97,6 +97,10 @@ pg addon password safeline --name waf1 --reset
 （默认 80/443），由 host 网络的 **tengine** 容器监听。添加站点前先确认宿主机端口空闲
 （`ss -tlnp`）。防火墙需放行控制台端口以及各站点的入口端口（默认 80、443）。
 
+站点的上游可以填 IP，也可以填主机名（例如负载均衡域名）。tengine 在**加载配置时**从宿主机 DNS
+解析主机名，因此负载均衡的 DNS 记录变化后，执行 `pg addon reload safeline --name waf1`
+重新校验并平滑重载 tengine 配置——新地址即刻生效，无需重启整栈，也不会中断在途请求。
+
 ## 容器布局与网络
 
 | 角色 | 网络 | 地址 | 用途 |
@@ -141,6 +145,7 @@ pg addon start safeline --name waf1             # 启动整栈（缺失容器会
 pg addon stop safeline --name waf1              # 反序停止
 pg addon logs safeline --name waf1              # mgt 控制台日志（默认 service）
 pg addon logs safeline --name waf1 --service tengine -f   # 流量代理日志
+pg addon reload safeline --name waf1            # nginx -t + 平滑重载 tengine（重新解析站点上游 DNS）
 ```
 
 `--service` 可选 `postgres`、`mgt`、`detector`、`tengine`、`luigi`、`fvm`、`chaos`，默认

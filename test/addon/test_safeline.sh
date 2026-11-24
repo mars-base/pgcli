@@ -192,6 +192,13 @@ health_ok() { [ "$(health_code)" = "200" ]; }
 health_down() { ! curl -k -s -f -o /dev/null "https://127.0.0.1:$CONSOLE_PORT/api/open/health" 2>/dev/null; }
 mgt_port_published() { podman port "$(cname mgt)" "$CONTAINER_PORT" 2>/dev/null | grep -q ":$CONSOLE_PORT$"; }
 db_ok() { podman exec "$(cname postgres)" psql -U safeline-ce -d safeline-ce -tAc 'select 1' 2>/dev/null | grep -qx '1'; }
+# addon reload wraps `nginx -t && nginx -s reload` in tengine; the stack has to
+# stay healthy and running afterwards.
+reload_ok() {
+    local out
+    out="$(pg addon reload safeline --name "$STACK" 2>&1)" || { echo "$out" >&2; return 1; }
+    [[ "$out" == *"tengine reloaded"* ]] && eventually all_running && health_ok
+}
 pg_data_present() { test -f "$DATA_DIR/resources/postgres/data/PG_VERSION"; }
 admin_pw_matches_config() {
     local stored printed
@@ -365,6 +372,7 @@ main() {
     run_test "bundled PostgreSQL password never doubles as the console one" admin_pw_differs_from_db
     run_test "addon password --reset rotates and stores the new password" admin_reset_rotates
     run_test "addon list shows 7/7 running" addon_list_ok
+    run_test "addon reload hot-reloads tengine (nginx -t + reload)" reload_ok
 
     # ---- Idempotency and drift ----
     section "Idempotency and drift"
@@ -386,6 +394,8 @@ main() {
         pg addon install safeline --name waf2 --subnet-prefix "$SUBNET" --port "$((CONSOLE_PORT + 1))"
     run_fails "malformed --subnet-prefix is rejected" "invalid --subnet-prefix" \
         pg addon install safeline --name waf2 --subnet-prefix 172.29
+    run_fails "reload rejects addons without a reloadable proxy" "only supported for safeline" \
+        pg addon reload redis --name cache
     run_fails "flags owned by other addons are rejected" "not supported for SafeLine" \
         pg addon install safeline --name waf2 --password secret
 
@@ -413,6 +423,8 @@ main() {
     run_grep "stop takes the whole stack down" "stopped" pg addon stop safeline --name "$STACK"
     run_test "no role is running after stop" eventually none_running
     run_test "console is unreachable after stop" health_down
+    run_fails "reload fails while the stack is stopped" "reloading tengine" \
+        pg addon reload safeline --name "$STACK"
     run_grep "start brings the stack back" "started" pg addon start safeline --name "$STACK"
     run_test "all seven roles running after start" eventually all_running
     run_test "console healthy after start" health_ok

@@ -589,6 +589,23 @@ func (m *SafelineManager) ResetAdmin(sc *config.SafelineConfig) (string, string,
 	return user, password, nil
 }
 
+// ReloadTengine tests and gracefully reloads the nginx config inside the
+// tengine container. Site upstreams named by host (e.g. a load-balancer
+// domain) are resolved from DNS when that config loads, so a reload is how a
+// DNS change on the upstream takes effect without restarting the stack.
+func (m *SafelineManager) ReloadTengine(sc *config.SafelineConfig) error {
+	name := config.SafelineContainerName(*sc, SafelineRoleTengine)
+	out, err := execIdleKilled(m.podman, 30*time.Second, 5*time.Second,
+		"exec", name, "sh", "-c", "nginx -t && nginx -s reload")
+	if err != nil {
+		if out = strings.TrimSpace(out); out != "" {
+			return fmt.Errorf("reloading tengine in %s: %w\n%s", name, err, out)
+		}
+		return fmt.Errorf("reloading tengine in %s: %w", name, err)
+	}
+	return nil
+}
+
 // safelineBundledPasswordFile is where the bundled database password lives.
 // PostgreSQL bakes the password into the cluster at first init, so the file
 // must outlive the config entry: `pg addon remove` (without --clean-data)

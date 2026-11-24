@@ -1015,6 +1015,29 @@ generated secrets and cannot be rotated this way.`,
 	},
 }
 
+// addonReloadCmd hot-reloads an add-on's traffic proxy so it re-resolves
+// upstream host names from DNS without a restart.
+var addonReloadCmd = &cobra.Command{
+	Use:   "reload <addon>",
+	Short: "Hot-reload an add-on's proxy config (SafeLine WAF: nginx -t && nginx -s reload in tengine)",
+	Long: `Hot-reload the traffic proxy of an add-on instance without restarting it.
+
+SafeLine WAF sites name their upstream by host (e.g. a load-balancer domain),
+and tengine — an nginx fork — resolves that name from the host's DNS only when
+its config loads. Reloading re-resolves it, so DNS changes on the load
+balancer take effect, while in-flight requests drain on the old workers.
+
+  pg addon reload safeline [--name waf1]
+
+The stack must be running. Run pg on the host that runs the stack: the
+reload is a podman exec into that host's tengine container.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		name, _ := cmd.Flags().GetString("name")
+		return runAddonReload(args[0], name)
+	},
+}
+
 // ---------------------------------------------------------------------------
 // remove
 // ---------------------------------------------------------------------------
@@ -1224,7 +1247,7 @@ Examples:
 
 func init() {
 	rootCmd.AddCommand(addonCmd)
-	addonCmd.AddCommand(addonInstallCmd, addonListCmd, addonPasswordCmd, addonRemoveCmd, addonStartCmd, addonStopCmd)
+	addonCmd.AddCommand(addonInstallCmd, addonListCmd, addonPasswordCmd, addonReloadCmd, addonRemoveCmd, addonStartCmd, addonStopCmd)
 	addonCmd.AddCommand(addonNginxCmd, addonHAProxyCmd, addonPrometheusCmd, addonAlertmanagerCmd, addonVmalertCmd, addonGiteaCmd, addonPGExporterCmd)
 	addonCmd.AddCommand(addonDocumentDBCmd)
 	addonDocumentDBCmd.AddCommand(addonDocumentDBShellCmd, addonDocumentDBDatabasesCmd, addonDocumentDBCollectionsCmd, addonDocumentDBIndexesCmd)
@@ -1440,6 +1463,7 @@ func init() {
 	addonPasswordCmd.Flags().String("name", "", "instance to reveal (redis/predixy/minio/silo/rustfs/garage/seaweedfs/pgadmin/grafana/gitea/influxdb/beegfs/etcd; default \"redis\"/\"predixy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"pgadmin\"/\"grafana\"/\"gitea\"/\"influxdb\"/\"beegfs\"/\"etcd\")")
 	addonPasswordCmd.Flags().String("file", "", "write the password to this file (mode 0600) instead of stdout, keeping it out of shell history and scrollback")
 	addonPasswordCmd.Flags().Bool("reset", false, "rotate and store a new password (SafeLine WAF only: reruns the console resetadmin bootstrap, saves admin_user/admin_password in pg.yaml and prints the new password; the stack must be running)")
+	addonReloadCmd.Flags().String("name", "", "instance to reload (default \"safeline\")")
 
 	// pgdog flags (top-level shared Postgres proxy addon)
 	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port) / PostgREST HTTP host port (0=auto-assign from postgrest_start_port) / Redis host port (0=auto-assign from redis_start_port, default 6379) / Predixy proxy host port (0=auto-assign from predixy_start_port, default 7617) / pgAdmin web host port (0=auto-assign from pgadmin_start_port, default 5050) / Grafana web host port (0=auto-assign from grafana_start_port, default 3000) / Prometheus web host port (0=auto-assign from prometheus_start_port, default 9090) / Alertmanager web host port (0=auto-assign from alertmanager_start_port, default 9093) / vmalert web/API host port (0=auto-assign from vmalert_start_port, default 8880) / Gitea web host port (0=auto-assign from gitea_start_port, default 3080) / influx2tsdb InfluxDB-protocol HTTP host port (0=auto-assign from influx2tsdb_start_port, default 8087) / Privoxy proxy host port (0=auto-assign from privoxy_start_port, default 8118; multiple instances increment from there and skip ports already listening on the host) / SafeLine console HTTPS host port (0=auto-assign from safeline_start_port, default 9443)")
@@ -7194,6 +7218,39 @@ func resetSafelineAdminPassword(cfg *config.Config, path, name, file string) err
 		return nil
 	}
 	fmt.Println(password)
+	return nil
+}
+
+// runAddonReload tests and gracefully reloads the instance's traffic proxy.
+// Only SafeLine exposes a proxy config pgcli can reload this way.
+func runAddonReload(addon, name string) error {
+	if addon != "safeline" {
+		return fmt.Errorf("reload is only supported for safeline: its tengine proxy resolves site upstream host names when the config loads, so a reload is what re-resolves them")
+	}
+	if name == "" {
+		name = addon
+	}
+	path := cfgPath
+	if path == "" {
+		path = platform.DefaultConfigPath()
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	cfg.ApplyDefaults()
+	sc, ok := cfg.Addons.Safeline[name]
+	if !ok {
+		return fmt.Errorf("no safeline instance %q installed; see 'pg addon list'", name)
+	}
+	m, err := podman.NewSafelineManager(cfg)
+	if err != nil {
+		return err
+	}
+	if err := m.ReloadTengine(&sc); err != nil {
+		return err
+	}
+	fmt.Printf("[OK] SafeLine %q tengine reloaded (nginx config test passed); site upstream host names re-resolved\n", name)
 	return nil
 }
 
