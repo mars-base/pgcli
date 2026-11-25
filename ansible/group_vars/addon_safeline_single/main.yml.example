@@ -68,7 +68,7 @@ addon_safeline_single_addons:
     #     # ---- CC 防护: waiting room and rate-limit rules ----
     #     cc:
     #       waiting_room:                     # the CC waiting room
-    #         enabled: true                   # true enables, false disables
+    #         enabled: false                   # true enables, false disables
     #         max_concurrent: 500             # 1-5000; Pro only, the CE keeps 5
     #         session_timeout: 10             # minutes, 1-30; Pro only, the CE keeps 3
     #       rate_limit:                       # the three built-in rules
