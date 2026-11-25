@@ -92,7 +92,7 @@ Ansible deployments can declare sites in the `sites` field of a `type: safeline`
 
 `pg addon safeline site ...` drives the console's own web API with the stored admin password — the same encrypted login and `/api/open/site` calls the browser makes — so sites can be scripted without the UI. The stack must be running.
 
-> **Deployed under a specific account?** These commands read the invoking user's `~/.pgcli/pg.yaml`; a stack installed under another account (for example `pgcli`) is not found there. Pass that account's config with `-c`: `pg -c /home/pgcli/.pgcli/pg.yaml addon safeline site cc show --name safeline1 --site-id 4`. `site mode` and `site cc` take the same flag.
+> **Deployed under a specific account?** These commands read the invoking user's `~/.pgcli/pg.yaml`; a stack installed under another account (for example `pgcli`) is not found there. Pass that account's config with `-c`: `pg -c /home/pgcli/.pgcli/pg.yaml addon safeline site cc show --name safeline1 --site-id 4`. `site mode`, `site cc` and `site protect` take the same flag.
 
 > **Community Edition limit: one upstream per site.** The console pgcli installs runs without a Pro license, so a site can proxy to a single upstream. Adding a second upstream — and therefore any load balancing across servers — is refused by the console with `license required`; activate a Pro license in the console to use it.
 
@@ -110,6 +110,8 @@ pg addon safeline site mode --name waf1 --site-id 3 dryrun
 pg addon safeline site cc show --name waf1 --site-id 3
 pg addon safeline site cc waiting-room --name waf1 --site-id 3 --enabled
 pg addon safeline site cc rate-limit --name waf1 --site-id 3 --type req --count 200
+pg addon safeline site protect show --name waf1 --site-id 3
+pg addon safeline site protect mode balance --name waf1
 pg addon safeline site delete --name waf1 --site-id 3
 
 pg addon safeline cert list --name waf1
@@ -124,6 +126,7 @@ pg addon safeline cert delete --name waf1 --cert-id 2
 - `site health` probes the selected sites (all of them by default) and prints `healthy` or the console's error per upstream; it exits non-zero when any upstream is unhealthy, so it works as a monitoring gate. `site list` shows the site ids that `update`, `delete`, `health` and `mode` take via `--site-id`.
 - `site mode` switches one or more sites between the three run modes, described under "Site run modes" below.
 - `site cc` reads and changes the two CC-protection settings (the waiting room and the rate-limit rules), described under "CC protection" below.
+- `site protect` reads and changes the semantic-analysis modules behind attack protection (攻击防护), described under "Semantic analysis (attack protection)" below.
 - `cert list` shows stored certificates with their covered domains, expiry and the sites using them. The console refuses to delete a certificate while a site's TLS entry port uses it, so delete or repoint the site first.
 
 A plain HTTP site needs no certificate — just an entry port and an upstream:
@@ -283,6 +286,55 @@ minutes:
 pg addon safeline site cc rate-limit --name waf1 --site-id 3 --use-global=false \
     --type req --enabled --period 10 --count 200 --action block --block-min 30
 ```
+
+### Semantic analysis (attack protection)
+
+`pg addon safeline site protect` reads and changes the semantic-analysis
+modules behind the console's attack protection (攻击防护). Fourteen detection
+modules — SQL injection, XSS, file upload, command injection, Java/PHP
+deserialization, SSTI, SSRF and others — each run at one of four levels:
+
+| Level | Console name | Behavior |
+|---|---|---|
+| `disable` | 禁用 | do not detect |
+| `observe` | 仅观察 | log risky requests, block nothing (`dry_run` on the wire) |
+| `balance` | 平衡防护 | block obvious attacks, keep false positives low (the console default) |
+| `strict` | 高强度防护 | block more requests, with a higher false-positive rate |
+
+Every site runs the global levels until it gets its own copy — the same
+follow-or-override shape as the CC rate limits.
+
+```bash
+# global levels, which sites without their own copy run
+pg addon safeline site protect show --name waf1
+
+# one site's effective levels, saying whether they are global or custom
+pg addon safeline site protect show --name waf1 --site-id 3
+
+# set all 14 modules at once, globally
+pg addon safeline site protect mode balance --name waf1
+
+# give one site its own copy at a stricter level
+pg addon safeline site protect mode strict --name waf1 --site-id 3
+
+# drop the copy and follow the global levels again
+pg addon safeline site protect use-global --name waf1 --site-id 3
+```
+
+```text
+Global attack protection (semantic analysis): all 14 modules at balance
+MODULE                LEVEL
+m_sqli                balance
+m_xss                 balance
+m_file_upload         balance
+...
+```
+
+The batch leaves the modules the console page does not expose untouched: the
+scanner detector (`m_scanner`), response detection (`m_response`) and the
+enhanced-rules module (`m_rule`). Individual module levels stay in the console
+UI. Changes publish to the detection engine immediately, and they apply while
+the site runs in defense mode.
 
 ## Container layout and networking
 

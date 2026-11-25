@@ -120,7 +120,7 @@ Ansible 部署可以在 `type: safeline` 条目的 `sites` 字段里声明站点
 > **部署在特定账号下？** 这些命令读取执行者账号的 `~/.pgcli/pg.yaml`，用其他账号
 > （例如 `pgcli`）安装的栈在这里找不到。用 `-c` 指定那个账号的配置，例如
 > `pg -c /home/pgcli/.pgcli/pg.yaml addon safeline site cc show --name safeline1 --site-id 4`；
-> `site mode` 与 `site cc` 用法相同。
+> `site mode`、`site cc` 与 `site protect` 用法相同。
 
 > **社区版限制：一个站点只能有一个上游。** pgcli 安装的控制台没有 Pro 授权，站点只能代理
 > 单个上游。添加第二个上游（也就是多服务器负载均衡）会被控制台以 `license required` 拒绝；
@@ -140,6 +140,8 @@ pg addon safeline site mode --name waf1 --site-id 3 dryrun
 pg addon safeline site cc show --name waf1 --site-id 3
 pg addon safeline site cc waiting-room --name waf1 --site-id 3 --enabled
 pg addon safeline site cc rate-limit --name waf1 --site-id 3 --type req --count 200
+pg addon safeline site protect show --name waf1 --site-id 3
+pg addon safeline site protect mode balance --name waf1
 pg addon safeline site delete --name waf1 --site-id 3
 
 pg addon safeline cert list --name waf1
@@ -163,6 +165,7 @@ pg addon safeline cert delete --name waf1 --cert-id 2
   `delete`、`health`、`mode` 通过 `--site-id` 使用的站点 id。
 - `site mode` 在三种运行模式间切换一个或多个站点，见下方的「站点运行模式」。
 - `site cc` 查看与修改 CC 防护的两项配置（等候室与频率限制），见下方的「CC 防护」。
+- `site protect` 查看与修改攻击防护背后的语义分析模块，见下方的「语义分析（攻击防护）」。
 - `cert list` 展示已存证书的覆盖域名、到期时间和使用它的站点。证书被站点的 TLS 入口端口
   占用时控制台拒绝删除，先删除站点或换绑证书。
 
@@ -318,6 +321,51 @@ pg addon safeline site cc rate-limit --name waf1 --site-id 3 --use-global
 pg addon safeline site cc rate-limit --name waf1 --site-id 3 --use-global=false \
     --type req --enabled --period 10 --count 200 --action block --block-min 30
 ```
+
+### 语义分析（攻击防护）
+
+`pg addon safeline site protect` 查看与修改控制台「攻击防护」背后的语义分析
+检测模块。14 个检测模块——SQL 注入、XSS、文件上传、命令注入、Java/PHP 反序列化、
+SSTI、SSRF 等——各自运行在四档之一：
+
+| 档位 | 控制台名称 | 行为 |
+|---|---|---|
+| `disable` | 禁用 | 不检测 |
+| `observe` | 仅观察 | 只记录风险请求，不拦截（接口值为 `dry_run`） |
+| `balance` | 平衡防护 | 拦截明显攻击、误报低（控制台默认档） |
+| `strict` | 高强度防护 | 拦截更多请求，误报率相对更高 |
+
+站点默认跟随全局档位；与 CC 频率限制相同，站点也可以拥有自己的副本。
+
+```bash
+# 全局档位（所有没有自有副本的站点都跟随它）
+pg addon safeline site protect show --name waf1
+
+# 某个站点的生效档位，并注明是全局还是站点自有
+pg addon safeline site protect show --name waf1 --site-id 3
+
+# 一次把 14 个模块全部设为某一档（全局）
+pg addon safeline site protect mode balance --name waf1
+
+# 给某个站点建立自有副本并设为高强度防护
+pg addon safeline site protect mode strict --name waf1 --site-id 3
+
+# 删除副本，重新跟随全局
+pg addon safeline site protect use-global --name waf1 --site-id 3
+```
+
+```text
+Global attack protection (semantic analysis): all 14 modules at balance
+MODULE                LEVEL
+m_sqli                balance
+m_xss                 balance
+m_file_upload         balance
+...
+```
+
+批量配置不会触碰控制台页面未展示的三个模块：扫描器检测（`m_scanner`）、响应检测
+（`m_response`）与加强规则模块（`m_rule`）。单模块档位仍在控制台 UI 中配置。
+变更立即下发到检测引擎，在站点处于防护模式（defense）时生效。
 
 ## 容器布局与网络
 

@@ -306,6 +306,40 @@ func TestSafelineSiteModeCommandRegistered(t *testing.T) {
 	}
 }
 
+func TestSafelineSiteProtectCommandsRegistered(t *testing.T) {
+	found := false
+	for _, c := range addonSafelineSiteCmd.Commands() {
+		if c.Name() == "protect" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("pg addon safeline site protect is not registered")
+	}
+	subs := map[string]bool{"show": false, "mode": false, "use-global": false}
+	for _, c := range addonSafelineSiteProtectCmd.Commands() {
+		if _, ok := subs[c.Name()]; ok {
+			subs[c.Name()] = true
+		}
+	}
+	for name, ok := range subs {
+		if !ok {
+			t.Errorf("protect subcommand %q is not registered", name)
+		}
+	}
+	for _, cmd := range []*cobra.Command{
+		addonSafelineSiteProtectShowCmd,
+		addonSafelineSiteProtectModeCmd,
+		addonSafelineSiteProtectUseGlobalCmd,
+	} {
+		f := cmd.Flags().Lookup("site-id")
+		if f == nil || f.Value.Type() != "int" {
+			t.Errorf("%s: --site-id flag = %+v, want an int flag", cmd.Name(), f)
+		}
+	}
+}
+
 func TestSafelineSiteCcCommandsRegistered(t *testing.T) {
 	found := false
 	for _, c := range addonSafelineSiteCmd.Commands() {

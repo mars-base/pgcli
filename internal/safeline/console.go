@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -839,6 +840,127 @@ func ValidateRateLimitAction(action string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown rate-limit action %q: use block, challenge_v1 or challenge_v2", action)
+}
+
+// The console's attack protection (attack protection menu) runs 14
+// semantic-analysis detection modules, each at a per-module level. A site
+// either follows the global configuration or carries its own copy, which is
+// the same follow-or-override shape as the CC rate-limit rules.
+
+// SemanticsModules lists the detection modules the console's semantic-analysis
+// page configures. The stored record also carries m_rule (enhanced rules),
+// m_scanner and m_response; the page and the batch edit below leave those
+// alone.
+var SemanticsModules = []string{
+	"m_sqli", "m_xss", "m_file_upload", "m_file_include", "m_cmd_injection",
+	"m_java", "m_java_unserialize", "m_php_unserialize", "m_php_code_injection",
+	"m_asp_code_injection", "m_ssti", "m_csrf", "m_ssrf", "m_http",
+}
+
+// Semantic analysis levels. The console shows them as 禁用 (disable), 仅观察
+// (dry_run), 平衡防护 (default, the console default) and 高强度防护 (strict).
+const (
+	SemanticsDisable = "disable"
+	SemanticsObserve = "dry_run"
+	SemanticsBalance = "default"
+	SemanticsStrict  = "strict"
+)
+
+var semanticsLevels = map[string]string{
+	"disable": SemanticsDisable,
+	"observe": SemanticsObserve,
+	"balance": SemanticsBalance,
+	"strict":  SemanticsStrict,
+}
+
+// ParseSemanticsMode maps a CLI level name to the stored value.
+func ParseSemanticsMode(name string) (string, error) {
+	if level, ok := semanticsLevels[strings.ToLower(name)]; ok {
+		return level, nil
+	}
+	return "", fmt.Errorf("unknown semantics mode %q: use disable, observe, balance or strict", name)
+}
+
+// SemanticsLevelName maps a stored level to its CLI name.
+func SemanticsLevelName(level string) string {
+	for name, v := range semanticsLevels {
+		if v == level {
+			return name
+		}
+	}
+	return level
+}
+
+// BatchSemantics returns a copy of levels with every semantic-analysis
+// detection module set to level. Modules the page does not expose keep their
+// values.
+func BatchSemantics(levels map[string]string, level string) map[string]string {
+	out := make(map[string]string, len(levels))
+	maps.Copy(out, levels)
+	for _, m := range SemanticsModules {
+		out[m] = level
+	}
+	return out
+}
+
+// SemanticsMismatch lists the detection modules whose level is not want.
+func SemanticsMismatch(levels map[string]string, want string) []string {
+	var out []string
+	for _, m := range SemanticsModules {
+		if levels[m] != want {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// SemanticsConfig is a site's own semantics record. The console answers with
+// null for a site that follows the global configuration.
+type SemanticsConfig struct {
+	ID        int               `json:"id"`
+	SiteID    int               `json:"site_id"`
+	Semantics map[string]string `json:"semantics"`
+	UseGlobal bool              `json:"use_global"`
+	CreatedAt string            `json:"created_at"`
+	UpdatedAt string            `json:"updated_at"`
+}
+
+// GetGlobalSemantics returns the global per-module levels, the configuration
+// sites follow unless they carry their own.
+func (c *Client) GetGlobalSemantics() (map[string]string, error) {
+	var g struct {
+		Semantics map[string]string `json:"semantics"`
+	}
+	if err := c.do(http.MethodGet, "/api/open/global/mode", nil, &g); err != nil {
+		return nil, err
+	}
+	return g.Semantics, nil
+}
+
+// SetGlobalSemantics replaces the global per-module levels.
+func (c *Client) SetGlobalSemantics(levels map[string]string) error {
+	return c.do(http.MethodPut, "/api/open/global/mode", map[string]any{"semantics": levels}, nil)
+}
+
+// GetSiteSemantics returns a site's own semantics record, or nil when it
+// follows the global configuration.
+func (c *Client) GetSiteSemantics(siteID int) (*SemanticsConfig, error) {
+	var sc *SemanticsConfig
+	if err := c.do(http.MethodGet, fmt.Sprintf("/api/open/site/%d/semantics", siteID), nil, &sc); err != nil {
+		return nil, err
+	}
+	return sc, nil
+}
+
+// SetSiteSemantics writes a site's semantics: with useGlobal the site follows
+// the global levels again, otherwise levels becomes its own record. The
+// console rejects the request without levels even when they are not applied,
+// so both fields always go out.
+func (c *Client) SetSiteSemantics(siteID int, useGlobal bool, levels map[string]string) error {
+	return c.do(http.MethodPut, fmt.Sprintf("/api/open/site/%d/semantics", siteID), map[string]any{
+		"use_global": useGlobal,
+		"semantics":  levels,
+	}, nil)
 }
 
 // ValidateRateLimitRule mirrors the console form's bounds for an enabled or

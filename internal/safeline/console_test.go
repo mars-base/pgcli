@@ -156,6 +156,8 @@ type fakeConsole struct {
 	rawSite    map[string]any
 	waiting    any
 	aclRules   any
+	globalMode any
+	siteMode   any
 	requests   []*http.Request
 	lastBodies map[string]map[string]any
 	createResp any
@@ -257,7 +259,36 @@ func (f *fakeConsole) handler() http.Handler {
 		}
 		writeJSON(w, map[string]any{"data": nil, "err": err, "msg": f.certDelMsg})
 	}))
+	mux.HandleFunc("/api/open/global/mode", auth(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, map[string]any{"data": f.globalMode, "err": nil, "msg": ""})
+		case http.MethodPut:
+			var body map[string]any
+			decodeBody(f.t, r, &body)
+			f.lastBodies["PUT /api/open/global/mode"] = body
+			f.globalMode = body
+			writeJSON(w, map[string]any{"data": nil, "err": nil, "msg": ""})
+		}
+	}))
 	mux.HandleFunc("/api/open/site/", auth(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/semantics") {
+			switch r.Method {
+			case http.MethodGet:
+				writeJSON(w, map[string]any{"data": f.siteMode, "err": nil, "msg": ""})
+			case http.MethodPut:
+				var body map[string]any
+				decodeBody(f.t, r, &body)
+				f.lastBodies["PUT "+r.URL.Path] = body
+				if useGlobal, _ := body["use_global"].(bool); useGlobal {
+					f.siteMode = nil
+				} else {
+					f.siteMode = map[string]any{"semantics": body["semantics"], "site_id": 4, "id": 2}
+				}
+				writeJSON(w, map[string]any{"data": nil, "err": nil, "msg": ""})
+			}
+			return
+		}
 		if strings.HasSuffix(r.URL.Path, "/mode") {
 			var body map[string]any
 			decodeBody(f.t, r, &body)
@@ -821,6 +852,109 @@ func TestRateLimitEndpoints(t *testing.T) {
 	body = fc.lastBodies["PUT /api/open/site/0/acl/14"]
 	if body["count"] != float64(11) || body["type"] != "attack" {
 		t.Errorf("single-rule body = %v", body)
+	}
+}
+
+func TestParseSemanticsMode(t *testing.T) {
+	for name, want := range map[string]string{
+		"disable": "disable", "Observe": "dry_run", "balance": "default", "STRICT": "strict",
+	} {
+		got, err := ParseSemanticsMode(name)
+		if err != nil || got != want {
+			t.Errorf("ParseSemanticsMode(%q) = (%q, %v), want %q", name, got, err, want)
+		}
+		if back := SemanticsLevelName(want); !strings.EqualFold(back, name) {
+			t.Errorf("SemanticsLevelName(%q) = %q, round-trip of %q", want, back, name)
+		}
+	}
+	if _, err := ParseSemanticsMode("default"); err == nil {
+		t.Error("raw stored value accepted as a CLI mode")
+	}
+	if _, err := ParseSemanticsMode("off"); err == nil {
+		t.Error("unknown semantics mode accepted")
+	}
+}
+
+func TestBatchSemantics(t *testing.T) {
+	cur := map[string]string{"m_sqli": "strict", "m_rule": "default", "m_scanner": "disable", "m_response": "disable"}
+	got := BatchSemantics(cur, "dry_run")
+	for _, m := range SemanticsModules {
+		if got[m] != "dry_run" {
+			t.Errorf("%s = %q, want dry_run", m, got[m])
+		}
+	}
+	for _, keep := range []string{"m_rule", "m_scanner", "m_response"} {
+		if got[keep] != cur[keep] {
+			t.Errorf("%s = %q, want preserved %q", keep, got[keep], cur[keep])
+		}
+	}
+	if cur["m_sqli"] != "strict" {
+		t.Errorf("input map mutated: %v", cur)
+	}
+	if miss := SemanticsMismatch(got, "dry_run"); len(miss) != 0 {
+		t.Errorf("mismatch = %v", miss)
+	}
+	got["m_xss"] = "disable"
+	if miss := SemanticsMismatch(got, "dry_run"); len(miss) != 1 || miss[0] != "m_xss" {
+		t.Errorf("mismatch = %v, want [m_xss]", miss)
+	}
+}
+
+func TestSemanticsEndpoints(t *testing.T) {
+	fc := newFakeConsole(t, "pw")
+	fc.globalMode = map[string]any{"semantics": map[string]any{"m_sqli": "strict", "m_scanner": "disable"}}
+	c := newTestClient(t, fc)
+	levels, err := c.GetGlobalSemantics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if levels["m_sqli"] != "strict" || levels["m_scanner"] != "disable" {
+		t.Fatalf("global levels = %v", levels)
+	}
+	if err := c.SetGlobalSemantics(map[string]string{"m_sqli": "dry_run"}); err != nil {
+		t.Fatal(err)
+	}
+	body := fc.lastBodies["PUT /api/open/global/mode"]
+	sent, _ := body["semantics"].(map[string]any)
+	if sent["m_sqli"] != "dry_run" || len(body) != 1 {
+		t.Errorf("global PUT body = %v", body)
+	}
+
+	// No row: the site follows the global configuration.
+	own, err := c.GetSiteSemantics(4)
+	if err != nil || own != nil {
+		t.Fatalf("GetSiteSemantics(no row) = (%+v, %v), want nil", own, err)
+	}
+	fc.siteMode = map[string]any{"id": 2, "site_id": 4, "semantics": map[string]any{"m_sqli": "disable"}}
+	own, err = c.GetSiteSemantics(4)
+	if err != nil || own == nil || own.Semantics["m_sqli"] != "disable" || own.SiteID != 4 {
+		t.Fatalf("GetSiteSemantics = (%+v, %v)", own, err)
+	}
+	if err := c.SetSiteSemantics(4, false, map[string]string{"m_sqli": "strict"}); err != nil {
+		t.Fatal(err)
+	}
+	body = fc.lastBodies["PUT /api/open/site/4/semantics"]
+	if body["use_global"] != false {
+		t.Errorf("custom use_global = %v", body["use_global"])
+	}
+	sent, _ = body["semantics"].(map[string]any)
+	if sent["m_sqli"] != "strict" {
+		t.Errorf("custom semantics = %v", body["semantics"])
+	}
+	if err := c.SetSiteSemantics(4, true, map[string]string{"m_sqli": "default"}); err != nil {
+		t.Fatal(err)
+	}
+	body = fc.lastBodies["PUT /api/open/site/4/semantics"]
+	if body["use_global"] != true {
+		t.Errorf("use-global body = %v", body)
+	}
+	// The console rejects the request without levels, so they go out too.
+	if sent, _ = body["semantics"].(map[string]any); sent["m_sqli"] != "default" {
+		t.Errorf("use-global semantics = %v", body["semantics"])
+	}
+	own, err = c.GetSiteSemantics(4)
+	if err != nil || own != nil {
+		t.Errorf("GetSiteSemantics after use-global = (%+v, %v), want nil", own, err)
 	}
 }
 
