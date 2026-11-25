@@ -158,6 +158,7 @@ type fakeConsole struct {
 	aclRules   any
 	globalMode any
 	siteMode   any
+	policy     any
 	requests   []*http.Request
 	lastBodies map[string]map[string]any
 	createResp any
@@ -271,7 +272,27 @@ func (f *fakeConsole) handler() http.Handler {
 			writeJSON(w, map[string]any{"data": nil, "err": nil, "msg": ""})
 		}
 	}))
+	mux.HandleFunc("/api/open/policy/detail", auth(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"data": f.policy, "err": nil, "msg": ""})
+	}))
 	mux.HandleFunc("/api/open/site/", auth(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/challenge") {
+			var body map[string]any
+			decodeBody(f.t, r, &body)
+			f.lastBodies["PUT /api/open/site/challenge"] = body
+			if f.rawSite == nil {
+				f.rawSite = map[string]any{}
+			}
+			enable, _ := body["enable"].(bool)
+			f.rawSite["challenge_is_enabled"] = enable
+			if enable {
+				if id, _ := f.rawSite["challenge_id"].(float64); id == 0 {
+					f.rawSite["challenge_id"] = 9
+				}
+			}
+			writeJSON(w, map[string]any{"data": nil, "err": nil, "msg": ""})
+			return
+		}
 		if strings.HasSuffix(r.URL.Path, "/semantics") {
 			switch r.Method {
 			case http.MethodGet:
@@ -955,6 +976,111 @@ func TestSemanticsEndpoints(t *testing.T) {
 	own, err = c.GetSiteSemantics(4)
 	if err != nil || own != nil {
 		t.Errorf("GetSiteSemantics after use-global = (%+v, %v), want nil", own, err)
+	}
+}
+
+func TestBotEndpoints(t *testing.T) {
+	fc := newFakeConsole(t, "pw")
+	fc.rawSite = map[string]any{
+		"id": 4, "server_names": []string{"www.example.com"},
+		"challenge_id": 0, "challenge_is_enabled": false,
+	}
+	c := newTestClient(t, fc)
+
+	// A site that never configured BOT protection reports the defaults.
+	cfg, err := c.GetSiteBot(4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Enabled || cfg.Level != BotLevelInvisible || cfg.Expire != 3600 || cfg.PolicyID != 0 || len(cfg.Pattern) != 0 {
+		t.Fatalf("defaults = %+v", cfg)
+	}
+
+	fc.policy = map[string]any{
+		"id": 9, "action": 2, "is_enabled": true, "level": 1, "expire": 7200,
+		"replay": false, "negate": true,
+		"pattern": [][]map[string]any{{{"k": "uri", "op": "prefix", "v": []string{"/admin"}, "sub_k": ""}}},
+	}
+	if err := c.SetSiteBot(4, true, 7200, true, [][]BotCondition{{{Key: "uri", Operator: "prefix", Value: []string{"/admin"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	body := fc.lastBodies["PUT /api/open/site/challenge"]
+	if body["enable"] != true || body["id"] != float64(4) || body["level"] != float64(BotLevelInvisible) ||
+		body["expire"] != float64(7200) || body["negate"] != true || body["replay"] != false {
+		t.Errorf("challenge PUT body = %v", body)
+	}
+	if groups, _ := body["pattern"].([]any); len(groups) != 1 {
+		t.Errorf("challenge PUT pattern = %v", body["pattern"])
+	}
+
+	got, err := c.GetSiteBot(4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Enabled || got.PolicyID != 9 || got.Expire != 7200 || !got.Negate || len(got.Pattern) != 1 ||
+		got.Pattern[0][0].Key != "uri" || got.Pattern[0][0].Value[0] != "/admin" {
+		t.Fatalf("GetSiteBot after enable = %+v", got)
+	}
+
+	// Disabling keeps the stored policy and its settings.
+	if err := c.SetSiteBot(4, false, got.Expire, got.Negate, got.Pattern); err != nil {
+		t.Fatal(err)
+	}
+	body = fc.lastBodies["PUT /api/open/site/challenge"]
+	if body["enable"] != false || body["expire"] != float64(7200) || body["negate"] != true {
+		t.Errorf("disable body = %v", body)
+	}
+	got, err = c.GetSiteBot(4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Enabled || got.PolicyID != 9 || len(got.Pattern) != 1 {
+		t.Fatalf("GetSiteBot after disable = %+v", got)
+	}
+
+	// A nil pattern goes out as an empty list, not null.
+	if err := c.SetSiteBot(4, true, 3600, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	body = fc.lastBodies["PUT /api/open/site/challenge"]
+	if _, ok := body["pattern"].([]any); !ok {
+		t.Errorf("nil pattern sent as %v, want []", body["pattern"])
+	}
+}
+
+func TestValidateBotCondition(t *testing.T) {
+	for _, ok := range []BotCondition{
+		{Key: "uri", Operator: "prefix", Value: []string{"/admin"}},
+		{Key: "src_ip", Operator: "cidr", Value: []string{"10.0.0.0/8"}},
+		{Key: "src_ip", Operator: "not_cidr", Value: []string{"10.0.0.0/8"}},
+		{Key: "method", Operator: "eq", Value: []string{"POST"}},
+		{Key: "req_header", Operator: "has", SubKey: "User-Agent", Value: []string{"curl"}},
+		{Key: "get_param", Operator: "exist", SubKey: "q"},
+	} {
+		if err := ValidateBotCondition(ok); err != nil {
+			t.Errorf("ValidateBotCondition(%+v) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []BotCondition{
+		{Key: "nope", Operator: "eq", Value: []string{"x"}},
+		{Key: "uri", Operator: "cidr", Value: []string{"10.0.0.0/8"}},
+		{Key: "uri", Operator: "eq"},
+		{Key: "uri", Operator: "exist", Value: []string{"x"}},
+		{Key: "req_header", Operator: "has", Value: []string{"curl"}},
+		{Key: "post_param", Operator: "eq", Value: []string{"x"}},
+		// Pro-only operators on src_ip and the console-only in/ja4_in
+		// selectors are rejected before they reach the console.
+		{Key: "src_ip", Operator: "geo_eq", Value: []string{"CN"}},
+		{Key: "src_ip", Operator: "geo_not_eq", Value: []string{"CN"}},
+		{Key: "src_ip", Operator: "asn_eq", Value: []string{"64512"}},
+		{Key: "src_ip", Operator: "asn_not_eq", Value: []string{"64512"}},
+		{Key: "src_ip", Operator: "in", Value: []string{"1"}},
+		{Key: "src_ip", Operator: "not_in", Value: []string{"1"}},
+		{Key: "ja4", Operator: "ja4_in", Value: []string{"t13d1516h2"}},
+	} {
+		if err := ValidateBotCondition(bad); err == nil {
+			t.Errorf("ValidateBotCondition(%+v) accepted an invalid condition", bad)
+		}
 	}
 }
 

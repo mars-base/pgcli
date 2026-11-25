@@ -194,6 +194,8 @@ type Site struct {
 	HealthCheckPath     string                 `json:"health_check_path"`
 	HealthState         map[string]HealthState `json:"health_state"`
 	LoadBalance         *LoadBalance           `json:"load_balance,omitempty"`
+	ChallengeID         int                    `json:"challenge_id"`
+	ChallengeIsEnabled  bool                   `json:"challenge_is_enabled"`
 }
 
 // HealthState is the console's cached health view for one upstream.
@@ -960,6 +962,172 @@ func (c *Client) SetSiteSemantics(siteID int, useGlobal bool, levels map[string]
 	return c.do(http.MethodPut, fmt.Sprintf("/api/open/site/%d/semantics", siteID), map[string]any{
 		"use_global": useGlobal,
 		"semantics":  levels,
+	}, nil)
+}
+
+// The console's BOT protection (menu 人机验证) challenges visitors with an
+// invisible verification. Every site carries its own configuration — an
+// on/off switch, how long a passed verification stays valid, and optional
+// conditions selecting the visitors to challenge. The console stores the
+// settings as a challenge policy and points the site at it through
+// challenge_id, so reading a configuration takes the site record plus that
+// policy's detail.
+//
+// The slide verification (滑动验证, level 2), editing the validity and replay
+// protection are Pro features; the Community Edition keeps the invisible
+// level and a one-hour validity, which is all this client writes.
+
+// BotLevelInvisible is the console's 无感知验证 challenge level.
+const BotLevelInvisible = 1
+
+// BotCondition is one visitor-match condition of a site's BOT rule, in the
+// console's pattern form: groups are ORed, conditions inside a group are
+// ANDed. Keys, operators and values are the console's own vocabulary
+// (src_ip, uri, host, …), left uninterpreted here.
+type BotCondition struct {
+	Key      string   `json:"k"`
+	Operator string   `json:"op"`
+	Value    []string `json:"v"`
+	SubKey   string   `json:"sub_k"`
+}
+
+// botFieldOperators is the console's condition vocabulary for BOT match
+// rules: the operators each field accepts. req_header, get_param and
+// post_param address a header or parameter name through SubKey; every other
+// field carries its value directly.
+var botFieldOperators = map[string][]string{
+	"src_ip":         {"eq", "not_eq", "match", "cidr", "not_cidr", "in", "not_in", "geo_eq", "geo_not_eq", "asn_eq", "asn_not_eq"},
+	"uri":            {"eq", "not_eq", "has", "not_has", "prefix", "re"},
+	"uri_no_query":   {"eq", "not_eq", "has", "not_has", "prefix", "re"},
+	"host":           {"eq", "not_eq", "match", "re", "has", "not_has"},
+	"req_header":     {"eq", "not_eq", "has", "not_has", "re", "exist", "not_exist"},
+	"get_param":      {"eq", "not_eq", "has", "not_has", "re", "exist", "not_exist"},
+	"post_param":     {"eq", "not_eq", "has", "not_has", "re", "exist", "not_exist"},
+	"req_raw_header": {"re", "has", "not_has"},
+	"res_raw_header": {"re", "has", "not_has"},
+	"req_body":       {"re", "has", "not_has"},
+	"res_body":       {"re", "has", "not_has"},
+	"method":         {"eq", "not_eq"},
+	"website":        {"eq", "not_eq"},
+	"ja4":            {"ja4_in", "eq", "not_eq"},
+}
+
+// ValidateBotCondition rejects conditions the console's rule editor cannot
+// build or the Community Edition cannot run, so a mistake fails fast with a
+// clear message instead of the console's opaque internal-error.
+func ValidateBotCondition(c BotCondition) error {
+	ops, ok := botFieldOperators[c.Key]
+	if !ok {
+		return fmt.Errorf("unknown condition field %q", c.Key)
+	}
+	if !slices.Contains(ops, c.Operator) {
+		return fmt.Errorf("operator %q does not apply to field %s, which takes %s", c.Operator, c.Key, strings.Join(ops, ", "))
+	}
+	switch c.Operator {
+	case "geo_eq", "geo_not_eq", "asn_eq", "asn_not_eq":
+		return fmt.Errorf("operator %s needs a Pro license (the Community Edition cannot run it)", c.Operator)
+	case "in", "not_in":
+		return fmt.Errorf("operator %s selects IP groups by console id; configure the condition in the console", c.Operator)
+	case "ja4_in":
+		return fmt.Errorf("operator ja4_in selects recorded JA4 fingerprints in the console; configure the condition there")
+	}
+	switch c.Key {
+	case "req_header", "get_param", "post_param":
+		if c.SubKey == "" {
+			return fmt.Errorf("field %s needs a header or parameter name (write %s/name:operator=value)", c.Key, c.Key)
+		}
+	}
+	if c.Operator == "exist" || c.Operator == "not_exist" {
+		if len(c.Value) > 0 {
+			return fmt.Errorf("operator %s takes no value", c.Operator)
+		}
+		return nil
+	}
+	if len(c.Value) == 0 {
+		return fmt.Errorf("field %s with operator %s needs a value", c.Key, c.Operator)
+	}
+	return nil
+}
+
+// PolicyDetail is a policy record as the console returns it. BOT protection
+// stores each site's challenge settings in a policy of its own, so the level,
+// expire, negate and pattern fields describe the site's challenge rule.
+type PolicyDetail struct {
+	ID        int              `json:"id"`
+	Name      string           `json:"name"`
+	Action    int              `json:"action"`
+	IsEnabled bool             `json:"is_enabled"`
+	Level     int              `json:"level"`
+	Expire    int              `json:"expire"` // seconds
+	Negate    bool             `json:"negate"`
+	Pattern   [][]BotCondition `json:"pattern"`
+}
+
+// GetPolicyDetail fetches one policy record by id.
+func (c *Client) GetPolicyDetail(id int) (*PolicyDetail, error) {
+	var p PolicyDetail
+	if err := c.do(http.MethodGet, fmt.Sprintf("/api/open/policy/detail?id=%d", id), nil, &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// BotConfig is a site's effective BOT protection configuration.
+type BotConfig struct {
+	Enabled  bool
+	Level    int
+	Expire   int // seconds a passed verification stays valid
+	Negate   bool
+	Pattern  [][]BotCondition
+	PolicyID int // the backing challenge policy, 0 when never configured
+}
+
+// GetSiteBot returns a site's BOT protection configuration. The site record
+// carries the switch and the backing policy id; the policy detail carries the
+// level, validity and match conditions. A site that never configured BOT
+// protection reports the console defaults (invisible level, one hour, no
+// conditions) with Enabled false.
+func (c *Client) GetSiteBot(siteID int) (*BotConfig, error) {
+	site, err := c.GetSite(siteID)
+	if err != nil {
+		return nil, err
+	}
+	cfg := &BotConfig{
+		Enabled:  site.ChallengeIsEnabled,
+		Level:    BotLevelInvisible,
+		Expire:   3600,
+		PolicyID: site.ChallengeID,
+	}
+	if site.ChallengeID > 0 {
+		p, err := c.GetPolicyDetail(site.ChallengeID)
+		if err != nil {
+			return nil, fmt.Errorf("challenge policy %d: %w", site.ChallengeID, err)
+		}
+		cfg.Level = p.Level
+		cfg.Expire = p.Expire
+		cfg.Negate = p.Negate
+		cfg.Pattern = p.Pattern
+	}
+	return cfg, nil
+}
+
+// SetSiteBot writes a site's BOT protection: the switch, the validity carried
+// over from the current configuration (seconds) and the match conditions. The
+// level is always the invisible verification. Validity editing and replay
+// protection are Pro features, so replay always goes out as off; the console
+// creates or updates the backing challenge policy itself.
+func (c *Client) SetSiteBot(siteID int, enable bool, expire int, negate bool, pattern [][]BotCondition) error {
+	if pattern == nil {
+		pattern = [][]BotCondition{}
+	}
+	return c.do(http.MethodPut, "/api/open/site/challenge", map[string]any{
+		"enable":  enable,
+		"id":      siteID,
+		"level":   BotLevelInvisible,
+		"expire":  expire,
+		"replay":  false,
+		"negate":  negate,
+		"pattern": pattern,
 	}, nil)
 }
 

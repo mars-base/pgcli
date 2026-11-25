@@ -120,7 +120,7 @@ Ansible 部署可以在 `type: safeline` 条目的 `sites` 字段里声明站点
 > **部署在特定账号下？** 这些命令读取执行者账号的 `~/.pgcli/pg.yaml`，用其他账号
 > （例如 `pgcli`）安装的栈在这里找不到。用 `-c` 指定那个账号的配置，例如
 > `pg -c /home/pgcli/.pgcli/pg.yaml addon safeline site cc show --name safeline1 --site-id 4`；
-> `site mode`、`site cc` 与 `site protect` 用法相同。
+> `site mode`、`site cc`、`site protect` 与 `site bot` 用法相同。
 
 > **社区版限制：一个站点只能有一个上游。** pgcli 安装的控制台没有 Pro 授权，站点只能代理
 > 单个上游。添加第二个上游（也就是多服务器负载均衡）会被控制台以 `license required` 拒绝；
@@ -142,6 +142,9 @@ pg addon safeline site cc waiting-room --name waf1 --site-id 3 --enabled
 pg addon safeline site cc rate-limit --name waf1 --site-id 3 --type req --count 200
 pg addon safeline site protect show --name waf1 --site-id 3
 pg addon safeline site protect mode balance --name waf1
+pg addon safeline site bot show --name waf1 --site-id 3
+pg addon safeline site bot enable --name waf1 --site-id 3
+pg addon safeline site bot condition --name waf1 --site-id 3 --where 'uri:prefix=/admin'
 pg addon safeline site delete --name waf1 --site-id 3
 
 pg addon safeline cert list --name waf1
@@ -166,6 +169,8 @@ pg addon safeline cert delete --name waf1 --cert-id 2
 - `site mode` 在三种运行模式间切换一个或多个站点，见下方的「站点运行模式」。
 - `site cc` 查看与修改 CC 防护的两项配置（等候室与频率限制），见下方的「CC 防护」。
 - `site protect` 查看与修改攻击防护背后的语义分析模块，见下方的「语义分析（攻击防护）」。
+- `site bot` 查看与修改站点的 BOT 防护（人机验证），见下方的「BOT 防护」；社区版只运行
+  无感知验证，匹配条件不包含仅有 Pro 的 `geo_*`/`asn_*` 操作符。
 - `cert list` 展示已存证书的覆盖域名、到期时间和使用它的站点。证书被站点的 TLS 入口端口
   占用时控制台拒绝删除，先删除站点或换绑证书。
 
@@ -322,6 +327,83 @@ pg addon safeline site cc rate-limit --name waf1 --site-id 3 --use-global=false 
     --type req --enabled --period 10 --count 200 --action block --block-min 30
 ```
 
+### BOT 防护（人机验证）
+
+`pg addon safeline site bot` 查看与修改控制台里与 CC 防护并列的 BOT 防护。它用
+**无感知验证**（invisible verification）挑战选中的访客：请求会收到一段 JavaScript
+挑战，浏览器无交互即可通过，无法执行 JavaScript 的客户端则失败。每个站点有自己的
+开关与匹配条件；站点处于防护模式（defense）时生效。
+
+```bash
+# 查看是否开启、验证等级、有效期与匹配条件
+pg addon safeline site bot show --name waf1 --site-id 3
+
+# 开启 / 关闭
+pg addon safeline site bot enable --name waf1 --site-id 3
+pg addon safeline site bot disable --name waf1 --site-id 3
+
+# 只挑战匹配条件的访客，或恢复为挑战全部访客
+pg addon safeline site bot condition --name waf1 --site-id 3 \
+  --where 'uri:prefix=/admin && method:eq=POST'
+pg addon safeline site bot condition --name waf1 --site-id 3 --all-visitors
+```
+
+`show` 输出开关、验证等级、通过验证后的有效期以及挑战哪些访客：
+
+```text
+Site 3 (www.example.com) BOT protection (人机验证)
+  Status:    enabled
+  Level:     invisible verification
+  Validity:  1h
+  Match:     only visitors matching the conditions below
+GROUP  FIELD   OP      VALUE
+1      uri     prefix  /admin
+1      method  eq      POST
+```
+
+从未配置过 BOT 防护的站点显示控制台默认值（关闭、无感知验证、1 小时、无条件）。
+`enable` 保留已存的有效期与匹配条件；没有任何条件的站点会挑战所有访客。`condition`
+对应控制台的「仅针对特定条件启用人机验证」选项中的「满足条件时认证」模式（另一种
+「满足条件时跳过认证」未实现）。每条 `--where` 是一个条件组，组之间 OR；组内用 `&&`
+连接必须同时满足的条件（AND），`|` 分隔单个条件的多个值；一个条件写作
+`field:operator=value`：
+
+```bash
+pg addon safeline site bot condition --name waf1 --site-id 3 \
+  --where 'uri:prefix=/admin && method:eq=POST' \
+  --where 'src_ip:cidr=10.0.0.0/8|192.168.0.0/16'
+```
+
+`field:operator=value` 中的匹配目标（field）与各自可用的操作符：
+
+| 匹配目标 | 书写 | 操作符 | 说明 |
+|---|---|---|---|
+| 源 IP | `src_ip` | `eq` `not_eq` `match` `cidr` `not_cidr` `in` `not_in` `geo_eq` `geo_not_eq` `asn_eq` `asn_not_eq` | 如 `src_ip:cidr=10.0.0.0/8`；`geo_*`/`asn_*` 需 Pro，`in`/`not_in` 选 IP 组——CLI 均拒绝，见下 |
+| URI | `uri` | `eq` `not_eq` `has` `not_has` `prefix` `re` | 含查询参数；如 `uri:prefix=/admin` |
+| 不含查询参数的 URI | `uri_no_query` | `eq` `not_eq` `has` `not_has` `prefix` `re` | 如 `uri_no_query:eq=/api/users` |
+| Host | `host` | `eq` `not_eq` `match` `re` `has` `not_has` | 如 `host:eq=www.example.com` |
+| 请求头 | `req_header/<header 名>` | `eq` `not_eq` `has` `not_has` `re` `exist` `not_exist` | 必须带 header 名；如 `req_header/User-Agent:has=curl` |
+| 原始请求头 | `req_raw_header` | `re` `has` `not_has` | 如 `req_raw_header:has=python-requests` |
+| 原始响应头 | `res_raw_header` | `re` `has` `not_has` | 如 `res_raw_header:has=Set-Cookie` |
+| 请求体 | `req_body` | `re` `has` `not_has` | 如 `req_body:has=<script` |
+| 响应体 | `res_body` | `re` `has` `not_has` | 如 `res_body:has=stack trace` |
+| GET 参数 | `get_param/<参数名>` | `eq` `not_eq` `has` `not_has` `re` `exist` `not_exist` | 必须带参数名；如 `get_param/q:exist` |
+| POST 参数 | `post_param/<参数名>` | `eq` `not_eq` `has` `not_has` `re` `exist` `not_exist` | 必须带参数名；如 `post_param/username:eq=admin` |
+| 请求方法 | `method` | `eq` `not_eq` | 如 `method:eq=POST` |
+| 站点 | `website` | `eq` `not_eq` | 值为站点 id；如 `website:eq=3` |
+| JA4 指纹 | `ja4` | `ja4_in` `eq` `not_eq` | `ja4_in` 选已记录指纹；如 `ja4:eq=t13d1516h2_8daaf6152771_02713d6af862` |
+
+Header 与参数类字段按名字定位（如 `req_header/User-Agent:has=curl`）；`exist`/`not_exist`
+不带值（可省略 `=`）。控制台的部分选项在此不可用：`src_ip` 上的 `geo_*`、`asn_*` 需要
+Pro 许可，`src_ip` 的 `in`/`not_in` 与 `ja4_in` 选取的是控制台管理的对象（IP 组、
+已记录的 JA4 指纹）——这些请在控制台配置。
+
+控制台只在防护开启时可修改条件，因此 `condition` 对关闭的站点直接报错，并提示用
+`enable --where ...` 一次完成开启与条件设置。滑动验证（slide）、修改有效期与请求防重放
+（replay）属于 Pro 功能：社区版固定为无感知验证 + 1 小时有效期，命令也只写入这组值。
+每次修改后命令会重新读取站点，控制台没有应用的变化会作为错误报出。关闭会保留已存配置，
+再次开启即恢复。
+
 ### 语义分析（攻击防护）
 
 `pg addon safeline site protect` 查看与修改控制台「攻击防护」背后的语义分析
@@ -454,6 +536,10 @@ pg addon remove safeline --name waf1 --clean-data   # 同时删除 <data-dir>
 - **社区版每站点单上游。** 内置控制台没有 Pro 授权，站点只能代理一个上游：`--add-upstream`、
   多 URL 的 `--upstream`、带权重/备份角色的上游与负载均衡都会被控制台以 `license required`
   拒绝；在控制台激活 Pro 授权后可用。
+- **BOT 防护只覆盖无感知验证。** 滑动验证、修改有效期与请求防重放属于 Pro 功能，社区版
+  固定无感知验证 + 1 小时有效期。`src_ip` 上的 `geo_*`/`asn_*` 需要 Pro 许可，`in`/`not_in`
+  与 `ja4_in` 指向控制台管理的对象——`site bot condition` 都会拒绝。身份认证与动态防护
+  不由 CLI 管理，请在控制台配置。
 - pgcli 只发布控制台端口；受防护站点的流量端口由 tengine 绑定，经控制台或 `pg addon safeline site` 创建。
 - 控制台使用 SafeLine 自带自签证书，不参与 `--tls` 体系。
 - pgcli 生成并管理内部 detector 管理令牌；其余上游可选密钥（`MGT_INTERNAL_TOKEN`、

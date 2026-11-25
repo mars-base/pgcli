@@ -92,7 +92,7 @@ Ansible deployments can declare sites in the `sites` field of a `type: safeline`
 
 `pg addon safeline site ...` drives the console's own web API with the stored admin password — the same encrypted login and `/api/open/site` calls the browser makes — so sites can be scripted without the UI. The stack must be running.
 
-> **Deployed under a specific account?** These commands read the invoking user's `~/.pgcli/pg.yaml`; a stack installed under another account (for example `pgcli`) is not found there. Pass that account's config with `-c`: `pg -c /home/pgcli/.pgcli/pg.yaml addon safeline site cc show --name safeline1 --site-id 4`. `site mode`, `site cc` and `site protect` take the same flag.
+> **Deployed under a specific account?** These commands read the invoking user's `~/.pgcli/pg.yaml`; a stack installed under another account (for example `pgcli`) is not found there. Pass that account's config with `-c`: `pg -c /home/pgcli/.pgcli/pg.yaml addon safeline site cc show --name safeline1 --site-id 4`. `site mode`, `site cc`, `site protect` and `site bot` take the same flag.
 
 > **Community Edition limit: one upstream per site.** The console pgcli installs runs without a Pro license, so a site can proxy to a single upstream. Adding a second upstream — and therefore any load balancing across servers — is refused by the console with `license required`; activate a Pro license in the console to use it.
 
@@ -112,6 +112,9 @@ pg addon safeline site cc waiting-room --name waf1 --site-id 3 --enabled
 pg addon safeline site cc rate-limit --name waf1 --site-id 3 --type req --count 200
 pg addon safeline site protect show --name waf1 --site-id 3
 pg addon safeline site protect mode balance --name waf1
+pg addon safeline site bot show --name waf1 --site-id 3
+pg addon safeline site bot enable --name waf1 --site-id 3
+pg addon safeline site bot condition --name waf1 --site-id 3 --where 'uri:prefix=/admin'
 pg addon safeline site delete --name waf1 --site-id 3
 
 pg addon safeline cert list --name waf1
@@ -127,6 +130,7 @@ pg addon safeline cert delete --name waf1 --cert-id 2
 - `site mode` switches one or more sites between the three run modes, described under "Site run modes" below.
 - `site cc` reads and changes the two CC-protection settings (the waiting room and the rate-limit rules), described under "CC protection" below.
 - `site protect` reads and changes the semantic-analysis modules behind attack protection (攻击防护), described under "Semantic analysis (attack protection)" below.
+- `site bot` reads and changes a site's BOT protection (人机验证), described under "BOT protection" below. The Community Edition runs the invisible verification only, and its match conditions skip the Pro-only `geo_*`/`asn_*` operators.
 - `cert list` shows stored certificates with their covered domains, expiry and the sites using them. The console refuses to delete a certificate while a site's TLS entry port uses it, so delete or repoint the site first.
 
 A plain HTTP site needs no certificate — just an entry port and an upstream:
@@ -287,6 +291,92 @@ pg addon safeline site cc rate-limit --name waf1 --site-id 3 --use-global=false 
     --type req --enabled --period 10 --count 200 --action block --block-min 30
 ```
 
+### BOT protection (人机验证)
+
+`pg addon safeline site bot` reads and changes the BOT protection the console
+lists next to CC protection. It challenges the selected visitors with an
+**invisible verification** (无感知验证): the request receives a JavaScript
+challenge that browsers solve without user interaction, while clients that
+cannot run JavaScript fail it. Every site has its own switch and its own match
+conditions; the challenge applies while the site runs in defense mode.
+
+```bash
+# whether it is on, the verification level, validity and match conditions
+pg addon safeline site bot show --name waf1 --site-id 3
+
+# turn it on / off
+pg addon safeline site bot enable --name waf1 --site-id 3
+pg addon safeline site bot disable --name waf1 --site-id 3
+
+# challenge only the matching visitors, or everyone again
+pg addon safeline site bot condition --name waf1 --site-id 3 \
+  --where 'uri:prefix=/admin && method:eq=POST'
+pg addon safeline site bot condition --name waf1 --site-id 3 --all-visitors
+```
+
+`show` prints the switch, the verification level, how long a passed
+verification stays valid and which visitors are challenged:
+
+```text
+Site 3 (www.example.com) BOT protection (人机验证)
+  Status:    enabled
+  Level:     invisible verification
+  Validity:  1h
+  Match:     only visitors matching the conditions below
+GROUP  FIELD   OP      VALUE
+1      uri     prefix  /admin
+1      method  eq      POST
+```
+
+A site that never configured BOT protection reports the console defaults
+(disabled, invisible level, one hour, no conditions). `enable` keeps the
+stored validity and match conditions; a site without any conditions challenges
+every visitor. `condition` fills in the console's "仅针对特定条件启用人机验证"
+option in its "满足条件时认证" mode (the other mode, 满足条件时跳过认证, is not
+implemented). Each `--where` rule is one condition group, groups are ORed, `&&`
+joins conditions that must all match (ANDed) and `|` separates the values of one
+condition; a condition is `field:operator=value`:
+
+```bash
+pg addon safeline site bot condition --name waf1 --site-id 3 \
+  --where 'uri:prefix=/admin && method:eq=POST' \
+  --where 'src_ip:cidr=10.0.0.0/8|192.168.0.0/16'
+```
+
+The match targets (the `field` in `field:operator=value`) and the operators
+each takes:
+
+| Match target | Spelling | Operators | Notes |
+|---|---|---|---|
+| Source IP | `src_ip` | `eq` `not_eq` `match` `cidr` `not_cidr` `in` `not_in` `geo_eq` `geo_not_eq` `asn_eq` `asn_not_eq` | e.g. `src_ip:cidr=10.0.0.0/8`; `geo_*`/`asn_*` need Pro and `in`/`not_in` select IP groups — the CLI refuses all of these, see below |
+| URI | `uri` | `eq` `not_eq` `has` `not_has` `prefix` `re` | includes the query string; e.g. `uri:prefix=/admin` |
+| URI without query | `uri_no_query` | `eq` `not_eq` `has` `not_has` `prefix` `re` | e.g. `uri_no_query:eq=/api/users` |
+| Host | `host` | `eq` `not_eq` `match` `re` `has` `not_has` | e.g. `host:eq=www.example.com` |
+| Request header | `req_header/<header>` | `eq` `not_eq` `has` `not_has` `re` `exist` `not_exist` | the header name is required; e.g. `req_header/User-Agent:has=curl` |
+| Raw request headers | `req_raw_header` | `re` `has` `not_has` | e.g. `req_raw_header:has=python-requests` |
+| Raw response headers | `res_raw_header` | `re` `has` `not_has` | e.g. `res_raw_header:has=Set-Cookie` |
+| Request body | `req_body` | `re` `has` `not_has` | e.g. `req_body:has=<script` |
+| Response body | `res_body` | `re` `has` `not_has` | e.g. `res_body:has=stack trace` |
+| GET parameter | `get_param/<param>` | `eq` `not_eq` `has` `not_has` `re` `exist` `not_exist` | the parameter name is required; e.g. `get_param/q:exist` |
+| POST parameter | `post_param/<param>` | `eq` `not_eq` `has` `not_has` `re` `exist` `not_exist` | the parameter name is required; e.g. `post_param/username:eq=admin` |
+| Method | `method` | `eq` `not_eq` | e.g. `method:eq=POST` |
+| Website | `website` | `eq` `not_eq` | value is the site id; e.g. `website:eq=3` |
+| JA4 fingerprint | `ja4` | `ja4_in` `eq` `not_eq` | `ja4_in` selects recorded fingerprints; e.g. `ja4:eq=t13d1516h2_8daaf6152771_02713d6af862` |
+
+`exist`/`not_exist` take no value (the `=` may be omitted). Some of the
+console's choices are out of reach: `geo_*` and `asn_*` on `src_ip` need a Pro
+license, and `in`/`not_in` on `src_ip` plus `ja4_in` select console-managed
+items (IP groups, recorded JA4 fingerprints) — configure those in the console.
+
+The console only accepts condition changes while the protection is on, so
+`condition` refuses a disabled site and points at `enable --where ...`, which
+enables and sets the conditions in one call. The slide verification (滑动验证),
+editing the validity and replay protection (请求防重放) are Pro features: the
+Community Edition keeps the invisible level and a one-hour validity, and those
+are the only values the command writes. Changing anything re-reads the site
+afterwards and reports a configuration the console did not apply. Disabling
+keeps the stored settings, so enabling again restores them.
+
 ### Semantic analysis (attack protection)
 
 `pg addon safeline site protect` reads and changes the semantic-analysis
@@ -412,6 +502,7 @@ The dedicated bridge network is removed once no containers are attached. Without
 
 - **Linux + rootful podman only** (static IPs; host-network traffic proxy).
 - **One upstream per site (Community Edition).** The bundled console runs without a Pro license, so a site proxies to a single upstream: `--add-upstream`, a multi-URL `--upstream`, weighted/backup upstreams and load balancing are refused with `license required`. Activate a Pro license in the console to use them.
+- **BOT protection covers the invisible verification only.** The slide verification, editing the validity and replay protection are Pro features; the Community Edition keeps the invisible level and a one-hour validity. On `src_ip`, the `geo_*`/`asn_*` operators need Pro, and `in`/`not_in` plus `ja4_in` address console-managed items — `site bot condition` rejects all of these. Identity authentication (身份认证) and dynamic protection (动态防护) are not managed by the CLI — configure them in the console.
 - Only the console port is published by pgcli; per-site traffic ports are bound by tengine and created through the console or `pg addon safeline site`.
 - The console uses SafeLine's own self-signed certificate; no `--tls` integration.
 - pgcli generates and manages the internal detector management token; the other optional upstream secrets (`MGT_INTERNAL_TOKEN`, `DETECTOR_AES_KEY`, `MGT_LICENSE_INTEGRITY_KEY`, `RIVER_*`) are left at their upstream defaults.

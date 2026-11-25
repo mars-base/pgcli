@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/mars-base/pgcli/internal/config"
+	"github.com/mars-base/pgcli/internal/safeline"
 )
 
 func TestSafelineFlagName(t *testing.T) {
@@ -336,6 +337,105 @@ func TestSafelineSiteProtectCommandsRegistered(t *testing.T) {
 		f := cmd.Flags().Lookup("site-id")
 		if f == nil || f.Value.Type() != "int" {
 			t.Errorf("%s: --site-id flag = %+v, want an int flag", cmd.Name(), f)
+		}
+	}
+}
+
+func TestSafelineSiteBotCommandsRegistered(t *testing.T) {
+	found := false
+	for _, c := range addonSafelineSiteCmd.Commands() {
+		if c.Name() == "bot" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("pg addon safeline site bot is not registered")
+	}
+	subs := map[string]bool{"show": false, "enable": false, "disable": false, "condition": false}
+	for _, c := range addonSafelineSiteBotCmd.Commands() {
+		if _, ok := subs[c.Name()]; ok {
+			subs[c.Name()] = true
+		}
+	}
+	for name, ok := range subs {
+		if !ok {
+			t.Errorf("bot subcommand %q is not registered", name)
+		}
+	}
+	for _, cmd := range []*cobra.Command{
+		addonSafelineSiteBotShowCmd,
+		addonSafelineSiteBotEnableCmd,
+		addonSafelineSiteBotDisableCmd,
+		addonSafelineSiteBotConditionCmd,
+	} {
+		f := cmd.Flags().Lookup("site-id")
+		if f == nil || f.Value.Type() != "int" {
+			t.Errorf("%s: --site-id flag = %+v, want an int flag", cmd.Name(), f)
+		}
+	}
+	if f := addonSafelineSiteBotEnableCmd.Flags().Lookup("expire"); f != nil {
+		t.Errorf("enable: --expire should not be registered (validity editing is Pro-only), got %+v", f)
+	}
+	if f := addonSafelineSiteBotEnableCmd.Flags().Lookup("where"); f == nil || f.Value.Type() != "stringArray" {
+		t.Errorf("enable: --where flag = %+v, want a stringArray flag", f)
+	}
+	if f := addonSafelineSiteBotConditionCmd.Flags().Lookup("where"); f == nil || f.Value.Type() != "stringArray" {
+		t.Errorf("condition: --where flag = %+v, want a stringArray flag", f)
+	}
+	if f := addonSafelineSiteBotConditionCmd.Flags().Lookup("all-visitors"); f == nil || f.Value.Type() != "bool" {
+		t.Errorf("condition: --all-visitors flag = %+v, want a bool flag", f)
+	}
+	if f := addonSafelineSiteBotConditionCmd.Flags().Lookup("skip"); f != nil {
+		t.Errorf("condition: --skip should not be registered (满足条件时跳过认证 is not implemented), got %+v", f)
+	}
+}
+
+func TestParseBotWhere(t *testing.T) {
+	groups, err := parseBotWhere([]string{
+		"uri:prefix=/admin && method:eq=POST",
+		"src_ip:cidr=10.0.0.0/8|192.168.0.0/16",
+		"req_header/User-Agent:has=curl",
+	})
+	if err != nil {
+		t.Fatalf("parseBotWhere: %v", err)
+	}
+	want := [][]safeline.BotCondition{
+		{
+			{Key: "uri", Operator: "prefix", Value: []string{"/admin"}},
+			{Key: "method", Operator: "eq", Value: []string{"POST"}},
+		},
+		{{Key: "src_ip", Operator: "cidr", Value: []string{"10.0.0.0/8", "192.168.0.0/16"}}},
+		{{Key: "req_header", Operator: "has", SubKey: "User-Agent", Value: []string{"curl"}}},
+	}
+	if !sameBotPattern(groups, want) {
+		t.Errorf("parseBotWhere = %+v, want %+v", groups, want)
+	}
+	if !sameBotPattern(nil, [][]safeline.BotCondition{}) {
+		t.Error("nil and empty patterns should compare equal")
+	}
+
+	noValue, err := parseBotWhere([]string{"req_header/X-Trace:exist"})
+	if err != nil || noValue[0][0].Operator != "exist" || len(noValue[0][0].Value) != 0 {
+		t.Errorf("exist condition = (%+v, %v)", noValue, err)
+	}
+
+	for _, bad := range []string{
+		"uri",                        // no operator
+		"uri=/admin",                 // no operator
+		"nope:eq=x",                  // unknown field
+		"uri:cidr=10.0.0.0/8",        // operator not for uri
+		"req_header:has=x",           // header field without a name
+		"req_header/X-Trace:exist=x", // exist takes no value
+		"uri:eq=",                    // missing value
+		"uri:prefix=/a && ",          // trailing AND
+		"src_ip:geo_eq=CN",           // Pro-only operator
+		"src_ip:asn_eq=64512",        // Pro-only operator
+		"src_ip:in=1",                // IP-group selector, console-only
+		"ja4:ja4_in=t13d1516h2",      // fingerprint selector, console-only
+	} {
+		if _, err := parseBotWhere([]string{bad}); err == nil {
+			t.Errorf("parseBotWhere(%q) accepted an invalid rule", bad)
 		}
 	}
 }
