@@ -333,8 +333,13 @@ A site that never configured BOT protection reports the console defaults
 stored validity and match conditions; a site without any conditions challenges
 every visitor. `condition` fills in the console's "仅针对特定条件启用人机验证"
 option in its "满足条件时认证" mode (the other mode, 满足条件时跳过认证, is not
-implemented). Each `--where` rule is one condition group, groups are ORed, `&&`
-joins conditions that must all match (ANDed) and `|` separates the values of one
+implemented). **Every `bot condition` call replaces the whole condition set**:
+the rules passed become exactly the stored conditions — existing rules are
+neither kept nor merged, so repeat the ones you still want. `--all-visitors`
+clears them all, so every visit is challenged again.
+
+Each `--where` rule is one condition group, groups are ORed, `&&` joins
+conditions that must all match (ANDed) and `|` separates the values of one
 condition; a condition is `field:operator=value`:
 
 ```bash
@@ -342,6 +347,23 @@ pg addon safeline site bot condition --name waf1 --site-id 3 \
   --where 'uri:prefix=/admin && method:eq=POST' \
   --where 'src_ip:cidr=10.0.0.0/8|192.168.0.0/16'
 ```
+
+A typical configuration challenges script clients, requests without a
+User-Agent and the admin path, and leaves everything else untouched:
+
+```bash
+pg addon safeline site bot enable --name waf1 --site-id 3 \
+  --where 'req_header/User-Agent:has=curl' \
+  --where 'req_header/User-Agent:has=python-requests' \
+  --where 'req_header/User-Agent:has=wget' \
+  --where 'req_header/User-Agent:not_exist' \
+  --where 'uri:prefix=/admin'
+```
+
+Matching clients receive the invisible-verification page with HTTP status 468:
+browsers run its JavaScript and pass without interaction, staying verified for
+the validity window, while clients that cannot execute JavaScript stay
+challenged.
 
 The match targets (the `field` in `field:operator=value`) and the operators
 each takes:

@@ -364,7 +364,11 @@ GROUP  FIELD   OP      VALUE
 从未配置过 BOT 防护的站点显示控制台默认值（关闭、无感知验证、1 小时、无条件）。
 `enable` 保留已存的有效期与匹配条件；没有任何条件的站点会挑战所有访客。`condition`
 对应控制台的「仅针对特定条件启用人机验证」选项中的「满足条件时认证」模式（另一种
-「满足条件时跳过认证」未实现）。每条 `--where` 是一个条件组，组之间 OR；组内用 `&&`
+「满足条件时跳过认证」未实现）。**每次调用 `bot condition` 都会整体覆盖已有的
+匹配条件**：命令传入的规则就是最终保存的全部条件——旧规则不会保留或合并，仍需要的
+规则请一并传入；`--all-visitors` 清空全部条件，恢复为对所有访问都进行人机验证。
+
+每条 `--where` 是一个条件组，组之间 OR；组内用 `&&`
 连接必须同时满足的条件（AND），`|` 分隔单个条件的多个值；一个条件写作
 `field:operator=value`：
 
@@ -373,6 +377,21 @@ pg addon safeline site bot condition --name waf1 --site-id 3 \
   --where 'uri:prefix=/admin && method:eq=POST' \
   --where 'src_ip:cidr=10.0.0.0/8|192.168.0.0/16'
 ```
+
+一个典型的配置——挑战脚本客户端、无 User-Agent 的请求与管理路径，其余访客直接放行：
+
+```bash
+pg addon safeline site bot enable --name waf1 --site-id 3 \
+  --where 'req_header/User-Agent:has=curl' \
+  --where 'req_header/User-Agent:has=python-requests' \
+  --where 'req_header/User-Agent:has=wget' \
+  --where 'req_header/User-Agent:not_exist' \
+  --where 'uri:prefix=/admin'
+```
+
+命中的客户端会收到无感知验证页（HTTP 状态码 468）：浏览器执行其中的 JavaScript
+后无交互通过，并在有效期内保持验证状态；无法执行 JavaScript 的脚本客户端则持续
+停留在验证页。
 
 `field:operator=value` 中的匹配目标（field）与各自可用的操作符：
 
