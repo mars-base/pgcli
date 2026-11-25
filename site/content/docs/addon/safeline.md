@@ -484,6 +484,58 @@ The switches only control outbound sharing and the malicious-IP intelligence
 groups: the built-in detection modules keep working with all of them off. The
 commands compare against the console and only write the switches that differ.
 
+### Source IP acquisition (源 IP 获取方式)
+
+The console's 通用设置 → 源 IP 获取方式 decides which address tengine
+attributes a request to — the address it logs, shows in attack events and
+matches IP-based ACLs, rate limits and bans against. `pg addon safeline
+source-ip` reads and writes the same proxy setting:
+
+| Mode | Stored value | Source address |
+|---|---|---|
+| `socket` | `socket_ip` (default) | the TCP connection's peer address |
+| `xff-first` | `xff_first` | the rightmost X-Forwarded-For entry (the previous proxy) |
+| `xff-second` | `xff_second` | the 2nd entry from the right |
+| `xff-third` | `xff_third` | the 3rd entry from the right |
+| `xff-dynamic` | `xff_dynamic` | the entry picked by `--xff-position from-end\|from-start` and `--xff-index N` (1–100) |
+| `header` | `http_header` | the address in the HTTP header named by `--header` |
+| `proxy-protocol` | `proxy_protocol` | the client address from a PROXY Protocol preamble, accepted only from the `--trust` sources |
+
+```bash
+# what the instance currently uses
+pg addon safeline source-ip show --name waf1
+
+# behind one trusted reverse proxy that appends X-Forwarded-For
+pg addon safeline source-ip set --name waf1 --mode xff-first
+
+# trust a custom header instead
+pg addon safeline source-ip set --name waf1 --mode header --header X-Real-IP
+
+# PROXY Protocol from the load balancers only
+pg addon safeline source-ip set --name waf1 --mode proxy-protocol \
+    --trust 10.0.0.0/8,192.168.0.0/16
+
+# X-Forwarded-For entry counted from the start
+pg addon safeline source-ip set --name waf1 --mode xff-dynamic \
+    --xff-position from-start --xff-index 2
+```
+
+Without `--site-id` the commands work on the global setting, which every site
+inherits by default. With `--site-id` they target one site's own record, and
+`use-global --site-id <id>` makes the site inherit the global values again.
+The Community Edition rejects per-site proxy settings with `license required`,
+so only the global setting is editable there.
+
+The commands write only the `ip_source`/`ip_value` pair; every other proxy
+field stays as stored. They compare against the effective setting (for a site
+following the global values, the global setting), skip the write when nothing
+differs, and re-read the console afterwards to verify the change.
+
+Warning: trusting an HTTP header or PROXY Protocol lets any client that
+reaches the listener directly forge its source address, so IP-based ACLs,
+rate limits and bans match the forged value. Enable these modes only when the
+listener receives traffic exclusively from proxies you control.
+
 ## Container layout and networking
 
 | Role | Network | Address | Purpose |

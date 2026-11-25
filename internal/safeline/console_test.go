@@ -148,26 +148,28 @@ func TestValidateHealthCheck(t *testing.T) {
 // the encrypted login exactly like the real console and requires the bearer
 // token afterwards.
 type fakeConsole struct {
-	t          *testing.T
-	key        string
-	password   string
-	loginBody  map[string]string
-	siteList   any
-	rawSite    map[string]any
-	waiting    any
-	aclRules   any
-	globalMode any
-	siteMode   any
-	policy     any
-	requests   []*http.Request
-	lastBodies map[string]map[string]any
-	createResp any
-	msg        string
-	health     map[string]string
-	certs      any
-	certID     int
-	certDelErr string
-	certDelMsg string
+	t           *testing.T
+	key         string
+	password    string
+	loginBody   map[string]string
+	siteList    any
+	rawSite     map[string]any
+	waiting     any
+	aclRules    any
+	globalMode  any
+	siteMode    any
+	policy      any
+	globalProxy any
+	siteProxy   any
+	requests    []*http.Request
+	lastBodies  map[string]map[string]any
+	createResp  any
+	msg         string
+	health      map[string]string
+	certs       any
+	certID      int
+	certDelErr  string
+	certDelMsg  string
 }
 
 func newFakeConsole(t *testing.T, password string) *fakeConsole {
@@ -272,6 +274,25 @@ func (f *fakeConsole) handler() http.Handler {
 			writeJSON(w, map[string]any{"data": nil, "err": nil, "msg": ""})
 		}
 	}))
+	mux.HandleFunc("/api/open/global/proxy", auth(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			data := f.globalProxy
+			if data == nil {
+				data = map[string]any{
+					"ip_source": map[string]any{"value": "socket_ip", "global": true},
+					"ip_value":  map[string]any{"value": "", "global": true},
+				}
+			}
+			writeJSON(w, map[string]any{"data": data, "err": nil, "msg": ""})
+		case http.MethodPut:
+			var body map[string]any
+			decodeBody(f.t, r, &body)
+			f.lastBodies["PUT /api/open/global/proxy"] = body
+			f.globalProxy = body
+			writeJSON(w, map[string]any{"data": nil, "err": nil, "msg": ""})
+		}
+	}))
 	mux.HandleFunc("/api/open/policy/detail", auth(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"data": f.policy, "err": nil, "msg": ""})
 	}))
@@ -291,6 +312,26 @@ func (f *fakeConsole) handler() http.Handler {
 				}
 			}
 			writeJSON(w, map[string]any{"data": nil, "err": nil, "msg": ""})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/proxy") {
+			switch r.Method {
+			case http.MethodGet:
+				data := f.siteProxy
+				if data == nil {
+					data = map[string]any{
+						"ip_source": map[string]any{"value": "socket_ip", "global": true},
+						"ip_value":  map[string]any{"value": "", "global": true},
+					}
+				}
+				writeJSON(w, map[string]any{"data": data, "err": nil, "msg": ""})
+			case http.MethodPut:
+				var body map[string]any
+				decodeBody(f.t, r, &body)
+				f.lastBodies["PUT "+r.URL.Path] = body
+				f.siteProxy = body
+				writeJSON(w, map[string]any{"data": nil, "err": nil, "msg": ""})
+			}
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/semantics") {
@@ -1120,5 +1161,116 @@ func TestValidateRateLimitRule(t *testing.T) {
 	}
 	if err := ValidateRateLimitAction("challenge_v2"); err != nil {
 		t.Errorf("challenge_v2 rejected: %v", err)
+	}
+}
+
+func TestNormalizeSourceIPMode(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"socket", SourceIPSocket},
+		{"socket_ip", SourceIPSocket},
+		{"socket-ip", SourceIPSocket},
+		{"xff-first", SourceIPXFFFirst},
+		{"xff_first", SourceIPXFFFirst},
+		{"XFF-Second", SourceIPXFFSecond},
+		{"xff-third", SourceIPXFFThird},
+		{"xff-dynamic", SourceIPXFFDynamic},
+		{"header", SourceIPHTTPHeader},
+		{"http-header", SourceIPHTTPHeader},
+		{"proxy-protocol", SourceIPProxyProtocol},
+		{"proxy", SourceIPProxyProtocol},
+	} {
+		got, err := NormalizeSourceIPMode(tc.in)
+		if err != nil || got != tc.want {
+			t.Errorf("NormalizeSourceIPMode(%q) = (%q, %v), want %q", tc.in, got, err, tc.want)
+		}
+	}
+	for _, bad := range []string{"", "xff", "xff-fourth", "socket-ipv6"} {
+		if _, err := NormalizeSourceIPMode(bad); err == nil {
+			t.Errorf("NormalizeSourceIPMode(%q) accepted", bad)
+		}
+	}
+}
+
+func TestSourceIPValidation(t *testing.T) {
+	if err := ValidateSourceIPHeader("X-Real-IP"); err != nil {
+		t.Errorf("X-Real-IP rejected: %v", err)
+	}
+	for _, bad := range []string{"", "X Real IP", "X-Real-IP:", "头"} {
+		if err := ValidateSourceIPHeader(bad); err == nil {
+			t.Errorf("header %q accepted", bad)
+		}
+	}
+
+	got, err := NormalizeTrustedProxies([]string{"10.0.0.0/8", " 192.168.1.1 ", ""})
+	if err != nil || got != "10.0.0.0/8,192.168.1.1" {
+		t.Errorf("NormalizeTrustedProxies = (%q, %v)", got, err)
+	}
+	for _, bad := range [][]string{nil, {""}, {"not-an-ip"}, {"300.1.1.1"}} {
+		if _, err := NormalizeTrustedProxies(bad); err == nil {
+			t.Errorf("trusted proxies %v accepted", bad)
+		}
+	}
+
+	if got, err := BuildXFFSelector("from-end", 1); err != nil || got != `{"index":1,"position":"from_end"}` {
+		t.Errorf("BuildXFFSelector(from-end, 1) = (%q, %v)", got, err)
+	}
+	if got, err := BuildXFFSelector("from_start", 100); err != nil || got != `{"index":100,"position":"from_start"}` {
+		t.Errorf("BuildXFFSelector(from_start, 100) = (%q, %v)", got, err)
+	}
+	for _, tc := range []struct {
+		position string
+		index    int
+	}{{"middle", 1}, {"from-end", 0}, {"from-end", 101}} {
+		if _, err := BuildXFFSelector(tc.position, tc.index); err == nil {
+			t.Errorf("BuildXFFSelector(%q, %d) accepted", tc.position, tc.index)
+		}
+	}
+}
+
+func TestSourceIPEndpoints(t *testing.T) {
+	fc := newFakeConsole(t, "pw")
+	c := newTestClient(t, fc)
+
+	global, err := c.GetSourceIP(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if global.Mode != SourceIPSocket || global.Value != "" || !global.FollowGlobal {
+		t.Fatalf("global source IP = %+v", global)
+	}
+	if err := c.SetSourceIP(0, ProxyIPSource{Mode: SourceIPXFFFirst}); err != nil {
+		t.Fatal(err)
+	}
+	body := fc.lastBodies["PUT /api/open/global/proxy"]
+	if len(body) != 2 {
+		t.Errorf("global PUT body = %v, want ip_source and ip_value only", body)
+	}
+	src, _ := body["ip_source"].(map[string]any)
+	if src["value"] != SourceIPXFFFirst || src["global"] != false {
+		t.Errorf("global ip_source = %v", body["ip_source"])
+	}
+	val, _ := body["ip_value"].(map[string]any)
+	if val["value"] != "" || val["global"] != false {
+		t.Errorf("global ip_value = %v", body["ip_value"])
+	}
+
+	site, err := c.GetSourceIP(4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !site.FollowGlobal {
+		t.Fatalf("site source IP = %+v, want follow-global", site)
+	}
+	if err := c.SetSourceIP(4, ProxyIPSource{Mode: SourceIPHTTPHeader, Value: "X-Real-IP", FollowGlobal: true}); err != nil {
+		t.Fatal(err)
+	}
+	body = fc.lastBodies["PUT /api/open/site/4/proxy"]
+	src, _ = body["ip_source"].(map[string]any)
+	if src["value"] != SourceIPHTTPHeader || src["global"] != true {
+		t.Errorf("site ip_source = %v", body["ip_source"])
+	}
+	val, _ = body["ip_value"].(map[string]any)
+	if val["value"] != "X-Real-IP" {
+		t.Errorf("site ip_value = %v", body["ip_value"])
 	}
 }

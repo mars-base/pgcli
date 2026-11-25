@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -1207,6 +1208,157 @@ func TelemetryMismatch(t TelemetryState, want bool) []string {
 		out = append(out, "fingerprint")
 	}
 	return out
+}
+
+// The console's 源 IP 获取方式 setting (SourceIP page) decides which address
+// tengine attributes a request to: the TCP connection's peer by default, or an
+// address taken from an X-Forwarded-For hop, an arbitrary HTTP header or a
+// PROXY Protocol preamble. The same ip_source/ip_value records live on the
+// global proxy config and (with a Pro license) on each site, where a site
+// either follows the global values or carries its own.
+
+// ip_source values accepted by the console.
+const (
+	SourceIPSocket        = "socket_ip"
+	SourceIPXFFFirst      = "xff_first"
+	SourceIPXFFSecond     = "xff_second"
+	SourceIPXFFThird      = "xff_third"
+	SourceIPXFFDynamic    = "xff_dynamic"
+	SourceIPHTTPHeader    = "http_header"
+	SourceIPProxyProtocol = "proxy_protocol"
+)
+
+// ProxyIPSource is a 源 IP 获取方式 record. Value carries the mode-specific
+// parameter — the header name for http_header, the trusted source list for
+// proxy_protocol, the JSON selector for xff_dynamic — and is empty otherwise.
+type ProxyIPSource struct {
+	Mode         string
+	Value        string
+	FollowGlobal bool
+}
+
+type proxyItem struct {
+	Value  string `json:"value"`
+	Global bool   `json:"global"`
+}
+
+type proxySource struct {
+	IPSource proxyItem `json:"ip_source"`
+	IPValue  proxyItem `json:"ip_value"`
+}
+
+func sourceIPPath(siteID int) string {
+	if siteID > 0 {
+		return fmt.Sprintf("/api/open/site/%d/proxy", siteID)
+	}
+	return "/api/open/global/proxy"
+}
+
+// GetSourceIP reads the global source-IP setting, or one site's record when
+// siteID is positive. A site record with FollowGlobal set inherits the global
+// values.
+func (c *Client) GetSourceIP(siteID int) (*ProxyIPSource, error) {
+	var cfg proxySource
+	if err := c.do(http.MethodGet, sourceIPPath(siteID), nil, &cfg); err != nil {
+		return nil, err
+	}
+	return &ProxyIPSource{
+		Mode:         cfg.IPSource.Value,
+		Value:        cfg.IPValue.Value,
+		FollowGlobal: cfg.IPSource.Global,
+	}, nil
+}
+
+// SetSourceIP writes the ip_source/ip_value pair, the way the SourceIP page's
+// save button does: the two fields only, everything else on the proxy config
+// stays as stored. Per-site writes need a Pro license; the console answers
+// "license required" in the Community Edition.
+func (c *Client) SetSourceIP(siteID int, src ProxyIPSource) error {
+	return c.do(http.MethodPut, sourceIPPath(siteID), map[string]any{
+		"ip_source": map[string]any{"value": src.Mode, "global": src.FollowGlobal},
+		"ip_value":  map[string]any{"value": src.Value, "global": src.FollowGlobal},
+	}, nil)
+}
+
+// NormalizeSourceIPMode maps the CLI spelling and the console's own ip_source
+// values to the console value.
+func NormalizeSourceIPMode(name string) (string, error) {
+	switch strings.ToLower(strings.ReplaceAll(name, "_", "-")) {
+	case "socket", "socket-ip":
+		return SourceIPSocket, nil
+	case "xff-first":
+		return SourceIPXFFFirst, nil
+	case "xff-second":
+		return SourceIPXFFSecond, nil
+	case "xff-third":
+		return SourceIPXFFThird, nil
+	case "xff-dynamic":
+		return SourceIPXFFDynamic, nil
+	case "header", "http-header":
+		return SourceIPHTTPHeader, nil
+	case "proxy-protocol", "proxy":
+		return SourceIPProxyProtocol, nil
+	}
+	return "", fmt.Errorf("unknown mode %q (want socket, xff-first, xff-second, xff-third, xff-dynamic, header or proxy-protocol)", name)
+}
+
+// ValidateSourceIPHeader checks an HTTP header name (RFC 7230 token).
+func ValidateSourceIPHeader(name string) error {
+	if name == "" {
+		return fmt.Errorf("--header is required with mode header")
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("!#$%&'*+-.^_`|~", r):
+		default:
+			return fmt.Errorf("invalid HTTP header name %q", name)
+		}
+	}
+	return nil
+}
+
+// NormalizeTrustedProxies validates the PROXY Protocol trusted sources (IPs
+// or CIDRs) and joins them the way ip_value stores them.
+func NormalizeTrustedProxies(entries []string) (string, error) {
+	var out []string
+	for _, e := range entries {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		if net.ParseIP(e) == nil {
+			if _, _, err := net.ParseCIDR(e); err != nil {
+				return "", fmt.Errorf("trusted source %q is neither an IP address nor a CIDR", e)
+			}
+		}
+		out = append(out, e)
+	}
+	if len(out) == 0 {
+		return "", fmt.Errorf("--trust requires at least one IP address or CIDR")
+	}
+	return strings.Join(out, ","), nil
+}
+
+// BuildXFFSelector builds the xff_dynamic ip_value: which address to take from
+// X-Forwarded-For.
+func BuildXFFSelector(position string, index int) (string, error) {
+	switch strings.ToLower(strings.ReplaceAll(position, "_", "-")) {
+	case "", "end", "from-end":
+		position = "from_end"
+	case "start", "from-start":
+		position = "from_start"
+	default:
+		return "", fmt.Errorf("--xff-position must be from-end or from-start, got %q", position)
+	}
+	if index < 1 || index > 100 {
+		return "", fmt.Errorf("--xff-index must be between 1 and 100, got %d", index)
+	}
+	b, err := json.Marshal(map[string]any{"position": position, "index": index})
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 // ValidateRateLimitRule mirrors the console form's bounds for an enabled or

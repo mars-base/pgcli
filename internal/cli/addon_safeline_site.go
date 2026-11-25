@@ -37,6 +37,7 @@ Subcommands:
   site       List, create, update, delete and health-check protected sites
   site cc    View and change a site's CC protection (waiting room, rate limits)
   cert       List, upload, renew and delete TLS certificates
+  source-ip  View and change the client source IP acquisition (源 IP 获取方式)
   telemetry  View and switch off the console's threat-intelligence sharing
 
 Examples:
@@ -48,6 +49,7 @@ Examples:
   pg addon safeline site cc show --site-id 3
   pg addon safeline cert update --cert-id 2 --cert fullchain.pem --key privkey.pem
   pg addon safeline cert list
+  pg addon safeline source-ip set --mode xff-first
   pg addon safeline telemetry disable`,
 }
 

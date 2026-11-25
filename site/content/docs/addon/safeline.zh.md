@@ -503,6 +503,52 @@ fingerprint    disabled  浏览器指纹信息共享计划
 这些开关只控制对外共享与恶意 IP 情报组：全部关闭时内置检测模块照常工作。命令会与
 控制台对账，只写入状态不同的开关。
 
+### 源 IP 获取方式（SourceIP）
+
+控制台「通用设置 → 源 IP 获取方式」决定 tengine 把请求归属到哪个地址——日志、
+攻击事件记录、按 IP 匹配的 ACL/频率限制/封禁都基于这个地址。
+`pg addon safeline source-ip` 读写同一份代理配置：
+
+| 模式 | 存储值 | 来源地址 |
+|---|---|---|
+| `socket` | `socket_ip`（默认） | TCP 连接的对端地址 |
+| `xff-first` | `xff_first` | X-Forwarded-For 最右侧一项（上一级代理） |
+| `xff-second` | `xff_second` | 倒数第 2 项 |
+| `xff-third` | `xff_third` | 倒数第 3 项 |
+| `xff-dynamic` | `xff_dynamic` | 由 `--xff-position from-end\|from-start` 与 `--xff-index N`（1–100）指定的位置 |
+| `header` | `http_header` | `--header` 指定 HTTP 头中的地址 |
+| `proxy-protocol` | `proxy_protocol` | PROXY Protocol 前导中的客户端地址，仅接受 `--trust` 列出的来源 |
+
+```bash
+# 查看当前设置
+pg addon safeline source-ip show --name waf1
+
+# 前置一层可信反向代理，由它追加 X-Forwarded-For
+pg addon safeline source-ip set --name waf1 --mode xff-first
+
+# 改用自定义 HTTP 头
+pg addon safeline source-ip set --name waf1 --mode header --header X-Real-IP
+
+# 只信任负载均衡器的 PROXY Protocol
+pg addon safeline source-ip set --name waf1 --mode proxy-protocol \
+    --trust 10.0.0.0/8,192.168.0.0/16
+
+# 从前往后数第 2 项
+pg addon safeline source-ip set --name waf1 --mode xff-dynamic \
+    --xff-position from-start --xff-index 2
+```
+
+不带 `--site-id` 时命令操作全局设置，所有未单独配置的站点默认继承全局值。
+带 `--site-id` 时针对单个站点自己的记录，`use-global --site-id <id>` 让站点重新
+继承全局值。社区版（CE）对按站点的代理设置返回 `license required`，只能改全局设置。
+
+命令只写入 `ip_source`/`ip_value` 两项，其余代理字段保持原样；写入前与生效值
+对账（跟随全局的站点对比全局设置），无差异时跳过写请求，写入后回读控制台校验。
+
+警告：信任 HTTP 头或 PROXY Protocol 后，能直连监听端口的客户端可以伪造源地址，
+按 IP 匹配的 ACL、频率限制和封禁会作用在伪造值上。仅在监听端口只接收可控代理
+转发的流量时启用。
+
 ## 容器布局与网络
 
 | 角色 | 网络 | 地址 | 用途 |

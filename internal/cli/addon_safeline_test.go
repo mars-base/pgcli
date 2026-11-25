@@ -492,3 +492,43 @@ func TestSafelineSiteCcCommandsRegistered(t *testing.T) {
 		}
 	}
 }
+
+func TestSafelineSourceIPCommandsRegistered(t *testing.T) {
+	found := false
+	for _, c := range addonSafelineCmd.Commands() {
+		if c.Name() == "source-ip" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("pg addon safeline source-ip is not registered")
+	}
+	subs := map[string]bool{"show": false, "set": false, "use-global": false}
+	for _, c := range addonSafelineSourceIPCmd.Commands() {
+		if _, ok := subs[c.Name()]; ok {
+			subs[c.Name()] = true
+		}
+	}
+	for name, ok := range subs {
+		if !ok {
+			t.Errorf("source-ip subcommand %q is not registered", name)
+		}
+	}
+	if f := addonSafelineSourceIPCmd.PersistentFlags().Lookup("name"); f == nil || f.Value.Type() != "string" {
+		t.Errorf("source-ip --name flag = %+v, want a string flag", f)
+	}
+	for _, cmd := range []*cobra.Command{addonSafelineSourceIPShowCmd, addonSafelineSourceIPSetCmd} {
+		if f := cmd.Flags().Lookup("site-id"); f == nil || f.Value.Type() != "int" {
+			t.Errorf("%s: --site-id flag = %+v, want an int flag", cmd.Name(), f)
+		}
+	}
+	for _, name := range []string{"mode", "header", "trust", "xff-position", "xff-index"} {
+		if addonSafelineSourceIPSetCmd.Flags().Lookup(name) == nil {
+			t.Errorf("set: --%s flag is not registered", name)
+		}
+	}
+	if f := addonSafelineSourceIPUseGlobalCmd.Flags().Lookup("site-id"); f == nil || f.Value.Type() != "int" {
+		t.Errorf("use-global: --site-id flag = %+v, want an int flag", f)
+	}
+}
