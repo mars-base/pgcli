@@ -151,6 +151,10 @@ func runAddonSafelineSiteProtectMode(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("reading global attack protection: %w", err)
 		}
+		if len(safeline.SemanticsMismatch(cur, level)) == 0 {
+			fmt.Printf("Global attack protection unchanged: %s\n", semanticsSummary(cur))
+			return printSemanticsLevels(cur)
+		}
 		if err := client.SetGlobalSemantics(safeline.BatchSemantics(cur, level)); err != nil {
 			return fmt.Errorf("updating global attack protection: %w", err)
 		}
@@ -178,6 +182,10 @@ func runAddonSafelineSiteProtectMode(cmd *cobra.Command, args []string) error {
 	}
 	if own != nil && len(own.Semantics) > 0 {
 		seed = own.Semantics
+		if len(safeline.SemanticsMismatch(own.Semantics, level)) == 0 {
+			fmt.Printf("Site %d (%s) attack protection unchanged: %s\n", site.ID, strings.Join(site.ServerNames, ","), semanticsSummary(own.Semantics))
+			return printSemanticsLevels(own.Semantics)
+		}
 	}
 	if err := client.SetSiteSemantics(id, false, safeline.BatchSemantics(seed, level)); err != nil {
 		return fmt.Errorf("updating site %d attack protection: %w", id, err)
@@ -212,10 +220,18 @@ func runAddonSafelineSiteProtectUseGlobal(cmd *cobra.Command) error {
 	if err != nil {
 		return fmt.Errorf("reading global attack protection: %w", err)
 	}
+	own, err := client.GetSiteSemantics(id)
+	if err != nil {
+		return fmt.Errorf("site %d semantics: %w", id, err)
+	}
+	if own == nil || len(own.Semantics) == 0 {
+		fmt.Printf("Site %d already follows the global attack protection levels\n", id)
+		return nil
+	}
 	if err := client.SetSiteSemantics(id, true, global); err != nil {
 		return fmt.Errorf("switching site %d to the global levels: %w", id, err)
 	}
-	own, err := client.GetSiteSemantics(id)
+	own, err = client.GetSiteSemantics(id)
 	if err != nil {
 		return fmt.Errorf("reading back site %d semantics: %w", id, err)
 	}

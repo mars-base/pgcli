@@ -88,7 +88,10 @@ A site following the global rules cannot change them per site: pass --global
 to edit the shared rules for every follower, or --use-global=false to give
 this site its own copy first. The copy seeds all three rules from the globals
 and disables them; add --type plus rule flags to enable and configure one in
-the same call. --use-global switches a site back to the shared rules.`,
+the same call. A site that already has its own rules keeps them: the switch
+is then a no-op and rule flags edit the rule in place. --use-global switches
+a site back to the shared rules. Writing a rule with the values it already
+has is a no-op.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonSafelineSiteCcRateLimit(cmd)
@@ -156,6 +159,7 @@ func runAddonSafelineSiteCcWaitingRoom(cmd *cobra.Command) error {
 	if err != nil {
 		return fmt.Errorf("site %d waiting room: %w", id, err)
 	}
+	orig := *cur
 	changed := false
 	if fs.Changed("enabled") {
 		cur.IsEnabled, _ = fs.GetBool("enabled")
@@ -171,6 +175,10 @@ func runAddonSafelineSiteCcWaitingRoom(cmd *cobra.Command) error {
 	}
 	if !changed {
 		fmt.Printf("Site %d waiting room: %s\n", id, waitingRoomSummary(cur))
+		return nil
+	}
+	if *cur == orig {
+		fmt.Printf("Site %d waiting room unchanged: %s\n", id, waitingRoomSummary(cur))
 		return nil
 	}
 	if err := safeline.ValidateWaitingRoom(cur.MaxConcurrent, cur.SessionTimeout); err != nil {
@@ -274,48 +282,61 @@ func runAddonSafelineSiteCcRateLimit(cmd *cobra.Command) error {
 		return printRateLimitRules(rules)
 	}
 
-	if useGlobalChanged {
-		if useGlobal {
-			if err := client.UseGlobalRateLimits(id); err != nil {
-				return fmt.Errorf("switching site %d to the global rules: %w", id, err)
+	if useGlobalChanged && useGlobal {
+		if safeline.RateLimitsFollowGlobal(rules) {
+			fmt.Printf("Site %d already follows the global rate-limit rules\n", id)
+			return printRateLimitRules(rules)
+		}
+		if err := client.UseGlobalRateLimits(id); err != nil {
+			return fmt.Errorf("switching site %d to the global rules: %w", id, err)
+		}
+		fmt.Printf("✓ Site %d now follows the global rate-limit rules\n", id)
+		updated, err := client.ListRateLimits(id)
+		if err != nil {
+			return fmt.Errorf("reading back site %d rate limits: %w", id, err)
+		}
+		return printRateLimitRules(updated)
+	}
+	if useGlobalChanged && !useGlobal {
+		if !safeline.RateLimitsFollowGlobal(rules) {
+			// The site already carries its own rules; there is nothing to seed,
+			// so the rule flags (if any) edit them in place below.
+			if !ruleFlags {
+				fmt.Printf("Site %d already uses custom rate-limit rules\n", id)
+				return printRateLimitRules(rules)
 			}
-			fmt.Printf("✓ Site %d now follows the global rate-limit rules\n", id)
+		} else {
+			seeded := make([]safeline.RateLimitRule, len(rules))
+			for i, r := range rules {
+				r.UseGlobal = false
+				r.Enabled = false
+				seeded[i] = r
+			}
+			if ruleFlags {
+				t, _ := fs.GetString("type")
+				idx := indexRateLimitRule(seeded, t)
+				if idx < 0 {
+					return fmt.Errorf("no %s rule to configure", t)
+				}
+				if err := applyRateLimitFlags(fs, &seeded[idx]); err != nil {
+					return err
+				}
+			}
+			if err := client.SetCustomRateLimits(id, seeded); err != nil {
+				return fmt.Errorf("switching site %d to custom rate-limit rules: %w", id, err)
+			}
+			if ruleFlags {
+				t, _ := fs.GetString("type")
+				fmt.Printf("✓ Site %d now uses custom rate-limit rules; %s rule configured\n", id, t)
+			} else {
+				fmt.Printf("✓ Site %d now uses custom rate-limit rules (all rules disabled; enable one with --type <type> --enabled)\n", id)
+			}
 			updated, err := client.ListRateLimits(id)
 			if err != nil {
 				return fmt.Errorf("reading back site %d rate limits: %w", id, err)
 			}
 			return printRateLimitRules(updated)
 		}
-		seeded := make([]safeline.RateLimitRule, len(rules))
-		for i, r := range rules {
-			r.UseGlobal = false
-			r.Enabled = false
-			seeded[i] = r
-		}
-		if ruleFlags {
-			t, _ := fs.GetString("type")
-			idx := indexRateLimitRule(seeded, t)
-			if idx < 0 {
-				return fmt.Errorf("no %s rule to configure", t)
-			}
-			if err := applyRateLimitFlags(fs, &seeded[idx]); err != nil {
-				return err
-			}
-		}
-		if err := client.SetCustomRateLimits(id, seeded); err != nil {
-			return fmt.Errorf("switching site %d to custom rate-limit rules: %w", id, err)
-		}
-		if ruleFlags {
-			t, _ := fs.GetString("type")
-			fmt.Printf("✓ Site %d now uses custom rate-limit rules; %s rule configured\n", id, t)
-		} else {
-			fmt.Printf("✓ Site %d now uses custom rate-limit rules (all rules disabled; enable one with --type <type> --enabled)\n", id)
-		}
-		updated, err := client.ListRateLimits(id)
-		if err != nil {
-			return fmt.Errorf("reading back site %d rate limits: %w", id, err)
-		}
-		return printRateLimitRules(updated)
 	}
 
 	if !global && safeline.RateLimitsFollowGlobal(rules) {
@@ -327,8 +348,14 @@ func runAddonSafelineSiteCcRateLimit(cmd *cobra.Command) error {
 		return fmt.Errorf("no %s rule found in %s", t, owner)
 	}
 	rule := rules[idx]
+	before := rule
 	if err := applyRateLimitFlags(fs, &rule); err != nil {
 		return err
+	}
+	if rule.Enabled == before.Enabled && rule.Period == before.Period && rule.Count == before.Count &&
+		rule.Action == before.Action && rule.BlockMin == before.BlockMin {
+		fmt.Printf("Rate-limit rule %s of %s unchanged\n", t, owner)
+		return printRateLimitRules(rules)
 	}
 	if err := client.UpdateRateLimit(scopeID, rule); err != nil {
 		return fmt.Errorf("updating the %s rule in %s: %w", t, owner, err)

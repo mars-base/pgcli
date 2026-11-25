@@ -220,6 +220,10 @@ func runAddonSafelineSiteBotEnable(cmd *cobra.Command) error {
 			return err
 		}
 	}
+	if cur.Enabled && !cur.Negate && cur.Level == safeline.BotLevelInvisible && sameBotPattern(cur.Pattern, pattern) {
+		fmt.Printf("Site %d (%s) BOT protection already enabled with the requested configuration\n", site.ID, strings.Join(site.ServerNames, ","))
+		return printBotConfig(site, cur)
+	}
 	if err := client.SetSiteBot(id, true, cur.Expire, cur.Negate, pattern); err != nil {
 		return fmt.Errorf("enabling site %d BOT protection: %w", id, err)
 	}
@@ -382,6 +386,10 @@ func runAddonSafelineSiteBotCondition(cmd *cobra.Command) error {
 	}
 	// The CLI writes the console's 满足条件时认证 mode; 满足条件时跳过认证
 	// (negate) is not implemented and always goes out as false here.
+	if !cur.Negate && sameBotPattern(cur.Pattern, pattern) {
+		fmt.Printf("Site %d (%s) BOT match conditions unchanged\n", site.ID, strings.Join(site.ServerNames, ","))
+		return printBotConfig(site, cur)
+	}
 	if err := client.SetSiteBot(id, cur.Enabled, cur.Expire, false, pattern); err != nil {
 		return fmt.Errorf("updating site %d BOT match conditions: %w", id, err)
 	}
