@@ -104,6 +104,7 @@ pg addon safeline site create --name waf1 \
     --health-check --health-check-interval 30 --health-check-path /healthz
 pg addon safeline site update --name waf1 --site-id 3 --health-check=false
 pg addon safeline site health --name waf1
+pg addon safeline site mode --name waf1 --site-id 3 dryrun
 pg addon safeline site delete --name waf1 --site-id 3
 
 pg addon safeline cert list --name waf1
@@ -115,7 +116,8 @@ pg addon safeline cert delete --name waf1 --cert-id 2
 - `--port` values are the host entry ports; suffix a port with `_ssl` to terminate TLS on it. `--cert`/`--key` upload a PEM certificate (leaf or full chain) and bind it in one step, `--cert-id` binds a certificate already stored in the console, and without either the console's default certificate is used. `--domain` defaults to `*` (any Host header).
 - `--upstream` takes absolute `http://` or `https://` URLs; `--balance` is `roundrobin` (default), `leastconn`, `iphash` or `backup`. `site update` replaces the whole list with `--upstream`, or changes it incrementally with `--add-upstream` / `--remove-upstream`. The bundled console runs as the Community Edition, which permits **one upstream per site** — a second one is refused with `license required`; load balancing across several upstreams needs a Pro license.
 - `--health-check` probes every upstream over HTTP every 10–3600 seconds at the given path. `site update` changes only the settings you pass (upstreams, health check and/or the bound certificate), leaving everything else at its console values.
-- `site health` probes the selected sites (all of them by default) and prints `healthy` or the console's error per upstream; it exits non-zero when any upstream is unhealthy, so it works as a monitoring gate. `site list` shows the site ids that `update`, `delete` and `health` take via `--site-id`.
+- `site health` probes the selected sites (all of them by default) and prints `healthy` or the console's error per upstream; it exits non-zero when any upstream is unhealthy, so it works as a monitoring gate. `site list` shows the site ids that `update`, `delete`, `health` and `mode` take via `--site-id`.
+- `site mode` switches one or more sites between the three run modes the console offers: `defense` (block attacks — the console default), `dryrun` (record detections only, nothing is blocked) and `offline` (maintenance page, the site is inaccessible). The mode is the only positional argument; ids come from `--site-id` (repeatable). The change is published to tengine immediately, exactly like the console's own mode switch.
 - `cert list` shows stored certificates with their covered domains, expiry and the sites using them. The console refuses to delete a certificate while a site's TLS entry port uses it, so delete or repoint the site first.
 
 A plain HTTP site needs no certificate — just an entry port and an upstream:

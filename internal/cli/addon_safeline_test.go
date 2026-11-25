@@ -288,3 +288,20 @@ func TestAddonReloadCommandRegistered(t *testing.T) {
 		t.Errorf("reload --name flag = %+v, want a string flag", f)
 	}
 }
+
+func TestSafelineSiteModeCommandRegistered(t *testing.T) {
+	found := false
+	for _, c := range addonSafelineSiteCmd.Commands() {
+		if c.Name() == "mode" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("pg addon safeline site mode is not registered")
+	}
+	f := addonSafelineSiteModeCmd.Flags().Lookup("site-id")
+	if f == nil || f.Value.Type() != "intSlice" {
+		t.Errorf("mode --site-id flag = %+v, want an intSlice flag", f)
+	}
+}

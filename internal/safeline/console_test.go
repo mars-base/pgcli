@@ -66,6 +66,21 @@ func TestParseBalance(t *testing.T) {
 	}
 }
 
+func TestParseMode(t *testing.T) {
+	for name, want := range map[string]int{"defense": ModeDefense, "Dryrun": ModeDryrun, "offline": ModeOffline} {
+		got, err := ParseMode(name)
+		if err != nil || got != want {
+			t.Errorf("ParseMode(%q) = (%d, %v), want %d", name, got, err, want)
+		}
+		if back := ModeName(want); !strings.EqualFold(back, name) {
+			t.Errorf("ModeName(%d) = %q, round-trip of %q", want, back, name)
+		}
+	}
+	if _, err := ParseMode("strict"); err == nil {
+		t.Error("unknown mode accepted")
+	}
+}
+
 func TestNormalizeServerNames(t *testing.T) {
 	cases := []struct {
 		in   []string
@@ -240,6 +255,13 @@ func (f *fakeConsole) handler() http.Handler {
 		writeJSON(w, map[string]any{"data": nil, "err": err, "msg": f.certDelMsg})
 	}))
 	mux.HandleFunc("/api/open/site/", auth(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/mode") {
+			var body map[string]any
+			decodeBody(f.t, r, &body)
+			f.lastBodies["PUT /api/open/site/mode"] = body
+			writeJSON(w, map[string]any{"data": nil, "err": nil, "msg": ""})
+			return
+		}
 		if strings.HasSuffix(r.URL.Path, "/healthcheck") {
 			var body map[string]any
 			decodeBody(f.t, r, &body)
@@ -452,6 +474,22 @@ func TestDeleteSites(t *testing.T) {
 	ids, _ := body["ids"].([]any)
 	if len(ids) != 2 || ids[0] != float64(1) || ids[1] != float64(2) {
 		t.Errorf("ids = %v", body["ids"])
+	}
+}
+
+func TestSetSiteMode(t *testing.T) {
+	fc := newFakeConsole(t, "pw")
+	c := newTestClient(t, fc)
+	if err := c.SetSiteMode([]int{4, 5}, ModeDryrun); err != nil {
+		t.Fatal(err)
+	}
+	body := fc.lastBodies["PUT /api/open/site/mode"]
+	ids, _ := body["ids"].([]any)
+	if len(ids) != 2 || ids[0] != float64(4) || ids[1] != float64(5) {
+		t.Errorf("ids = %v", body["ids"])
+	}
+	if body["mode"] != float64(ModeDryrun) {
+		t.Errorf("mode = %v, want %d", body["mode"], ModeDryrun)
 	}
 }
 

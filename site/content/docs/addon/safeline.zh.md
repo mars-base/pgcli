@@ -131,6 +131,7 @@ pg addon safeline site create --name waf1 \
     --health-check --health-check-interval 30 --health-check-path /healthz
 pg addon safeline site update --name waf1 --site-id 3 --health-check=false
 pg addon safeline site health --name waf1
+pg addon safeline site mode --name waf1 --site-id 3 dryrun
 pg addon safeline site delete --name waf1 --site-id 3
 
 pg addon safeline cert list --name waf1
@@ -151,7 +152,11 @@ pg addon safeline cert delete --name waf1 --cert-id 2
   只改你传入的配置（上游、健康检查与/或绑定证书），其他站点配置保持控制台里的值。
 - `site health` 探测选定站点（默认全部）的每个上游，输出 `healthy` 或控制台返回的错误；
   只要有上游不健康就以非零码退出，可直接用作监控/脚本门禁。`site list` 展示 `update`、
-  `delete`、`health` 通过 `--site-id` 使用的站点 id。
+  `delete`、`health`、`mode` 通过 `--site-id` 使用的站点 id。
+- `site mode` 在控制台的三种运行模式间切换一个或多个站点：`defense`（防护，拦截攻击，
+  控制台默认）、`dryrun`（观察，只记录检测结果、不拦截）、`offline`（维护，展示维护页面，
+  站点不可访问）。模式名是唯一的位置参数，站点 id 用 `--site-id` 指定（可重复）。变更
+  立即下发到 tengine，与控制台里切换模式完全等价。
 - `cert list` 展示已存证书的覆盖域名、到期时间和使用它的站点。证书被站点的 TLS 入口端口
   占用时控制台拒绝删除，先删除站点或换绑证书。
 

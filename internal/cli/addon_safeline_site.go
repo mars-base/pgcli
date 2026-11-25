@@ -42,6 +42,7 @@ Examples:
   pg addon safeline site create --port 443_ssl --domain www.example.com \
       --upstream http://10.0.0.5:8080 --cert fullchain.pem --key privkey.pem --health-check
   pg addon safeline site health
+  pg addon safeline site mode --site-id 3 dryrun
   pg addon safeline cert update --cert-id 2 --cert fullchain.pem --key privkey.pem
   pg addon safeline cert list`,
 }
@@ -61,6 +62,10 @@ seconds. TLS certificates for _ssl entry ports are managed with
 via --cert/--key or --cert-id on create and rebound with
 'site update --site-id <id> --cert-id <new id>'; custom error pages and
 other advanced options stay in the console UI.
+
+Each site runs in one of three modes — defense (block attacks, the console
+default), dryrun (record detections only) or offline (maintenance page) —
+switched with 'pg addon safeline site mode'.
 
 The instance must be running ('pg addon start safeline --name <name>').`,
 }
@@ -163,6 +168,26 @@ upstream is unhealthy, so it can gate scripts and monitoring.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runAddonSafelineSiteHealth(cmd)
+	},
+}
+
+var addonSafelineSiteModeCmd = &cobra.Command{
+	Use:   "mode --site-id <id> [--site-id <id>...] <defense|dryrun|offline>",
+	Short: "Switch protected sites between defense, dryrun and offline modes",
+	Long: `Switch one or more protected sites to a run mode:
+
+  defense   block attacks (the console default); enabled rules are enforced
+  dryrun    observation mode: detections are only recorded, nothing is blocked
+  offline   maintenance mode: a maintenance page is served, the site is
+            inaccessible
+
+Pass the site ids with --site-id (repeatable or comma-separated; list them
+with 'pg addon safeline site list') and the mode as the only positional
+argument. The change is published to tengine immediately, exactly like the
+console's own mode switch.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runAddonSafelineSiteMode(cmd, args[0])
 	},
 }
 
@@ -537,6 +562,53 @@ func runAddonSafelineSiteHealth(cmd *cobra.Command) error {
 	if unhealthy > 0 {
 		return fmt.Errorf("%d of %d upstreams unhealthy", unhealthy, total)
 	}
+	return nil
+}
+
+func runAddonSafelineSiteMode(cmd *cobra.Command, name string) error {
+	mode, err := safeline.ParseMode(name)
+	if err != nil {
+		return err
+	}
+	raw, _ := cmd.Flags().GetIntSlice("site-id")
+	if len(raw) == 0 {
+		return fmt.Errorf("at least one --site-id is required (list them with 'pg addon safeline site list')")
+	}
+	client, _, err := resolveSafelineConsole(cmd)
+	if err != nil {
+		return err
+	}
+	sites, err := client.ListSites()
+	if err != nil {
+		return err
+	}
+	known := make(map[int]bool, len(sites))
+	for _, s := range sites {
+		known[s.ID] = true
+	}
+	ids := make([]int, 0, len(raw))
+	var missing []string
+	for _, id := range raw {
+		if id < 1 {
+			return fmt.Errorf("invalid site id %d", id)
+		}
+		if !known[id] {
+			missing = append(missing, strconv.Itoa(id))
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("site id(s) not found: %s (list them with 'pg addon safeline site list')", strings.Join(missing, ", "))
+	}
+	if err := client.SetSiteMode(ids, mode); err != nil {
+		return fmt.Errorf("switching site mode: %w", err)
+	}
+	parts := make([]string, 0, len(ids))
+	for _, id := range ids {
+		parts = append(parts, strconv.Itoa(id))
+	}
+	fmt.Printf("✓ Set SafeLine site(s) %s to %s mode\n", strings.Join(parts, ", "), safeline.ModeName(mode))
 	return nil
 }
 

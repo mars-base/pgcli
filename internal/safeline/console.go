@@ -227,18 +227,35 @@ func (s Site) EffectiveUpstreams() []string {
 	return s.Upstreams
 }
 
+// Site run modes, matching the console's SiteRunMode enum.
+const (
+	ModeDefense = 0 // block attacks (console default)
+	ModeOffline = 1 // maintenance page, site inaccessible
+	ModeDryrun  = 2 // record detections only, nothing is blocked
+)
+
+var siteModes = map[string]int{
+	"defense": ModeDefense,
+	"offline": ModeOffline,
+	"dryrun":  ModeDryrun,
+}
+
 // ModeName maps the site run mode to its CLI name.
 func ModeName(mode int) string {
-	switch mode {
-	case 0:
-		return "defense"
-	case 1:
-		return "offline"
-	case 2:
-		return "dryrun"
-	default:
-		return strconv.Itoa(mode)
+	for name, v := range siteModes {
+		if v == mode {
+			return name
+		}
 	}
+	return strconv.Itoa(mode)
+}
+
+// ParseMode maps a CLI mode name to the console enum.
+func ParseMode(name string) (int, error) {
+	if m, ok := siteModes[strings.ToLower(name)]; ok {
+		return m, nil
+	}
+	return 0, fmt.Errorf("unknown mode %q: use defense, dryrun or offline", name)
 }
 
 var balanceTypes = map[string]int{
@@ -417,6 +434,12 @@ func (c *Client) CreateSite(spec SiteSpec) (int, error) {
 // DeleteSites removes sites by id.
 func (c *Client) DeleteSites(ids []int) error {
 	return c.do(http.MethodDelete, "/api/open/site", map[string]any{"ids": ids}, nil)
+}
+
+// SetSiteMode switches the given sites to a run mode (defense, dryrun or
+// offline). The console publishes the change to tengine immediately.
+func (c *Client) SetSiteMode(ids []int, mode int) error {
+	return c.do(http.MethodPut, "/api/open/site/mode", map[string]any{"ids": ids, "mode": mode}, nil)
 }
 
 // HealthCheckPatch changes only the fields set to non-nil.
