@@ -33,6 +33,10 @@
 # instance_addon_mixed and ha_etcd can also define pgcli_addons. Any active
 # scenario/HA group would override the add-on selection for its hosts. The
 # scenario groups stay commented out here and while testing add-on groups.
+# safeline is the exception: its add-on group always selects its own list and
+# runs the safeline commands as root (rootful podman), even on a host whose
+# scenario group is configured rootless; the stack stays in the deployment
+# account's pgcli config.
 
 [all]
 node1 ansible_host=192.0.2.10 private_ip=192.0.2.10

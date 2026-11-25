@@ -38,6 +38,8 @@ haproxy, minio/silo/rustfs, redis, nginx, prometheus, kafka, and so on).
 | `clean_data` | With `state: absent`, delete data where the add-on supports it (default `true`; set `false` to keep it) |
 | `force` | With `state: present`, recreate with `pg addon install --force` |
 | `autostart` | `true` (default) enables boot autostart, `false` disables it |
+| `autoreload` | top-level safeline only: reload tengine on every run (re-resolves site upstream host names; graceful, keeps serving) |
+| `sites` | top-level safeline only: declarative protected sites, see [SafeLine sites](#safeline-sites) below |
 
 Every entry needs `type` and exactly one of `name`, `pg_name`, or `instance`;
 the role asserts this before doing anything.
@@ -297,6 +299,40 @@ pgcli_addons:
     name: cache
     state: absent
 ```
+
+## SafeLine sites
+
+A top-level `type: safeline` entry can declare protected sites with `sites`.
+Every run reconciles them against the console. A site's identity is its
+**domain set plus entry port set**:
+
+- Missing → created with `pg addon safeline site create`; `cert`/`key` are PEM
+  file paths **on the controller**, which the role copies to the target and
+  uploads together with the site.
+- Present but `upstream` changed → updated in place with
+  `pg addon safeline site update --upstream`; the Community Edition allows one
+  upstream per site.
+- An existing site only has its upstream reconciled; every other field
+  (certificate, health check, comment) reflects the declaration at creation
+  time — change them with the CLI (`pg addon safeline site update`).
+
+```yaml
+addon_safeline_single_addons:
+  - type: safeline
+    name: safeline1
+    state: present
+    sites:
+      - domains: [www.example.com]       # default ["*"] (any Host header)
+        ports: ["443_ssl", "80"]         # suffix a port _ssl to terminate TLS
+        upstream: http://10.0.0.5:8080
+        cert: /path/to/fullchain.pem     # optional, together with key
+        key: /path/to/privkey.pem
+```
+
+Dropping an entry from `sites` does **not** delete the site from the console
+(use `pg addon safeline site delete`), and certificate renewal stays manual
+(`pg addon safeline cert update --cert-id <id>` replaces the PEM in place, so
+every site bound to it serves the new certificate without being touched).
 
 ## Install and remove
 

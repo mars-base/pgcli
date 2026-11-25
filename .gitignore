@@ -72,3 +72,7 @@ pg
 # offline VM load (see docs/images.md, `make container-images-export`). These
 # are hundreds of MB each and are byproducts, never committed.
 images/
+
+# Local CA and sample certificates for the SafeLine add-on example
+# (staged under misc/ca/, contains private keys — never committed).
+misc/ca/

@@ -9,6 +9,11 @@
 # podman. The console listens on HTTPS (self-signed certificate) and publishes
 # one host port; the protected sites' traffic ports (default 80/443) are
 # configured per site in the console.
+#
+# The play runs the safeline commands as root (rootful podman) even on a host
+# configured for rootless deployment (for example a host that also belongs to
+# an active scenario group) and prints a notice; the stack stays in the
+# deployment account's pgcli config.
 
 # Default flags for safeline entries that do not set their own params.
 addon_safeline_single_params: []
@@ -24,3 +29,21 @@ addon_safeline_single_addons:
   - type: safeline
     state: present
     name: safeline1
+    # Reload tengine on every playbook run: re-resolves the protected sites'
+    # upstream host names (nginx -t + graceful reload, the stack keeps serving).
+    # autoreload: true
+    # Protected sites (optional). Each apply creates the missing ones — the
+    # PEM files below are controller paths, uploaded with the site — and
+    # updates the upstream of existing ones when it changed. Removing an
+    # entry here does NOT delete the site from the console; renewing a
+    # certificate stays manual (`pg addon safeline cert update`).
+    # sites:
+    #   - domains: [www.example.com]        # default ["*"] (any Host header)
+    #     ports: ["443_ssl", "80"]          # suffix a port _ssl to terminate TLS
+    #     upstream: http://10.0.0.5:8080    # exactly one upstream (CE edition)
+    #     cert: /path/to/fullchain.pem      # optional; with key
+    #     key: /path/to/privkey.pem
+    #     health_check: true                # optional
+    #     health_check_interval: 10         # seconds, 10-3600
+    #     health_check_path: /
+    #     comment: "example"

@@ -378,7 +378,22 @@ uv run ansible-playbook playbooks/apply.yaml --limit addon_etcd_single --tags ad
 Set `state: absent` to remove an add-on; add `clean_data: true` to delete its
 data as well. Per-type flags go in the entry's `params` list (or the group's
 `addon_<type>_<mode>_params` default); each `main.yml.example` documents the
-common ones. See the [add-on reference](https://pgcli.pages.dev/docs/addon/)
+common ones. Set `autoreload: true` on a safeline entry to run
+`pg addon reload safeline --name <name>` on every apply: tengine re-resolves
+the protected sites' upstream host names (nginx -t plus a graceful reload; the
+stack keeps serving). A safeline entry can also declare its protected sites in
+`sites` (domains, ports, one upstream, and optional `cert`/`key` PEM paths on
+the controller): each apply creates the missing sites and updates the upstream
+of existing ones when it changed. Dropping a site from the list does not delete
+it from the console, and certificate renewal stays manual
+(`pg addon safeline cert update`). SafeLine needs rootful podman, so a safeline add-on group
+is always reconciled as root: when the host's deployment identity is rootless
+(for example a host that also belongs to an active scenario group), the
+safeline group's list still wins over the scenario group's `pgcli_addons` and
+the play prints a notice, runs the safeline commands as root (rootful podman),
+and keeps the stack in the deployment account's config (restoring the config's
+ownership to that account afterwards). See the
+[add-on reference](https://pgcli.pages.dev/docs/addon/)
 and [deploying add-ons with Ansible](https://pgcli.pages.dev/docs/ansible/addons/).
 
 To create a PostgreSQL instance and its add-ons in one run, use the mixed

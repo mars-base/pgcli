@@ -12,11 +12,20 @@
       - addon.args is not defined or (addon.args is sequence and addon.args is not string and addon.args is not mapping)
       - addon.conf is not defined or addon.conf is string
       - addon.rule_files is not defined or addon.rule_files is mapping
+      - addon.autoreload is not defined or addon.autoreload is boolean
+      - not (addon.autoreload | default(false) | bool)
+        or (addon.type == 'safeline' and addon.name is defined)
+      - addon.sites is not defined
+        or (addon.sites is sequence and addon.sites is not string and addon.sites is not mapping)
+      - (addon.sites | default([]) | length == 0)
+        or (addon.type == 'safeline' and addon.name is defined)
     fail_msg: >-
       Each pgcli_addons entry needs type plus either name (top-level),
       instance (instance-scoped), or pg_name (remote PgBouncer/PostgREST),
       and state present|absent. params and args must be lists, conf must be a
-      string, and rule_files must be a mapping of filenames to contents.
+      string, rule_files must be a mapping of filenames to contents,
+      autoreload is a boolean supported by top-level safeline entries only,
+      and sites is a list supported by top-level safeline entries only.
 
 - name: Resolve the add-on key
   ansible.builtin.set_fact:
@@ -32,6 +41,10 @@
     _addon_dsn_args: "{{ ['--dsn', addon.dsn] if addon.dsn is defined else [] }}"
     _addon_state: "{{ addon.state | default('present') }}"
     _addon_force: "{{ addon.force | default(false) | bool }}"
+    _addon_sites: []
+    _addon_sites_new: []
+    _addon_sites_moved: []
+    _addon_sites_existing: {}
 
 # Offline installs only preload the core images. Entries marked auto_load: true
 # in pgcli_images declare the add-on types that need them; pull exactly this
@@ -96,6 +109,9 @@
          else lookup('vars', 'addon_' ~ (_addon_kind | default('')) ~ '_conf',
                      default=lookup('vars', 'addon_' ~ _addon_key ~ '_conf', default='')) }}
     _addon_conf_dir: "{{ pgcli_config_path | dirname }}/addons"
+    _addon_site_cert_dir: >-
+      {{ (pgcli_config_path | dirname) ~ '/addons/' ~ addon.type ~ '-'
+         ~ (_addon_key_name | regex_replace('[^A-Za-z0-9_.-]', '_')) ~ '-certs' }}
     _addon_conf_path: >-
       {{ (pgcli_config_path | dirname) ~ '/addons/' ~ addon.type ~ '-'
          ~ (_addon_key_name | regex_replace('[^A-Za-z0-9_.-]', '_')) ~ '.conf' }}
@@ -121,6 +137,40 @@
       rule_files is supported by prometheus only, must be a mapping of
       filenames to source paths on the controller, and filenames must stay
       unique after sanitising.
+
+- name: Validate the declared protected sites
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.ports is defined
+      - item.ports is sequence and item.ports is not string and item.ports is not mapping
+      - item.ports | length > 0
+      - item.domains is not defined or (item.domains is sequence and item.domains is not string and item.domains is not mapping)
+      - item.domains is not defined or item.domains | length > 0
+      - item.upstream is defined
+      - item.upstream is string and item.upstream | length > 0
+      - (item.cert is defined) == (item.key is defined)
+      - item.cert is not defined or (item.cert is string and item.cert.startswith('/'))
+      - item.key is not defined or (item.key is string and item.key.startswith('/'))
+      - item.health_check is not defined or item.health_check is boolean
+      - (item.health_check_interval is not defined and item.health_check_path is not defined)
+        or (item.health_check | default(false) | bool)
+      - item.health_check_interval is not defined
+        or (item.health_check_interval is number and item.health_check_interval >= 10 and item.health_check_interval <= 3600)
+      - item.health_check_path is not defined or (item.health_check_path is string and item.health_check_path.startswith('/'))
+      - item.comment is not defined or item.comment is string
+    fail_msg: >-
+      Each sites entry is a mapping with ports (a non-empty list of entry
+      ports; suffix a port _ssl to terminate TLS on it) and exactly one
+      upstream URL (the Community Edition allows one upstream per site),
+      plus optional domains (default ["*"]), cert and key (both required
+      together, absolute controller file paths of the PEM certificate and
+      private key), health_check with health_check_interval (10-3600) and
+      health_check_path, and comment.
+  loop: "{{ addon.sites | default([]) }}"
+  when:
+    - addon.state | default('present') == 'present'
+    - addon.sites | default([]) | length > 0
 
 - name: Resolve the inline rule file paths
   ansible.builtin.set_fact:
@@ -261,6 +311,202 @@
     - _addon_cfg | length > 0
     - not (_addon_autostart | bool)
     - (_addon_cfg.autostart | default(false)) | bool
+
+# ---------------------------------------------------------------------------
+# Declarative protected sites (safeline only). Each apply reads the console's
+# site list and reconciles by identity (the domain set plus the entry port
+# set): a declared site that does not exist yet is created — its PEM files
+# are copied from the controller and uploaded together with the site — and
+# an existing site whose single upstream changed is updated in place. Other
+# fields of an existing site are left alone, and a site dropped from `sites`
+# is NOT deleted from the console ('pg addon safeline site delete' does
+# that). Certificates are only uploaded when a site is created; renewing one
+# stays manual ('pg addon safeline cert update').
+- name: List the safeline protected sites
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - addon
+      - safeline
+      - site
+      - list
+      - "--name"
+      - "{{ addon.name }}"
+  register: _addon_site_list
+  changed_when: false
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - _addon_cfg | length > 0
+    - addon.sites | default([]) | length > 0
+
+# site list columns: ID DOMAINS PORTS UPSTREAMS STATUS MODE HEALTH COMMENT.
+# The first four are whitespace-free and fixed-position; HEALTH and COMMENT
+# may contain spaces, so only these four are parsed.
+- name: Index the existing protected sites
+  ansible.builtin.set_fact:
+    _addon_sites_existing: >-
+      {{ _addon_sites_existing | combine({
+           (item.split()[1].split(',') | map('lower') | sort | join(','))
+           ~ '|' ~ (item.split()[2].split(',') | map('string') | sort | join(',')):
+           {'id': item.split()[0] | int,
+            'upstreams': item.split()[3].split(',')} }) }}
+  loop: "{{ (_addon_site_list.stdout_lines | default([]))[1:] }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - item | trim | length > 0
+
+- name: Resolve the declared protected sites
+  ansible.builtin.set_fact:
+    _addon_sites: >-
+      {{ _addon_sites + [ item | combine({
+           'domains': item.domains | default(['*']) | map('string') | map('trim') | map('lower') | unique | sort,
+           'ports': item.ports | map('string') | sort,
+           'site_key':
+             ((item.domains | default(['*']) | map('string') | map('trim') | map('lower') | unique | sort) | join(','))
+             ~ '|' ~ ((item.ports | map('string') | sort) | join(',')) }) ] }}
+  loop: "{{ addon.sites | default([]) }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+
+- name: Check the declared protected sites are unique
+  ansible.builtin.assert:
+    that:
+      - _addon_sites | map(attribute='site_key') | unique | length == _addon_sites | length
+    fail_msg: >-
+      sites entries must be unique after normalising: two entries share the
+      same domains plus ports.
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - _addon_sites | length > 0
+
+- name: Select the declared sites that need creating
+  ansible.builtin.set_fact:
+    _addon_sites_new: "{{ _addon_sites | rejectattr('site_key', 'in', _addon_sites_existing) | list }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+
+- name: Select the declared sites whose upstream changed
+  ansible.builtin.set_fact:
+    _addon_sites_moved: >-
+      {{ _addon_sites_moved + [ item | combine({
+           'site_id': _addon_sites_existing[item.site_key].id }) ] }}
+  loop: "{{ _addon_sites | selectattr('site_key', 'in', _addon_sites_existing) | list }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - _addon_sites_existing[item.site_key].upstreams != [item.upstream]
+
+- name: Create the staged certificate directory
+  ansible.builtin.file:
+    path: "{{ _addon_site_cert_dir }}"
+    state: directory
+    mode: '0700'
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - _addon_sites_new | selectattr('cert', 'defined') | list | length > 0
+
+- name: Stage the declared site certificates
+  ansible.builtin.copy:
+    src: "{{ item.cert }}"
+    dest: "{{ _addon_site_cert_dir }}/{{ item.site_key | regex_replace('[^A-Za-z0-9_.-]', '_') }}.pem"
+    mode: '0600'
+  loop: "{{ _addon_sites_new }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - item.cert is defined
+
+- name: Stage the declared site private keys
+  ansible.builtin.copy:
+    src: "{{ item.key }}"
+    dest: "{{ _addon_site_cert_dir }}/{{ item.site_key | regex_replace('[^A-Za-z0-9_.-]', '_') }}.key"
+    mode: '0600'
+  loop: "{{ _addon_sites_new }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - item.key is defined
+
+- name: Create the declared protected sites
+  ansible.builtin.command:
+    argv: >-
+      {{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'safeline', 'site', 'create', '--name', addon.name]
+         + ['--domain'] + item.domains
+         + ['--port'] + item.ports
+         + ['--upstream', item.upstream]
+         + (['--cert', _addon_site_cert_dir ~ '/' ~ (item.site_key | regex_replace('[^A-Za-z0-9_.-]', '_')) ~ '.pem',
+             '--key', _addon_site_cert_dir ~ '/' ~ (item.site_key | regex_replace('[^A-Za-z0-9_.-]', '_')) ~ '.key']
+            if item.cert is defined else [])
+         + (['--health-check'] if item.health_check | default(false) | bool else [])
+         + (['--health-check-interval', item.health_check_interval | string]
+            if item.health_check_interval is defined else [])
+         + (['--health-check-path', item.health_check_path]
+            if item.health_check_path is defined else [])
+         + (['--comment', item.comment] if item.comment is defined else []) }}
+  loop: "{{ _addon_sites_new }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+
+- name: Update the upstream of the changed protected sites
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - addon
+      - safeline
+      - site
+      - update
+      - "--name"
+      - "{{ addon.name }}"
+      - "--site-id"
+      - "{{ item.site_id | string }}"
+      - "--upstream"
+      - "{{ item.upstream }}"
+  loop: "{{ _addon_sites_moved }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+
+- name: Report the protected sites changes
+  ansible.builtin.debug:
+    msg: >-
+      SafeLine sites on {{ addon.name }}: created
+      [{{ _addon_sites_new | map(attribute='site_key') | join(', ') }}],
+      updated the upstream of [{{ _addon_sites_moved | map(attribute='site_key') | join(', ') }}]
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - (_addon_sites_new | length > 0) or (_addon_sites_moved | length > 0)
+
+# The PEM files were only staged for `site create`, which uploaded them into
+# the console; they are not needed afterwards.
+- name: Remove the staged site certificates
+  ansible.builtin.file:
+    path: "{{ _addon_site_cert_dir }}"
+    state: absent
+  when: addon.type == 'safeline'
+
+# autoreload runs on EVERY apply, not only when something above changed.
+# SafeLine's tengine resolves site upstream host names when its config loads,
+# so each deployment re-resolves them; reload is nginx -t plus a graceful
+# tengine reload, so the stack keeps serving.
+- name: Reload the add-on
+  ansible.builtin.command:
+    argv: "{{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'reload', addon.type, '--name', addon.name] }}"
+  when:
+    - _addon_state == 'present'
+    - _addon_cfg | length > 0
+    - addon.autoreload | default(false) | bool
 
 # A fresh etcd member returns from `addon install` before it can answer
 # requests. The next host in this serial:1 play joins it, so wait here before

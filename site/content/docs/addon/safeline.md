@@ -86,6 +86,8 @@ Applications (protected sites) are configured **in the console** or, for scripti
 
 A site's upstream can be an IP or a host name (for example a load-balancer domain). tengine resolves host names from the host's DNS **when its config loads**, so after the load balancer's DNS records change, run `pg addon reload safeline --name waf1` to re-test and gracefully reload the tengine config — the new addresses take effect without restarting the stack or dropping in-flight requests.
 
+Ansible deployments can declare sites in the `sites` field of a `type: safeline` entry (each run creates missing sites and updates changed upstreams; certificates are uploaded from controller file paths) — see the [Ansible add-ons chapter](../ansible/addons.md#safeline-sites).
+
 ### Managing sites from the CLI
 
 `pg addon safeline site ...` drives the console's own web API with the stored admin password — the same encrypted login and `/api/open/site` calls the browser makes — so sites can be scripted without the UI. The stack must be running.

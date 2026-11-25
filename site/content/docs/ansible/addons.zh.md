@@ -36,6 +36,8 @@ minio/silo/rustfs、redis、nginx、prometheus、kafka 等）。
 | `clean_data` | 与 `state: absent` 搭配，在插件支持时一并删除数据（默认 `true`，设为 `false` 保留数据） |
 | `force` | 与 `state: present` 搭配，用 `pg addon install --force` 重建 |
 | `autostart` | `true`（默认）启用开机自启，`false` 关闭 |
+| `autoreload` | 仅顶层 safeline：每次运行都重载 tengine（重新解析站点上游主机名，热更新不断服） |
+| `sites` | 仅顶层 safeline：声明式防护站点列表，见下文 [SafeLine 站点](#safeline-站点) |
 
 每个条目必须有 `type`，并且 `name`/`pg_name`/`instance` 恰好设置一个；角色会在执行前断言。
 
@@ -282,6 +284,36 @@ pgcli_addons:
     name: cache
     state: absent
 ```
+
+## SafeLine 站点
+
+`type: safeline` 的顶层条目可以用 `sites` 声明防护站点，每次运行都会与
+控制台对账。站点身份是**域名集合 + 端口集合**：
+
+- 不存在 → `pg addon safeline site create` 创建；`cert`/`key` 是**控制机**上的
+  PEM 文件路径，角色会先复制到目标机再随站点一起上传绑定。
+- 已存在且 `upstream` 变了 → `pg addon safeline site update --upstream` 原地更新；
+  Community Edition 每个站点只允许一个上游。
+- 已存在的站点只有 upstream 会被收敛；其他字段（证书、健康检查、备注）以创建时
+  的声明为准，之后改动需用 CLI（`pg addon safeline site update`）。
+
+```yaml
+addon_safeline_single_addons:
+  - type: safeline
+    name: safeline1
+    state: present
+    sites:
+      - domains: [www.example.com]       # 默认 ["*"]（任意 Host）
+        ports: ["443_ssl", "80"]         # 端口加 _ssl 后缀表示终止 TLS
+        upstream: http://10.0.0.5:8080
+        cert: /path/to/fullchain.pem     # 可选，与 key 成对
+        key: /path/to/privkey.pem
+```
+
+从 `sites` 删掉条目**不会**删除控制台里的站点（用
+`pg addon safeline site delete`）；证书续期也保持手动
+（`pg addon safeline cert update --cert-id <id>` 原地替换 PEM，绑定该证书的
+站点自动换用新证书）。
 
 ## 安装与移除
 

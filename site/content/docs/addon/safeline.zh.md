@@ -108,6 +108,10 @@ pg addon password safeline --name waf1 --reset
 解析主机名，因此负载均衡的 DNS 记录变化后，执行 `pg addon reload safeline --name waf1`
 重新校验并平滑重载 tengine 配置——新地址即刻生效，无需重启整栈，也不会中断在途请求。
 
+Ansible 部署可以在 `type: safeline` 条目的 `sites` 字段里声明站点（每次运行自动创建
+缺失站点、更新变更的上游，证书按控制机文件路径上传），见
+[Ansible 插件章节](../ansible/addons.md#safeline-站点)。
+
 ### 通过 CLI 管理站点
 
 `pg addon safeline site ...` 用存储的管理员密码调用控制台自己的 Web API——与浏览器相同的加密
