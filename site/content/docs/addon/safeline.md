@@ -244,6 +244,8 @@ its defaults (5 concurrent, 3 minutes). The command re-reads the room after
 writing and reports any threshold the console did not apply, so a silently
 ignored change is not mistaken for success.
 
+> **Not suitable for production.** The waiting room is a browser-facing tool: its queue page needs JavaScript and cookies, so API and CLI clients that do not follow the queue stay in it indefinitely; abandoned sessions hold their slots until the session timeout; and a handful of concurrent requests from curl-style scripts occupy every slot for that long, locking ordinary visitors out — a cheap denial-of-service vector. The Community Edition's fixed 5 concurrent visitors are unusable for real traffic regardless. Protect production with the rate-limit rules below instead — prefer `--action block` for endpoints that non-browser clients call.
+
 Every site has three rate-limit rules — `req` (requests per window), `attack`
 (attack hits per window) and `error` (responses matching the rule's
 conditions) — and by default follows the global rule set:
