@@ -312,9 +312,9 @@ Every run reconciles them against the console. A site's identity is its
 - Present but `upstream` changed → updated in place with
   `pg addon safeline site update --upstream`; the Community Edition allows one
   upstream per site.
-- An existing site only has its upstream reconciled; every other field
-  (certificate, health check, comment) reflects the declaration at creation
-  time — change them with the CLI (`pg addon safeline site update`).
+- Certificate, health check and comment reflect the declaration at creation
+  time — change them with the CLI (`pg addon safeline site update`). `mode`,
+  `cc`, `protect` and `bot`, by contrast, are reconciled on every run.
 
 ```yaml
 addon_safeline_single_addons:
@@ -327,7 +327,36 @@ addon_safeline_single_addons:
         upstream: http://10.0.0.5:8080
         cert: /path/to/fullchain.pem     # optional, together with key
         key: /path/to/privkey.pem
+        mode: defense                    # defense blocks | dryrun only records |
+                                         # offline serves the maintenance page
+        cc:                              # CC protection: waiting room + rate limits
+          rate_limit:
+            rules:                       # the three built-in rule types
+              - type: req
+                enabled: true
+                period: 10               # seconds, 10-600
+                count: 200               # per window
+                action: block            # block | challenge_v1 | challenge_v2
+                block_min: 30
+        protect:
+          mode: balance                  # disable | observe | balance | strict
+        bot:                             # BOT protection (invisible challenge)
+          enabled: true
+          all_visitors: true             # or a where condition list
 ```
+
+`mode` switches the site's run mode (`pg addon safeline site mode`; see
+[Site run modes](../../addon/safeline/#site-run-modes) for the semantics):
+`defense` blocks attacks, `dryrun` only records them, `offline` serves the
+maintenance page; the protections above only enforce in `defense` mode. `cc`
+declares the waiting room (`enabled`; thresholds need Pro) plus the
+req/attack/error rate limit rules — `use_global: true` follows the shared rules
+again. `protect` sets all 14 semantic-analysis modules in one call via
+`mode: disable|observe|balance|strict`, or follows the global levels with
+`use_global: true`. `bot` declares the challenge scope as a `where` condition
+list or `all_visitors: true`. Commands compare against the console and skip the
+write when nothing changed (the task reports ok); the complete field set lives
+in `group_vars/addon_safeline_single/main.yml.example`.
 
 Dropping an entry from `sites` does **not** delete the site from the console
 (use `pg addon safeline site delete`), and certificate renewal stays manual

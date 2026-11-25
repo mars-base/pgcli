@@ -161,6 +161,7 @@
         or (item.health_check_interval is number and item.health_check_interval >= 10 and item.health_check_interval <= 3600)
       - item.health_check_path is not defined or (item.health_check_path is string and item.health_check_path.startswith('/'))
       - item.comment is not defined or item.comment is string
+      - item.mode is not defined or (item.mode is string and item.mode in ['defense', 'dryrun', 'offline'])
     fail_msg: >-
       Each sites entry is a mapping with ports (a non-empty list of entry
       ports; suffix a port _ssl to terminate TLS on it) and exactly one
@@ -168,7 +169,7 @@
       plus optional domains (default ["*"]), cert and key (both required
       together, absolute controller file paths of the PEM certificate and
       private key), health_check with health_check_interval (10-3600) and
-      health_check_path, and comment.
+      health_check_path, comment, and mode (defense, dryrun or offline).
   loop: "{{ addon.sites | default([]) }}"
   when:
     - addon.state | default('present') == 'present'
@@ -597,25 +598,26 @@
     - (_addon_sites_new | length > 0) or (_addon_sites_moved | length > 0)
 
 # ---------------------------------------------------------------------------
-# Declarative per-site protections (safeline only). The optional cc, protect
-# and bot mappings apply on every apply, after sites are created or updated.
-# Each protection command compares the declaration with the console state and
-# writes only on a difference, printing '✓' in that case; changed_when keys
-# off the marker, so an unchanged declaration leaves every protection task ok.
-# The site ids only exist after creation, so the console's site list is read
-# again whenever a declaration carries a protection.
-- name: Select the declared sites with protection settings
+# Declarative per-site settings (safeline only). The optional mode mapping and
+# the cc, protect and bot protection mappings apply on every apply, after sites
+# are created or updated. Each command compares the declaration with the
+# console state and writes only on a difference, printing '✓' in that case;
+# changed_when keys off the marker, so an unchanged declaration leaves every
+# task ok. The site ids only exist after creation, so the console's site list
+# is read again whenever a declaration carries a per-site setting.
+- name: Select the declared sites with per-site settings
   ansible.builtin.set_fact:
     _addon_sites_protected: >-
       {{ ((_addon_sites | selectattr('cc', 'defined') | list)
           + (_addon_sites | selectattr('protect', 'defined') | list)
-          + (_addon_sites | selectattr('bot', 'defined') | list))
+          + (_addon_sites | selectattr('bot', 'defined') | list)
+          + (_addon_sites | selectattr('mode', 'defined') | list))
          | unique(attribute='site_key') }}
   when:
     - addon.type == 'safeline'
     - _addon_state == 'present'
 
-- name: List the safeline protected sites for the protection settings
+- name: List the safeline sites for the per-site settings
   ansible.builtin.command:
     argv:
       - "{{ pgcli_install_path }}"
@@ -634,7 +636,7 @@
     - _addon_state == 'present'
     - _addon_sites_protected | length > 0
 
-- name: Index the protected sites for the protection settings
+- name: Index the sites for the per-site settings
   ansible.builtin.set_fact:
     _addon_site_ids: >-
       {{ _addon_site_ids | combine({
@@ -647,6 +649,20 @@
     - _addon_state == 'present'
     - _addon_sites_protected | length > 0
     - item | trim | length > 0
+
+- name: Set the declared sites' run modes
+  ansible.builtin.command:
+    argv: >-
+      {{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'safeline', 'site', 'mode',
+          '--name', addon.name, '--site-id', _addon_site_ids[item.site_key] | string, item.mode] }}
+  register: _addon_site_mode
+  changed_when: "'✓' in _addon_site_mode.stdout"
+  loop: "{{ _addon_sites }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - _addon_sites_protected | length > 0
+    - item.mode is defined
 
 - name: Configure the declared waiting rooms
   ansible.builtin.command:

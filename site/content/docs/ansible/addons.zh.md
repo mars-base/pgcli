@@ -294,8 +294,9 @@ pgcli_addons:
   PEM 文件路径，角色会先复制到目标机再随站点一起上传绑定。
 - 已存在且 `upstream` 变了 → `pg addon safeline site update --upstream` 原地更新；
   Community Edition 每个站点只允许一个上游。
-- 已存在的站点只有 upstream 会被收敛；其他字段（证书、健康检查、备注）以创建时
-  的声明为准，之后改动需用 CLI（`pg addon safeline site update`）。
+- 证书、健康检查、备注以创建时的声明为准，之后改动需用 CLI
+  （`pg addon safeline site update`）；`mode`、`cc`、`protect`、`bot` 则每次
+  运行都会与控制台对账。
 
 ```yaml
 addon_safeline_single_addons:
@@ -308,7 +309,32 @@ addon_safeline_single_addons:
         upstream: http://10.0.0.5:8080
         cert: /path/to/fullchain.pem     # 可选，与 key 成对
         key: /path/to/privkey.pem
+        mode: defense                    # defense 拦截 | dryrun 只记录 | offline 维护页
+        cc:                              # CC 防护：等待室与速率限制
+          rate_limit:
+            rules:                       # req / attack / error 三条内置规则
+              - type: req
+                enabled: true
+                period: 10               # 秒，10-600
+                count: 200               # 每窗口请求数
+                action: block            # block | challenge_v1 | challenge_v2
+                block_min: 30
+        protect:
+          mode: balance                  # disable | observe | balance | strict
+        bot:                             # BOT 防护（隐形人机验证）
+          enabled: true
+          all_visitors: true             # 或 where 条件列表
 ```
+
+`mode` 的三种取值切换站点运行模式（`pg addon safeline site mode`，语义详见
+[站点运行模式](../../addon/safeline/#站点运行模式)）：`defense`
+拦截攻击、`dryrun` 只记录不拦截、`offline` 只返回维护页；只有 `defense` 下各
+防护规则才真正生效。`cc` 声明等待室（`enabled`，阈值需 Pro）与 req/attack/error
+速率限制规则，可用 `use_global: true` 切回全局规则；`protect` 用
+`mode: disable|observe|balance|strict` 一次设置全部 14 个语义分析模块，或
+`use_global: true` 跟随全局；`bot` 用 `where` 条件列表或 `all_visitors: true`
+声明挑战范围。命令与控制台对账，声明不变时不写入（任务显示 ok），完整字段与取值
+见 `group_vars/addon_safeline_single/main.yml.example`。
 
 从 `sites` 删掉条目**不会**删除控制台里的站点（用
 `pg addon safeline site delete`）；证书续期也保持手动
