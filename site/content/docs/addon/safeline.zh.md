@@ -504,6 +504,27 @@ bridge 网络以 `--subnet <prefix>.0/24 --gateway <prefix>.1` 创建，并带�
 
 容器以 root 运行，这些目录归 root 所有。请把整棵树当作不透明数据，需要保留控制台配置时整体备份。PostgreSQL 在首次初始化时把口令写死在数据目录里，因此 pgcli 会把它记录到 `resources/postgres/password`：`pg addon remove`（不带 `--clean-data`）之后再重新安装，就是靠它重新接上保留下来的数据。
 
+## 备份与恢复
+
+逻辑备份直接连栈的内置数据库（口令文件仅 root 可读）。示例（实例 `safeline1`，默认数据目录）：
+
+```bash
+pw=$(cat /data/pg/addon/safeline/safeline1/resources/postgres/password)
+
+# 备份 / 恢复（.sql 纯 SQL、.dump custom，加 .gz 压缩；--clean 先删已有对象）
+pg export --dsn "postgres://safeline-ce:$pw@<subnet-prefix>.2:5432/safeline-ce?sslmode=disable" -o safeline.sql
+pg import --dsn "postgres://safeline-ce:$pw@<subnet-prefix>.2:5432/safeline-ce?sslmode=disable" -i safeline.sql
+```
+
+`<subnet-prefix>` 换成该实例的 `--subnet-prefix`（默认 `172.22.222`），最后一段 `.2`
+是内置数据库在栈内 /24 中的固定地址。
+
+整目录冷备：停栈后拷贝整个 `<data-dir>`（含控制台状态），恢复时放回原位再
+`pg addon start`。
+
+`pg export` / `pg import` 的完整参数（压缩级别、stdin/stdout 管道等）见
+[数据导入导出](/docs/import-export/)。
+
 ## 生命周期、日志与开机自启
 
 ```bash

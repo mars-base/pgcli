@@ -481,6 +481,29 @@ Everything lives under `--data-dir` (`<base_dir>/addon/safeline/<name>/` by defa
 
 The containers run as root inside the container, so these directories are root-owned. Treat the tree as opaque and back it up as a whole if you need to preserve console configuration. PostgreSQL bakes its password into the cluster on first init, so pgcli records it in `resources/postgres/password`; that is what lets `pg addon remove` (without `--clean-data`) followed by a re-install reattach to the surviving data.
 
+## Backup and restore
+
+Logical backups talk to the stack's bundled database directly (the password file is
+root-only). Example (instance `safeline1`, default data dir):
+
+```bash
+pw=$(cat /data/pg/addon/safeline/safeline1/resources/postgres/password)
+
+# backup / restore (.sql plain SQL, .dump custom, add .gz to compress; --clean drops existing objects)
+pg export --dsn "postgres://safeline-ce:$pw@<subnet-prefix>.2:5432/safeline-ce?sslmode=disable" -o safeline.sql
+pg import --dsn "postgres://safeline-ce:$pw@<subnet-prefix>.2:5432/safeline-ce?sslmode=disable" -i safeline.sql
+```
+
+Replace `<subnet-prefix>` with the instance's `--subnet-prefix` (`172.22.222` by
+default); the trailing `.2` is the bundled database's fixed address inside the stack's
+/24.
+
+Cold copy: stop the stack, copy the whole `<data-dir>` (console state included), put it
+back at the same path and run `pg addon start`.
+
+See [Data Import/Export](/docs/import-export/) for the full `pg export` / `pg import`
+options (compression levels, stdin/stdout piping, and more).
+
 ## Lifecycle, logs and autostart
 
 ```bash
