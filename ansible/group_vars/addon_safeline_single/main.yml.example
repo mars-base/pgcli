@@ -14,23 +14,41 @@
 # configured for rootless deployment (for example a host that also belongs to
 # an active scenario group) and prints a notice; the stack stays in the
 # deployment account's pgcli config.
+#
+# Every apply is idempotent: an add-on or site left as declared reports no
+# change, and a protection whose desired values already match the console is
+# not rewritten.
 
-# Default flags for safeline entries that do not set their own params.
+# Default `pg addon install safeline` flags for entries that do not set their
+# own params. The complete flag set:
 addon_safeline_single_params: []
 # Example:
-#   - "--data-dir=/data/pg/addon/safeline/safeline1"
-#   - "--port=9443"                 # console HTTPS host port
-#   - "--listen=0.0.0.0"
-#   - "--subnet-prefix=172.22.222"  # each stack needs its own /24
-#   - "--version=9.4.7"             # SafeLine release tag
-#   - "--postgres-version=15.18"    # bundled PostgreSQL tag
+#   - "--data-dir=/data/pg/addon/safeline/safeline1"  # default <base_dir>/addon/safeline/<name>
+#   - "--port=9443"                 # console HTTPS host port (0 = auto-assign from safeline_start_port, default 9443)
+#   - "--listen=0.0.0.0"            # console bind address
+#   - "--subnet-prefix=172.22.222"  # first three octets of the stack's /24 (each stack needs its own)
+#   - "--version=9.4.7"             # SafeLine release tag (all component images share it)
+#   - "--postgres-version=15.18"    # tag of the bundled chaitin/safeline-postgres image
 
 addon_safeline_single_addons:
   - type: safeline
-    state: present
+    state: present                  # present installs/keeps; absent removes the add-on
     name: safeline1
+    # Per-entry install flags; when set they REPLACE the group-level list
+    # above for this entry:
+    # params:
+    #   - "--port=9444"
+    #   - "--subnet-prefix=172.22.223"
+    # Recreate the seven containers even if the stack exists (keeps the
+    # bundled PostgreSQL data and console state; rotates the console admin
+    # password and prints the new one):
+    # force: false
+    # Start the stack on boot (default true):
+    # autostart: true
+    # With state: absent, also delete the data directory (default true):
+    # clean_data: true
     # Reload tengine on every playbook run: re-resolves the protected sites'
-    # upstream host names (nginx -t + graceful reload, the stack keeps serving).
+    # upstream host names (nginx -t + graceful reload, the stack keeps serving):
     # autoreload: true
     # Protected sites (optional). Each apply creates the missing ones — the
     # PEM files below are controller paths, uploaded with the site — and
@@ -41,40 +59,57 @@ addon_safeline_single_addons:
     #   - domains: [www.example.com]        # default ["*"] (any Host header)
     #     ports: ["443_ssl", "80"]          # suffix a port _ssl to terminate TLS
     #     upstream: http://10.0.0.5:8080    # exactly one upstream (CE edition)
-    #     cert: /path/to/fullchain.pem      # optional; with key
+    #     cert: /path/to/fullchain.pem      # optional; always together with key
     #     key: /path/to/privkey.pem
-    #     health_check: true                # optional
-    #     health_check_interval: 10         # seconds, 10-3600
-    #     health_check_path: /
+    #     health_check: true                # optional, default false
+    #     health_check_interval: 10         # seconds, 10-3600; needs health_check
+    #     health_check_path: /              # needs health_check
     #     comment: "example"
-    #     # Optional protections, applied on every playbook run (the commands
-    #     # are idempotent server-side and reported as changed):
+    #     # ---- CC 防护: waiting room and rate-limit rules ----
     #     cc:
-    #       waiting_room:                     # CC 防护: the waiting room
-    #         enabled: true
+    #       waiting_room:                     # the CC waiting room
+    #         enabled: true                   # true enables, false disables
     #         max_concurrent: 500             # 1-5000; Pro only, the CE keeps 5
     #         session_timeout: 10             # minutes, 1-30; Pro only, the CE keeps 3
-    #       rate_limit:                       # CC 防护: rate-limit rules
-    #         use_global: false               # true = follow the shared rules again
-    #         rules:                          # a site following the global set
-    #                                         # switches to its own copy (all
-    #                                         # rules disabled) first; a rule is
-    #                                         # enabled unless it says enabled: false
-    #           - type: req                   # req, attack or error (required)
+    #       rate_limit:                       # the three built-in rules
+    #         # A site either follows the shared global rules or carries its own
+    #         # copy. use_global and rules are exclusive:
+    #         # use_global: true              # follow the shared rules again
+    #         rules:                          # switches the site to its own copy
+    #                                         # (all rules disabled) and then
+    #                                         # configures the declared ones; a
+    #                                         # rule is enabled unless it says
+    #                                         # enabled: false
+    #           - type: req                   # requests per window
     #             enabled: true
     #             period: 10                  # seconds, 10-600
-    #             count: 200                  # requests per window
-    #             action: block               # block, challenge_v1, challenge_v2
+    #             count: 200                  # per window, >= 1
+    #             action: block               # block | challenge_v1 | challenge_v2
     #             block_min: 30               # minutes, 1-1440
-    #     protect:                            # 攻击防护 (semantic analysis)
-    #       mode: balance                     # disable, observe, balance or strict;
+    #           - type: attack                # attack hits per window
+    #             enabled: true
+    #             period: 60
+    #             count: 5
+    #             action: block
+    #             block_min: 120
+    #           - type: error                 # responses matching (e.g.) a status code
+    #             enabled: false
+    #             period: 10
+    #             count: 10
+    #             action: block
+    #             block_min: 30
+    #     # ---- 攻击防护: the 14 semantic analysis modules ----
+    #     protect:
+    #       mode: balance                     # disable | observe | balance | strict;
     #                                         # sets all 14 modules in one call
-    #       # use_global: true                # follow the global levels again
-    #     bot:                                # BOT 防护 (invisible 人机验证)
-    #       enabled: true
-    #       # exactly one of all_visitors / where while enabled:
-    #       # all_visitors: true              # challenge every visitor
+    #       # use_global: true                # instead of mode: follow the global levels again
+    #     # ---- BOT 防护: the invisible 人机验证 ----
+    #     bot:
+    #       enabled: true                     # false disables it (stored config is kept)
+    #       # Exactly one of where / all_visitors while enabled:
     #       where:                            # challenge matching visitors only;
-    #                                         # replaces the stored conditions
-    #         - "uri:prefix=/admin && method:eq=POST"
-    #         - "req_header/User-Agent:has=curl"
+    #                                         # replaces the stored conditions;
+    #                                         # each rule is one OR group
+    #         - "uri:prefix=/admin && method:eq=POST"          # && = AND inside a group
+    #         - "req_header/User-Agent:has=curl|wget|python"   # | = any of the values
+    #       # all_visitors: true              # challenge every visitor instead
