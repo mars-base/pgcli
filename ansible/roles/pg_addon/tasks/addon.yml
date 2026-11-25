@@ -45,6 +45,8 @@
     _addon_sites_new: []
     _addon_sites_moved: []
     _addon_sites_existing: {}
+    _addon_site_ids: {}
+    _addon_rate_rules_rest: []
 
 # Offline installs only preload the core images. Entries marked auto_load: true
 # in pgcli_images declare the add-on types that need them; pull exactly this
@@ -171,6 +173,112 @@
   when:
     - addon.state | default('present') == 'present'
     - addon.sites | default([]) | length > 0
+
+- name: Validate the declared CC protection settings
+  ansible.builtin.assert:
+    that:
+      - item.cc is mapping
+      - item.cc.waiting_room is not defined or item.cc.waiting_room is mapping
+      - item.cc.waiting_room is not defined or item.cc.waiting_room.enabled is not defined or item.cc.waiting_room.enabled is boolean
+      - item.cc.waiting_room is not defined or item.cc.waiting_room.max_concurrent is not defined
+        or (item.cc.waiting_room.max_concurrent is number
+            and item.cc.waiting_room.max_concurrent >= 1 and item.cc.waiting_room.max_concurrent <= 5000)
+      - item.cc.waiting_room is not defined or item.cc.waiting_room.session_timeout is not defined
+        or (item.cc.waiting_room.session_timeout is number
+            and item.cc.waiting_room.session_timeout >= 1 and item.cc.waiting_room.session_timeout <= 30)
+      - item.cc.rate_limit is not defined or item.cc.rate_limit is mapping
+      - item.cc.rate_limit is not defined or item.cc.rate_limit.use_global is not defined
+        or item.cc.rate_limit.use_global is boolean
+      - item.cc.rate_limit is not defined or item.cc.rate_limit.rules is not defined
+        or (item.cc.rate_limit.rules is sequence and item.cc.rate_limit.rules is not string
+            and item.cc.rate_limit.rules is not mapping)
+      - item.cc.rate_limit is not defined
+        or not (item.cc.rate_limit.use_global | default(false) | bool
+                and (item.cc.rate_limit.rules | default([], true) | length > 0))
+    fail_msg: >-
+      cc is a mapping with an optional waiting_room (enabled, max_concurrent
+      1-5000 and session_timeout 1-30 — both thresholds need a Pro license)
+      and an optional rate_limit (use_global, or a rules list with type
+      req|attack|error plus optional enabled, period 10-600, count >= 1,
+      action block|challenge_v1|challenge_v2 and block_min 1-1440).
+      use_global: true cannot be combined with rules.
+  loop: "{{ addon.sites | default([]) }}"
+  when:
+    - addon.state | default('present') == 'present'
+    - addon.sites | default([]) | length > 0
+    - item.cc is defined
+
+- name: Validate the declared rate-limit rules
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.type is defined
+      - item.type in ['req', 'attack', 'error']
+      - item.enabled is not defined or item.enabled is boolean
+      - item.period is not defined or (item.period is number and item.period >= 10 and item.period <= 600)
+      - item.count is not defined or (item.count is number and item.count >= 1)
+      - item.action is not defined or item.action in ['block', 'challenge_v1', 'challenge_v2']
+      - item.block_min is not defined or (item.block_min is number and item.block_min >= 1 and item.block_min <= 1440)
+    fail_msg: >-
+      Each cc.rate_limit.rules entry is a mapping with type req|attack|error
+      and may set enabled, period (10-600 seconds), count (>= 1), action
+      (block, challenge_v1, challenge_v2) and block_min (1-1440 minutes).
+  loop: >-
+    {{ addon.sites | default([]) | selectattr('cc', 'defined')
+       | map(attribute='cc') | selectattr('rate_limit', 'defined')
+       | map(attribute='rate_limit') | selectattr('rules', 'defined')
+       | map(attribute='rules') | flatten }}
+  when:
+    - addon.state | default('present') == 'present'
+
+- name: Validate the declared attack protection settings
+  ansible.builtin.assert:
+    that:
+      - item.protect is mapping
+      - (item.protect.mode is defined) or (item.protect.use_global is defined)
+      - item.protect.mode is not defined or item.protect.mode in ['disable', 'observe', 'balance', 'strict']
+      - item.protect.use_global is not defined or item.protect.use_global is boolean
+      - not (item.protect.mode is defined and (item.protect.use_global | default(false) | bool))
+    fail_msg: >-
+      protect is a mapping that sets either mode (disable, observe, balance
+      or strict — applied to every semantic-analysis module at once) or
+      use_global: true (follow the global levels again); the two are
+      mutually exclusive.
+  loop: "{{ addon.sites | default([]) }}"
+  when:
+    - addon.state | default('present') == 'present'
+    - addon.sites | default([]) | length > 0
+    - item.protect is defined
+
+- name: Validate the declared BOT protection settings
+  ansible.builtin.assert:
+    that:
+      - item.bot is mapping
+      - item.bot.enabled is defined
+      - item.bot.enabled is boolean
+      - item.bot.all_visitors is not defined or item.bot.all_visitors is boolean
+      - item.bot.where is not defined
+        or (item.bot.where is sequence and item.bot.where is not string and item.bot.where is not mapping)
+      - (item.bot.where | default([], true) | select('string') | select('search', '\\S') | list | length)
+        == (item.bot.where | default([], true) | length)
+      - not (item.bot.all_visitors | default(false) | bool
+             and (item.bot.where | default([], true) | length > 0))
+      - (not (item.bot.enabled | bool))
+        or ((item.bot.all_visitors | default(false) | bool)
+            != ((item.bot.where | default([], true) | length) > 0))
+    fail_msg: >-
+      bot is a mapping with enabled (required). When enabled, set exactly
+      one of all_visitors: true (challenge every visitor) or where (the
+      match conditions, 'field:operator=value' with one OR group per entry,
+      && for AND and | for multiple values — see 'pg addon safeline site
+      bot condition --help'). Both are invalid while enabled is false.
+      The apply replaces the stored conditions with the declared ones. When
+      disabled, existing conditions are kept.
+  loop: "{{ addon.sites | default([]) }}"
+  when:
+    - addon.state | default('present') == 'present'
+    - addon.sites | default([]) | length > 0
+    - item.bot is defined
 
 - name: Resolve the inline rule file paths
   ansible.builtin.set_fact:
@@ -487,6 +595,280 @@
     - addon.type == 'safeline'
     - _addon_state == 'present'
     - (_addon_sites_new | length > 0) or (_addon_sites_moved | length > 0)
+
+# ---------------------------------------------------------------------------
+# Declarative per-site protections (safeline only). The optional cc, protect
+# and bot mappings apply on every apply, after sites are created or updated.
+# Each protection command compares the declaration with the console state and
+# writes only on a difference, printing '✓' in that case; changed_when keys
+# off the marker, so an unchanged declaration leaves every protection task ok.
+# The site ids only exist after creation, so the console's site list is read
+# again whenever a declaration carries a protection.
+- name: Select the declared sites with protection settings
+  ansible.builtin.set_fact:
+    _addon_sites_protected: >-
+      {{ ((_addon_sites | selectattr('cc', 'defined') | list)
+          + (_addon_sites | selectattr('protect', 'defined') | list)
+          + (_addon_sites | selectattr('bot', 'defined') | list))
+         | unique(attribute='site_key') }}
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+
+- name: List the safeline protected sites for the protection settings
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - addon
+      - safeline
+      - site
+      - list
+      - "--name"
+      - "{{ addon.name }}"
+  register: _addon_site_list_prot
+  changed_when: false
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - _addon_sites_protected | length > 0
+
+- name: Index the protected sites for the protection settings
+  ansible.builtin.set_fact:
+    _addon_site_ids: >-
+      {{ _addon_site_ids | combine({
+           (item.split()[1].split(',') | map('lower') | sort | join(','))
+           ~ '|' ~ (item.split()[2].split(',') | map('string') | sort | join(',')):
+           item.split()[0] | int }) }}
+  loop: "{{ (_addon_site_list_prot.stdout_lines | default([]))[1:] }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - _addon_sites_protected | length > 0
+    - item | trim | length > 0
+
+- name: Configure the declared waiting rooms
+  ansible.builtin.command:
+    argv: >-
+      {{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'safeline', 'site', 'cc',
+          'waiting-room', '--name', addon.name, '--site-id', _addon_site_ids[item.site_key] | string]
+         + (['--enabled=' ~ ('true' if (item.cc.waiting_room.enabled | default(false) | bool) else 'false')]
+            if item.cc.waiting_room.enabled is defined else [])
+         + (['--max-concurrent', item.cc.waiting_room.max_concurrent | string]
+            if item.cc.waiting_room.max_concurrent is defined else [])
+         + (['--session-timeout', item.cc.waiting_room.session_timeout | string]
+            if item.cc.waiting_room.session_timeout is defined else []) }}
+  register: _addon_cc_waiting_room
+  changed_when: "'✓' in _addon_cc_waiting_room.stdout"
+  loop: "{{ _addon_sites }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - _addon_sites_protected | length > 0
+    - item.cc is defined
+    - item.cc.waiting_room is defined
+
+# The protection commands compare the request with the console state and
+# print '✓' only when they wrote. changed_when keys off that marker, so a run
+# with an unchanged declaration reports ok instead of changed.
+- name: Switch the declared sites back to the global rate-limit rules
+  ansible.builtin.command:
+    argv: >-
+      {{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'safeline', 'site', 'cc', 'rate-limit',
+          '--name', addon.name, '--site-id', _addon_site_ids[item.site_key] | string, '--use-global'] }}
+  register: _addon_cc_use_global
+  changed_when: "'✓' in _addon_cc_use_global.stdout"
+  loop: "{{ _addon_sites }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - _addon_sites_protected | length > 0
+    - item.cc is defined
+    - item.cc.rate_limit is defined
+    - item.cc.rate_limit.use_global | default(false) | bool
+
+- name: Give the declared sites their own disabled rate-limit rules
+  ansible.builtin.command:
+    argv: >-
+      {{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'safeline', 'site', 'cc', 'rate-limit',
+          '--name', addon.name, '--site-id', _addon_site_ids[item.site_key] | string, '--use-global=false'] }}
+  register: _addon_cc_custom
+  changed_when: "'✓' in _addon_cc_custom.stdout"
+  loop: "{{ _addon_sites }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - _addon_sites_protected | length > 0
+    - item.cc is defined
+    - item.cc.rate_limit is defined
+    - item.cc.rate_limit.use_global is defined
+    - not (item.cc.rate_limit.use_global | bool)
+    - (item.cc.rate_limit.rules | default([]) | length) == 0
+
+# The first rule switches the site to its custom rules (seeded disabled) when
+# it still follows the global set; a site that already has custom rules keeps
+# them and the flags edit the rule in place. The remaining rules edit the
+# now-custom site rule by rule. A declared rule is enabled unless it says
+# enabled: false.
+- name: Configure the declared sites' first rate-limit rule
+  ansible.builtin.command:
+    argv: >-
+      {{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'safeline', 'site', 'cc', 'rate-limit',
+          '--name', addon.name, '--site-id', _addon_site_ids[item.site_key] | string, '--type', rule.type,
+          '--use-global=false']
+         + (['--enabled=' ~ ('true' if (rule.enabled | default(true) | bool) else 'false')])
+         + (['--period', rule.period | string] if rule.period is defined else [])
+         + (['--count', rule.count | string] if rule.count is defined else [])
+         + (['--action', rule.action] if rule.action is defined else [])
+         + (['--block-min', rule.block_min | string] if rule.block_min is defined else []) }}
+  vars:
+    rule: "{{ item.cc.rate_limit.rules[0] }}"
+  register: _addon_cc_first_rule
+  changed_when: "'✓' in _addon_cc_first_rule.stdout"
+  loop: "{{ _addon_sites }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - _addon_sites_protected | length > 0
+    - item.cc is defined
+    - item.cc.rate_limit is defined
+    - (item.cc.rate_limit.rules | default([]) | length) > 0
+
+- name: Collect the remaining declared rate-limit rules
+  ansible.builtin.set_fact:
+    _addon_rate_rules_rest: >-
+      {{ _addon_rate_rules_rest
+         + (item.cc.rate_limit.rules[1:] | map('combine', {'site_key': item.site_key}) | list) }}
+  loop: "{{ _addon_sites }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - item.cc is defined
+    - item.cc.rate_limit is defined
+    - (item.cc.rate_limit.rules | default([]) | length) > 1
+
+- name: Configure the remaining declared rate-limit rules
+  ansible.builtin.command:
+    argv: >-
+      {{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'safeline', 'site', 'cc', 'rate-limit',
+          '--name', addon.name, '--site-id', _addon_site_ids[item.site_key] | string, '--type', item.type]
+         + (['--enabled=' ~ ('true' if (item.enabled | default(true) | bool) else 'false')])
+         + (['--period', item.period | string] if item.period is defined else [])
+         + (['--count', item.count | string] if item.count is defined else [])
+         + (['--action', item.action] if item.action is defined else [])
+         + (['--block-min', item.block_min | string] if item.block_min is defined else []) }}
+  register: _addon_cc_rest_rules
+  changed_when: "'✓' in _addon_cc_rest_rules.stdout"
+  loop: "{{ _addon_rate_rules_rest }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - _addon_rate_rules_rest | length > 0
+
+- name: Set the declared sites' attack protection levels
+  ansible.builtin.command:
+    argv: >-
+      {{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'safeline', 'site', 'protect', 'mode',
+          item.protect.mode, '--name', addon.name, '--site-id', _addon_site_ids[item.site_key] | string] }}
+  register: _addon_protect_mode
+  changed_when: "'✓' in _addon_protect_mode.stdout"
+  loop: "{{ _addon_sites }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - _addon_sites_protected | length > 0
+    - item.protect is defined
+    - item.protect.mode is defined
+
+- name: Switch the declared sites back to the global attack protection levels
+  ansible.builtin.command:
+    argv: >-
+      {{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'safeline', 'site', 'protect', 'use-global',
+          '--name', addon.name, '--site-id', _addon_site_ids[item.site_key] | string] }}
+  register: _addon_protect_use_global
+  changed_when: "'✓' in _addon_protect_use_global.stdout"
+  loop: "{{ _addon_sites }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - _addon_sites_protected | length > 0
+    - item.protect is defined
+    - item.protect.use_global | default(false) | bool
+
+- name: Enable the declared BOT protection with match conditions
+  ansible.builtin.command:
+    argv: >-
+      {{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'safeline', 'site', 'bot', 'enable',
+          '--name', addon.name, '--site-id', _addon_site_ids[item.site_key] | string]
+         + ((['--where'] | product(item.bot.where) | list) | flatten) }}
+  register: _addon_bot_enable_where
+  changed_when: "'✓' in _addon_bot_enable_where.stdout"
+  loop: "{{ _addon_sites }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - _addon_sites_protected | length > 0
+    - item.bot is defined
+    - item.bot.enabled | bool
+    - (item.bot.where | default([]) | length) > 0
+
+- name: Enable the declared BOT protection
+  ansible.builtin.command:
+    argv: >-
+      {{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'safeline', 'site', 'bot', 'enable',
+          '--name', addon.name, '--site-id', _addon_site_ids[item.site_key] | string] }}
+  register: _addon_bot_enable
+  changed_when: "'✓' in _addon_bot_enable.stdout"
+  loop: "{{ _addon_sites }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - _addon_sites_protected | length > 0
+    - item.bot is defined
+    - item.bot.enabled | bool
+    - (item.bot.where | default([]) | length) == 0
+
+- name: Challenge every visitor of the declared BOT protection
+  ansible.builtin.command:
+    argv: >-
+      {{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'safeline', 'site', 'bot', 'condition',
+          '--name', addon.name, '--site-id', _addon_site_ids[item.site_key] | string, '--all-visitors'] }}
+  register: _addon_bot_all_visitors
+  changed_when: "'✓' in _addon_bot_all_visitors.stdout"
+  loop: "{{ _addon_sites }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - _addon_sites_protected | length > 0
+    - item.bot is defined
+    - item.bot.enabled | bool
+    - item.bot.all_visitors | default(false) | bool
+
+- name: Disable the declared BOT protection
+  ansible.builtin.command:
+    argv: >-
+      {{ [pgcli_install_path, '-c', pgcli_config_path, 'addon', 'safeline', 'site', 'bot', 'disable',
+          '--name', addon.name, '--site-id', _addon_site_ids[item.site_key] | string] }}
+  register: _addon_bot_disable
+  changed_when: "'✓' in _addon_bot_disable.stdout"
+  loop: "{{ _addon_sites }}"
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - _addon_sites_protected | length > 0
+    - item.bot is defined
+    - not (item.bot.enabled | bool)
+
+- name: Report the applied site protections
+  ansible.builtin.debug:
+    msg: >-
+      SafeLine site protections on {{ addon.name }} applied for
+      [{{ _addon_sites_protected | map(attribute='site_key') | unique | join(', ') }}]
+  when:
+    - addon.type == 'safeline'
+    - _addon_state == 'present'
+    - _addon_sites_protected | length > 0
 
 # The PEM files were only staged for `site create`, which uploaded them into
 # the console; they are not needed afterwards.

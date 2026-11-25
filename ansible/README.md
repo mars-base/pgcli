@@ -384,7 +384,12 @@ the protected sites' upstream host names (nginx -t plus a graceful reload; the
 stack keeps serving). A safeline entry can also declare its protected sites in
 `sites` (domains, ports, one upstream, and optional `cert`/`key` PEM paths on
 the controller): each apply creates the missing sites and updates the upstream
-of existing ones when it changed. Dropping a site from the list does not delete
+of existing ones when it changed. A site can also declare its protections in
+`cc` (waiting room plus rate-limit rules), `protect` (one level for all 14
+semantic-analysis modules, or back to the global levels) and `bot` (the
+invisible challenge, with `where` match conditions or `all_visitors: true`);
+they are applied on every run, after the sites and their upstreams are
+reconciled. Dropping a site from the list does not delete
 it from the console, and certificate renewal stays manual
 (`pg addon safeline cert update`). SafeLine needs rootful podman, so a safeline add-on group
 is always reconciled as root: when the host's deployment identity is rootless

@@ -47,3 +47,34 @@ addon_safeline_single_addons:
     #     health_check_interval: 10         # seconds, 10-3600
     #     health_check_path: /
     #     comment: "example"
+    #     # Optional protections, applied on every playbook run (the commands
+    #     # are idempotent server-side and reported as changed):
+    #     cc:
+    #       waiting_room:                     # CC 防护: the waiting room
+    #         enabled: true
+    #         max_concurrent: 500             # 1-5000; Pro only, the CE keeps 5
+    #         session_timeout: 10             # minutes, 1-30; Pro only, the CE keeps 3
+    #       rate_limit:                       # CC 防护: rate-limit rules
+    #         use_global: false               # true = follow the shared rules again
+    #         rules:                          # a site following the global set
+    #                                         # switches to its own copy (all
+    #                                         # rules disabled) first; a rule is
+    #                                         # enabled unless it says enabled: false
+    #           - type: req                   # req, attack or error (required)
+    #             enabled: true
+    #             period: 10                  # seconds, 10-600
+    #             count: 200                  # requests per window
+    #             action: block               # block, challenge_v1, challenge_v2
+    #             block_min: 30               # minutes, 1-1440
+    #     protect:                            # 攻击防护 (semantic analysis)
+    #       mode: balance                     # disable, observe, balance or strict;
+    #                                         # sets all 14 modules in one call
+    #       # use_global: true                # follow the global levels again
+    #     bot:                                # BOT 防护 (invisible 人机验证)
+    #       enabled: true
+    #       # exactly one of all_visitors / where while enabled:
+    #       # all_visitors: true              # challenge every visitor
+    #       where:                            # challenge matching visitors only;
+    #                                         # replaces the stored conditions
+    #         - "uri:prefix=/admin && method:eq=POST"
+    #         - "req_header/User-Agent:has=curl"
