@@ -99,13 +99,108 @@ pg addon password safeline --name waf1 --reset
 
 ## 防护站点与流量端口
 
-受防护应用（站点）在**控制台里**配置，不通过 pgcli 参数。每个站点在宿主机上获得一个入口端口
+受防护应用（站点）在**控制台里**配置，也可以用 `pg addon safeline site`（见下）脚本化
+管理。每个站点在宿主机上获得一个入口端口
 （默认 80/443），由 host 网络的 **tengine** 容器监听。添加站点前先确认宿主机端口空闲
 （`ss -tlnp`）。防火墙需放行控制台端口以及各站点的入口端口（默认 80、443）。
 
 站点的上游可以填 IP，也可以填主机名（例如负载均衡域名）。tengine 在**加载配置时**从宿主机 DNS
 解析主机名，因此负载均衡的 DNS 记录变化后，执行 `pg addon reload safeline --name waf1`
 重新校验并平滑重载 tengine 配置——新地址即刻生效，无需重启整栈，也不会中断在途请求。
+
+### 通过 CLI 管理站点
+
+`pg addon safeline site ...` 用存储的管理员密码调用控制台自己的 Web API——与浏览器相同的加密
+登录和 `/api/open/site` 接口——因此无需打开 UI 即可脚本化建站。栈必须处于运行状态。
+
+> **社区版限制：一个站点只能有一个上游。** pgcli 安装的控制台没有 Pro 授权，站点只能代理
+> 单个上游。添加第二个上游（也就是多服务器负载均衡）会被控制台以 `license required` 拒绝；
+> 在控制台激活 Pro 授权后可用。
+
+```bash
+pg addon safeline site list --name waf1
+pg addon safeline site create --name waf1 \
+    --port 443_ssl --domain www.example.com \
+    --upstream http://10.0.0.5:8080 \
+    --comment "web tier" \
+    --cert fullchain.pem --key privkey.pem \
+    --health-check --health-check-interval 30 --health-check-path /healthz
+pg addon safeline site update --name waf1 --site-id 3 --health-check=false
+pg addon safeline site health --name waf1
+pg addon safeline site delete --name waf1 --site-id 3
+
+pg addon safeline cert list --name waf1
+pg addon safeline cert create --name waf1 --cert fullchain.pem --key privkey.pem
+pg addon safeline cert update --name waf1 --cert-id 2 --cert fullchain.pem --key privkey.pem
+pg addon safeline cert delete --name waf1 --cert-id 2
+```
+
+- `--port` 是宿主机入口端口；端口加 `_ssl` 后缀表示在该端口终结 TLS。`--cert`/`--key`
+  上传 PEM 证书（叶子证书或完整链）并一步绑定，`--cert-id` 绑定控制台里已有证书，都不传则
+  使用控制台的默认证书。`--domain` 默认 `*`（匹配任意 Host 头）。
+- `--upstream` 填 `http://` 或 `https://` 绝对 URL；`--balance` 可选 `roundrobin`（默认）、
+  `leastconn`、`iphash`、`backup`。`site update` 用 `--upstream` 整体替换上游列表，
+  或用 `--add-upstream` / `--remove-upstream` 增量增删。pgcli 安装的控制台运行的是
+  **社区版**，每个站点只允许 **一个上游**——第二个上游会被控制台以 `license required`
+  拒绝，多上游负载均衡需要 Pro 授权。
+- `--health-check` 按指定路径每 10–3600 秒对每个上游做 HTTP 健康检查。`site update`
+  只改你传入的配置（上游、健康检查与/或绑定证书），其他站点配置保持控制台里的值。
+- `site health` 探测选定站点（默认全部）的每个上游，输出 `healthy` 或控制台返回的错误；
+  只要有上游不健康就以非零码退出，可直接用作监控/脚本门禁。`site list` 展示 `update`、
+  `delete`、`health` 通过 `--site-id` 使用的站点 id。
+- `cert list` 展示已存证书的覆盖域名、到期时间和使用它的站点。证书被站点的 TLS 入口端口
+  占用时控制台拒绝删除，先删除站点或换绑证书。
+
+HTTP 明文站点不需要证书——只要入口端口和上游：
+
+```bash
+pg addon safeline site create --name waf1 \
+    --port 80 --domain www.example.com \
+    --upstream http://10.0.0.5:8080
+```
+
+tengine 直接在宿主机绑定 80 端口，因此该端口必须空闲（用 `ss -tlnp` 确认）。
+
+给已创建的站点换上游——整体替换成单个上游任何版本都可，增删上游与多上游列表需要 Pro 授权：
+
+```bash
+# 增加一台服务器，保留现有上游（Pro）
+pg addon safeline site update --name waf1 --site-id 3 --add-upstream http://10.0.0.7:8080
+
+# 摘除一台服务器（Pro，且站点已有多个上游时才需要）
+pg addon safeline site update --name waf1 --site-id 3 --remove-upstream http://10.0.0.5:8080
+
+# 整体替换上游列表：一个 URL 任何版本都可，多个需要 Pro
+pg addon safeline site update --name waf1 --site-id 3 \
+    --upstream http://10.0.0.6:8080 --upstream http://10.0.0.7:8080
+```
+
+给 TLS 站点绑定证书——可以先用 `cert create` 上传、再按 id 绑定，也可以一步上传并绑定：
+
+```bash
+# 先上传，之后按 id 复用到多个站点（id 由命令打印，也可用 cert list 查看）
+pg addon safeline cert create --name waf1 --cert fullchain.pem --key privkey.pem
+pg addon safeline site create --name waf1 --port 443_ssl --domain www.example.com \
+    --upstream http://10.0.0.5:8080 --cert-id 2
+
+# 一步上传并绑定（建站失败会自动回滚已上传的证书）
+pg addon safeline site create --name waf1 --port 443_ssl --domain www.example.com \
+    --upstream http://10.0.0.5:8080 --cert fullchain.pem --key privkey.pem
+```
+
+证书续期分两种情况：
+
+```bash
+# 同一张证书续期（临近过期）：在原有 id 上原地替换 PEM——所有绑定该证书的站点
+# 自动换用新证书，无需逐个改动，也无需 `pg addon reload`
+pg addon safeline cert update --name waf1 --cert-id 2 --cert new-fullchain.pem --key new-privkey.pem
+
+# 站点改用另一张证书：先存好新证书（也可复用 cert list 里的 id），再按 id 换绑
+pg addon safeline cert create --name waf1 --cert other-fullchain.pem --key other-privkey.pem  # -> id 5
+pg addon safeline site update --name waf1 --site-id 3 --cert-id 5
+```
+
+自定义错误页、ACL/限流等高级选项，以及带权重/备份角色的上游，仍在控制台 UI 中配置。
 
 ## 容器布局与网络
 
@@ -163,7 +258,7 @@ pg addon reload safeline --name waf1            # nginx -t + 平滑重载 tengin
 pg autostart enable --safeline --name waf1
 ```
 
-受防护站点及其流量端口仍由控制台配置，不受 autostart 影响。
+受防护站点及其流量端口由控制台或 `pg addon safeline site` 配置，不受 autostart 影响。
 
 ## 卸载
 
@@ -191,7 +286,10 @@ pg addon remove safeline --name waf1 --clean-data   # 同时删除 <data-dir>
 ## 限制
 
 - **仅 Linux + rootful podman**（静态 IP；host 网络流量代理）。
-- pgcli 只发布控制台端口；受防护站点的流量端口在控制台管理。
+- **社区版每站点单上游。** 内置控制台没有 Pro 授权，站点只能代理一个上游：`--add-upstream`、
+  多 URL 的 `--upstream`、带权重/备份角色的上游与负载均衡都会被控制台以 `license required`
+  拒绝；在控制台激活 Pro 授权后可用。
+- pgcli 只发布控制台端口；受防护站点的流量端口由 tengine 绑定，经控制台或 `pg addon safeline site` 创建。
 - 控制台使用 SafeLine 自带自签证书，不参与 `--tls` 体系。
 - pgcli 生成并管理内部 detector 管理令牌；其余上游可选密钥（`MGT_INTERNAL_TOKEN`、
   `DETECTOR_AES_KEY`、`MGT_LICENSE_INTEGRITY_KEY`、`RIVER_*`）保持上游默认值。

@@ -82,9 +82,92 @@ The console serves HTTPS with a self-signed certificate; browsers show the usual
 
 ## Protected sites and traffic ports
 
-Applications (protected sites) are configured **in the console**, not with pgcli flags. Each site gets an entry port on the host — 80/443 by default — served by the host-networked **tengine** container. Before adding a site, make sure the port is free on the host (`ss -tlnp`). In the firewall, open the console port and each site's entry port (80 and 443 by default).
+Applications (protected sites) are configured **in the console** or, for scripting, through `pg addon safeline site` (below). Each site gets an entry port on the host — 80/443 by default — served by the host-networked **tengine** container. Before adding a site, make sure the port is free on the host (`ss -tlnp`). In the firewall, open the console port and each site's entry port (80 and 443 by default).
 
 A site's upstream can be an IP or a host name (for example a load-balancer domain). tengine resolves host names from the host's DNS **when its config loads**, so after the load balancer's DNS records change, run `pg addon reload safeline --name waf1` to re-test and gracefully reload the tengine config — the new addresses take effect without restarting the stack or dropping in-flight requests.
+
+### Managing sites from the CLI
+
+`pg addon safeline site ...` drives the console's own web API with the stored admin password — the same encrypted login and `/api/open/site` calls the browser makes — so sites can be scripted without the UI. The stack must be running.
+
+> **Community Edition limit: one upstream per site.** The console pgcli installs runs without a Pro license, so a site can proxy to a single upstream. Adding a second upstream — and therefore any load balancing across servers — is refused by the console with `license required`; activate a Pro license in the console to use it.
+
+```bash
+pg addon safeline site list --name waf1
+pg addon safeline site create --name waf1 \
+    --port 443_ssl --domain www.example.com \
+    --upstream http://10.0.0.5:8080 \
+    --comment "web tier" \
+    --cert fullchain.pem --key privkey.pem \
+    --health-check --health-check-interval 30 --health-check-path /healthz
+pg addon safeline site update --name waf1 --site-id 3 --health-check=false
+pg addon safeline site health --name waf1
+pg addon safeline site delete --name waf1 --site-id 3
+
+pg addon safeline cert list --name waf1
+pg addon safeline cert create --name waf1 --cert fullchain.pem --key privkey.pem
+pg addon safeline cert update --name waf1 --cert-id 2 --cert fullchain.pem --key privkey.pem
+pg addon safeline cert delete --name waf1 --cert-id 2
+```
+
+- `--port` values are the host entry ports; suffix a port with `_ssl` to terminate TLS on it. `--cert`/`--key` upload a PEM certificate (leaf or full chain) and bind it in one step, `--cert-id` binds a certificate already stored in the console, and without either the console's default certificate is used. `--domain` defaults to `*` (any Host header).
+- `--upstream` takes absolute `http://` or `https://` URLs; `--balance` is `roundrobin` (default), `leastconn`, `iphash` or `backup`. `site update` replaces the whole list with `--upstream`, or changes it incrementally with `--add-upstream` / `--remove-upstream`. The bundled console runs as the Community Edition, which permits **one upstream per site** — a second one is refused with `license required`; load balancing across several upstreams needs a Pro license.
+- `--health-check` probes every upstream over HTTP every 10–3600 seconds at the given path. `site update` changes only the settings you pass (upstreams, health check and/or the bound certificate), leaving everything else at its console values.
+- `site health` probes the selected sites (all of them by default) and prints `healthy` or the console's error per upstream; it exits non-zero when any upstream is unhealthy, so it works as a monitoring gate. `site list` shows the site ids that `update`, `delete` and `health` take via `--site-id`.
+- `cert list` shows stored certificates with their covered domains, expiry and the sites using them. The console refuses to delete a certificate while a site's TLS entry port uses it, so delete or repoint the site first.
+
+A plain HTTP site needs no certificate — just an entry port and an upstream:
+
+```bash
+pg addon safeline site create --name waf1 \
+    --port 80 --domain www.example.com \
+    --upstream http://10.0.0.5:8080
+```
+
+tengine binds port 80 directly on the host, so it must be free (see `ss -tlnp`).
+
+To change an existing site's upstreams — replacing the list with a single upstream works on any edition, while adding/removing servers and multi-upstream lists need a Pro license:
+
+```bash
+# add a server, keeping the current ones (Pro)
+pg addon safeline site update --name waf1 --site-id 3 --add-upstream http://10.0.0.7:8080
+
+# drop a server (Pro, once more than one is configured)
+pg addon safeline site update --name waf1 --site-id 3 --remove-upstream http://10.0.0.5:8080
+
+# replace the whole list: one URL works on any edition, several need Pro
+pg addon safeline site update --name waf1 --site-id 3 \
+    --upstream http://10.0.0.6:8080 --upstream http://10.0.0.7:8080
+```
+
+Binding a certificate to a TLS site — either upload it once and bind by id, or upload and bind in one step:
+
+```bash
+# upload once, reuse by id (the id is printed and shown by `cert list`)
+pg addon safeline cert create --name waf1 --cert fullchain.pem --key privkey.pem
+pg addon safeline site create --name waf1 --port 443_ssl --domain www.example.com \
+    --upstream http://10.0.0.5:8080 --cert-id 2
+
+# upload and bind in one step (the certificate is rolled back if site creation fails)
+pg addon safeline site create --name waf1 --port 443_ssl --domain www.example.com \
+    --upstream http://10.0.0.5:8080 --cert fullchain.pem --key privkey.pem
+```
+
+Renewing is two different operations, depending on what changed:
+
+```bash
+# same certificate renewed (expiry approaching): replace the PEM in place under
+# the existing id — every site bound to it serves the new certificate without
+# being touched and without a reload
+pg addon safeline cert update --name waf1 --cert-id 2 --cert new-fullchain.pem --key new-privkey.pem
+
+# the site should serve a different certificate altogether: store the new one
+# (or reuse an id from `cert list`) and rebind the site
+pg addon safeline cert create --name waf1 --cert other-fullchain.pem --key other-privkey.pem  # -> id 5
+pg addon safeline site update --name waf1 --site-id 3 --cert-id 5
+```
+
+Custom error pages, ACL/rate-limit options and upstream weights/backup roles stay in the console UI.
 
 ## Container layout and networking
 
@@ -138,7 +221,7 @@ Autostart starts the whole stack on boot in dependency order, and recovers the c
 pg autostart enable --safeline --name waf1
 ```
 
-The protected sites and their traffic ports are still configured in the console, not through autostart.
+The protected sites and their traffic ports are configured in the console or with `pg addon safeline site`, not through autostart.
 
 ## Uninstall
 
@@ -161,7 +244,8 @@ The dedicated bridge network is removed once no containers are attached. Without
 ## Limitations
 
 - **Linux + rootful podman only** (static IPs; host-network traffic proxy).
-- Only the console port is published by pgcli; the per-site traffic ports are managed in the console.
+- **One upstream per site (Community Edition).** The bundled console runs without a Pro license, so a site proxies to a single upstream: `--add-upstream`, a multi-URL `--upstream`, weighted/backup upstreams and load balancing are refused with `license required`. Activate a Pro license in the console to use them.
+- Only the console port is published by pgcli; per-site traffic ports are bound by tengine and created through the console or `pg addon safeline site`.
 - The console uses SafeLine's own self-signed certificate; no `--tls` integration.
 - pgcli generates and manages the internal detector management token; the other optional upstream secrets (`MGT_INTERNAL_TOKEN`, `DETECTOR_AES_KEY`, `MGT_LICENSE_INTEGRITY_KEY`, `RIVER_*`) are left at their upstream defaults.
 - SafeLine keeps its state in the bundled PostgreSQL inside `--data-dir`; pgcli's PITR/backup add-ons target pgcli instances and do not back this database up.

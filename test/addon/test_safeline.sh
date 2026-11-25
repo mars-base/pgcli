@@ -40,6 +40,17 @@
 #      (www.baidu.com) are proxied through tengine on the new sites' entry
 #      ports, and a hostname upstream picks up its new address only after
 #      `pg addon reload`.
+#   8. CLI SITES — `pg addon safeline site` drives that same console API from
+#      pgcli: a site is created with health checks, served by tengine, reported
+#      healthy by `site health`, then reported unreachable (non-zero exit) once
+#      its upstream stops; `site update` (health check, upstream add/remove/
+#      replace) and `site delete` round out the lifecycle. `pg addon safeline
+#      cert` uploads a certificate, the certificate
+#      is bound to a TLS site and verified on the wire, renewed IN PLACE with
+#      `cert update` (the bound site serves the new certificate without being
+#      touched), the site is rebound to a second certificate with
+#      `site update --cert-id`, deletion is refused while bound, and succeeds
+#      once the site is gone.
 #
 # Usage:
 #   bash test/addon/test_safeline.sh                   # full test, cleans up
@@ -602,7 +613,227 @@ main() {
             ! curl -s --max-time 2 -H "Host: www.baidu.com" "http://127.0.0.1:$BAIDU_SITE_PORT/" | grep -q 百度一下
     }
     run_test "deleted sites stop being served" eventually sites_gone
+
+    # ---- CLI site management and health checks ----
+    section "CLI site management and health checks"
+    # `pg addon safeline site` logs in with the stored admin password and calls
+    # the same /api/open/site endpoints the UI does. Create a site with a
+    # health check, confirm tengine serves it and the console reports the
+    # upstream healthy, then stop the upstream and expect an unreachable probe
+    # with a non-zero exit; update and delete close the lifecycle.
+    CLI_SITE_PORT="$(free_port)"
+    while [ "$CLI_SITE_PORT" = "$UPSTREAM_PORT" ] || [ "$CLI_SITE_PORT" = "$SITE_PORT" ] ||
+          [ "$CLI_SITE_PORT" = "$DNS_SITE_PORT" ] || [ "$CLI_SITE_PORT" = "$BAIDU_SITE_PORT" ]; do
+        CLI_SITE_PORT="$(free_port)"
+    done
+    CLI_DOMAIN="sfe2e-cli.test"
+    CLI_SITE_ID=""
+    create_cli_site() {
+        local out id
+        out="$(pg addon safeline site create --name "$STACK" --port "$CLI_SITE_PORT" --domain "$CLI_DOMAIN" \
+            --upstream "http://$HOST_IP:$UPSTREAM_PORT" --comment e2e-cli --balance leastconn \
+            --health-check --health-check-interval 10 --health-check-path / 2>&1)" || { echo "$out" >&2; return 1; }
+        id="$(printf '%s\n' "$out" | sed -n 's/^✓ Created SafeLine site \([0-9][0-9]*\)$/\1/p')"
+        [[ "$id" =~ ^[0-9]+$ ]] || { echo "$out" >&2; return 1; }
+        CLI_SITE_ID="$id"
+    }
+    run_test "site created through the CLI with health checks" create_cli_site
+    cli_row() {  # cli_row — the site-list line of the CLI-created site
+        pg addon safeline site list --name "$STACK" | awk -v id="$CLI_SITE_ID" '$1 == id'
+    }
+    cli_site_listed() {
+        local row
+        row="$(cli_row)" || return 1
+        contains "$row" "$CLI_DOMAIN" && contains "$row" "every 10s /" && contains "$row" "e2e-cli"
+    }
+    run_test "site list shows the CLI site with its health settings" cli_site_listed
+    run_test "tengine serves the CLI-created site" \
+        wait_body "http://127.0.0.1:$CLI_SITE_PORT/" "e2e-upstream-a" "$CLI_DOMAIN"
+    cli_healthy() {
+        local out
+        out="$(pg addon safeline site health --name "$STACK" --site-id "$CLI_SITE_ID" 2>&1)" || { echo "$out" >&2; return 1; }
+        contains "$out" "healthy" && ! contains "$out" "unreachable"
+    }
+    run_test "site health reports the upstream healthy" cli_healthy
     stop_upstreams
+    run_fails "site health reports a stopped upstream unreachable (non-zero exit)" "unreachable" \
+        pg addon safeline site health --name "$STACK" --site-id "$CLI_SITE_ID"
+    run_fails "site update requires --site-id" "site-id is required" \
+        pg addon safeline site update --name "$STACK" --health-check=false
+    run_fails "site update rejects an out-of-range health check interval" "between 10 and 3600" \
+        pg addon safeline site update --name "$STACK" --site-id "$CLI_SITE_ID" --health-check-interval 5
+    run_grep "site update disables the health check" "Health:     off" \
+        pg addon safeline site update --name "$STACK" --site-id "$CLI_SITE_ID" --health-check=false
+    cli_site_kept() {
+        local row
+        row="$(cli_row)" || return 1
+        contains "$row" "$CLI_DOMAIN" && contains "$row" "e2e-cli" && ! contains "$row" "every 10s"
+    }
+    run_test "disabling the health check keeps the rest of the site" cli_site_kept
+
+    # Updating an existing site's upstreams: --upstream replaces the list and
+    # --add-upstream/--remove-upstream change it incrementally. The bundled
+    # console runs as the Community Edition, which allows ONE upstream per
+    # site: a second upstream is refused with "license required" (load
+    # balancing needs Pro). A fresh server proves tengine follows a replace.
+    UPSTREAM_ADD1_PORT="$(free_port)"
+    while [ "$UPSTREAM_ADD1_PORT" = "$UPSTREAM_PORT" ] || [ "$UPSTREAM_ADD1_PORT" = "$SITE_PORT" ] ||
+          [ "$UPSTREAM_ADD1_PORT" = "$DNS_SITE_PORT" ] || [ "$UPSTREAM_ADD1_PORT" = "$BAIDU_SITE_PORT" ] ||
+          [ "$UPSTREAM_ADD1_PORT" = "$CLI_SITE_PORT" ]; do
+        UPSTREAM_ADD1_PORT="$(free_port)"
+    done
+    mkdir -p "$TEST_DIR/upstream-add1"
+    printf 'e2e-upstream-add-1\n' > "$TEST_DIR/upstream-add1/index.html"
+    ( cd "$TEST_DIR/upstream-add1" && exec python3 -m http.server "$UPSTREAM_ADD1_PORT" --bind "$HOST_IP" ) >"$LOG_DIR/upstream-add1.log" 2>&1 &
+    UPSTREAM_PIDS="$UPSTREAM_PIDS $!"
+    run_grep "site update --upstream replaces the upstream list" \
+        "Upstreams:  http://$HOST_IP:$UPSTREAM_ADD1_PORT" \
+        pg addon safeline site update --name "$STACK" --site-id "$CLI_SITE_ID" \
+            --upstream "http://$HOST_IP:$UPSTREAM_ADD1_PORT"
+    run_test "tengine serves the replaced upstream" \
+        wait_body "http://127.0.0.1:$CLI_SITE_PORT/" "e2e-upstream-add-1" "$CLI_DOMAIN"
+    run_fails "adding a second upstream hits the Community Edition license limit" \
+        "allows one upstream per site" \
+        pg addon safeline site update --name "$STACK" --site-id "$CLI_SITE_ID" \
+            --add-upstream "http://$HOST_IP:1"
+    still_single_upstream() {
+        local row
+        row="$(cli_row)" || return 1
+        contains "$row" "$HOST_IP:$UPSTREAM_ADD1_PORT" && ! contains "$row" "http://$HOST_IP:1 "
+    }
+    run_test "the refused add leaves the site untouched" still_single_upstream
+    run_fails "replacing with two upstreams hits the Community Edition license limit" \
+        "allows one upstream per site" \
+        pg addon safeline site update --name "$STACK" --site-id "$CLI_SITE_ID" \
+            --upstream "http://$HOST_IP:$UPSTREAM_ADD1_PORT" --upstream "http://$HOST_IP:1"
+    run_fails "removing the last upstream is refused" "cannot remove every upstream" \
+        pg addon safeline site update --name "$STACK" --site-id "$CLI_SITE_ID" \
+            --remove-upstream "http://$HOST_IP:$UPSTREAM_ADD1_PORT"
+    run_fails "removing an upstream that is not configured is refused" "not configured" \
+        pg addon safeline site update --name "$STACK" --site-id "$CLI_SITE_ID" \
+            --remove-upstream "http://$HOST_IP:1"
+    run_fails "--upstream cannot be combined with --add-upstream" "do not combine" \
+        pg addon safeline site update --name "$STACK" --site-id "$CLI_SITE_ID" \
+            --upstream "http://$HOST_IP:$UPSTREAM_ADD1_PORT" --add-upstream "http://$HOST_IP:1"
+
+    run_grep "site delete removes the CLI-created site" "Deleted SafeLine site(s): $CLI_SITE_ID" \
+        pg addon safeline site delete --name "$STACK" --site-id "$CLI_SITE_ID"
+    cli_site_gone() {
+        [[ -z "$(cli_row 2>/dev/null)" ]] &&
+            ! curl -s --max-time 2 -H "Host: $CLI_DOMAIN" "http://127.0.0.1:$CLI_SITE_PORT/" | grep -q e2e-upstream-a
+    }
+    run_test "deleted CLI site stops being served" eventually cli_site_gone
+
+    # ---- CLI certificate management ----
+    section "CLI certificate management"
+    # Upload a self-signed certificate with `cert create`, bind it to a TLS
+    # site with --cert-id, and verify tengine actually terminates TLS with it.
+    # The console refuses to delete a bound certificate; once the site is gone
+    # the delete succeeds.
+    CLI_TLS_PORT="$(free_port)"
+    while [ "$CLI_TLS_PORT" = "$CLI_SITE_PORT" ] || [ "$CLI_TLS_PORT" = "$SITE_PORT" ] ||
+          [ "$CLI_TLS_PORT" = "$DNS_SITE_PORT" ] || [ "$CLI_TLS_PORT" = "$BAIDU_SITE_PORT" ]; do
+        CLI_TLS_PORT="$(free_port)"
+    done
+    openssl req -x509 -newkey rsa:2048 -nodes -days 7 \
+        -subj "/CN=www.cli-tls.test" -addext "subjectAltName=DNS:www.cli-tls.test" \
+        -keyout "$TEST_DIR/cli-key.pem" -out "$TEST_DIR/cli-crt.pem" >/dev/null 2>&1
+    CERT_ID=""
+    upload_cert() {
+        local out id
+        out="$(pg addon safeline cert create --name "$STACK" \
+            --cert "$TEST_DIR/cli-crt.pem" --key "$TEST_DIR/cli-key.pem" 2>&1)" || { echo "$out" >&2; return 1; }
+        id="$(printf '%s\n' "$out" | sed -n 's/^✓ Uploaded SafeLine certificate \([0-9][0-9]*\)$/\1/p')"
+        [[ "$id" =~ ^[0-9]+$ ]] || { echo "$out" >&2; return 1; }
+        CERT_ID="$id"
+    }
+    run_test "certificate uploaded through the CLI" upload_cert
+    cert_listed() {
+        pg addon safeline cert list --name "$STACK" | awk -v id="$CERT_ID" '$1 == id' | grep -q www.cli-tls.test
+    }
+    run_test "cert list shows the uploaded certificate" cert_listed
+    CLI_TLS_SITE_ID=""
+    create_tls_site() {
+        local out id
+        out="$(pg addon safeline site create --name "$STACK" --port "${CLI_TLS_PORT}_ssl" \
+            --domain www.cli-tls.test --upstream "http://$HOST_IP:$UNUSED_UPSTREAM_PORT" \
+            --comment e2e-tls --cert-id "$CERT_ID" 2>&1)" || { echo "$out" >&2; return 1; }
+        id="$(printf '%s\n' "$out" | sed -n 's/^✓ Created SafeLine site \([0-9][0-9]*\)$/\1/p')"
+        [[ "$id" =~ ^[0-9]+$ ]] || { echo "$out" >&2; return 1; }
+        CLI_TLS_SITE_ID="$id"
+    }
+    # The upstream need not be reachable: TLS terminates at tengine before any
+    # upstream connection is attempted.
+    UNUSED_UPSTREAM_PORT="$(free_port)"
+    run_test "TLS site created through the CLI with the uploaded certificate" create_tls_site
+    tls_cert_served() {
+        local out
+        out="$(echo | timeout 8 openssl s_client -connect "127.0.0.1:$CLI_TLS_PORT" \
+            -servername www.cli-tls.test 2>/dev/null | openssl x509 -noout -subject 2>/dev/null)" || true
+        [[ "$out" == *"www.cli-tls.test"* ]]
+    }
+    run_test "tengine terminates TLS with the uploaded certificate" eventually tls_cert_served
+
+    # Renewal, path 1: `cert update` replaces the PEM in place and every site
+    # bound to the certificate serves the new one without being touched.
+    openssl req -x509 -newkey rsa:2048 -nodes -days 7 \
+        -subj "/CN=www.cli-tls-renewed.test" -addext "subjectAltName=DNS:www.cli-tls-renewed.test" \
+        -keyout "$TEST_DIR/cli-key-renewed.pem" -out "$TEST_DIR/cli-crt-renewed.pem" >/dev/null 2>&1
+    run_fails "cert update requires --cert-id" "cert-id is required" \
+        pg addon safeline cert update --name "$STACK" \
+        --cert "$TEST_DIR/cli-crt-renewed.pem" --key "$TEST_DIR/cli-key-renewed.pem"
+    run_grep "cert update replaces the certificate in place" "Updated SafeLine certificate $CERT_ID" \
+        pg addon safeline cert update --name "$STACK" --cert-id "$CERT_ID" \
+        --cert "$TEST_DIR/cli-crt-renewed.pem" --key "$TEST_DIR/cli-key-renewed.pem"
+    renewed_cert_served() {
+        local out
+        out="$(echo | timeout 8 openssl s_client -connect "127.0.0.1:$CLI_TLS_PORT" \
+            -servername www.cli-tls.test 2>/dev/null | openssl x509 -noout -subject 2>/dev/null)" || true
+        [[ "$out" == *"www.cli-tls-renewed.test"* ]]
+    }
+    run_test "bound site serves the renewed certificate" eventually renewed_cert_served
+    cert_listed_renewed() {
+        pg addon safeline cert list --name "$STACK" | awk -v id="$CERT_ID" '$1 == id' | grep -q www.cli-tls-renewed.test
+    }
+    run_test "cert list shows the renewed certificate under the same id" cert_listed_renewed
+
+    # Renewal, path 2: rebind the site to a different stored certificate.
+    openssl req -x509 -newkey rsa:2048 -nodes -days 7 \
+        -subj "/CN=www.cli-tls-rebind.test" -addext "subjectAltName=DNS:www.cli-tls-rebind.test" \
+        -keyout "$TEST_DIR/cli-key-rebind.pem" -out "$TEST_DIR/cli-crt-rebind.pem" >/dev/null 2>&1
+    CERT2_ID=""
+    upload_cert2() {
+        local out id
+        out="$(pg addon safeline cert create --name "$STACK" \
+            --cert "$TEST_DIR/cli-crt-rebind.pem" --key "$TEST_DIR/cli-key-rebind.pem" 2>&1)" || { echo "$out" >&2; return 1; }
+        id="$(printf '%s\n' "$out" | sed -n 's/^✓ Uploaded SafeLine certificate \([0-9][0-9]*\)$/\1/p')"
+        [[ "$id" =~ ^[0-9]+$ ]] || { echo "$out" >&2; return 1; }
+        CERT2_ID="$id"
+    }
+    run_test "second certificate uploaded for the rebind" upload_cert2
+    run_fails "site update with no changes is refused" "nothing to update" \
+        pg addon safeline site update --name "$STACK" --site-id "$CLI_TLS_SITE_ID"
+    run_grep "site update --cert-id rebinds the site" "Certificate: $CERT2_ID" \
+        pg addon safeline site update --name "$STACK" --site-id "$CLI_TLS_SITE_ID" --cert-id "$CERT2_ID"
+    rebind_cert_served() {
+        local out
+        out="$(echo | timeout 8 openssl s_client -connect "127.0.0.1:$CLI_TLS_PORT" \
+            -servername www.cli-tls.test 2>/dev/null | openssl x509 -noout -subject 2>/dev/null)" || true
+        [[ "$out" == *"www.cli-tls-rebind.test"* ]]
+    }
+    run_test "site serves the rebound certificate" eventually rebind_cert_served
+
+    run_fails "cert delete is refused while a site uses the certificate" "cert Is Used On Website" \
+        pg addon safeline cert delete --name "$STACK" --cert-id "$CERT2_ID"
+    run_grep "site delete removes the TLS site" "Deleted SafeLine site(s): $CLI_TLS_SITE_ID" \
+        pg addon safeline site delete --name "$STACK" --site-id "$CLI_TLS_SITE_ID"
+    run_grep "cert delete succeeds once the site is gone" "Deleted SafeLine certificate(s): $CERT_ID, $CERT2_ID" \
+        pg addon safeline cert delete --name "$STACK" --cert-id "$CERT_ID,$CERT2_ID"
+    cert_gone() {
+        ! pg addon safeline cert list --name "$STACK" | awk -v id="$CERT_ID" '$1 == id' | grep -q . \
+            && ! pg addon safeline cert list --name "$STACK" | awk -v id="$CERT2_ID" '$1 == id' | grep -q .
+    }
+    run_test "deleted certificates no longer listed" cert_gone
 
     # ---- Idempotency and drift ----
     section "Idempotency and drift"
