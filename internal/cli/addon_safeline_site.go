@@ -34,9 +34,10 @@ tengine rules are published immediately, exactly as if the site had been
 created in the browser.
 
 Subcommands:
-  site     List, create, update, delete and health-check protected sites
-  site cc  View and change a site's CC protection (waiting room, rate limits)
-  cert     List, upload, renew and delete TLS certificates
+  site       List, create, update, delete and health-check protected sites
+  site cc    View and change a site's CC protection (waiting room, rate limits)
+  cert       List, upload, renew and delete TLS certificates
+  telemetry  View and switch off the console's threat-intelligence sharing
 
 Examples:
   pg addon safeline site list
@@ -46,7 +47,8 @@ Examples:
   pg addon safeline site mode --site-id 3 dryrun
   pg addon safeline site cc show --site-id 3
   pg addon safeline cert update --cert-id 2 --cert fullchain.pem --key privkey.pem
-  pg addon safeline cert list`,
+  pg addon safeline cert list
+  pg addon safeline telemetry disable`,
 }
 
 var addonSafelineSiteCmd = &cobra.Command{

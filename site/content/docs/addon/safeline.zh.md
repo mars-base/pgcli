@@ -468,6 +468,41 @@ m_file_upload         balance
 （`m_response`）与加强规则模块（`m_rule`）。单模块档位仍在控制台 UI 中配置。
 变更立即下发到检测引擎，在站点处于防护模式（defense）时生效。
 
+### 威胁情报共享（威胁情报共享计划）
+
+控制台「通用设置 → 威胁情报共享计划」下有三个开关，把本机检测到的数据上报给
+长亭的威胁情报服务器：
+
+| 开关 | 控制台名称 | 共享内容 |
+|---|---|---|
+| `malicious-ips` | IP 情报共享计划（共享恶意 IP 信息） | 本机检测到的恶意 IP |
+| `threat-intel` | 共享威胁情报 | 公网攻击 IP 与关键攻击日志（脱敏加密后上报） |
+| `fingerprint` | 浏览器指纹信息共享计划（共享浏览器指纹信息） | 浏览器指纹 |
+
+`pg addon safeline telemetry` 查看与切换这三个开关：
+
+```bash
+# 查看三个开关
+pg addon safeline telemetry show --name waf1
+
+# 全部关闭——私有化部署的常见选择
+pg addon safeline telemetry disable --name waf1
+
+# 全部重新开启
+pg addon safeline telemetry enable --name waf1
+```
+
+```text
+Threat-intelligence sharing on "waf1":
+SWITCH         STATE     CONSOLE SETTING
+malicious-ips  disabled  IP 情报共享计划（共享恶意 IP 信息）
+threat-intel   disabled  共享威胁情报
+fingerprint    disabled  浏览器指纹信息共享计划
+```
+
+这些开关只控制对外共享与恶意 IP 情报组：全部关闭时内置检测模块照常工作。命令会与
+控制台对账，只写入状态不同的开关。
+
 ## 容器布局与网络
 
 | 角色 | 网络 | 地址 | 用途 |

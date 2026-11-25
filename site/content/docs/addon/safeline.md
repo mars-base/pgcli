@@ -448,6 +448,42 @@ enhanced-rules module (`m_rule`). Individual module levels stay in the console
 UI. Changes publish to the detection engine immediately, and they apply while
 the site runs in defense mode.
 
+### Threat-intelligence sharing (威胁情报共享计划)
+
+The console's 通用设置 → 威胁情报共享计划 carries three switches that report
+what this instance detects back to Chaitin's threat-intelligence servers:
+
+| Switch | Console label | Shares |
+|---|---|---|
+| `malicious-ips` | IP 情报共享计划 (共享恶意 IP 信息) | malicious IPs detected by this instance |
+| `threat-intel` | 共享威胁情报 | attack IPs and key attack logs (desensitized and encrypted) |
+| `fingerprint` | 浏览器指纹信息共享计划 (共享浏览器指纹信息) | browser fingerprints |
+
+`pg addon safeline telemetry` reads and switches them:
+
+```bash
+# the three switches
+pg addon safeline telemetry show --name waf1
+
+# report nothing — the usual choice for private deployments
+pg addon safeline telemetry disable --name waf1
+
+# turn every switch back on
+pg addon safeline telemetry enable --name waf1
+```
+
+```text
+Threat-intelligence sharing on "waf1":
+SWITCH         STATE     CONSOLE SETTING
+malicious-ips  disabled  IP 情报共享计划（共享恶意 IP 信息）
+threat-intel   disabled  共享威胁情报
+fingerprint    disabled  浏览器指纹信息共享计划
+```
+
+The switches only control outbound sharing and the malicious-IP intelligence
+groups: the built-in detection modules keep working with all of them off. The
+commands compare against the console and only write the switches that differ.
+
 ## Container layout and networking
 
 | Role | Network | Address | Purpose |

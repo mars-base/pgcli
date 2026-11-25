@@ -1131,6 +1131,84 @@ func (c *Client) SetSiteBot(siteID int, enable bool, expire int, negate bool, pa
 	}, nil)
 }
 
+// The console's 通用设置 → 威胁情报共享计划 reports what this instance detects
+// back to Chaitin's threat-intelligence servers. The three switches are
+// independent, each behind its own endpoint — and each endpoint names its
+// switch differently (share_enabled, enabled, enable) — so they are exposed
+// here as one struct.
+
+// TelemetryState is the threat-intelligence sharing switch set.
+type TelemetryState struct {
+	ShareAttackIPs   bool // IP 情报共享计划: malicious IPs detected by this instance
+	ShareThreatIntel bool // 共享威胁情报
+	ShareFingerprint bool // 浏览器指纹信息共享计划
+}
+
+// GetTelemetry reads the three sharing switches.
+func (c *Client) GetTelemetry() (*TelemetryState, error) {
+	var intel struct {
+		ShareEnabled bool `json:"share_enabled"`
+	}
+	if err := c.do(http.MethodGet, "/api/open/intelligence", nil, &intel); err != nil {
+		return nil, err
+	}
+	var plan struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := c.do(http.MethodGet, "/api/open/share-plan-v2", nil, &plan); err != nil {
+		return nil, err
+	}
+	var fingerprint bool
+	if err := c.do(http.MethodGet, "/api/open/share_fingerprint", nil, &fingerprint); err != nil {
+		return nil, err
+	}
+	return &TelemetryState{
+		ShareAttackIPs:   intel.ShareEnabled,
+		ShareThreatIntel: plan.Enabled,
+		ShareFingerprint: fingerprint,
+	}, nil
+}
+
+// SetTelemetry writes the switches that differ from cur, leaving the others
+// untouched, and returns the CLI names of the switches it wrote.
+func (c *Client) SetTelemetry(cur, want TelemetryState) ([]string, error) {
+	var changed []string
+	if cur.ShareAttackIPs != want.ShareAttackIPs {
+		if err := c.do(http.MethodPost, "/api/open/intelligence", map[string]any{"share_enabled": want.ShareAttackIPs}, nil); err != nil {
+			return changed, fmt.Errorf("malicious-ips: %w", err)
+		}
+		changed = append(changed, "malicious-ips")
+	}
+	if cur.ShareThreatIntel != want.ShareThreatIntel {
+		if err := c.do(http.MethodPost, "/api/open/share-plan-v2", map[string]any{"enabled": want.ShareThreatIntel}, nil); err != nil {
+			return changed, fmt.Errorf("threat-intel: %w", err)
+		}
+		changed = append(changed, "threat-intel")
+	}
+	if cur.ShareFingerprint != want.ShareFingerprint {
+		if err := c.do(http.MethodPost, "/api/open/share_fingerprint", map[string]any{"enable": want.ShareFingerprint}, nil); err != nil {
+			return changed, fmt.Errorf("fingerprint: %w", err)
+		}
+		changed = append(changed, "fingerprint")
+	}
+	return changed, nil
+}
+
+// TelemetryMismatch lists the switches that do not read back as want.
+func TelemetryMismatch(t TelemetryState, want bool) []string {
+	var out []string
+	if t.ShareAttackIPs != want {
+		out = append(out, "malicious-ips")
+	}
+	if t.ShareThreatIntel != want {
+		out = append(out, "threat-intel")
+	}
+	if t.ShareFingerprint != want {
+		out = append(out, "fingerprint")
+	}
+	return out
+}
+
 // ValidateRateLimitRule mirrors the console form's bounds for an enabled or
 // disabled rule: window 10-600 seconds, at least one request per window and a
 // 1-1440 minute block.
