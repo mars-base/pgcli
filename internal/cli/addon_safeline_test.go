@@ -305,3 +305,56 @@ func TestSafelineSiteModeCommandRegistered(t *testing.T) {
 		t.Errorf("mode --site-id flag = %+v, want an intSlice flag", f)
 	}
 }
+
+func TestSafelineSiteCcCommandsRegistered(t *testing.T) {
+	found := false
+	for _, c := range addonSafelineSiteCmd.Commands() {
+		if c.Name() == "cc" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("pg addon safeline site cc is not registered")
+	}
+	subs := map[string]bool{"show": false, "waiting-room": false, "rate-limit": false}
+	for _, c := range addonSafelineSiteCcCmd.Commands() {
+		if _, ok := subs[c.Name()]; ok {
+			subs[c.Name()] = true
+		}
+	}
+	for name, ok := range subs {
+		if !ok {
+			t.Errorf("cc subcommand %q is not registered", name)
+		}
+	}
+	for _, f := range []struct {
+		cmd  *cobra.Command
+		name string
+		typ  string
+	}{
+		{addonSafelineSiteCcShowCmd, "site-id", "int"},
+		{addonSafelineSiteCcWaitingRoomCmd, "site-id", "int"},
+		{addonSafelineSiteCcWaitingRoomCmd, "enabled", "bool"},
+		{addonSafelineSiteCcWaitingRoomCmd, "max-concurrent", "int"},
+		{addonSafelineSiteCcWaitingRoomCmd, "session-timeout", "int"},
+		{addonSafelineSiteCcRateLimitCmd, "site-id", "int"},
+		{addonSafelineSiteCcRateLimitCmd, "global", "bool"},
+		{addonSafelineSiteCcRateLimitCmd, "use-global", "bool"},
+		{addonSafelineSiteCcRateLimitCmd, "type", "string"},
+		{addonSafelineSiteCcRateLimitCmd, "enabled", "bool"},
+		{addonSafelineSiteCcRateLimitCmd, "period", "int"},
+		{addonSafelineSiteCcRateLimitCmd, "count", "int"},
+		{addonSafelineSiteCcRateLimitCmd, "action", "string"},
+		{addonSafelineSiteCcRateLimitCmd, "block-min", "int"},
+	} {
+		fl := f.cmd.Flags().Lookup(f.name)
+		if fl == nil {
+			t.Errorf("%s: --%s is not registered", f.cmd.Name(), f.name)
+			continue
+		}
+		if fl.Value.Type() != f.typ {
+			t.Errorf("%s: --%s is %s, want %s", f.cmd.Name(), f.name, fl.Value.Type(), f.typ)
+		}
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -153,6 +154,8 @@ type fakeConsole struct {
 	loginBody  map[string]string
 	siteList   any
 	rawSite    map[string]any
+	waiting    any
+	aclRules   any
 	requests   []*http.Request
 	lastBodies map[string]map[string]any
 	createResp any
@@ -267,6 +270,37 @@ func (f *fakeConsole) handler() http.Handler {
 			decodeBody(f.t, r, &body)
 			f.lastBodies["POST /api/open/site/healthcheck"] = body
 			writeJSON(w, map[string]any{"data": f.health, "err": nil, "msg": ""})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/waiting") {
+			switch r.Method {
+			case http.MethodGet:
+				writeJSON(w, map[string]any{"data": f.waiting, "err": nil, "msg": ""})
+			case http.MethodPost:
+				var body map[string]any
+				decodeBody(f.t, r, &body)
+				f.lastBodies["POST "+r.URL.Path] = body
+				writeJSON(w, map[string]any{"data": nil, "err": nil, "msg": ""})
+			}
+			return
+		}
+		if i := strings.Index(r.URL.Path, "/acl"); i >= 0 {
+			rest := r.URL.Path[i:]
+			switch {
+			case rest == "/acl" && r.Method == http.MethodGet:
+				writeJSON(w, map[string]any{"data": f.aclRules, "err": nil, "msg": ""})
+			case rest == "/acl" && r.Method == http.MethodPut:
+				var body map[string]any
+				decodeBody(f.t, r, &body)
+				f.lastBodies["PUT "+r.URL.Path] = body
+				writeJSON(w, map[string]any{"data": nil, "err": nil, "msg": ""})
+			case strings.HasPrefix(rest, "/acl/") && r.Method == http.MethodPut:
+				var body map[string]any
+				decodeBody(f.t, r, &body)
+				f.lastBodies["PUT "+r.URL.Path] = body
+				id, _ := strconv.Atoi(rest[len("/acl/"):])
+				writeJSON(w, map[string]any{"data": id, "err": nil, "msg": ""})
+			}
 			return
 		}
 		writeJSON(w, map[string]any{"data": f.rawSite, "err": nil, "msg": ""})
@@ -687,5 +721,144 @@ func TestHealthCheck(t *testing.T) {
 	hosts, _ := body["hosts"].([]any)
 	if len(hosts) != 1 || hosts[0] != "a.test" {
 		t.Errorf("hosts = %v", body["hosts"])
+	}
+}
+
+func TestWaitingRoomEndpoints(t *testing.T) {
+	fc := newFakeConsole(t, "pw")
+	fc.waiting = map[string]any{
+		"id": 1, "name": "website_waiting_room_4", "is_enabled": true,
+		"max_concurrent": 7, "max_waiting": 0, "session_timeout": 4,
+		"website_id": 4,
+		"created_at": "2026-11-25T11:45:36.808774+08:00",
+		"updated_at": "2026-11-25T11:45:36.808774+08:00",
+	}
+	c := newTestClient(t, fc)
+	wr, err := c.GetWaitingRoom(4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wr.ID != 1 || !wr.IsEnabled || wr.MaxConcurrent != 7 || wr.SessionTimeout != 4 ||
+		wr.WebsiteID != 4 || !strings.HasPrefix(wr.CreatedAt, "2026-11-25") {
+		t.Errorf("waiting room = %+v", wr)
+	}
+
+	if err := c.SetWaitingRoom(4, WaitingRoom{IsEnabled: true, MaxConcurrent: 7, SessionTimeout: 4}); err != nil {
+		t.Fatal(err)
+	}
+	body := fc.lastBodies["POST /api/open/site/4/waiting"]
+	if len(body) != 3 || body["is_enabled"] != true ||
+		body["max_concurrent"] != float64(7) || body["session_timeout"] != float64(4) {
+		t.Errorf("POST body = %v", body)
+	}
+}
+
+func TestRateLimitEndpoints(t *testing.T) {
+	fc := newFakeConsole(t, "pw")
+	fc.aclRules = []map[string]any{
+		{"id": 14, "site_id": 4, "type": "attack", "priority": 2, "enabled": false,
+			"period": 60, "count": 10, "block_min": 30, "action": "block", "use_global": true},
+		{"id": 15, "site_id": 4, "type": "error", "priority": 1, "enabled": false,
+			"period": 10, "count": 10, "block_min": 30, "action": "block", "use_global": true,
+			"conditions": []any{map[string]any{
+				"strategy":  "status_code",
+				"condition": map[string]any{"field": "", "operator": "eq", "value": []string{"403", "404"}},
+			}}},
+		{"id": 13, "site_id": 4, "type": "req", "priority": 3, "enabled": true,
+			"period": 10, "count": 100, "block_min": 60, "action": "challenge_v1", "use_global": true},
+	}
+	c := newTestClient(t, fc)
+	rules, err := c.ListRateLimits(4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 3 || rules[0].Type != "attack" || rules[2].Action != "challenge_v1" {
+		t.Fatalf("rules = %+v", rules)
+	}
+	cond := rules[1].Conditions
+	if len(cond) != 1 || cond[0].Strategy != "status_code" || cond[0].Condition.Operator != "eq" ||
+		len(cond[0].Condition.Value) != 2 || cond[0].Condition.Value[1] != "404" {
+		t.Errorf("conditions = %+v", cond)
+	}
+	if !RateLimitsFollowGlobal(rules) {
+		t.Error("global rule set not detected")
+	}
+	rules[0].UseGlobal, rules[1].UseGlobal, rules[2].UseGlobal = false, false, false
+	if RateLimitsFollowGlobal(rules) {
+		t.Error("custom rule set detected as global")
+	}
+
+	if err := c.UseGlobalRateLimits(4); err != nil {
+		t.Fatal(err)
+	}
+	body := fc.lastBodies["PUT /api/open/site/4/acl"]
+	if len(body) != 1 || body["use_global"] != true {
+		t.Errorf("use-global body = %v", body)
+	}
+
+	custom := []RateLimitRule{{ID: 19, SiteID: 4, Type: "req", Period: 10, Count: 50,
+		Action: "block", BlockMin: 5, Enabled: true}}
+	if err := c.SetCustomRateLimits(4, custom); err != nil {
+		t.Fatal(err)
+	}
+	body = fc.lastBodies["PUT /api/open/site/4/acl"]
+	if body["use_global"] != false {
+		t.Errorf("custom use_global = %v", body["use_global"])
+	}
+	sent, _ := body["rules"].([]any)
+	if len(sent) != 1 {
+		t.Fatalf("custom rules = %v", body["rules"])
+	}
+	if rule, _ := sent[0].(map[string]any); rule["count"] != float64(50) || rule["action"] != "block" {
+		t.Errorf("custom rule = %v", sent[0])
+	}
+
+	rule := rules[0]
+	rule.Count = 11
+	if err := c.UpdateRateLimit(0, rule); err != nil {
+		t.Fatal(err)
+	}
+	body = fc.lastBodies["PUT /api/open/site/0/acl/14"]
+	if body["count"] != float64(11) || body["type"] != "attack" {
+		t.Errorf("single-rule body = %v", body)
+	}
+}
+
+func TestValidateWaitingRoom(t *testing.T) {
+	if err := ValidateWaitingRoom(1, 1); err != nil {
+		t.Errorf("minimum rejected: %v", err)
+	}
+	if err := ValidateWaitingRoom(5000, 30); err != nil {
+		t.Errorf("maximum rejected: %v", err)
+	}
+	for _, tc := range [][2]int{{0, 3}, {5001, 3}, {5, 0}, {5, 31}} {
+		if err := ValidateWaitingRoom(tc[0], tc[1]); err == nil {
+			t.Errorf("ValidateWaitingRoom(%d, %d) accepted", tc[0], tc[1])
+		}
+	}
+}
+
+func TestValidateRateLimitRule(t *testing.T) {
+	valid := RateLimitRule{Type: "req", Period: 10, Count: 1, Action: "block", BlockMin: 1}
+	if err := ValidateRateLimitRule(valid); err != nil {
+		t.Errorf("valid rule rejected: %v", err)
+	}
+	for _, mutate := range []func(*RateLimitRule){
+		func(r *RateLimitRule) { r.Type = "other" },
+		func(r *RateLimitRule) { r.Period = 9 },
+		func(r *RateLimitRule) { r.Period = 601 },
+		func(r *RateLimitRule) { r.Count = 0 },
+		func(r *RateLimitRule) { r.Action = "allow" },
+		func(r *RateLimitRule) { r.BlockMin = 0 },
+		func(r *RateLimitRule) { r.BlockMin = 1441 },
+	} {
+		r := valid
+		mutate(&r)
+		if err := ValidateRateLimitRule(r); err == nil {
+			t.Errorf("rule %+v accepted", r)
+		}
+	}
+	if err := ValidateRateLimitAction("challenge_v2"); err != nil {
+		t.Errorf("challenge_v2 rejected: %v", err)
 	}
 }

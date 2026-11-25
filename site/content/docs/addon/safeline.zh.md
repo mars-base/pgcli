@@ -117,6 +117,11 @@ Ansible 部署可以在 `type: safeline` 条目的 `sites` 字段里声明站点
 `pg addon safeline site ...` 用存储的管理员密码调用控制台自己的 Web API——与浏览器相同的加密
 登录和 `/api/open/site` 接口——因此无需打开 UI 即可脚本化建站。栈必须处于运行状态。
 
+> **部署在特定账号下？** 这些命令读取执行者账号的 `~/.pgcli/pg.yaml`，用其他账号
+> （例如 `pgcli`）安装的栈在这里找不到。用 `-c` 指定那个账号的配置，例如
+> `pg -c /home/pgcli/.pgcli/pg.yaml addon safeline site cc show --name safeline1 --site-id 4`；
+> `site mode` 与 `site cc` 用法相同。
+
 > **社区版限制：一个站点只能有一个上游。** pgcli 安装的控制台没有 Pro 授权，站点只能代理
 > 单个上游。添加第二个上游（也就是多服务器负载均衡）会被控制台以 `license required` 拒绝；
 > 在控制台激活 Pro 授权后可用。
@@ -132,6 +137,9 @@ pg addon safeline site create --name waf1 \
 pg addon safeline site update --name waf1 --site-id 3 --health-check=false
 pg addon safeline site health --name waf1
 pg addon safeline site mode --name waf1 --site-id 3 dryrun
+pg addon safeline site cc show --name waf1 --site-id 3
+pg addon safeline site cc waiting-room --name waf1 --site-id 3 --enabled
+pg addon safeline site cc rate-limit --name waf1 --site-id 3 --type req --count 200
 pg addon safeline site delete --name waf1 --site-id 3
 
 pg addon safeline cert list --name waf1
@@ -153,10 +161,8 @@ pg addon safeline cert delete --name waf1 --cert-id 2
 - `site health` 探测选定站点（默认全部）的每个上游，输出 `healthy` 或控制台返回的错误；
   只要有上游不健康就以非零码退出，可直接用作监控/脚本门禁。`site list` 展示 `update`、
   `delete`、`health`、`mode` 通过 `--site-id` 使用的站点 id。
-- `site mode` 在控制台的三种运行模式间切换一个或多个站点：`defense`（防护，拦截攻击，
-  控制台默认）、`dryrun`（观察，只记录检测结果、不拦截）、`offline`（维护，展示维护页面，
-  站点不可访问）。模式名是唯一的位置参数，站点 id 用 `--site-id` 指定（可重复）。变更
-  立即下发到 tengine，与控制台里切换模式完全等价。
+- `site mode` 在三种运行模式间切换一个或多个站点，见下方的「站点运行模式」。
+- `site cc` 查看与修改 CC 防护的两项配置（等候室与频率限制），见下方的「CC 防护」。
 - `cert list` 展示已存证书的覆盖域名、到期时间和使用它的站点。证书被站点的 TLS 入口端口
   占用时控制台拒绝删除，先删除站点或换绑证书。
 
@@ -209,7 +215,102 @@ pg addon safeline cert create --name waf1 --cert other-fullchain.pem --key other
 pg addon safeline site update --name waf1 --site-id 3 --cert-id 5
 ```
 
-自定义错误页、ACL/限流等高级选项，以及带权重/备份角色的上游，仍在控制台 UI 中配置。
+自定义错误页以及带权重/备份角色的上游仍在控制台 UI 中配置。
+
+### 站点运行模式
+
+每个站点运行在三种模式之一，与控制台的「防护模式 / 观察模式 / 维护模式」一一对应。
+`pg addon safeline site list` 的 `MODE` 列显示当前模式，`pg addon safeline site mode`
+负责切换：
+
+| 模式 | 控制台名称 | 行为 |
+|---|---|---|
+| `defense` | 防护模式 | 默认模式；发现攻击后自动拦截并记录攻击事件 |
+| `dryrun` | 观察模式 | 只记录命中的攻击事件，不拦截任何请求 |
+| `offline` | 维护模式 | 返回维护页面，任何人都无法访问站点 |
+
+模式名是 `site mode` 唯一的位置参数，站点 id 用 `--site-id` 指定（可重复或逗号分隔），
+一次调用可以切换多个站点。变更立即下发到 tengine，与控制台里切换模式完全等价。
+
+```bash
+# 查看当前模式（MODE 列）
+pg addon safeline site list --name waf1
+
+# 单个站点切到观察模式
+pg addon safeline site mode --name waf1 --site-id 3 dryrun
+
+# 多个站点一次切回防护模式
+pg addon safeline site mode --name waf1 --site-id 3 --site-id 4 defense
+```
+
+### CC 防护（等候室与频率限制）
+
+`pg addon safeline site cc` 查看与修改控制台里站点 CC 防护（CC 防护）的两项配置。
+配置在站点处于防护模式（defense）时生效。
+
+```bash
+# 两项配置一览：等候室、规则作用域与生效规则
+pg addon safeline site cc show --name waf1 --site-id 3
+```
+
+输出展示等候室、站点频率限制是自有规则还是跟随全局，以及生效规则：
+
+```text
+Site 3 (www.example.com) CC protection
+  Waiting room:  enabled (max concurrent 5, session timeout 3m)
+  Rate limits:   global (3 rules)
+TYPE    ENABLED  PERIOD  COUNT  ACTION        BLOCK  CONDITIONS
+req     yes      10s     100    challenge_v1  60m    -
+attack  no       60s     10     block         30m    -
+error   no       10s     10     block         30m    status_code eq 403,404
+```
+
+等候室限制同时访问的并发用户数——查看、启用、禁用：
+
+```bash
+pg addon safeline site cc waiting-room --name waf1 --site-id 3
+pg addon safeline site cc waiting-room --name waf1 --site-id 3 --enabled
+pg addon safeline site cc waiting-room --name waf1 --site-id 3 --enabled=false
+```
+
+它的两个阈值（`--max-concurrent` 1–5000、`--session-timeout` 1–30 分钟）属于
+Pro 功能：社区版控制台只保存 `--enabled`，阈值保持默认（5 并发、3 分钟）。命令写入后
+会重新读取等候室，把控制台没有应用的阈值作为错误报出，不会把被静默忽略的修改当成成功。
+
+每个站点有三条频率限制规则——`req`（窗口内请求数）、`attack`（窗口内攻击命中数）与
+`error`（匹配规则条件的响应数）——默认跟随全局规则集：
+
+```bash
+# 查看生效规则，可用 --type 只看一条
+pg addon safeline site cc rate-limit --name waf1 --site-id 3
+pg addon safeline site cc rate-limit --name waf1 --site-id 3 --type req
+
+# 修改规则（窗口 10-600 秒，次数 >= 1，封禁 1-1440 分钟，
+# action 取 block / challenge_v1 / challenge_v2）
+pg addon safeline site cc rate-limit --name waf1 --site-id 3 \
+    --type req --enabled --period 10 --count 200 --action block --block-min 30
+
+# 修改所有跟随站点共用的全局规则（控制台中的 0 号站点）
+pg addon safeline site cc rate-limit --name waf1 --global --type attack --count 20
+
+# 让单个站点使用自己的副本（从全局规则播种，所有规则默认禁用），
+# 再切回全局
+pg addon safeline site cc rate-limit --name waf1 --site-id 3 --use-global=false
+pg addon safeline site cc rate-limit --name waf1 --site-id 3 --use-global
+```
+
+跟随全局规则的站点不能单独修改规则：命令会说明这一点，并提示用 `--global`
+修改共用规则、或用 `--use-global=false` 先建立站点自己的副本。副本里所有规则初始为
+禁用；把 `--use-global=false` 与 `--type` 和规则参数组合，可在同一次调用里启用并配置
+其中一条。
+
+一次调用完成的典型加固配置——让站点使用自己的规则（从全局规则播种），10 秒内允许
+200 次请求，超限封禁 30 分钟：
+
+```bash
+pg addon safeline site cc rate-limit --name waf1 --site-id 3 --use-global=false \
+    --type req --enabled --period 10 --count 200 --action block --block-min 30
+```
 
 ## 容器布局与网络
 

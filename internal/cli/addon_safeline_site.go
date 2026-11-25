@@ -34,8 +34,9 @@ tengine rules are published immediately, exactly as if the site had been
 created in the browser.
 
 Subcommands:
-  site   List, create, update, delete and health-check protected sites
-  cert   List, upload, renew and delete TLS certificates
+  site     List, create, update, delete and health-check protected sites
+  site cc  View and change a site's CC protection (waiting room, rate limits)
+  cert     List, upload, renew and delete TLS certificates
 
 Examples:
   pg addon safeline site list
@@ -43,6 +44,7 @@ Examples:
       --upstream http://10.0.0.5:8080 --cert fullchain.pem --key privkey.pem --health-check
   pg addon safeline site health
   pg addon safeline site mode --site-id 3 dryrun
+  pg addon safeline site cc show --site-id 3
   pg addon safeline cert update --cert-id 2 --cert fullchain.pem --key privkey.pem
   pg addon safeline cert list`,
 }
@@ -60,12 +62,13 @@ Upstream health checks probe each upstream's HTTP path every 10-3600
 seconds. TLS certificates for _ssl entry ports are managed with
 'pg addon safeline cert' (upload, renew in place, delete) or bound directly
 via --cert/--key or --cert-id on create and rebound with
-'site update --site-id <id> --cert-id <new id>'; custom error pages and
-other advanced options stay in the console UI.
+'site update --site-id <id> --cert-id <new id>'; custom error pages stay in
+the console UI.
 
 Each site runs in one of three modes — defense (block attacks, the console
 default), dryrun (record detections only) or offline (maintenance page) —
-switched with 'pg addon safeline site mode'.
+switched with 'pg addon safeline site mode'. Its CC protection — the waiting
+room and the rate-limit rules — is managed with 'pg addon safeline site cc'.
 
 The instance must be running ('pg addon start safeline --name <name>').`,
 }

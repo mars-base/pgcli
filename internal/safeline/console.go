@@ -686,3 +686,179 @@ func (c *Client) HealthCheck(upstreams, hosts []string) (map[string]string, erro
 	}
 	return out, nil
 }
+
+// WaitingRoom is a site's CC-protection waiting room. A site that never had
+// one configured reads back as a synthetic row (id 0) carrying the console
+// defaults.
+type WaitingRoom struct {
+	ID             int    `json:"id"`
+	Name           string `json:"name"`
+	IsEnabled      bool   `json:"is_enabled"`
+	MaxConcurrent  int    `json:"max_concurrent"`
+	MaxWaiting     int    `json:"max_waiting"`
+	SessionTimeout int    `json:"session_timeout"`
+	WebsiteID      int    `json:"website_id"`
+	CreatedAt      string `json:"created_at"`
+	UpdatedAt      string `json:"updated_at"`
+}
+
+// GetWaitingRoom fetches a site's waiting-room configuration.
+func (c *Client) GetWaitingRoom(siteID int) (*WaitingRoom, error) {
+	var wr WaitingRoom
+	if err := c.do(http.MethodGet, fmt.Sprintf("/api/open/site/%d/waiting", siteID), nil, &wr); err != nil {
+		return nil, err
+	}
+	return &wr, nil
+}
+
+// SetWaitingRoom writes the three settings the console form edits. The
+// console answers with no payload, and the Community Edition applies only
+// is_enabled: max_concurrent and session_timeout are Pro thresholds and stay
+// at their stored values. Callers that change the numbers should re-read the
+// room and compare.
+func (c *Client) SetWaitingRoom(siteID int, wr WaitingRoom) error {
+	return c.do(http.MethodPost, fmt.Sprintf("/api/open/site/%d/waiting", siteID), map[string]any{
+		"is_enabled":      wr.IsEnabled,
+		"max_concurrent":  wr.MaxConcurrent,
+		"session_timeout": wr.SessionTimeout,
+	}, nil)
+}
+
+// Rate limit rule types, one rule each in the console's CC protection.
+const (
+	RateLimitReq    = "req"    // requests per window
+	RateLimitAttack = "attack" // attack hits per window
+	RateLimitError  = "error"  // responses matching the rule's conditions
+)
+
+// Rate limit actions taken when a rule fires.
+const (
+	RateLimitActionBlock       = "block"
+	RateLimitActionChallengeV1 = "challenge_v1"
+	RateLimitActionChallengeV2 = "challenge_v2"
+)
+
+// RateLimitRule is one CC-protection rate-limit rule. Rules carrying
+// UseGlobal are the site's view of the global rules (site id 0).
+type RateLimitRule struct {
+	ID                int                  `json:"id"`
+	SiteID            int                  `json:"site_id"`
+	Type              string               `json:"type"`
+	Name              string               `json:"name"`
+	Priority          int                  `json:"priority"`
+	Conditions        []RateLimitCondition `json:"conditions"`
+	CustomStatusCodes []string             `json:"custom_status_codes"`
+	Enabled           bool                 `json:"enabled"`
+	Period            int                  `json:"period"`
+	Count             int                  `json:"count"`
+	Action            string               `json:"action"`
+	BlockMin          int                  `json:"block_min"`
+	BuiltIn           bool                 `json:"built_in"`
+	UseGlobal         bool                 `json:"use_global"`
+	CreatedAt         int64                `json:"created_at"`
+	UpdatedAt         int64                `json:"updated_at"`
+}
+
+// RateLimitCondition is one extra match condition of a rule; the built-in
+// error rule, for example, matches status_code eq [403 404].
+type RateLimitCondition struct {
+	Condition struct {
+		Field    string   `json:"field"`
+		Operator string   `json:"operator"`
+		Value    []string `json:"value"`
+	} `json:"condition"`
+	Strategy string `json:"strategy"`
+}
+
+// RateLimitsFollowGlobal reports whether a rule set is the global rules as
+// seen from a site (every rule carries use_global) rather than site-specific
+// rules.
+func RateLimitsFollowGlobal(rules []RateLimitRule) bool {
+	for _, r := range rules {
+		if r.UseGlobal {
+			return true
+		}
+	}
+	return false
+}
+
+// ListRateLimits returns a site's effective rate-limit rules; siteID 0 is the
+// global rule set shared by sites that follow it.
+func (c *Client) ListRateLimits(siteID int) ([]RateLimitRule, error) {
+	var rules []RateLimitRule
+	if err := c.do(http.MethodGet, fmt.Sprintf("/api/open/site/%d/acl", siteID), nil, &rules); err != nil {
+		return nil, err
+	}
+	return rules, nil
+}
+
+// UseGlobalRateLimits switches a site back to the global rate-limit rules.
+func (c *Client) UseGlobalRateLimits(siteID int) error {
+	return c.do(http.MethodPut, fmt.Sprintf("/api/open/site/%d/acl", siteID), map[string]any{"use_global": true}, nil)
+}
+
+// SetCustomRateLimits replaces a site's rule set with site-specific rules.
+// The console recreates the rows, so the ids in the response differ from the
+// ids passed in.
+func (c *Client) SetCustomRateLimits(siteID int, rules []RateLimitRule) error {
+	return c.do(http.MethodPut, fmt.Sprintf("/api/open/site/%d/acl", siteID), map[string]any{
+		"rules":      rules,
+		"use_global": false,
+	}, nil)
+}
+
+// UpdateRateLimit rewrites one rule in place; siteID 0 edits a global rule.
+func (c *Client) UpdateRateLimit(siteID int, rule RateLimitRule) error {
+	return c.do(http.MethodPut, fmt.Sprintf("/api/open/site/%d/acl/%d", siteID, rule.ID), rule, nil)
+}
+
+// ValidateWaitingRoom mirrors the console form's waiting-room bounds.
+func ValidateWaitingRoom(maxConcurrent, sessionTimeout int) error {
+	if maxConcurrent < 1 || maxConcurrent > 5000 {
+		return fmt.Errorf("waiting room max concurrent must be between 1 and 5000, got %d", maxConcurrent)
+	}
+	if sessionTimeout < 1 || sessionTimeout > 30 {
+		return fmt.Errorf("waiting room session timeout must be between 1 and 30 minutes, got %d", sessionTimeout)
+	}
+	return nil
+}
+
+// ValidateRateLimitType checks the rule type selector.
+func ValidateRateLimitType(t string) error {
+	switch t {
+	case RateLimitReq, RateLimitAttack, RateLimitError:
+		return nil
+	}
+	return fmt.Errorf("unknown rate-limit type %q: use req, attack or error", t)
+}
+
+// ValidateRateLimitAction checks the action taken when a rule fires.
+func ValidateRateLimitAction(action string) error {
+	switch action {
+	case RateLimitActionBlock, RateLimitActionChallengeV1, RateLimitActionChallengeV2:
+		return nil
+	}
+	return fmt.Errorf("unknown rate-limit action %q: use block, challenge_v1 or challenge_v2", action)
+}
+
+// ValidateRateLimitRule mirrors the console form's bounds for an enabled or
+// disabled rule: window 10-600 seconds, at least one request per window and a
+// 1-1440 minute block.
+func ValidateRateLimitRule(r RateLimitRule) error {
+	if err := ValidateRateLimitType(r.Type); err != nil {
+		return err
+	}
+	if r.Period < 10 || r.Period > 600 {
+		return fmt.Errorf("rate-limit window must be between 10 and 600 seconds, got %d", r.Period)
+	}
+	if r.Count < 1 {
+		return fmt.Errorf("rate-limit count must be at least 1, got %d", r.Count)
+	}
+	if err := ValidateRateLimitAction(r.Action); err != nil {
+		return err
+	}
+	if r.BlockMin < 1 || r.BlockMin > 1440 {
+		return fmt.Errorf("rate-limit block duration must be between 1 and 1440 minutes, got %d", r.BlockMin)
+	}
+	return nil
+}

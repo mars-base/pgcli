@@ -92,6 +92,8 @@ Ansible deployments can declare sites in the `sites` field of a `type: safeline`
 
 `pg addon safeline site ...` drives the console's own web API with the stored admin password — the same encrypted login and `/api/open/site` calls the browser makes — so sites can be scripted without the UI. The stack must be running.
 
+> **Deployed under a specific account?** These commands read the invoking user's `~/.pgcli/pg.yaml`; a stack installed under another account (for example `pgcli`) is not found there. Pass that account's config with `-c`: `pg -c /home/pgcli/.pgcli/pg.yaml addon safeline site cc show --name safeline1 --site-id 4`. `site mode` and `site cc` take the same flag.
+
 > **Community Edition limit: one upstream per site.** The console pgcli installs runs without a Pro license, so a site can proxy to a single upstream. Adding a second upstream — and therefore any load balancing across servers — is refused by the console with `license required`; activate a Pro license in the console to use it.
 
 ```bash
@@ -105,6 +107,9 @@ pg addon safeline site create --name waf1 \
 pg addon safeline site update --name waf1 --site-id 3 --health-check=false
 pg addon safeline site health --name waf1
 pg addon safeline site mode --name waf1 --site-id 3 dryrun
+pg addon safeline site cc show --name waf1 --site-id 3
+pg addon safeline site cc waiting-room --name waf1 --site-id 3 --enabled
+pg addon safeline site cc rate-limit --name waf1 --site-id 3 --type req --count 200
 pg addon safeline site delete --name waf1 --site-id 3
 
 pg addon safeline cert list --name waf1
@@ -117,7 +122,8 @@ pg addon safeline cert delete --name waf1 --cert-id 2
 - `--upstream` takes absolute `http://` or `https://` URLs; `--balance` is `roundrobin` (default), `leastconn`, `iphash` or `backup`. `site update` replaces the whole list with `--upstream`, or changes it incrementally with `--add-upstream` / `--remove-upstream`. The bundled console runs as the Community Edition, which permits **one upstream per site** — a second one is refused with `license required`; load balancing across several upstreams needs a Pro license.
 - `--health-check` probes every upstream over HTTP every 10–3600 seconds at the given path. `site update` changes only the settings you pass (upstreams, health check and/or the bound certificate), leaving everything else at its console values.
 - `site health` probes the selected sites (all of them by default) and prints `healthy` or the console's error per upstream; it exits non-zero when any upstream is unhealthy, so it works as a monitoring gate. `site list` shows the site ids that `update`, `delete`, `health` and `mode` take via `--site-id`.
-- `site mode` switches one or more sites between the three run modes the console offers: `defense` (block attacks — the console default), `dryrun` (record detections only, nothing is blocked) and `offline` (maintenance page, the site is inaccessible). The mode is the only positional argument; ids come from `--site-id` (repeatable). The change is published to tengine immediately, exactly like the console's own mode switch.
+- `site mode` switches one or more sites between the three run modes, described under "Site run modes" below.
+- `site cc` reads and changes the two CC-protection settings (the waiting room and the rate-limit rules), described under "CC protection" below.
 - `cert list` shows stored certificates with their covered domains, expiry and the sites using them. The console refuses to delete a certificate while a site's TLS entry port uses it, so delete or repoint the site first.
 
 A plain HTTP site needs no certificate — just an entry port and an upstream:
@@ -171,7 +177,110 @@ pg addon safeline cert create --name waf1 --cert other-fullchain.pem --key other
 pg addon safeline site update --name waf1 --site-id 3 --cert-id 5
 ```
 
-Custom error pages, ACL/rate-limit options and upstream weights/backup roles stay in the console UI.
+Custom error pages and upstream weights/backup roles stay in the console UI.
+
+### Site run modes
+
+Every site runs in one of three modes, mirroring the console's Defense / Audited /
+Offline modes. `pg addon safeline site list` shows the current mode in its `MODE`
+column, and `pg addon safeline site mode` switches it:
+
+| Mode | Console name | Behavior |
+|---|---|---|
+| `defense` | Defense mode | the default; detected attacks are blocked and recorded |
+| `dryrun` | Audited mode | detections are only recorded, nothing is blocked |
+| `offline` | Offline mode | a maintenance page is served; everyone is blocked |
+
+The mode is the only positional argument and the site ids come from `--site-id`
+(repeatable or comma-separated), so one call can switch several sites. The change
+is published to tengine immediately, exactly like the console's own mode switch.
+
+```bash
+# see the current mode (MODE column)
+pg addon safeline site list --name waf1
+
+# switch one site to audit mode
+pg addon safeline site mode --name waf1 --site-id 3 dryrun
+
+# switch several sites back to defense in one call
+pg addon safeline site mode --name waf1 --site-id 3 --site-id 4 defense
+```
+
+### CC protection (waiting room and rate limits)
+
+`pg addon safeline site cc` reads and changes the two CC protection (CC 防护)
+settings the console shows for a site. They apply while the site runs in
+defense mode.
+
+```bash
+# both settings at a glance: waiting room, rule scope and effective rules
+pg addon safeline site cc show --name waf1 --site-id 3
+```
+
+The output shows the waiting room, whether the site's rate limits are its own
+or the global set it follows, and the effective rules:
+
+```text
+Site 3 (www.example.com) CC protection
+  Waiting room:  enabled (max concurrent 5, session timeout 3m)
+  Rate limits:   global (3 rules)
+TYPE    ENABLED  PERIOD  COUNT  ACTION        BLOCK  CONDITIONS
+req     yes      10s     100    challenge_v1  60m    -
+attack  no       60s     10     block         30m    -
+error   no       10s     10     block         30m    status_code eq 403,404
+```
+
+The waiting room limits concurrent visitors — view, enable and disable it:
+
+```bash
+pg addon safeline site cc waiting-room --name waf1 --site-id 3
+pg addon safeline site cc waiting-room --name waf1 --site-id 3 --enabled
+pg addon safeline site cc waiting-room --name waf1 --site-id 3 --enabled=false
+```
+
+Its thresholds (`--max-concurrent` 1–5000, `--session-timeout` 1–30 minutes) are
+a Pro feature: the Community Edition console applies only `--enabled` and keeps
+its defaults (5 concurrent, 3 minutes). The command re-reads the room after
+writing and reports any threshold the console did not apply, so a silently
+ignored change is not mistaken for success.
+
+Every site has three rate-limit rules — `req` (requests per window), `attack`
+(attack hits per window) and `error` (responses matching the rule's
+conditions) — and by default follows the global rule set:
+
+```bash
+# view the effective rules, optionally one type only
+pg addon safeline site cc rate-limit --name waf1 --site-id 3
+pg addon safeline site cc rate-limit --name waf1 --site-id 3 --type req
+
+# edit a rule (window 10-600 seconds, count >= 1, block 1-1440 minutes,
+# action block / challenge_v1 / challenge_v2)
+pg addon safeline site cc rate-limit --name waf1 --site-id 3 \
+    --type req --enabled --period 10 --count 200 --action block --block-min 30
+
+# edit the shared rules every follower sees (site 0 in the console)
+pg addon safeline site cc rate-limit --name waf1 --global --type attack --count 20
+
+# give one site its own copy (seeded from the globals, all rules disabled),
+# then switch it back
+pg addon safeline site cc rate-limit --name waf1 --site-id 3 --use-global=false
+pg addon safeline site cc rate-limit --name waf1 --site-id 3 --use-global
+```
+
+A site that follows the global rules cannot edit them per site: the command
+says so and points at `--global` (edit the shared rules) and
+`--use-global=false` (make a site-specific copy first). In the copy every rule
+starts disabled; combine `--use-global=false` with `--type` and rule flags to
+enable and configure one in the same call.
+
+A common hardening, in one call — give the site its own rules (seeded from the
+global set) and allow 200 requests per 10 seconds, blocking offenders for 30
+minutes:
+
+```bash
+pg addon safeline site cc rate-limit --name waf1 --site-id 3 --use-global=false \
+    --type req --enabled --period 10 --count 200 --action block --block-min 30
+```
 
 ## Container layout and networking
 
