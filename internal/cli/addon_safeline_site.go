@@ -604,12 +604,26 @@ func runAddonSafelineSiteMode(cmd *cobra.Command, name string) error {
 	if len(missing) > 0 {
 		return fmt.Errorf("site id(s) not found: %s (list them with 'pg addon safeline site list')", strings.Join(missing, ", "))
 	}
-	if err := client.SetSiteMode(ids, mode); err != nil {
-		return fmt.Errorf("switching site mode: %w", err)
-	}
 	parts := make([]string, 0, len(ids))
 	for _, id := range ids {
 		parts = append(parts, strconv.Itoa(id))
+	}
+	current := make(map[int]int, len(sites))
+	for _, s := range sites {
+		current[s.ID] = s.Mode
+	}
+	changed := make([]int, 0, len(ids))
+	for _, id := range ids {
+		if current[id] != mode {
+			changed = append(changed, id)
+		}
+	}
+	if len(changed) == 0 {
+		fmt.Printf("Site(s) %s already in %s mode\n", strings.Join(parts, ", "), safeline.ModeName(mode))
+		return nil
+	}
+	if err := client.SetSiteMode(changed, mode); err != nil {
+		return fmt.Errorf("switching site mode: %w", err)
 	}
 	fmt.Printf("✓ Set SafeLine site(s) %s to %s mode\n", strings.Join(parts, ", "), safeline.ModeName(mode))
 	return nil
