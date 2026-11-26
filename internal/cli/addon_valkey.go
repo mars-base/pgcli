@@ -105,6 +105,8 @@ func runAddonInstallValkey(cmd *cobra.Command) error {
 	aofSet := cmd.Flags().Changed("aof")
 	appendfsync, _ := cmd.Flags().GetString("appendfsync")
 	saveSchedule, _ := cmd.Flags().GetString("save")
+	ioThreads, _ := cmd.Flags().GetInt("io-threads")
+	ioThreadsSet := cmd.Flags().Changed("io-threads")
 	replicaOf, _ := cmd.Flags().GetString("replica-of")
 	replicaOfHost, _ := cmd.Flags().GetString("replica-of-host")
 	replicaOfPort, _ := cmd.Flags().GetInt("replica-of-port")
@@ -161,6 +163,9 @@ func runAddonInstallValkey(cmd *cobra.Command) error {
 	}
 	if saveSchedule != "" {
 		existing.SaveSchedule = saveSchedule
+	}
+	if ioThreadsSet {
+		existing.IoThreads = ioThreads
 	}
 	// Resolve the replica role (if requested) before validating and before the
 	// version step: a local --replica-of adopts the master's major and password,
@@ -278,6 +283,9 @@ func runAddonInstallValkey(cmd *cobra.Command) error {
 	fmt.Printf("  Role:       %s\n", redisRoleSummary(rc))
 	if rc.MaxMemory != "" {
 		fmt.Printf("  Maxmemory:   %s (%s)\n", rc.MaxMemory, redisEffectivePolicy(rc))
+	}
+	if rc.IoThreads > 0 {
+		fmt.Printf("  IO threads:  %d\n", rc.IoThreads)
 	}
 	fmt.Printf("  Persistence: %s\n", redisPersistenceSummary(rc))
 	fmt.Println()

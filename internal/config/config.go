@@ -3759,6 +3759,12 @@ type RedisConfig struct {
 	// default schedule; "no" disables snapshots (the AOF-only shape).
 	SaveSchedule string `yaml:"save,omitempty"`
 
+	// IoThreads is io-threads: threads serving network reads/writes. Command
+	// execution stays single-threaded on the main thread, so the throughput
+	// gain flattens quickly — 2-4 is the useful range (docs recommend ≤ 4).
+	// 0 means "leave the server default" (1); the servers accept 1-128.
+	IoThreads int `yaml:"io_threads,omitempty"`
+
 	// ReplicaHost non-empty marks this instance a read replica of the master at
 	// that host:port. It is resolved once at install (from a local --replica-of
 	// name → 127.0.0.1 + the master's port + the master's password, or a remote

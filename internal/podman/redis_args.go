@@ -41,7 +41,9 @@ func valkeyServerArgs(rc *config.RedisConfig, bindHost string) []string {
 // port/requirepass/bind/dir is opt-in, and empty means "leave the server's own
 // default alone": --maxmemory pairs with allkeys-lru unless MaxMemoryPolicy
 // says otherwise, --appendonly comes with an optional --appendfsync strength,
-// and --save overrides (or, as "no", disables) the RDB snapshot schedule. A
+// and --save overrides (or, as "no", disables) the RDB snapshot schedule.
+// IoThreads > 0 adds --io-threads, parallelizing network I/O only (command
+// execution stays single-threaded). A
 // non-empty ReplicaHost turns the instance into a read replica: --replicaof
 // <host> <port> plus --masterauth (which equals requirepass, since
 // resolveRedisReplica pins a replica's password to the master's). A non-empty
@@ -62,6 +64,11 @@ func kvServerArgs(binary string, rc *config.RedisConfig, bindHost string) []stri
 		"--requirepass", rc.Password,
 		"--bind", bindHost,
 		"--dir", redisContainerDataDir,
+	}
+	if rc.IoThreads > 0 {
+		// Network I/O only — command execution stays single-threaded, so 0
+		// (unset) leaves the server's own default of 1 alone.
+		args = append(args, "--io-threads", fmt.Sprintf("%d", rc.IoThreads))
 	}
 	if rc.MaxMemory != "" {
 		policy := rc.MaxMemoryPolicy

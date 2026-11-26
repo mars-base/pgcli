@@ -113,6 +113,10 @@ func TestValidateRedisKnobs(t *testing.T) {
 		{"save pairs", config.RedisConfig{Name: "c", SaveSchedule: "900 1 300 10"}, ""},
 		{"save odd fields", config.RedisConfig{Name: "c", SaveSchedule: "900 1 300"}, "malformed --save"},
 		{"save non-integer", config.RedisConfig{Name: "c", SaveSchedule: "900 one"}, "not a non-negative integer"},
+		{"io-threads valid", config.RedisConfig{Name: "c", IoThreads: 4}, ""},
+		{"io-threads max", config.RedisConfig{Name: "c", IoThreads: 128}, ""},
+		{"io-threads negative", config.RedisConfig{Name: "c", IoThreads: -1}, "--io-threads must be 1-128"},
+		{"io-threads too high", config.RedisConfig{Name: "c", IoThreads: 129}, "--io-threads must be 1-128"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -49,6 +49,7 @@ file is generated, and one container per instance runs the plain upstream image:
 | `--aof` / `aof` | off | `--appendonly yes` | write-ahead log on top of the snapshot |
 | `--appendfsync` / `appendfsync` | `everysec` (Valkey's own) | `--appendfsync` | AOF flush strength, only with `--aof` |
 | `--save` / `save` | Valkey's default schedule | `--save` | RDB snapshot plan; `no` disables snapshots |
+| `--io-threads` / `io_threads` | unset (server default `1`) | `--io-threads` | network-I/O threads (1-128); command execution stays single-threaded — **keep it ≤ 4**, gains past that are negligible |
 | `--replica-of` / `replica_host`+`replica_port` | unset (master) | `--replicaof` + `--masterauth` | read-only replica of a *local* valkey master addon (host/port/password resolved from the config) |
 | `--replica-of-host` / `replica_host` | — | `--replicaof` | master *address* for a cross-host replica (pair with `--replica-of-port` + `--password`) |
 | `--replica-of-port` / `replica_port` | — | `--replicaof` | master port, paired with `--replica-of-host` |
@@ -75,6 +76,11 @@ validators:
 - **`--maxmemory` implies eviction**, defaulting to `allkeys-lru`; pass
   `--maxmemory-policy noeviction` for a hard ceiling. `--appendfsync` requires
   `--aof`; both combinations are rejected before anything is pulled.
+- **`--io-threads N` parallelizes network I/O only** — Valkey executes commands
+  on the main thread; the extra threads just read/write sockets. The gain
+  flattens quickly: 2-4 is the useful range, and **the recommendation is not to
+  exceed 4**. The servers accept 1-128; `0` (the default) leaves the server's
+  own value of 1 in place.
 - **`--replica-of` / `--cluster` are mutually exclusive** — an instance is one
   role or the other. Group members share the first member's password and
   `--cluster-replicas`; an explicit mismatch is rejected up front.
@@ -387,6 +393,7 @@ addons:
       # aof: true                        # write-ahead log on top of snapshots
       # appendfsync: always              # only with aof; default everysec
       # save: "900 1 300 10"             # RDB schedule; "no" disables snapshots
+      # io_threads: 4                    # network I/O threads (1-128; keep ≤ 4)
       # replica_host: 127.0.0.1          # set by --replica-of: this is a read replica
       # replica_port: 6380               # the master's port
       # cluster: app                     # set by --cluster: this is a native-cluster member
@@ -396,7 +403,7 @@ addons:
 ```
 
 Edits to `listen`, `port`, `password`, `maxmemory`/`maxmemory_policy`,
-`aof`/`appendfsync`/`save`, `replica_host`/`replica_port`,
+`aof`/`appendfsync`/`save`, `io_threads`, `replica_host`/`replica_port`,
 `cluster`/`cluster_replicas`/`advertise_host`, `image_tag`/`version`, or
 `data_dir` take effect after the next `pg addon install valkey --name vcache
 --force` (or via the matching flags).

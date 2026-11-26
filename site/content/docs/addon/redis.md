@@ -59,6 +59,7 @@ per instance runs the plain upstream image (no pgcli wrapper, unlike
 | `--aof` / `aof` | off | `--appendonly yes` | write-ahead log on top of the snapshot |
 | `--appendfsync` / `appendfsync` | `everysec` (Redis's own) | `--appendfsync` | AOF flush strength, only with `--aof` |
 | `--save` / `save` | Redis's default schedule | `--save` | RDB snapshot plan; `no` disables snapshots |
+| `--io-threads` / `io_threads` | unset (server default `1`) | `--io-threads` | network-I/O threads (1-128); command execution stays single-threaded — **keep it ≤ 4**, gains past that are negligible |
 | `--replica-of` / `replica_host`+`replica_port` | unset (master) | `--replicaof` + `--masterauth` | read-only replica of a *local* master addon (its host/port/password are resolved from the config) |
 | `--replica-of-host` / `replica_host` | — | `--replicaof` | master *address* for a cross-host replica (pair with `--replica-of-port` + `--password`) |
 | `--replica-of-port` / `replica_port` | — | `--replicaof` | master port, paired with `--replica-of-host` |
@@ -89,6 +90,11 @@ How the knobs combine:
   `--maxmemory` entirely for no cap. The policy flag requires `--maxmemory`;
   `--appendfsync` requires `--aof` — the CLI rejects those combinations before
   it pulls or creates anything.
+- **`--io-threads N` parallelizes network I/O only** — Redis executes commands
+  on the main thread; the extra threads just read/write sockets. The gain
+  flattens quickly: 2-4 is the useful range, and **the recommendation is not to
+  exceed 4**. The servers accept 1-128; `0` (the default) leaves the server's
+  own value of 1 in place.
 - **`--replica-of` makes a read replica** — see [Read
   replicas](#read-replicas). The persistence/eviction knobs stay orthogonal: a
   replica may cap memory or enable AOF exactly like a master.
@@ -547,6 +553,7 @@ addons:
       # aof: true                        # write-ahead log on top of snapshots
       # appendfsync: always              # only with aof; default everysec
       # save: "900 1 300 10"             # RDB schedule; "no" disables snapshots
+      # io_threads: 4                    # network I/O threads (1-128; keep ≤ 4)
       # replica_host: 127.0.0.1          # set by --replica-of: this is a read replica
       # replica_port: 6379               # the master's port, paired with replica_host
       # cluster: app                     # set by --cluster: this is a native-cluster member
@@ -556,7 +563,7 @@ addons:
 ```
 
 Edits to `listen`, `port`, `password`, `maxmemory`/`maxmemory_policy`,
-`aof`/`appendfsync`/`save`, `replica_host`/`replica_port`,
+`aof`/`appendfsync`/`save`, `io_threads`, `replica_host`/`replica_port`,
 `cluster`/`cluster_replicas`/`advertise_host`, `image_tag`/`version`, or
 `data_dir` take effect after the next `pg addon install redis --name cache
 --force` (or via the matching flags). The replica and cluster roles are normally

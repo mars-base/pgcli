@@ -43,6 +43,7 @@ weight: 50
 | `--aof` / `aof` | 关闭 | `--appendonly yes` | 在快照之上叠加预写日志 |
 | `--appendfsync` / `appendfsync` | `everysec`（Valkey 自身默认） | `--appendfsync` | AOF 刷盘强度，仅配合 `--aof` |
 | `--save` / `save` | Valkey 默认计划 | `--save` | RDB 快照计划；`no` 关闭快照 |
+| `--io-threads` / `io_threads` | 未设置（服务端默认 `1`） | `--io-threads` | 网络 I/O 线程数（1-128）；命令执行仍是单线程——**不要超过 4**，再多收益很小 |
 | `--replica-of` / `replica_host`+`replica_port` | 未设置（主节点） | `--replicaof` + `--masterauth` | 本地 valkey 主 add-on 的只读副本（host/port/password 从配置解析） |
 | `--replica-of-host` / `replica_host` | — | `--replicaof` | 跨主机副本的主节点**地址**（搭配 `--replica-of-port` + `--password`） |
 | `--replica-of-port` / `replica_port` | — | `--replicaof` | 主节点端口，与 `--replica-of-host` 配对 |
@@ -64,6 +65,9 @@ weight: 50
 - **`--maxmemory` 隐含淘汰**，默认 `allkeys-lru`；要硬上限就传
   `--maxmemory-policy noeviction`。`--appendfsync` 依赖 `--aof`；非法组合在拉取
   之前就被拒绝。
+- **`--io-threads N` 只并行网络 I/O**——Valkey 的命令执行仍在主线程，多出的线程
+  只负责套接字读写。收益很快变平：2-4 是有效区间，**文档建议不要超过 4**。服务端
+  接受 1-128；`0`（默认）表示保留服务端自己的 1。
 - **`--replica-of` / `--cluster` 互斥**——实例只能是其中一种角色。同组成员共享
   第一个成员的口令与 `--cluster-replicas`；显式不一致会在开始前被拒绝。
 
@@ -351,6 +355,7 @@ addons:
       # aof: true                        # 在快照之上叠加预写日志
       # appendfsync: always              # 仅配合 aof；默认 everysec
       # save: "900 1 300 10"             # RDB 计划；"no" 关闭快照
+      # io_threads: 4                    # 网络 I/O 线程数（1-128；建议 ≤ 4）
       # replica_host: 127.0.0.1          # 由 --replica-of 写入：这是读副本
       # replica_port: 6380               # 主节点端口
       # cluster: app                     # 由 --cluster 写入：这是原生集群成员
@@ -360,7 +365,7 @@ addons:
 ```
 
 修改 `listen`、`port`、`password`、
-`maxmemory`/`maxmemory_policy`、`aof`/`appendfsync`/`save`、
+`maxmemory`/`maxmemory_policy`、`aof`/`appendfsync`/`save`、`io_threads`、
 `replica_host`/`replica_port`、`cluster`/`cluster_replicas`/`advertise_host`、
 `image_tag`/`version` 或 `data_dir` 后，需执行
 `pg addon install valkey --name vcache --force`（或使用对应 flag）生效。

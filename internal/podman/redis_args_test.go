@@ -137,6 +137,19 @@ func TestRedisServerArgsSaveDefaultUntouched(t *testing.T) {
 	}
 }
 
+func TestRedisServerArgsIoThreads(t *testing.T) {
+	rc := &config.RedisConfig{Port: 6379, Password: "p", IoThreads: 4}
+	args := redisServerArgs(rc, "0.0.0.0")
+	flagPair(t, args, "--io-threads", "4")
+
+	// 0 is the "server default" sentinel: no flag at all.
+	rc.IoThreads = 0
+	args = redisServerArgs(rc, "0.0.0.0")
+	if slices.Contains(args, "--io-threads") {
+		t.Errorf("--io-threads emitted without IoThreads set: %v", args)
+	}
+}
+
 // A replica emits --replicaof <host> <port> — three argv slots, so the
 // two-slot flagPair helper does not fit — plus --masterauth carrying the same
 // password as --requirepass (resolveRedisReplica pins them equal).

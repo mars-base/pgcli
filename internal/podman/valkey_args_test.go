@@ -44,6 +44,7 @@ func TestValkeyServerArgsMirrorsRedisArgs(t *testing.T) {
 				Port: 6380, Password: "p",
 				MaxMemory: "256mb", MaxMemoryPolicy: "noeviction",
 				AOF: true, AppendFsync: "always", SaveSchedule: "900 1 300 10",
+				IoThreads: 4,
 			},
 		},
 		{

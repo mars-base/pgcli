@@ -50,6 +50,7 @@ wrapper，这点与 [rustfs](../rustfs/) 不同）。下表列出每个可调项
 | `--aof` / `aof` | 关 | `--appendonly yes` | 在快照之上叠加写前日志 |
 | `--appendfsync` / `appendfsync` | `everysec`（Redis 自身默认） | `--appendfsync` | AOF 刷盘强度，仅在开 `--aof` 时有意义 |
 | `--save` / `save` | Redis 默认计划 | `--save` | RDB 快照计划；`no` 关闭快照 |
+| `--io-threads` / `io_threads` | 未设置（服务端默认 `1`） | `--io-threads` | 网络 I/O 线程数（1-128）；命令执行仍是单线程——**不要超过 4**，再多收益很小 |
 | `--replica-of` / `replica_host`+`replica_port` | 不设（主节点） | `--replicaof` + `--masterauth` | 成为*本机*主实例的只读副本（host/port/密码都从配置里取） |
 | `--replica-of-host` / `replica_host` | — | `--replicaof` | 跨机副本的**主节点地址**（与 `--replica-of-port` + `--password` 搭配） |
 | `--replica-of-port` / `replica_port` | — | `--replicaof` | 主节点端口，与 `--replica-of-host` 搭配 |
@@ -75,6 +76,9 @@ wrapper，这点与 [rustfs](../rustfs/) 不同）。下表列出每个可调项
   就驱逐"。传 `--maxmemory-policy noeviction` 变成硬顶（超上限写失败而非驱逐
   键），或干脆不设 `--maxmemory` 表示无上限。policy 依赖 `--maxmemory`、
   `--appendfsync` 依赖 `--aof`——CLI 在拉镜像/建容器之前就拒绝这类组合。
+- **`--io-threads N` 只并行网络 I/O**——Redis 的命令执行仍在主线程，多出的线程
+  只负责套接字读写。收益很快变平：2-4 是有效区间，**文档建议不要超过 4**。服务端
+  接受 1-128；`0`（默认）表示保留服务端自己的 1。
 - **`--replica-of` 造只读副本**——见[读副本](#读副本)。持久化/驱逐旋钮与角色
   正交：副本也能设 `--maxmemory` 或开 `--aof`，跟主节点一模一样。
 - **`--cluster` 造集群成员，与 `--replica-of`/`--replica-of-host` 互斥**——
@@ -483,6 +487,7 @@ addons:
       # aof: true                        # 在快照之上叠加写前日志
       # appendfsync: always              # 仅在开 aof 时有效；默认 everysec
       # save: "900 1 300 10"             # RDB 计划；"no" 关闭快照
+      # io_threads: 4                    # 网络 I/O 线程数（1-128；建议 ≤ 4）
       # replica_host: 127.0.0.1          # 由 --replica-of 写入：本实例是读副本
       # replica_port: 6379               # 主节点端口，与 replica_host 搭配
       # cluster: app                     # 由 --cluster 写入：本实例是原生集群成员
@@ -492,7 +497,7 @@ addons:
 ```
 
 改 `listen`、`port`、`password`、`maxmemory`/`maxmemory_policy`、
-`aof`/`appendfsync`/`save`、`replica_host`/`replica_port`、
+`aof`/`appendfsync`/`save`、`io_threads`、`replica_host`/`replica_port`、
 `cluster`/`cluster_replicas`/`advertise_host`、`image_tag`/`version` 或 `data_dir` 后，
 下一次 `pg addon install redis --name cache --force`（或用对应 flag）生效。副本角色
 与集群角色通常分别由 `--replica-of*` / `--cluster`（含 `--cluster-replicas`）/

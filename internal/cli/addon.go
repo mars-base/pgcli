@@ -511,6 +511,7 @@ Linux and macOS; the first version-selectable addon):
                          [--listen 0.0.0.0] [--password ...] [--maxmemory 256mb]
                          [--maxmemory-policy noeviction] [--aof]
                          [--appendfsync always|everysec|no] [--save "900 1 300 10"|no]
+                         [--io-threads N]
                          [--replica-of <masterName>]
                          [--replica-of-host <ip> --replica-of-port <N> --password ...]
                          [--data-dir ...] [--image ...] [--force]
@@ -526,6 +527,9 @@ Linux and macOS; the first version-selectable addon):
   <base_dir>/addon/redis/<name>/data), so remove/reinstall revives the data;
   --aof adds the write-ahead log on top (--appendfsync tunes its flush), and
   --save overrides the snapshot schedule or "no" disables snapshots entirely.
+  --io-threads N parallelizes network I/O across N threads (server default 1;
+  command execution stays single-threaded). The gain flattens quickly: 2-4 is
+  the useful range and going past 4 is not recommended.
   Listen defaults to 0.0.0.0 — requirepass is always on, so pass
   --listen 127.0.0.1 to keep it loopback-only.
   --replica-of <masterName> turns the instance into a read-only replica of a
@@ -553,6 +557,7 @@ topologies as redis under its own type, port pool and client):
                           [--listen 0.0.0.0] [--password ...] [--maxmemory 256mb]
                           [--maxmemory-policy noeviction] [--aof]
                           [--appendfsync always|everysec|no] [--save "900 1 300 10"|no]
+                          [--io-threads N]
                           [--replica-of <masterName>]
                           [--replica-of-host <ip> --replica-of-port <N> --password ...]
                           [--data-dir ...] [--image ...] [--force]
@@ -1568,6 +1573,7 @@ func init() {
 	addonInstallCmd.Flags().Bool("aof", false, "Redis/Valkey: enable AOF (appendonly yes) — a write-ahead log on top of the RDB snapshot, for crash-safe no-eviction stores; off by default")
 	addonInstallCmd.Flags().String("appendfsync", "", "Redis/Valkey AOF flush strength: always (durability) | everysec (default) | no (throughput); requires --aof")
 	addonInstallCmd.Flags().String("save", "", `Redis/Valkey RDB snapshot schedule, e.g. "900 1 300 10" (empty keeps the server's own default; "no" disables snapshots, e.g. for an AOF-only instance)`)
+	addonInstallCmd.Flags().Int("io-threads", 0, "Redis/Valkey network I/O threads (io-threads; 0 keeps the server default of 1). Only socket reads/writes are parallelized — command execution stays single-threaded — so the gain flattens quickly: 2-4 is the useful range, and anything past 4 is not recommended. Accepted range 1-128")
 	addonInstallCmd.Flags().String("replica-of", "", "Redis/Valkey: make this instance a read-only replica of the named local master addon of the SAME type (its host/port/password are resolved from the config; the master must already be installed and on the same major)")
 	addonInstallCmd.Flags().String("replica-of-host", "", "Redis/Valkey: address of a remote master to replicate (cross-host; pair with --replica-of-port and --password matching the master's; mutually exclusive with --replica-of)")
 	addonInstallCmd.Flags().Int("replica-of-port", 0, "Redis/Valkey: remote master's port, paired with --replica-of-host")
@@ -4266,6 +4272,9 @@ func validateRedisKnobs(rc config.RedisConfig) error {
 			return fmt.Errorf("unknown --appendfsync %q (available: %s)", rc.AppendFsync, strings.Join(redisAppendFsyncs, ", "))
 		}
 	}
+	if rc.IoThreads != 0 && (rc.IoThreads < 1 || rc.IoThreads > 128) {
+		return fmt.Errorf("--io-threads must be 1-128 (0 leaves the server default of 1); got %d", rc.IoThreads)
+	}
 	if rc.SaveSchedule != "" && rc.SaveSchedule != "no" {
 		fields := strings.Fields(rc.SaveSchedule)
 		if len(fields)%2 != 0 {
@@ -4547,6 +4556,8 @@ func runAddonInstallRedis(cmd *cobra.Command) error {
 	aofSet := cmd.Flags().Changed("aof")
 	appendfsync, _ := cmd.Flags().GetString("appendfsync")
 	saveSchedule, _ := cmd.Flags().GetString("save")
+	ioThreads, _ := cmd.Flags().GetInt("io-threads")
+	ioThreadsSet := cmd.Flags().Changed("io-threads")
 	replicaOf, _ := cmd.Flags().GetString("replica-of")
 	replicaOfHost, _ := cmd.Flags().GetString("replica-of-host")
 	replicaOfPort, _ := cmd.Flags().GetInt("replica-of-port")
@@ -4603,6 +4614,9 @@ func runAddonInstallRedis(cmd *cobra.Command) error {
 	}
 	if saveSchedule != "" {
 		existing.SaveSchedule = saveSchedule
+	}
+	if ioThreadsSet {
+		existing.IoThreads = ioThreads
 	}
 	// Resolve the replica role (if requested) before validating and before the
 	// version step: a local --replica-of adopts the master's major and password,
@@ -4727,6 +4741,9 @@ func runAddonInstallRedis(cmd *cobra.Command) error {
 	fmt.Printf("  Role:       %s\n", redisRoleSummary(rc))
 	if rc.MaxMemory != "" {
 		fmt.Printf("  Maxmemory:   %s (%s)\n", rc.MaxMemory, redisEffectivePolicy(rc))
+	}
+	if rc.IoThreads > 0 {
+		fmt.Printf("  IO threads:  %d\n", rc.IoThreads)
 	}
 	fmt.Printf("  Persistence: %s\n", redisPersistenceSummary(rc))
 	fmt.Println()
@@ -6062,6 +6079,9 @@ func runAddonList(showPassword bool) error {
 			if rc.MaxMemory != "" {
 				fmt.Printf("    Maxmemory:   %s (%s)\n", rc.MaxMemory, redisEffectivePolicy(rc))
 			}
+			if rc.IoThreads > 0 {
+				fmt.Printf("    IO threads:  %d\n", rc.IoThreads)
+			}
 			fmt.Printf("    Persistence: %s\n", redisPersistenceSummary(rc))
 			fmt.Printf("    Data:        %s\n", rm.DataDir(&rc))
 			fmt.Printf("    Image:       %s\n", rc.ImageTag)
@@ -6117,6 +6137,9 @@ func runAddonList(showPassword bool) error {
 			}
 			if vc.MaxMemory != "" {
 				fmt.Printf("    Maxmemory:   %s (%s)\n", vc.MaxMemory, redisEffectivePolicy(vc))
+			}
+			if vc.IoThreads > 0 {
+				fmt.Printf("    IO threads:  %d\n", vc.IoThreads)
 			}
 			fmt.Printf("    Persistence: %s\n", redisPersistenceSummary(vc))
 			fmt.Printf("    Data:        %s\n", vm.DataDir(&vc))

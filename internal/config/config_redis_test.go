@@ -107,6 +107,7 @@ func TestRedisSaveLoadRoundTrip(t *testing.T) {
 			AppendFsync:     "always",
 			MaxMemoryPolicy: "noeviction",
 			SaveSchedule:    "900 1 300 10",
+			IoThreads:       4,
 			Autostart:       true,
 		},
 		// The replica role is stored, not re-derived: `pg addon start` rebuilds
@@ -157,6 +158,9 @@ func TestRedisSaveLoadRoundTrip(t *testing.T) {
 	}
 	if rc.SaveSchedule != "900 1 300 10" {
 		t.Errorf("save not persisted: %q", rc.SaveSchedule)
+	}
+	if rc.IoThreads != 4 {
+		t.Errorf("io_threads not persisted: %d", rc.IoThreads)
 	}
 	if rc.Listen != "127.0.0.1" {
 		t.Errorf("listen not persisted: %q", rc.Listen)
