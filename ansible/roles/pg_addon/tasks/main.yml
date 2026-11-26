@@ -35,6 +35,14 @@
       config {{ _addon_safeline_config_path }}.
   when: _addon_safeline_rootful | bool
 
+- name: Ensure the pgcli config exists
+  ansible.builtin.include_role:
+    name: pgcli
+    tasks_from: config
+  # --tags addon may run on a host that never went through the pgcli role (a
+  # fresh test VM) and no instance play will create the config there: create
+  # it here so the add-on commands have one to write to. No-op when present.
+
 - name: Read pgcli config
   ansible.builtin.command:
     argv:
