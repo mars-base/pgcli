@@ -393,6 +393,7 @@ IMAGES := \
 	docker.io/victoriametrics/vlagent:v1.53.0 \
 	docker.io/victoriametrics/vmalert:v1.133.0 \
 	docker.io/clickhouse/clickhouse-server:26.8.36.3 \
+	docker.io/clickhouse/clickhouse-keeper:26.8.36.3 \
 	docker.io/apache/kafka:4.4.0 \
 	docker.io/library/rabbitmq:4.4.0-management \
 	docker.io/apache/rocketmq:5.5.0 \

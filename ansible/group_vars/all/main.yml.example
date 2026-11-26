@@ -332,7 +332,11 @@ pgcli_images:
   - image: docker.io/clickhouse/clickhouse-server:26.8.36.3
     archive: clickhouse-server_26.8.36.3.tar
     auto_load: true
-    addons: [clickhouse, clickhouse_keeper]
+    addons: [clickhouse]
+  - image: docker.io/clickhouse/clickhouse-keeper:26.8.36.3
+    archive: clickhouse-keeper_26.8.36.3.tar
+    auto_load: true
+    addons: [clickhouse_keeper]
   - image: docker.io/apache/kafka:4.4.0
     archive: kafka_4.4.0.tar
     auto_load: true

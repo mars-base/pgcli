@@ -23,6 +23,7 @@ pgcli 使用的容器镜像及其默认 tag。
 | `ghcr.io/mars-base/pgcli/pgcli-documentdb-gateway` | `1.0.0` | DocumentDB MongoDB wire protocol 网关（官方 Rust gateway `.deb` + `debian:13-slim`），不含 MongoDB server；仅本地 PG 18 + DocumentDB 扩展，经共享 Unix socket；双架构 manifest list | `DefaultDocumentDBImageTag` |
 | `ghcr.io/mars-base/pgcli/pgcli-mongosh` | `2.14.1` | mongosh 客户端（官方 2.14.1 单文件二进制 + `debian:13-slim`），不含 MongoDB server；由 `pg addon documentdb shell`/只读巡检按需拉取，pgcli 二进制不含 MongoDB driver；双架构 manifest list | `DefaultMongoshImageTag` |
 | `docker.io/clickhouse/clickhouse-server` | `26.8.36.3` | ClickHouse 单机列式 OLAP（26.8 LTS），纯上游官方镜像无 wrapper，多架构 manifest list；host 网络 | `DefaultClickHouseImageTag`（`ClickHouseImageTagForVersion`） |
+| `docker.io/clickhouse/clickhouse-keeper` | `26.8.36.3` | ClickHouse Keeper（ZooKeeper 兼容协议），ClickHouse 复制/分布式表的 Raft quorum 协调服务，可单机或跨主机多成员，纯上游官方镜像无 wrapper，多架构 manifest list；host 网络，入口脚本按 env 创建数据/日志目录并修复属主 | `DefaultClickHouseKeeperImageTag`（`ClickHouseKeeperImageTagForVersion`） |
 | `docker.io/apache/kafka` | `4.4.0` | Apache Kafka 4.x（KRaft-only，无需 ZooKeeper）broker+controller combined 节点，支持单机或跨主机静态 controller quorum，纯上游官方镜像无 wrapper，多架构 manifest list；host 网络，以 uid/gid 1000 运行 | `DefaultKafkaImageTag`（`KafkaImageTagForVersion`） |
 | `docker.io/library/rabbitmq` | `4.4.0-management` | RabbitMQ 消息代理（AMQP + management Web UI/API），单机或跨主机 etcd peer discovery 集群，纯上游官方镜像无 wrapper，多架构 manifest list；host 网络，以 uid/gid 999 运行 | `DefaultRabbitMQImageTag` |
 | `docker.io/apache/rocketmq` | `5.5.0` | Apache RocketMQ 5.x 消息队列（每个实例 NameServer + broker + proxy 三容器），单机或 DLedger controller-mode 集群，纯上游官方镜像无 wrapper；host 网络，以 uid/gid 3000 运行 | `DefaultRocketMQImageTag` |
@@ -148,6 +149,11 @@ podman save -o "$TARGET/pgcli-mongosh_2.14.1.tar" \
 podman pull --platform linux/amd64 docker.io/clickhouse/clickhouse-server:26.8.36.3
 podman save -o "$TARGET/clickhouse-server_26.8.36.3.tar" \
   docker.io/clickhouse/clickhouse-server:26.8.36.3
+
+# clickhouse-keeper 与 server 同一 LTS 线，同样先按 amd64 pull 再 save
+podman pull --platform linux/amd64 docker.io/clickhouse/clickhouse-keeper:26.8.36.3
+podman save -o "$TARGET/clickhouse-keeper_26.8.36.3.tar" \
+  docker.io/clickhouse/clickhouse-keeper:26.8.36.3
 
 # kafka 上游镜像是多架构 manifest list，先按 amd64 pull 再 save
 podman pull --platform linux/amd64 docker.io/apache/kafka:4.4.0
@@ -333,6 +339,14 @@ done
   覆盖镜像自带的 wildcard 监听），数据/日志/备份/密码 secret 也都是 bind mount。
   认证始终开启（`CLICKHOUSE_USER` + `CLICKHOUSE_PASSWORD_FILE`）；**无 TLS 监听**
   （用 nginx 前置）、单节点无复制/HA；以 **host 网络**运行
+- **clickhouse-keeper**：纯上游官方 `docker.io/clickhouse/clickhouse-keeper`，无 wrapper，
+  与 clickhouse-server 共用同一个 LTS 版本 pin（`DefaultClickHouseKeeperVersion =
+  DefaultClickHouseVersion`，当前 `26.8.36.3`；多架构 manifest list，amd64 + arm64）。
+  ZooKeeper 协议兼容的协调服务，给 ClickHouse 的复制表/分布式 DDL 提供 Raft quorum；
+  单机一个成员即可服务，跨主机用 `--server-id`/`--peer` 组成多成员集群（客户端口
+  9181，Raft peer 口 9234）。数据/日志/配置全部 bind mount，入口脚本按
+  `CLICKHOUSE_DATA_DIR`/`LOG_DIR` 创建目录并修复属主；`--tmpfs /var/lib/clickhouse`
+  屏蔽镜像的匿名卷。**无认证、无 TLS**；以 **host 网络**运行
 - **kafka**：纯上游官方 `docker.io/apache/kafka`，无 wrapper，pin 到 `4.4.0`
   （多架构 manifest list，amd64 + arm64）。Kafka 4.x **KRaft-only**，无 ZooKeeper；
   pgcli 渲染 `server.properties`（combined broker+controller、静态 voters、
@@ -490,7 +504,9 @@ done
 
 ---
 
-**最后更新**：2026-11-13（pgcli-privoxy 接入 pg addon 并进入主镜像表、同步 Makefile IMAGES；2026-11-03 新增 vmalert 镜像并同步 Makefile IMAGES；2026-11-02 补入 RabbitMQ、RocketMQ、node_exporter、pg_exporter 镜像并同步 Makefile IMAGES；同日新增 pgcli-mongosh；同步补入 pgcli-documentdb-gateway；2026-10-28 新增 Kafka 4.4.0 镜像；2026-10-27 新增 clickhouse 与 influx2tsdb 镜像；2026-10-23 新增 vlagent 镜像；同日新增 victorialogs 镜像；此前新增 vmcluster 三镜像于 2026-10-22；
+**最后更新**：2026-11-26（补录 clickhouse-keeper 镜像并同步 Makefile IMAGES 与 Ansible
+`pgcli_images`——此前代码在用但三个清单均未收录；2026-11-24 SafeLine 全栈 7 个镜像进入
+主镜像表；2026-11-13 pgcli-privoxy 接入 pg addon 并进入主镜像表、同步 Makefile IMAGES；2026-11-03 新增 vmalert 镜像并同步 Makefile IMAGES；2026-11-02 补入 RabbitMQ、RocketMQ、node_exporter、pg_exporter 镜像并同步 Makefile IMAGES；同日新增 pgcli-mongosh；同步补入 pgcli-documentdb-gateway；2026-10-28 新增 Kafka 4.4.0 镜像；2026-10-27 新增 clickhouse 与 influx2tsdb 镜像；2026-10-23 新增 vlagent 镜像；同日新增 victorialogs 镜像；此前新增 vmcluster 三镜像于 2026-10-22；
 此前新增 victoriametrics 镜像；
 此前新增 beegfs 三镜像于 2026-10-19，gitea 于 2026-10-16
 合入时补录，alertmanager 于 2026-10-15
