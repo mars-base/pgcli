@@ -135,7 +135,9 @@ printf '%s\n' "$PASSWORD" | pg http htpasswd alice
 请先用 `scripts/export-images.sh` 导出到该目录（见[离线镜像服务器](./image-server/)）。
 
 启用二进制复制时，控制端必须先 `make build`，且 `images/` 下要有其余二进制；否则
-playbook 会在修改任何主机前失败。可以在 `group_vars/http/main.yml` 里覆盖：
+playbook 会在修改任何主机前失败。`scripts/export-images.sh --binaries` 会把 `pg`
+与 `podman-launcher-linux_<arch>` 写进 `images/`（见[离线镜像服务器](./image-server/)）。
+可以在 `group_vars/http/main.yml` 里覆盖：
 
 ```yaml
 pgcli_http_binaries: [pg, podman-launcher-linux_amd64]

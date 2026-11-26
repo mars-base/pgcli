@@ -31,7 +31,7 @@ export-images.sh ──▶ /srv/offline-images ──HTTP──▶ pgcli_images_
 ./scripts/export-images.sh --ansible ansible/group_vars/all/main.yml -o /srv/offline-images
 ```
 
-两种来源都解析出 44 个镜像，且镜像到文件名的映射一致。常用参数：
+两种来源都解析出 52 个镜像，且镜像到文件名的映射一致。常用参数：
 
 | 参数 | 说明 |
 |------|------|
@@ -39,6 +39,7 @@ export-images.sh ──▶ /srv/offline-images ──HTTP──▶ pgcli_images_
 | `--ansible FILE` | 从 Ansible group_vars 的 `pgcli_images` 读取，使用其中的 `archive` 命名 |
 | `-o, --output DIR` | 保存目录，默认仓库下的 `images/` |
 | `--platform ARCH` | 拉取架构，默认 `linux/amd64`；ARM 主机用 `linux/arm64` |
+| `-b, --binaries` | 同时产出 `pg` 与 `podman-launcher` 二进制（见下文） |
 | `-n, --dry-run` | 只打印计划，不拉取、不写文件 |
 | `-f, --force` | 重新导出已存在的 tar 包 |
 
@@ -58,6 +59,28 @@ export HTTPS_PROXY=$HTTP_PROXY
 
 代理本身的部署见[出网代理](./proxy/)。
 
+### 二进制（离线引导）
+
+加 `--binaries` 会同时产出隔离环境需要的两个非镜像文件，命名与 Ansible
+角色约定一致：
+
+```bash
+./scripts/export-images.sh --ansible ansible/group_vars/all/main.yml \
+  --binaries -o /srv/offline-images
+```
+
+- `pg`——用当前 checkout 按 `--platform` 交叉编译（走 `make build`，需要
+  go 与 make）；把 `pgcli_install_binary_url` 指向它。
+- `podman-launcher-linux_<arch>`——上游
+  [podman-launcher](https://github.com/89luca89/podman-launcher) 的发布二进制
+  （curl 下载；可用 `PODMAN_LAUNCHER_URL` 换镜像地址）；把
+  `pgcli_podman_binary_url` 指向它。它只是引导器：静态 podman 树仍会在首次
+  使用时下载，完全隔离的主机需预置 podman（见[离线安装](./offline/)）。
+
+与 tar 包一样，目标文件已存在且未加 `--force` 时只打印 `SKIP`，不会重复
+编译或下载。使用默认 `-o images/` 时，`pg_http` 角色的 `sync_binaries`
+会直接取用这两个文件。
+
 ### 文件命名与行为
 
 - 文件名规则为 `<镜像仓库名>_<tag>.tar`（`:` 替换为 `_`），例如
@@ -68,7 +91,7 @@ export HTTPS_PROXY=$HTTP_PROXY
   继续处理其余镜像，最后以非零状态退出并列出失败项。
 - 先按 `--platform` 拉取再 `podman save`，因为 `podman save` 无法把多架构
   manifest list 写成 `docker-archive`。
-- 全部 44 个 tar 包总计数 GB，请确保保存目录所在文件系统有足够空间。
+- 全部 52 个 tar 包总计数 GB，请确保保存目录所在文件系统有足够空间。
 
 ## 启动 HTTP 服务器
 

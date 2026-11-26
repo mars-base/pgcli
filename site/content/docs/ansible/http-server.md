@@ -146,7 +146,9 @@ first with `scripts/export-images.sh` (see [Offline image server](./image-server
 
 The controller therefore needs a `make build` first, and the other binaries
 must already exist under `images/` when binary copying is enabled; otherwise the
-playbook fails before any host is modified. Override the variables in
+playbook fails before any host is modified. `scripts/export-images.sh
+--binaries` writes `pg` and `podman-launcher-linux_<arch>` into `images/` (see
+[Offline image server](./image-server/)). Override the variables in
 `group_vars/http/main.yml`:
 
 ```yaml

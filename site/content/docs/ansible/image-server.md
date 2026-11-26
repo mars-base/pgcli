@@ -35,7 +35,7 @@ consume:
 ./scripts/export-images.sh --ansible ansible/group_vars/all/main.yml -o /srv/offline-images
 ```
 
-Both sources resolve to 44 images with the same image-to-filename mapping.
+Both sources resolve to 52 images with the same image-to-filename mapping.
 Options:
 
 | Option | Meaning |
@@ -44,6 +44,7 @@ Options:
 | `--ansible FILE` | Read `pgcli_images` from an Ansible group_vars file and use its `archive` names |
 | `-o, --output DIR` | Output directory; default `images/` in the repository |
 | `--platform ARCH` | Pull platform; default `linux/amd64` (use `linux/arm64` for ARM hosts) |
+| `-b, --binaries` | Also emit the `pg` and `podman-launcher` binaries (see below) |
 | `-n, --dry-run` | Print the plan without pulling or writing anything |
 | `-f, --force` | Re-export tarballs that already exist |
 
@@ -64,6 +65,30 @@ export HTTPS_PROXY=$HTTP_PROXY
 
 See [Egress proxy](./proxy/) for running the proxy itself.
 
+### Binaries for air-gapped hosts
+
+`--binaries` also writes the two non-image artifacts an isolated environment
+needs, using the names the Ansible roles already expect:
+
+```bash
+./scripts/export-images.sh --ansible ansible/group_vars/all/main.yml \
+  --binaries -o /srv/offline-images
+```
+
+- `pg` — cross-built from this checkout for `--platform` (via `make build`;
+  needs go and make). Point `pgcli_install_binary_url` at it.
+- `podman-launcher-linux_<arch>` — the upstream
+  [podman-launcher](https://github.com/89luca89/podman-launcher) release
+  binary (fetched with curl; `PODMAN_LAUNCHER_URL` overrides the URL). Point
+  `pgcli_podman_binary_url` at it. It only bootstraps podman: the static
+  podman tree is still downloaded on first use, so a fully air-gapped host
+  needs podman pre-seeded (see [Offline installs](./offline/)).
+
+Like the tarballs, an existing file is reported as `SKIP` unless `--force` is
+given, so repeated runs do not rebuild or re-download. With the default
+`-o images/`, the `pg_http` role's `sync_binaries` picks both files up
+directly.
+
 ### Naming and behaviour
 
 - Names follow `<repository-basename>_<tag>.tar` (`:` becomes `_`), for example
@@ -76,7 +101,7 @@ See [Egress proxy](./proxy/) for running the proxy itself.
   script exits non-zero and lists the failures at the end.
 - Images are pulled with `--platform` before saving because `podman save`
   cannot write a multi-arch manifest list to `docker-archive`.
-- The 44 tarballs total several GB; make sure the output filesystem has room.
+- The 52 tarballs total several GB; make sure the output filesystem has room.
 
 ## Start the HTTP server
 

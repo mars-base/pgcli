@@ -21,6 +21,7 @@ OUT="$REPO_ROOT/images"
 PLATFORM="linux/amd64"
 FORCE=false
 DRY_RUN=false
+WITH_BINARIES=false
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
@@ -39,12 +40,19 @@ Image source (one of):
 Options:
   -o, --output DIR      output directory (default: $OUT)
       --platform ARCH   platform to pull (default: $PLATFORM)
+  -b, --binaries        also emit the pg binary (cross-built for --platform)
+                        and the podman-launcher binary, named as the Ansible
+                        roles expect: pg and podman-launcher-linux_<arch>
   -f, --force           re-export archives that already exist
   -n, --dry-run         print the planned exports without pulling or saving
   -h, --help            show this help
 
 Archive names match the offline manifest convention:
   <repository-basename>_<tag>.tar    e.g. pgcli-pg_18-2.59.3.tar
+
+--binaries needs go and make (for pg) and curl (for the launcher); set
+PODMAN_LAUNCHER_URL to fetch the launcher from a mirror instead of:
+  https://github.com/89luca89/podman-launcher/releases/latest/download/podman-launcher-<arch>
 
 After exporting, serve the directory with:
   pg http start --listen 0.0.0.0 --port 18080 --dir DIR
@@ -61,6 +69,7 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || die "missing value for $1"
             PLATFORM=$2; shift 2 ;;
         --platform=*) PLATFORM=${1#*=}; shift ;;
+        -b|--binaries) WITH_BINARIES=true; shift ;;
         -f|--force)   FORCE=true; shift ;;
         -n|--dry-run) DRY_RUN=true; shift ;;
         --manifest)
@@ -86,6 +95,19 @@ else
     [[ -r $MANIFEST ]] || die "cannot read image manifest: $MANIFEST"
 fi
 
+BIN_OS=${PLATFORM%%/*}
+BIN_ARCH=${PLATFORM#*/}
+BIN_ARCH=${BIN_ARCH%%/*}
+PODMAN_LAUNCHER_URL=${PODMAN_LAUNCHER_URL:-}
+if [[ $WITH_BINARIES == true ]]; then
+    [[ $BIN_OS == linux ]] || die "--binaries exports Linux binaries; got platform '$PLATFORM'"
+    case $BIN_ARCH in
+        amd64|arm64) ;;
+        *) die "--binaries supports linux/amd64 and linux/arm64; got platform '$PLATFORM'" ;;
+    esac
+    : "${PODMAN_LAUNCHER_URL:=https://github.com/89luca89/podman-launcher/releases/latest/download/podman-launcher-$BIN_ARCH}"
+fi
+
 images=()
 archives=()
 declare -A seen=()
@@ -109,6 +131,60 @@ add_entry() {
     archive_owner[$archive]=$image
     images+=("$image")
     archives+=("$archive")
+}
+
+# Cross-build the pg binary for the selected platform. BINARY is overridden so
+# the checkout's bin/pg (possibly built for this host) is left untouched.
+export_pg_binary() {
+    local dest="$OUT/pg" staged="pg-export-$$"
+    if [[ -f $dest && $FORCE != true ]]; then
+        printf 'SKIP    %s (exists)\n' "$dest"
+        return 0
+    fi
+    command -v go >/dev/null 2>&1 || die "go not found in PATH (required by --binaries)"
+    command -v make >/dev/null 2>&1 || die "make not found in PATH (required by --binaries)"
+    printf 'BUILD   pg (%s)\n' "$PLATFORM"
+    if ! GOOS="$BIN_OS" GOARCH="$BIN_ARCH" \
+        make -C "$REPO_ROOT" build BINARY="$staged" >/dev/null; then
+        rm -f "$REPO_ROOT/bin/$staged"
+        printf 'FAIL    pg: make build failed\n' >&2
+        return 1
+    fi
+    if ! install -m 0755 "$REPO_ROOT/bin/$staged" "$dest.tmp"; then
+        rm -f "$REPO_ROOT/bin/$staged" "$dest.tmp"
+        printf 'FAIL    pg: could not stage %s\n' "$dest" >&2
+        return 1
+    fi
+    rm -f "$REPO_ROOT/bin/$staged"
+    if ! mv -f "$dest.tmp" "$dest"; then
+        rm -f "$dest.tmp"
+        printf 'FAIL    pg: could not finalize %s\n' "$dest" >&2
+        return 1
+    fi
+    printf 'OK      %s\n' "$dest"
+}
+
+# The launcher is a bootstrap binary, not the podman tree itself: on first use
+# it downloads the static podman build (see the offline docs).
+export_podman_launcher() {
+    local dest="$OUT/podman-launcher-linux_${BIN_ARCH}"
+    if [[ -f $dest && $FORCE != true ]]; then
+        printf 'SKIP    %s (exists)\n' "$dest"
+        return 0
+    fi
+    command -v curl >/dev/null 2>&1 || die "curl not found in PATH (required by --binaries)"
+    printf 'FETCH   %s\n' "$PODMAN_LAUNCHER_URL"
+    if ! curl -fsSL --connect-timeout 15 --max-time 300 -o "$dest.tmp" "$PODMAN_LAUNCHER_URL"; then
+        rm -f "$dest.tmp"
+        printf 'FAIL    podman-launcher: download failed\n' >&2
+        return 1
+    fi
+    if ! { chmod 0755 "$dest.tmp" && mv -f "$dest.tmp" "$dest"; }; then
+        rm -f "$dest.tmp"
+        printf 'FAIL    podman-launcher: could not finalize %s\n' "$dest" >&2
+        return 1
+    fi
+    printf 'OK      %s\n' "$dest"
 }
 
 if [[ $ANSIBLE_SET == true ]]; then
@@ -164,13 +240,29 @@ if [[ $DRY_RUN == true ]]; then
     for i in "${!images[@]}"; do
         printf 'WOULD  %s -> %s/%s\n' "${images[$i]}" "$OUT" "${archives[$i]}"
     done
-    printf '\nDry run: %d image(s); nothing pulled or saved.\n' "${#images[@]}"
+    bin_count=0
+    if [[ $WITH_BINARIES == true ]]; then
+        bin_count=2
+        printf 'WOULD  build pg (%s) -> %s/pg\n' "$PLATFORM" "$OUT"
+        printf 'WOULD  fetch %s -> %s/podman-launcher-linux_%s\n' \
+            "$PODMAN_LAUNCHER_URL" "$OUT" "$BIN_ARCH"
+    fi
+    printf '\nDry run: %d image(s), %d binary artifact(s); nothing pulled, built, or saved.\n' \
+        "${#images[@]}" "$bin_count"
     exit 0
 fi
 
 command -v podman >/dev/null 2>&1 || die "podman not found in PATH"
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
+
+bin_failed=0
+if [[ $WITH_BINARIES == true ]]; then
+    printf '== Binaries ==\n'
+    export_pg_binary || bin_failed=$((bin_failed + 1))
+    export_podman_launcher || bin_failed=$((bin_failed + 1))
+    printf '\n'
+fi
 
 exported=0
 skipped=0
@@ -219,6 +311,11 @@ printf 'Output:   %s\n' "$OUT"
 if (( failed > 0 )); then
     printf 'Failed images:\n' >&2
     printf '  %s\n' "${failures[@]}" >&2
+fi
+if (( bin_failed > 0 )); then
+    printf 'Failed binaries: see the FAIL lines above\n' >&2
+fi
+if (( failed > 0 || bin_failed > 0 )); then
     exit 1
 fi
 
