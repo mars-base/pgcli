@@ -13,12 +13,10 @@ func NewValkeyManager(cfg *config.Config) (*RedisManager, error) {
 	return newKVManager(cfg, "valkey", valkeyServerArgs)
 }
 
-// ValkeyCLI runs valkey-cli from a short-lived container; the semantics match
-// RedisCLI exactly (REDISCLI_AUTH precedence, host networking on Linux, -c for
-// cluster nodes unless args start with --cluster). valkey-cli honors
-// REDISCLI_AUTH like redis-cli, so callers unchanged from Redis work verbatim;
-// newer clients also read VALKEYCLI_AUTH, which is left to the caller's
-// environment untouched.
+// ValkeyCLI runs valkey-cli from a short-lived container. VALKEYCLI_AUTH takes
+// precedence when set and is also mirrored to REDISCLI_AUTH for older clients;
+// REDISCLI_AUTH remains supported for compatibility. Networking and cluster
+// routing follow RedisCLI.
 func (m *RedisManager) ValkeyCLI(imageTag, password, host string, port int, cluster bool, args []string) error {
 	return m.kvCLI("valkey-cli", imageTag, password, host, port, cluster, args)
 }

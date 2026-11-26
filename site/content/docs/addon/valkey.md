@@ -28,9 +28,10 @@ the same Ansible single + cluster layouts. Only the labels and binaries differ
 
 > **Out of scope:** Sentinel (automatic failover) is not managed, the same as
 > for redis. The *native cluster* is supported — `--cluster` turns instances
-> into cluster-enabled members that you assemble once yourself with
-> `pg valkey-cli -- --cluster create` — and so are read replicas
-> (`--replica-of`).
+> into cluster-enabled members. With direct `pg addon install` commands, assemble
+> them once yourself with `pg valkey-cli -- --cluster create`; the Ansible
+> `addon_valkey_cluster` layout assembles the cluster after all members are up.
+> Read replicas (`--replica-of`) are supported too.
 
 ## Parameters
 
@@ -195,10 +196,12 @@ REDISCLI_AUTH=s3cret pg valkey-cli --host 10.0.0.7 dbsize
 
 Use these instead of the client's own `-h`/`-p`: those sit *after* the command
 word and would be read as command arguments, while pgcli injects the connection
-flags itself. `REDISCLI_AUTH` — the env var `valkey-cli` inherited from
-redis-cli — if set, overrides the stored password in every mode:
+flags itself. `VALKEYCLI_AUTH` and `REDISCLI_AUTH` are both accepted by `pg
+valkey-cli`; if both are set, `VALKEYCLI_AUTH` wins. pgcli forwards that value
+under both names for compatibility, and otherwise uses the configured password:
 
 ```bash
+VALKEYCLI_AUTH=otherpass pg valkey-cli dbsize
 REDISCLI_AUTH=otherpass pg valkey-cli dbsize
 ```
 
@@ -249,9 +252,10 @@ pg addon install valkey --name vcache-ro         # reinstall as a plain master
 ## Native cluster
 
 `--cluster` turns instances into members of a **Valkey native cluster** —
-sharding by slot (16384 of them), not a read replica of one master. The flow is
-identical to redis: **pgcli installs cluster-enabled nodes, it does not
-assemble them.**
+sharding by slot (16384 of them), not a read replica of one master. Direct
+`pg addon install` commands create cluster-enabled nodes but do not assemble
+them; the Ansible `addon_valkey_cluster` layout assembles the cluster after all
+members are up.
 
 ```bash
 # 1. install the members — minimum 3 masters; same token = same cluster
@@ -345,9 +349,10 @@ pg valkey-cli --name n1 -- --cluster create \
 ```
 
 Open each member's **bus port (client+10000 — `16380` at the default
-`6380`)** on the firewall between hosts, and give every member of the group the
-flag. The password inheritance only works within one `pg.yaml`; across hosts
-you must pin one password explicitly on every host, as above.
+`6380`)** on the firewall between hosts. Password inheritance only works within
+one `pg.yaml`; across hosts, every member must use the same password. Set it
+explicitly on each host (as above), or otherwise ensure each install receives
+that same value.
 
 > **Status:** the single-host cluster flow is covered by the automated e2e
 > (`test/addon/test_valkey_cluster.sh`); the cross-host procedure reuses the
@@ -508,14 +513,15 @@ pg logs addon valkey --name vcache -f     # follow
 ## Known limitations
 
 - **No automatic failover** — read replicas and native-cluster sharding are
-  supported, but the HA control plane is not: **Sentinel** is out of scope, and
-  so is cluster orchestration — pgcli installs cluster members but never
-  assembles, rescales, or rebalances them. A replica gives read scaling and a
-  redundant copy, not a self-healing pair.
-- **Native cluster: assembly and reshaping stay manual** — `--cluster` installs
-  cluster-enabled nodes and `--cluster-replicas N` lets each master have
-  followers, but `--cluster create`/`add-node`/resharding/`del-node` are yours
-  to run. Removing a member is a plain delete with no slot reassignment.
+  supported, but there is no HA control plane: **Sentinel** is out of scope.
+  The Ansible `addon_valkey_cluster` layout assembles the initial cluster but
+  does not automatically rescale or rebalance it. A replica gives read scaling
+  and a redundant copy, not a self-healing pair.
+- **Native cluster: direct installs and reshaping stay manual** — direct
+  `pg addon install` commands create cluster-enabled nodes but do not run
+  `--cluster create`. The Ansible `addon_valkey_cluster` layout assembles the
+  initial cluster automatically; `add-node`/resharding/`del-node` remain manual.
+  Removing a member is a plain delete with no slot reassignment.
 - **Cross-host cluster (`--advertise-host`) is manual, not in the e2e suite** —
   same status as redis: implemented, unit-tested and verified by hand; the
   single-host flow has the automated e2e.

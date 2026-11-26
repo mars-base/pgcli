@@ -282,15 +282,13 @@ func (m *RedisManager) Stop(name string) (string, error) {
 
 // RedisCLI runs redis-cli from a short-lived container against the addon's
 // published port; ValkeyCLI (valkey.go) does the same with valkey-cli. Both
-// share kvCLI below. Auth follows the client's native precedence: a
-// REDISCLI_AUTH already present in the caller's environment is forwarded and
-// wins, otherwise the addon's config password is injected (valkey-cli honors
-// the same variable). Networking mirrors MCRunner — Linux uses host networking
-// to reach the port on the host loopback, macOS the default bridge with
-// host.containers.internal as the target (host networking there would only see
-// the VM's loopback). An explicit host (from pg redis-cli --host) replaces
-// that local target, so a remote endpoint is reachable from either platform.
-// The image is pulled first if the host does not already have it.
+// share kvCLI below. Caller-provided auth variables are forwarded; when none
+// is set, the addon's config password is injected. Networking mirrors MCRunner —
+// Linux uses host networking to reach the port on the host loopback, macOS the
+// default bridge with host.containers.internal as the target (host networking
+// there would only see the VM's loopback). An explicit host replaces that local
+// target, so a remote endpoint is reachable from either platform. The image is
+// pulled first if the host does not already have it.
 func (m *RedisManager) RedisCLI(imageTag, password, host string, port int, cluster bool, args []string) error {
 	return m.kvCLI("redis-cli", imageTag, password, host, port, cluster, args)
 }
@@ -332,7 +330,18 @@ func (m *RedisManager) kvCLI(client, imageTag, password, host string, port int, 
 	// Same reason as createContainer: proxy injection would risk hijacking the
 	// client connection.
 	runArgs = append(runArgs, "--http-proxy=false")
-	if auth, ok := os.LookupEnv("REDISCLI_AUTH"); ok {
+	if client == "valkey-cli" {
+		if auth, ok := os.LookupEnv("VALKEYCLI_AUTH"); ok {
+			runArgs = append(runArgs,
+				"-e", "VALKEYCLI_AUTH="+auth,
+				"-e", "REDISCLI_AUTH="+auth,
+			)
+		} else if auth, ok := os.LookupEnv("REDISCLI_AUTH"); ok {
+			runArgs = append(runArgs, "-e", "REDISCLI_AUTH="+auth)
+		} else if password != "" {
+			runArgs = append(runArgs, "-e", "REDISCLI_AUTH="+password)
+		}
+	} else if auth, ok := os.LookupEnv("REDISCLI_AUTH"); ok {
 		runArgs = append(runArgs, "-e", "REDISCLI_AUTH="+auth)
 	} else if password != "" {
 		runArgs = append(runArgs, "-e", "REDISCLI_AUTH="+password)

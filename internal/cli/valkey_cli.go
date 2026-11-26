@@ -31,14 +31,16 @@ the container itself is stopped (the image is pulled on demand).
 
 By default the target addon is --name when given, otherwise the first valkey
 addon by name, reached on the local host. Its port and requirepass password are
-read from the config, so you never type a password. REDISCLI_AUTH (the env var
-valkey-cli inherited from redis-cli; newer releases also accept VALKEYCLI_AUTH),
-if set, overrides the config password.
+read from the config, so you never type a password. VALKEYCLI_AUTH and
+REDISCLI_AUTH are forwarded when set; if both are set, VALKEYCLI_AUTH takes
+precedence and is mirrored to REDISCLI_AUTH for client compatibility. Otherwise,
+the config password is used. An explicit -a argument takes precedence inside
+valkey-cli.
 
 --host/--port point at any remote endpoint instead of the local one. With a
 local addon configured, its image and password are reused; with none configured,
-the default major's image is used and you must supply REDISCLI_AUTH (or pass -a
-after the command word).
+the default major's image is used and you must supply one of those environment
+variables (or pass -a after the command word).
 
 pgcli's own flags are only recognised before the command word; everything after
 it is forwarded to valkey-cli verbatim — negative indexes (lrange k 0 -1) and

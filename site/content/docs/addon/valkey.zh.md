@@ -23,8 +23,10 @@ weight: 50
 > 端口池也做了错开播种，不会自动撞号。
 
 > **不在范围内：** Sentinel（自动故障转移）不由 pgcli 管理，与 redis 一致。
-> 支持**原生集群**——`--cluster` 把实例变成 cluster-enabled 成员，由你自己用
-> `pg valkey-cli -- --cluster create` 组建一次；也支持读副本（`--replica-of`）。
+> 支持**原生集群**——`--cluster` 把实例变成 cluster-enabled 成员。直接运行
+> `pg addon install` 时需自行用 `pg valkey-cli -- --cluster create` 组建；Ansible
+> 的 `addon_valkey_cluster` 布局会在所有成员启动后自动组建。也支持读副本
+>（`--replica-of`）。
 
 ## 参数
 
@@ -174,10 +176,12 @@ REDISCLI_AUTH=s3cret pg valkey-cli --host 10.0.0.7 dbsize
 ```
 
 请用这些而不是客户端自己的 `-h`/`-p`：后者位于命令词*之后*，会被当作命令参数，
-而 pgcli 自己注入连接 flag。`REDISCLI_AUTH`——valkey-cli 从 redis-cli 继承的
-环境变量——若设置，在所有模式下覆盖存储的口令：
+而 pgcli 自己注入连接 flag。`pg valkey-cli` 同时接受 `VALKEYCLI_AUTH` 和
+`REDISCLI_AUTH`；若两者都设置，以 `VALKEYCLI_AUTH` 为准。pgcli 会把该值用两个变量名
+传入临时容器以兼容不同客户端版本；都未设置时使用配置中的口令：
 
 ```bash
+VALKEYCLI_AUTH=otherpass pg valkey-cli dbsize
 REDISCLI_AUTH=otherpass pg valkey-cli dbsize
 ```
 
@@ -223,8 +227,8 @@ pg addon install valkey --name vcache-ro         # 作为普通主节点重装
 ## 原生集群
 
 `--cluster` 把实例变成 **Valkey 原生集群**成员——按 slot（16384 个）分片，而
-非某个主节点的读副本。流程与 redis 完全一致：**pgcli 只安装 cluster-enabled
-节点，不负责组装。**
+非某个主节点的读副本。直接运行 `pg addon install` 只创建 cluster-enabled 节点，
+不会负责组装；Ansible 的 `addon_valkey_cluster` 布局会在所有成员启动后自动组建集群。
 
 ```bash
 # 1. 安装成员——最少 3 个主节点；相同 token 即同一集群
@@ -311,8 +315,8 @@ pg valkey-cli --name n1 -- --cluster create \
 ```
 
 在主机间防火墙放行每个成员的**总线端口（client+10000——默认 `6380` 时为
-`16380`）**，并给组内每个成员都加该 flag。口令继承只在同一个 `pg.yaml` 内有效；
-跨主机必须在每台主机上显式固定同一口令，如上所示。
+`16380`）**。口令继承只在同一个 `pg.yaml` 内有效；跨主机时每个成员必须使用相同
+口令。可像上例一样在每台主机显式设置，也可通过其他方式确保每次安装拿到相同值。
 
 > **状态：** 单主机集群流程有自动化 e2e（`test/addon/test_valkey_cluster.sh`）；
 > 跨主机流程复用 redis 实现，与 redis 一样为手工验证。
@@ -465,11 +469,11 @@ pg logs addon valkey --name vcache -f     # 跟随
 ## 已知限制
 
 - **没有自动故障转移**——支持读副本与原生集群分片，但没有 HA 控制面：
-  **Sentinel** 不在范围，集群编排也不在——pgcli 安装集群成员，但从不负责组装、
-  扩缩容或再均衡。副本提供读扩展与冗余副本，不是自愈对。
-- **原生集群：组装与重塑仍是手工**——`--cluster` 安装 cluster-enabled 节点，
-  `--cluster-replicas N` 让每个主节点可带跟随者，但
-  `--cluster create`/`add-node`/reshard/`del-node` 由你执行。删除成员只是普通
+  **Sentinel** 不在范围内。Ansible 的 `addon_valkey_cluster` 布局会组建初始集群，
+  但不会自动扩缩容或再均衡。副本提供读扩展与冗余副本，不是自愈对。
+- **原生集群：直接安装与重塑仍需手工处理**——直接运行 `pg addon install` 只创建
+  cluster-enabled 节点，不执行 `--cluster create`。Ansible 的 `addon_valkey_cluster`
+  布局会自动组建初始集群；`add-node`/reshard/`del-node` 仍由你执行。删除成员只是普通
   删除，不会做 slot 重新分配。
 - **跨主机集群（`--advertise-host`）为手工流程，未进 e2e**——状态与 redis 相同：
   已实现、有单测、经手工验证；单主机流程有自动化 e2e。
