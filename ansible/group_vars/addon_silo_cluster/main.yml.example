@@ -6,6 +6,7 @@
 # Same 4-node MNSD layout on a separate port pair.
 _addon_cluster_silo_hosts: "{{ groups['addon_silo_cluster'] }}"
 _addon_cluster_silo_root_user: admin
+# Empty uses the controller-generated random password; set a value to pin it.
 _addon_cluster_silo_root_password: ""
 _addon_cluster_silo_tls: false
 _addon_cluster_silo_tls_cert: "{{ addon_cluster_shared_server_chain_cert }}"

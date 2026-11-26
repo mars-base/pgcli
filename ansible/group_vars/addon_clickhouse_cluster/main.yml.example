@@ -27,6 +27,7 @@ _addon_cluster_clickhouse_keeper_endpoint_args: >-
   {%- set _ = out.extend(['--keeper', hostvars[host].private_ip ~ ':9181']) -%}
   {%- endfor -%}
   {{ out }}
+# Empty uses the controller-generated random password; set a value to pin it.
 _addon_cluster_clickhouse_admin_password: ""
 
 # Optional extra flags can be appended to each entry's params, for example:

@@ -124,11 +124,14 @@ On the members the files land under `/data/pg/addon/shared/` (`ca.crt`,
 server certificate covers every `private_ip` of the selected
 `addon_<type>_cluster` group.
 
-Password values are loaded into the matching `_addon_cluster_<type>_*` variables
-with `set_fact` during the run, so the templates keep them empty:
+Leave the `_addon_cluster_<type>_*` password variables empty to use the random
+password generated on the controller. A non-empty value pins that password for
+the run and the generated file is ignored. Redis and Valkey deployments usually
+set their password explicitly; the generated file mainly covers lab setups:
 
 ```yaml
 _addon_cluster_minio_root_user: admin
+# Empty: use the generated password. Set a value to pin it.
 _addon_cluster_minio_root_password: ""
 ```
 

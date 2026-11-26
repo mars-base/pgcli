@@ -13,6 +13,7 @@ addon_redis_single_params: []
 #   - "--data-dir=/data/pg/addon/redis/redis1"
 #   - "--port=6379"
 #   - "--maxmemory=256mb"
+#   - "--password=<your-password>"   # otherwise a password is generated and printed
 #   - "--maxmemory-policy=allkeys-lru"
 #   - "--aof"
 #   - "--appendfsync=everysec"

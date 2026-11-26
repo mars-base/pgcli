@@ -113,11 +113,13 @@ pgcli_addons: >-
 `server.key`、`server.pem`；私钥类文件权限 `0600`）。服务器证书覆盖所选
 `addon_<type>_cluster` 分组内所有主机的 `private_ip`。
 
-运行期间，口令会通过 `set_fact` 注入对应的 `_addon_cluster_<type>_*` 变量，因此
-配置模板里保持为空即可：
+`_addon_cluster_<type>_*` 口令变量留空时使用控制机自动生成的随机口令；填写
+非空值即指定该口令（本次运行忽略生成的口令文件）。Redis 和 Valkey 通常自行指定
+密码，生成的口令文件主要用于实验环境：
 
 ```yaml
 _addon_cluster_minio_root_user: admin
+# 留空使用自动生成的口令；填写即指定密码
 _addon_cluster_minio_root_password: ""
 ```
 

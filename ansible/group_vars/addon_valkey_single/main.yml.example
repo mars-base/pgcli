@@ -16,6 +16,7 @@ addon_valkey_single_params: []
 #   - "--data-dir=/data/pg/addon/valkey/vcache"
 #   - "--port=6380"
 #   - "--maxmemory=256mb"
+#   - "--password=<your-password>"   # otherwise a password is generated and printed
 #   - "--maxmemory-policy=allkeys-lru"
 #   - "--aof"
 #   - "--appendfsync=everysec"

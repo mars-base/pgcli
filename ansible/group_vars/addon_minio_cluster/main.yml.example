@@ -8,6 +8,7 @@
 # the shared certificate (all endpoints then switch to https://).
 _addon_cluster_minio_hosts: "{{ groups['addon_minio_cluster'] }}"
 _addon_cluster_minio_root_user: admin
+# Empty uses the controller-generated random password; set a value to pin it.
 _addon_cluster_minio_root_password: ""
 _addon_cluster_minio_tls: false
 _addon_cluster_minio_tls_cert: "{{ addon_cluster_shared_server_chain_cert }}"

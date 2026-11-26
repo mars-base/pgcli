@@ -6,6 +6,8 @@
 # 4 cluster-enabled members. apply.yaml assembles the slots after every member
 # is up, then waits for cluster_state:ok and full 16384-slot coverage.
 _addon_cluster_redis_ip: "{{ hostvars[inventory_hostname]['private_ip'] }}"
+# Redis deployments usually set their own password here; empty falls back to the
+# controller-generated random one.
 _addon_cluster_redis_password: ""
 
 # apply.yaml assembles the slots and reads --cluster-replicas from each

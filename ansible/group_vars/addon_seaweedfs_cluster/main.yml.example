@@ -9,6 +9,7 @@ _addon_cluster_seaweedfs_hosts: "{{ groups['addon_seaweedfs_cluster'] }}"
 _addon_cluster_seaweedfs_members: "{{ _addon_cluster_seaweedfs_hosts }}"
 _addon_cluster_seaweedfs_ip: "{{ hostvars[inventory_hostname]['private_ip'] }}"
 _addon_cluster_seaweedfs_root_user: SWaddoncluster
+# Empty uses the controller-generated random password; set a value to pin it.
 _addon_cluster_seaweedfs_root_password: ""
 # Cluster mode needs one PostgreSQL metadata database reachable from every
 # member. Pre-create the database, then point this at it.

@@ -7,6 +7,7 @@
 # needed (/data is a separate block device).
 _addon_cluster_rustfs_hosts: "{{ groups['addon_rustfs_cluster'] }}"
 _addon_cluster_rustfs_root_user: admin
+# Empty uses the controller-generated random password; set a value to pin it.
 _addon_cluster_rustfs_root_password: ""
 _addon_cluster_rustfs_tls: false
 _addon_cluster_rustfs_tls_cert: "{{ addon_cluster_shared_server_chain_cert }}"

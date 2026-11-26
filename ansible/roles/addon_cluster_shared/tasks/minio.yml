@@ -1,6 +1,11 @@
 ---
+# A non-empty value in group_vars pins the password for the run; otherwise the
+# shared file generated on the controller is used.
 - name: Load the shared minio root password
   tags: [addon]
   ansible.builtin.set_fact:
-    _addon_cluster_minio_root_password: "{{ lookup('file', addon_cluster_shared_dir ~ '/minio_root_password') }}"
+    _addon_cluster_minio_root_password: >-
+      {{ _addon_cluster_minio_root_password
+         if (_addon_cluster_minio_root_password | default('', true) | length > 0)
+         else lookup('file', addon_cluster_shared_dir ~ '/minio_root_password') }}
   no_log: true
