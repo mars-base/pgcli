@@ -25,6 +25,8 @@ addon_valkey_cluster_addons:
     state: present
     name: valkey-cluster
     params:
+      - "--version"
+      - "9"
       - "--cluster"
       - "pgcli-valkey-cluster"
       - "--advertise-host"
