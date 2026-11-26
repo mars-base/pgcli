@@ -27,7 +27,7 @@ func init() {
 		c.Flags().Bool("postgrest", false, "select the PostgREST addon (use with -i for a local one, --pg-name for a remote one)")
 		c.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST (top-level addons)")
 		c.Flags().Bool("etcd", false, "select an etcd member (top-level addons)")
-		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs or vlagent or vmalert instance, gitea, beegfs, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, safeline, nginx, privoxy, daemon or SQLite database, or Patroni member")
+		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, pgadmin, grafana, prometheus, alertmanager, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs or vlagent or vmalert instance, gitea, beegfs, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, safeline, nginx, privoxy, daemon or SQLite database, or Patroni member")
 		c.Flags().Bool("pgdog", false, "select a PgDog proxy (top-level addons)")
 		c.Flags().Bool("ha", false, "select Patroni HA members (top-level addons; requires --scope)")
 		c.Flags().Bool("haproxy", false, "select an HAProxy instance (top-level addons)")
@@ -37,6 +37,7 @@ func init() {
 		c.Flags().Bool("garage", false, "select a garage instance (top-level addons)")
 		c.Flags().Bool("seaweedfs", false, "select a seaweedfs instance (top-level addons)")
 		c.Flags().Bool("redis", false, "select a redis instance (top-level addons)")
+		c.Flags().Bool("valkey", false, "select a valkey instance (top-level addons)")
 		c.Flags().Bool("predixy", false, "select a predixy proxy instance (top-level addons)")
 		c.Flags().Bool("pgadmin", false, "select a pgAdmin instance (top-level addons)")
 		c.Flags().Bool("grafana", false, "select a Grafana instance (top-level addons)")
@@ -85,7 +86,7 @@ Use 'pg autostart disable' to opt out.`,
 
 var autostartEnableCmd = &cobra.Command{
 	Use:   "enable",
-	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/victoriametrics/nodeexporter/pgexporter/documentdb/vmcluster/vlcluster/victorialogs/vlagent/vmalert/gitea/beegfs/juicefs/zerofs/influxdb/influx2tsdb/clickhouse/clickhouse-keeper/kafka/rabbitmq/rocketmq/safeline/nginx/privoxy instance, a pg daemon, a pg http server, a SQLite database, or a Patroni member",
+	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/garage/seaweedfs/redis/valkey/predixy/pgadmin/grafana/prometheus/alertmanager/victoriametrics/nodeexporter/pgexporter/documentdb/vmcluster/vlcluster/victorialogs/vlagent/vmalert/gitea/beegfs/juicefs/zerofs/influxdb/influx2tsdb/clickhouse/clickhouse-keeper/kafka/rabbitmq/rocketmq/safeline/nginx/privoxy instance, a pg daemon, a pg http server, a SQLite database, or a Patroni member",
 	Long: `Enable auto-start on boot for exactly one target:
 
   pg autostart enable -i myinst          # instance
@@ -103,6 +104,7 @@ var autostartEnableCmd = &cobra.Command{
   pg autostart enable --garage --name store       # garage instance (default name "garage")
   pg autostart enable --seaweedfs --name store    # seaweedfs instance (default name "seaweedfs")
   pg autostart enable --redis --name cache       # redis instance (default name "redis")
+  pg autostart enable --valkey --name cache      # valkey instance (default name "valkey")
   pg autostart enable --predixy --name proxy       # predixy proxy (default name "predixy")
   pg autostart enable --pgadmin --name ui            # pgAdmin (default name "pgadmin")
   pg autostart enable --grafana --name ui            # Grafana (default name "grafana")
@@ -155,9 +157,11 @@ peers; no special host privileges beyond podman are needed.
 Redis autostart likewise only starts the existing container (pg addon install
 redis); it replays the RDB snapshot from its data dir, so the dataset survives
 the reboot.
+Valkey autostart behaves identically (pg addon install valkey): it starts the
+existing container, replaying its RDB/AOF from the data dir.
 Predixy autostart likewise only starts the existing container (pg addon install
 predixy), reading the predixy.conf already on disk. The boot service starts
-redis before predixy, so a proxied cluster is up before its proxy.
+redis and valkey before predixy, so a proxied cluster is up before its proxy.
 PostgREST autostart likewise only starts the existing container, recreating it
 from the config if it was removed — install it first (pg addon install
 postgrest).
@@ -337,6 +341,7 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	garageSel, _ := cmd.Flags().GetBool("garage")
 	seaweedfsSel, _ := cmd.Flags().GetBool("seaweedfs")
 	redisSel, _ := cmd.Flags().GetBool("redis")
+	valkeySel, _ := cmd.Flags().GetBool("valkey")
 	predixySel, _ := cmd.Flags().GetBool("predixy")
 	pgadminSel, _ := cmd.Flags().GetBool("pgadmin")
 	grafanaSel, _ := cmd.Flags().GetBool("grafana")
@@ -415,6 +420,9 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		sel++
 	}
 	if redisSel {
+		sel++
+	}
+	if valkeySel {
 		sel++
 	}
 	if predixySel {
@@ -511,13 +519,13 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		sel++
 	}
 	if sel != 1 {
-		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --nodeexporter, --pgexporter, --documentdb, --vmcluster, --vlcluster, --victorialogs, --vlagent, --vmalert, --gitea, --beegfs, --juicefs, --zerofs, --influxdb, --influx2tsdb, --clickhouse, --clickhouse-keeper, --kafka, --rabbitmq, --rocketmq, --safeline, --sqlite, --daemon, --http, --nginx, or --privoxy")
+		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --valkey, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --nodeexporter, --pgexporter, --documentdb, --vmcluster, --vlcluster, --victorialogs, --vlagent, --vmalert, --gitea, --beegfs, --juicefs, --zerofs, --influxdb, --influx2tsdb, --clickhouse, --clickhouse-keeper, --kafka, --rabbitmq, --rocketmq, --safeline, --sqlite, --daemon, --http, --nginx, or --privoxy")
 	}
 	if pgName != "" && !pgbSel && !prSel {
 		return fmt.Errorf("--pg-name requires --pgbouncer or --postgrest")
 	}
-	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !garageSel && !seaweedfsSel && !redisSel && !predixySel && !pgadminSel && !grafanaSel && !prometheusSel && !alertmanagerSel && !victoriaMetricsSel && !nodeExporterSel && !pgExporterSel && !documentDBSel && !vmclusterSel && !vlclusterSel && !victoriaLogsSel && !vlagentSel && !vmalertSel && !giteaSel && !beegfsSel && !juicefsSel && !zerofsSel && !influxdbSel && !influx2tsdbSel && !clickhouseSel && !clickHouseKeeperSel && !kafkaSel && !rabbitmqSel && !rocketmqSel && !safelineSel && !sqliteSel && !daemonSel && !httpSel && !nginxSel && !privoxySel {
-		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --nodeexporter, --pgexporter, --documentdb, --vmcluster, --vlcluster, --victorialogs, --vlagent, --vmalert, --gitea, --beegfs, --juicefs, --zerofs, --influxdb, --influx2tsdb, --clickhouse, --clickhouse-keeper, --kafka, --rabbitmq, --rocketmq, --safeline, --sqlite, --daemon, --http, --nginx, or --privoxy")
+	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !garageSel && !seaweedfsSel && !redisSel && !valkeySel && !predixySel && !pgadminSel && !grafanaSel && !prometheusSel && !alertmanagerSel && !victoriaMetricsSel && !nodeExporterSel && !pgExporterSel && !documentDBSel && !vmclusterSel && !vlclusterSel && !victoriaLogsSel && !vlagentSel && !vmalertSel && !giteaSel && !beegfsSel && !juicefsSel && !zerofsSel && !influxdbSel && !influx2tsdbSel && !clickhouseSel && !clickHouseKeeperSel && !kafkaSel && !rabbitmqSel && !rocketmqSel && !safelineSel && !sqliteSel && !daemonSel && !httpSel && !nginxSel && !privoxySel {
+		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --valkey, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --nodeexporter, --pgexporter, --documentdb, --vmcluster, --vlcluster, --victorialogs, --vlagent, --vmalert, --gitea, --beegfs, --juicefs, --zerofs, --influxdb, --influx2tsdb, --clickhouse, --clickhouse-keeper, --kafka, --rabbitmq, --rocketmq, --safeline, --sqlite, --daemon, --http, --nginx, or --privoxy")
 	}
 	if sqliteSel && addonName == "" {
 		return fmt.Errorf("--sqlite requires --name <database>")
@@ -624,6 +632,18 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		rc.Autostart = enable
 		cfg.Addons.Redis[proxyName] = rc
 		targetDesc = fmt.Sprintf("redis instance %q", proxyName)
+	case valkeySel:
+		proxyName := addonName
+		if proxyName == "" {
+			proxyName = "valkey"
+		}
+		vc, ok := cfg.Addons.Valkey[proxyName]
+		if !ok {
+			return fmt.Errorf("valkey instance %q not found in config", proxyName)
+		}
+		vc.Autostart = enable
+		cfg.Addons.Valkey[proxyName] = vc
+		targetDesc = fmt.Sprintf("valkey instance %q", proxyName)
 	case predixySel:
 		proxyName := addonName
 		if proxyName == "" {
@@ -1368,6 +1388,9 @@ func runAutostartStatus(cmd *cobra.Command, args []string) error {
 	}
 	for name, rc := range cfg.Addons.Redis {
 		fmt.Printf("  redis %-15s %s\n", name, onOff(rc.Autostart))
+	}
+	for name, vc := range cfg.Addons.Valkey {
+		fmt.Printf("  valkey %-14s %s\n", name, onOff(vc.Autostart))
 	}
 	for name, pc := range cfg.Addons.Predixy {
 		fmt.Printf("  predixy %-13s %s\n", name, onOff(pc.Autostart))

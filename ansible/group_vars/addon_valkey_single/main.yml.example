@@ -1,0 +1,40 @@
+---
+# valkey standalone add-on group (addon_valkey_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_valkey_single --tags addon
+
+# Single-node test group for the valkey add-on (the BSD-3 fork of Redis).
+
+# Shared flags for entries that do not set their own params.
+addon_valkey_single_params: []
+# Per-entry params replace addon_valkey_single_params for that instance.
+
+# Example:
+#   - "--data-dir=/data/pg/addon/valkey/vcache"
+#   - "--port=6380"
+#   - "--maxmemory=256mb"
+#   - "--maxmemory-policy=allkeys-lru"
+#   - "--aof"
+#   - "--appendfsync=everysec"
+
+addon_valkey_single_addons:
+  - type: valkey
+    state: present
+    name: cache
+    params:
+      - "--port"
+      - "6380"
+      - "--maxmemory"
+      - "256mb"
+      - "--listen"
+      - "127.0.0.1"
+  - type: valkey
+    state: present
+    name: session
+    params:
+      - "--port"
+      - "6381"
+      - "--maxmemory"
+      - "512mb"
+      - "--listen"
+      - "127.0.0.1"

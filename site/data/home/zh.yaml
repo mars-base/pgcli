@@ -33,7 +33,7 @@ cards:
       icon: fa-solid fa-sitemap
       url: docs/ha-cluster/
     - title: 插件与工具箱
-      desc: "围绕实例或集群的配套服务——PgBouncer、etcd、MinIO / silo / rustfs、Redis、Kafka 等——外加独立的 [工具箱](docs/toolbox/) 工具，如 ZFS、PGMQ、SQLite + Litestream、daemon 等。"
+      desc: "围绕实例或集群的配套服务——PgBouncer、etcd、MinIO / silo / rustfs、Redis / Valkey、Kafka 等——外加独立的 [工具箱](docs/toolbox/) 工具，如 ZFS、PGMQ、SQLite + Litestream、daemon 等。"
       icon: fa-solid fa-cubes
       url: docs/addon/
     - title: 扩展

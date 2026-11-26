@@ -110,6 +110,16 @@ Infra addons (shared, not tied to one instance):
           create ..." (pgcli installs cluster-enabled nodes; it does not run
           the assembly). --cluster-replicas N sets followers per master for that
           create (0 = masters-only). Sentinel is out of scope.
+  pg addon install valkey
+          Stored under top-level addons.valkey in config (Linux and macOS).
+          Valkey — the BSD-3 fork of Redis 7.2.4 (Linux Foundation) — run from
+          the plain upstream docker.io/valkey/valkey image. Feature-for-feature
+          the redis add-on under its own type, version table, port pool
+          (valkey_start_port, default 6380) and client: --version 7|8|9 (Valkey
+          majors do NOT track Redis majors), requirepass auto-generated, RDB/AOF
+          persistence, --replica-of read replicas, native cluster members via
+          --cluster assembled once with "pg valkey-cli -- --cluster create ...".
+          Talk to it with "pg valkey-cli".
   pg addon install postgrest
           Exposes a PostgreSQL schema as a REST API (single stateless
           container, dual mode like pgbouncer): local -i fronting an
@@ -378,6 +388,7 @@ Currently supported add-ons:
   garage      Garage (garagehq.deuxfleurs.fr) — Rust S3-compatible object store from the upstream docker.io/dxflrs/garage image, single-node or multi-node cross-host cluster (--cluster --peer); plaintext HTTP with no native TLS (front with the nginx addon for HTTPS/pgBackRest), four ports from garage_start_port (default 3900), one seeded access key + one default bucket
   seaweedfs   SeaweedFS (seaweedfs.io) — Go Apache-2.0 S3-compatible object store from the upstream docker.io/chrislusf/seaweedfs image, volume-granularity disk management; single-node "weed mini" or cross-host "weed server" cluster (--cluster, MNMD: same command on every host, full --peer Raft list, shared filer metadata in a --dsn PostgreSQL, and one shared --root-user/--root-password across all nodes); native S3 TLS via --tls or --tls-cert/--tls-key, four ports from seaweedfs_start_port (default 8400)
   redis       standalone KV store (cache/session/ranking/counters) from the plain upstream docker.io/library/redis image; --version 7|8 selects the major, requirepass auto-generated, RDB persistence, read replicas via --replica-of (no automatic failover), native cluster masters via --cluster (assemble once with "pg redis-cli -- --cluster create")
+  valkey      Valkey — the BSD-3 Redis 7.2.4 fork (Linux Foundation) from the plain upstream docker.io/valkey/valkey image; the redis add-on feature-for-feature under a separate type: --version 7|8|9 (Valkey majors do NOT track Redis majors), requirepass auto-generated, RDB/AOF persistence, read replicas via --replica-of, native cluster masters via --cluster (assemble once with "pg valkey-cli -- --cluster create")
   predixy     Redis protocol proxy fronting a native redis cluster as one plain redis:// endpoint (clients need no -c / MOVED handling; --backend lists the full node set, --password reuses the cluster's requirepass; Linux only)
   postgrest   stateless REST API in front of a PostgreSQL schema (single container; Linux host network, macOS bridge)
   pgadmin     pgAdmin 4 — the official web administration UI (single container from docker.io/dpage/pgadmin4; web login auto-generated; Linux host network, macOS bridge)
@@ -535,6 +546,29 @@ Linux and macOS; the first version-selectable addon):
   A cluster member cannot also be a read replica.
   Talk to it with "pg redis-cli" (a short-lived redis-cli container wired to the
   first redis addon; see that command's help).
+
+Infra addon (valkey — the BSD-3 Redis fork, Linux and macOS; same flags and
+topologies as redis under its own type, port pool and client):
+  pg addon install valkey [--name cache] [--version 7|8|9] [--port N]
+                          [--listen 0.0.0.0] [--password ...] [--maxmemory 256mb]
+                          [--maxmemory-policy noeviction] [--aof]
+                          [--appendfsync always|everysec|no] [--save "900 1 300 10"|no]
+                          [--replica-of <masterName>]
+                          [--replica-of-host <ip> --replica-of-port <N> --password ...]
+                          [--data-dir ...] [--image ...] [--force]
+  Valkey is Redis 7.2.4's BSD-3 fork (Linux Foundation): server flags,
+  persistence files, replication and native-cluster protocols are all
+  compatible, so everything above about redis applies verbatim — with three
+  differences: the majors are 7|8|9 (Valkey's own numbering, no correspondence
+  to Redis majors; default 9), the image is docker.io/valkey/valkey, and the
+  client is "pg valkey-cli". Its port pool is valkey_start_port (default 6380,
+  deliberately offset so a redis+valkey pair in one config does not collide
+  before either container exists), its data dir default is
+  <base_dir>/addon/valkey/<name>/data, and its config lives under
+  addons.valkey.<name>. --cluster groups only bind valkey members (redis and
+  valkey clusters are separate namespaces); assemble with
+  "pg valkey-cli --name <m1> -- --cluster create ...". Predixy can front a
+  Valkey cluster the same way — it speaks the same protocol.
   pg addon install predixy
           Stored under top-level addons.predixy in config (Linux only).
           Predixy — a Redis protocol proxy that fronts a native redis cluster
@@ -894,6 +928,10 @@ Examples:
   pg addon install redis --name session --listen 127.0.0.1
   pg addon install redis --name cache-r --replica-of cache
   pg addon install redis --name remote-r --replica-of-host 10.0.0.9 --replica-of-port 6379 --password <master-pw>
+  pg addon install valkey
+  pg addon install valkey --name cache --version 9 --maxmemory 256mb
+  pg addon install valkey --name cache-r --replica-of cache
+  pg addon install valkey --name n1 --cluster app --advertise-host 10.0.0.21
   pg addon install predixy --name proxy --backend 127.0.0.1:6379,127.0.0.1:6380,127.0.0.1:6381 --password "$(pg addon password redis --name n1)"
   pg addon install predixy --name proxy --backend 10.0.0.11:6379,10.0.0.12:6379,10.0.0.13:6379 --password <cluster-pw> --workers 4 --port 7617
   pg addon install postgrest -i proj01 --schema api --anon-role web_anon
@@ -958,7 +996,7 @@ var addonListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all installed add-ons (local and remote)",
 	Long: `List all installed add-ons. The default output is safe to paste into
-tickets and screenshots: stored credentials (Redis requirepass, the Predixy
+tickets and screenshots: stored credentials (Redis/Valkey requirepass, the Predixy
 proxy password, the object stores' root passwords) are shown only as presence
 markers. Add --show-password to print them too — or read them straight from
 pg.yaml.`,
@@ -975,9 +1013,9 @@ pg.yaml.`,
 // shaped for $(...) capture in scripts.
 var addonPasswordCmd = &cobra.Command{
 	Use:   "password <addon>",
-	Short: "Print an add-on's stored password (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin/Grafana/Gitea web login password, BeeGFS conn-auth secret, juicefs S3 secret, zerofs encryption password, influxdb admin password, pgexporter monitor-role password)",
-	Long: `Print the password stored for one add-on instance: the Redis
-requirepass (generated by pgcli), the Predixy proxy password (the
+	Short: "Print an add-on's stored password (Redis/Valkey requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin/Grafana/Gitea web login password, BeeGFS conn-auth secret, juicefs S3 secret, zerofs encryption password, influxdb admin password, pgexporter monitor-role password)",
+	Long: `Print the password stored for one add-on instance: the Redis or
+Valkey requirepass (generated by pgcli), the Predixy proxy password (the
 operator-supplied copy of the proxied cluster's requirepass), the
 MinIO/silo/rustfs root password or garage secret key (the access-key secret — pair it with the
 instance's Root user from "pg addon list"), or the pgAdmin, Grafana or Gitea web
@@ -996,6 +1034,7 @@ The single value goes to stdout with no decoration, so it composes into
 scripts and app config:
 
   export REDISCLI_AUTH="$(pg addon password redis --name cache)"
+  export REDISCLI_AUTH="$(pg addon password valkey --name vcache)"
   mc alias set local http://127.0.0.1:9000 admin "$(pg addon password minio --name store)"
 
 The default "pg addon list" never prints passwords; this command is the
@@ -1050,7 +1089,7 @@ var addonRemoveCmd = &cobra.Command{
 For local add-ons, use -i to specify the instance.
 For remote add-ons, use --pg-name to specify the pooler name.
 
-Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/garage/seaweedfs/redis/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/beegfs/juicefs/zerofs/duckdb/influxdb/influx2tsdb/clickhouse/kafka/rocketmq) use --name.
+Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/garage/seaweedfs/redis/valkey/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/beegfs/juicefs/zerofs/duckdb/influxdb/influx2tsdb/clickhouse/kafka/rocketmq) use --name.
 Remove keeps the data directory; pass --clean-data for object-storage/KV/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea/BeeGFS/DuckDB
 data to go too. For beegfs the unit is the filesystem on THIS host — its role containers (all three on a converged host, the configured subset on a cross-host member) go, and --clean-data deletes their data dirs.
 For juicefs/zerofs (host-binary addons) remove unmounts and stops the processes but NEVER touches object storage or the
@@ -1077,6 +1116,8 @@ Examples:
   pg addon remove postgrest --pg-name app-api
   pg addon remove redis --name cache
   pg addon remove redis --name cache --clean-data
+  pg addon remove valkey --name cache
+  pg addon remove valkey --name cache --clean-data
   pg addon remove predixy --name proxy
   pg addon remove pgadmin
   pg addon remove pgadmin --clean-data
@@ -1126,6 +1167,7 @@ Supported add-ons:
   garage     pg addon start garage [--name store]
   seaweedfs  pg addon start seaweedfs [--name store]
   redis      pg addon start redis [--name cache]
+  valkey     pg addon start valkey [--name cache]
   predixy    pg addon start predixy [--name proxy]
   pgadmin    pg addon start pgadmin [--name pgadmin]
   grafana    pg addon start grafana [--name grafana]
@@ -1155,6 +1197,7 @@ Examples:
   pg addon start rustfs --name store
   pg addon start garage --name store
   pg addon start redis --name cache
+  pg addon start valkey --name cache
   pg addon start predixy --name proxy
   pg addon start pgadmin
   pg addon start grafana
@@ -1192,6 +1235,7 @@ Supported add-ons:
   garage     pg addon stop garage [--name store]
   seaweedfs  pg addon stop seaweedfs [--name store]
   redis      pg addon stop redis [--name cache]
+  valkey     pg addon stop valkey [--name cache]
   predixy    pg addon stop predixy [--name proxy]
   pgadmin    pg addon stop pgadmin [--name pgadmin]
   grafana    pg addon stop grafana [--name grafana]
@@ -1221,6 +1265,7 @@ Examples:
   pg addon stop rustfs --name store
   pg addon stop garage --name store
   pg addon stop redis --name cache
+  pg addon stop valkey --name cache
   pg addon stop predixy --name proxy
   pg addon stop pgadmin
   pg addon stop grafana
@@ -1411,11 +1456,11 @@ func init() {
 	addonRemoveCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to remove")
 
 	// etcd flags (top-level shared-infrastructure addon)
-	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, vmcluster, vlcluster, alertmanager, vmalert, gitea, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, beegfs, privoxy, rocketmq or safeline instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"vmc\"/\"vlc\"/\"alertmanager\"/\"vmalert\"/\"gitea\"/\"influx2tsdb\"/\"clickhouse\"/\"clickhouse-keeper\"/\"beegfs\"/\"privoxy\"/\"rocketmq\"/\"safeline\")")
+	addonInstallCmd.Flags().String("name", "", "addon key/name for the etcd member, pgdog proxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, pgadmin, grafana, prometheus, vmcluster, vlcluster, alertmanager, vmalert, gitea, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, beegfs, privoxy, rocketmq or safeline instance (default \"etcd\"/\"pgdog\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"valkey\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"vmc\"/\"vlc\"/\"alertmanager\"/\"vmalert\"/\"gitea\"/\"influx2tsdb\"/\"clickhouse\"/\"clickhouse-keeper\"/\"beegfs\"/\"privoxy\"/\"rocketmq\"/\"safeline\")")
 	addonInstallCmd.Flags().Int("client-port", 0, "etcd client host port (0=auto-assign from etcd_start_port); clickhouse-keeper client (4lw/ZooKeeper protocol) port (0=default 9181; immutable after install)")
 	addonInstallCmd.Flags().Int("peer-port", 0, "etcd peer host port (0=auto-assign, next free port after client)")
-	addonInstallCmd.Flags().String("image", "", "override the addon image tag verbatim (etcd default quay.io/coreos/etcd:v3.5.30; redis default resolved from --version, e.g. docker.io/library/redis:8.10.2; predixy default ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine; pgadmin default docker.io/dpage/pgadmin4:9.18; grafana default docker.io/grafana/grafana:13.2.4; prometheus default docker.io/prom/prometheus:v3.15.0; vmcluster/insert-image/select-image/storage-image override the per-role vm* images; vlcluster default docker.io/victoriametrics/victoria-logs:v1.53.0 for all three roles; alertmanager default docker.io/prom/alertmanager:v0.34.1; vmalert default docker.io/victoriametrics/vmalert:v1.133.0; gitea default docker.io/gitea/gitea:28.1.0; rocketmq is pinned by --version and rejects --image; privoxy default ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0)")
-	addonInstallCmd.Flags().String("cluster", "", "cluster grouping token: etcd --initial-cluster-token (default \"pgcli-etcd\"); redis native-cluster name (--cluster-enabled yes, members sharing it form one cluster you assemble once with `pg redis-cli -- --cluster create ...`); garage — switch on multi-node mode (members sharing the name join one Garage cluster; requires --advertise-host); seaweedfs — switch on multi-node mode (members sharing the name join one Raft cluster via the full --peer list; requires --advertise-host, a shared --dsn metadata database, and the SAME --root-user/--root-password on every node); kafka — switch on multi-host cluster mode: the cluster name, from which the deterministic KRaft cluster id is derived; pass the SAME name on every host and a unique --node-id per host; rabbitmq — switch on multi-host cluster mode: the etcd discovery cluster_name; pass the SAME name on every host and a unique --node-name per host; rocketmq — switch on multi-host cluster mode: the DLedger controller group and broker group name; pass the SAME name on every host with a unique --controller-id, that host's --advertise-host, and --peer entries for the other controllers; clickhouse — switch on multi-host cluster mode: the remote_servers/macros cluster name; pass the SAME name on every host with a unique --shard/--replica pair, that host's --advertise-host, --peer entries for the other members, and --keeper endpoints for the Keeper quorum (immutable after install)")
+	addonInstallCmd.Flags().String("image", "", "override the addon image tag verbatim (etcd default quay.io/coreos/etcd:v3.5.30; redis default resolved from --version, e.g. docker.io/library/redis:8.10.2; valkey default resolved from --version, e.g. docker.io/valkey/valkey:9.2.0; predixy default ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine; pgadmin default docker.io/dpage/pgadmin4:9.18; grafana default docker.io/grafana/grafana:13.2.4; prometheus default docker.io/prom/prometheus:v3.15.0; vmcluster/insert-image/select-image/storage-image override the per-role vm* images; vlcluster default docker.io/victoriametrics/victoria-logs:v1.53.0 for all three roles; alertmanager default docker.io/prom/alertmanager:v0.34.1; vmalert default docker.io/victoriametrics/vmalert:v1.133.0; gitea default docker.io/gitea/gitea:28.1.0; rocketmq is pinned by --version and rejects --image; privoxy default ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0)")
+	addonInstallCmd.Flags().String("cluster", "", "cluster grouping token: etcd --initial-cluster-token (default \"pgcli-etcd\"); redis native-cluster name (--cluster-enabled yes, members sharing it form one cluster you assemble once with `pg redis-cli -- --cluster create ...`); valkey native-cluster name (same shape, separate namespace from redis; assemble once with `pg valkey-cli -- --cluster create ...`); garage — switch on multi-node mode (members sharing the name join one Garage cluster; requires --advertise-host); seaweedfs — switch on multi-node mode (members sharing the name join one Raft cluster via the full --peer list; requires --advertise-host, a shared --dsn metadata database, and the SAME --root-user/--root-password on every node); kafka — switch on multi-host cluster mode: the cluster name, from which the deterministic KRaft cluster id is derived; pass the SAME name on every host and a unique --node-id per host; rabbitmq — switch on multi-host cluster mode: the etcd discovery cluster_name; pass the SAME name on every host and a unique --node-name per host; rocketmq — switch on multi-host cluster mode: the DLedger controller group and broker group name; pass the SAME name on every host with a unique --controller-id, that host's --advertise-host, and --peer entries for the other controllers; clickhouse — switch on multi-host cluster mode: the remote_servers/macros cluster name; pass the SAME name on every host with a unique --shard/--replica pair, that host's --advertise-host, --peer entries for the other members, and --keeper endpoints for the Keeper quorum (immutable after install)")
 	addonInstallCmd.Flags().StringArray("peer", nil, "cluster peer list (repeat one per peer): garage — an existing member's <id>@<addr> to connect to (a joiner usually needs just one — peering is transitive; printed by the bootstrap node's install summary). seaweedfs — a member's <ip>:<master_port> Raft address; pass the FULL list on EVERY node (weed requires the complete membership, MNMD-style, no bootstrap/join distinction), your own entry optional. kafka — another controller as <id>@<host>:<controller_port>; pass every OTHER node on EVERY host (static KRaft quorum, no bootstrap/join distinction) — your own entry is added automatically; rabbitmq does not use --peer: members discover each other through etcd; rocketmq — another controller as <id>@<host> (bare IPv4, no port; the controller port is fixed at 9877); pass every OTHER node on every host — your own entry is added automatically; clickhouse — another cluster member as <shard>/<replica>@<host>:<tcp_port>; pass every OTHER member on EVERY host and use the same --cluster name everywhere; clickhouse-keeper — another Keeper as <server_id>@<host>[:<raft_port>]; pass every OTHER member on EVERY host, your own entry is added automatically (Raft membership is immutable after install)")
 	addonInstallCmd.Flags().String("replication", "", "seaweedfs cluster only: placement code XYZ (X=remote copies, Y=distinct racks, Z=distinct data centers; each digit 0-3), e.g. 001 = one remote copy. Default \"000\" (single-node — no peers to copy to). Immutable once set in a cluster")
 	addonInstallCmd.Flags().String("bucket", "", "seaweedfs: default bucket to create and seed on first boot (default = instance name)")
@@ -1424,12 +1469,12 @@ func init() {
 	addonInstallCmd.Flags().Int("capacity", 0, "garage cluster only: this node's layout capacity in GiB (`garage layout assign -c`; requires --zone; 0 = start the node without assigning a role)")
 	addonInstallCmd.Flags().Int("replication-factor", 0, "garage cluster only: object replication factor (garage.toml replication_factor; must be <= node count — a 3-node cluster with rf 3 tolerates losing 2; set it on EVERY member, the value is per-node config). Empty for garage = default 1 (single-node); etcd/redis ignore it")
 	addonInstallCmd.Flags().String("rpc-secret", "", "garage cluster only: the shared 64-hex cluster RPC secret (garage.toml rpc_secret) — generated by the bootstrap node and printed once; every joiner MUST pass the same value (pgcli never executes remotely, so you carry it). Invalid on a single-node install")
-	addonInstallCmd.Flags().Int("cluster-replicas", 0, "redis native-cluster only: per-master replica count for the --cluster create you will run (default 0 = masters-only). Only shapes the suggested assemble command and node-count guidance — which nodes become followers is decided by Redis at create time, not here; the whole group inherits the first member's value")
-	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs, garage, redis, pgAdmin, Grafana, Gitea, DuckDB, VMCluster or VLCluster instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; garage default <base_dir>/addon/garage/<name>/data (its metadata dir is a sibling .../meta); seaweedfs default <base_dir>/addon/seaweedfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data; pgadmin default <base_dir>/addon/pgadmin/<name>/data; grafana default <base_dir>/addon/grafana/<name>/data; prometheus default <base_dir>/addon/prometheus/<name>/data; vmcluster default <base_dir>/addon/vmcluster/<name>/data (vmstorage only); vlcluster default <base_dir>/addon/vlcluster/<name>/data (vlstorage only); alertmanager default <base_dir>/addon/alertmanager/<name>/data; gitea default <base_dir>/addon/gitea/<name>/data; beegfs — ONE dir for the whole filesystem, its three services use <dir>/mgmtd, <dir>/meta and <dir>/storage, default root <base_dir>/addon/beegfs/<name>; duckdb default <base_dir>/addon/duckdb/<name>; influxdb default <base_dir>/addon/influxdb/<name>/data; clickhouse default <base_dir>/addon/clickhouse/<name>/data; clickhouse-keeper default <base_dir>/addon/clickhouse-keeper/<name>/data (its config and logs live in sibling dirs and may be overridden separately); kafka default <base_dir>/addon/kafka/<name>/data; rabbitmq default <base_dir>/addon/rabbitmq/<name>/data; rocketmq default <base_dir>/addon/rocketmq/<name>/data (broker store; cluster controller store is beside it); safeline default <base_dir>/addon/safeline/<name> (one root for the whole 7-container stack: bundled PostgreSQL data, console state, nginx config, logs)")
-	addonInstallCmd.Flags().String("advertise-host", "", "peer-visible host: etcd member peer/client URLs, redis native-cluster --cluster-announce-ip, garage cluster rpc_public_addr, and seaweedfs cluster weed -ip that peers dial (empty=127.0.0.1 single-host; set a LAN IP or FQDN for cross-host clusters — required on every garage or seaweedfs --cluster member; Kafka advertises this broker host:port to clients and may not be 0.0.0.0; in Kafka --cluster mode it is also this node's controller voter address, must be a concrete non-loopback IP, and is required on every fresh cluster install. RabbitMQ does not use --advertise-host: its peer-visible identity is --node-name NAME@HOST. RocketMQ advertises this host to clients and peers; required on every fresh cluster install and must be a concrete non-loopback IPv4 in cluster mode (standalone defaults to 127.0.0.1). ClickHouse advertises this host to peers (interserver) and is required on every fresh --cluster install; clickhouse-keeper advertises this host to Raft peers and is required on every fresh install (both must be concrete non-loopback addresses)")
+	addonInstallCmd.Flags().Int("cluster-replicas", 0, "redis/valkey native-cluster only: per-master replica count for the --cluster create you will run (default 0 = masters-only). Only shapes the suggested assemble command and node-count guidance — which nodes become followers is decided by Redis/Valkey at create time, not here; the whole group inherits the first member's value")
+	addonInstallCmd.Flags().String("data-dir", "", "data directory for an etcd cluster root, a MinIO, silo, rustfs, garage, redis, valkey, pgAdmin, Grafana, Gitea, DuckDB, VMCluster or VLCluster instance, absolute or relative to base_dir (etcd default <base_dir>/addon/etcd, each member uses <root>/<name>/data; minio default <base_dir>/addon/minio/<name>/data; silo default <base_dir>/addon/silo/<name>/data; rustfs default <base_dir>/addon/rustfs/<name>/data; garage default <base_dir>/addon/garage/<name>/data (its metadata dir is a sibling .../meta); seaweedfs default <base_dir>/addon/seaweedfs/<name>/data; redis default <base_dir>/addon/redis/<name>/data; valkey default <base_dir>/addon/valkey/<name>/data; pgadmin default <base_dir>/addon/pgadmin/<name>/data; grafana default <base_dir>/addon/grafana/<name>/data; prometheus default <base_dir>/addon/prometheus/<name>/data; vmcluster default <base_dir>/addon/vmcluster/<name>/data (vmstorage only); vlcluster default <base_dir>/addon/vlcluster/<name>/data (vlstorage only); alertmanager default <base_dir>/addon/alertmanager/<name>/data; gitea default <base_dir>/addon/gitea/<name>/data; beegfs — ONE dir for the whole filesystem, its three services use <dir>/mgmtd, <dir>/meta and <dir>/storage, default root <base_dir>/addon/beegfs/<name>; duckdb default <base_dir>/addon/duckdb/<name>; influxdb default <base_dir>/addon/influxdb/<name>/data; clickhouse default <base_dir>/addon/clickhouse/<name>/data; clickhouse-keeper default <base_dir>/addon/clickhouse-keeper/<name>/data (its config and logs live in sibling dirs and may be overridden separately); kafka default <base_dir>/addon/kafka/<name>/data; rabbitmq default <base_dir>/addon/rabbitmq/<name>/data; rocketmq default <base_dir>/addon/rocketmq/<name>/data (broker store; cluster controller store is beside it); safeline default <base_dir>/addon/safeline/<name> (one root for the whole 7-container stack: bundled PostgreSQL data, console state, nginx config, logs)")
+	addonInstallCmd.Flags().String("advertise-host", "", "peer-visible host: etcd member peer/client URLs, redis/valkey native-cluster --cluster-announce-ip, garage cluster rpc_public_addr, and seaweedfs cluster weed -ip that peers dial (empty=127.0.0.1 single-host; set a LAN IP or FQDN for cross-host clusters — required on every garage or seaweedfs --cluster member; Kafka advertises this broker host:port to clients and may not be 0.0.0.0; in Kafka --cluster mode it is also this node's controller voter address, must be a concrete non-loopback IP, and is required on every fresh cluster install. RabbitMQ does not use --advertise-host: its peer-visible identity is --node-name NAME@HOST. RocketMQ advertises this host to clients and peers; required on every fresh cluster install and must be a concrete non-loopback IPv4 in cluster mode (standalone defaults to 127.0.0.1). ClickHouse advertises this host to peers (interserver) and is required on every fresh --cluster install; clickhouse-keeper advertises this host to Raft peers and is required on every fresh install (both must be concrete non-loopback addresses)")
 	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.0.0.12:2379 or https://10.0.0.12:2379 (implies --initial-cluster-state existing; requires --advertise-host). For etcd the scheme must match --tls, the member must use the same auth setting as the cluster, and with TLS the cluster CA is fetched automatically (credentials required when auth is enabled). RabbitMQ does not use --join: members discover each other through etcd")
-	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, vmcluster, vlcluster, alertmanager, vmalert, gitea, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, beegfs, privoxy, rocketmq or safeline instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"vmc\"/\"vlc\"/\"alertmanager\"/\"vmalert\"/\"gitea\"/\"influx2tsdb\"/\"clickhouse\"/\"clickhouse-keeper\"/\"beegfs\"/\"privoxy\"/\"rocketmq\"/\"safeline\")")
-	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/garage/seaweedfs/redis/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea/VMCluster/VLCluster data directory (object storage / backup repository / key-value data / pgAdmin config+sessions, Grafana dashboards sqlite DB, Prometheus TSDB, Alertmanager silences+notification state, or Gitea repos + app.ini + its default SQLite DB; VMCluster vmstorage TSDB; VLCluster vlstorage logs) and pgcli-rendered files beside it, or the juicefs/zerofs host per-instance dir (cache, logs, sqlite meta), or the influxdb per-instance dir (data, generated influxdb.conf, local backups), or the clickhouse per-instance dir (data, logs, rendered config, local backups); or the rocketmq per-instance dir (broker store, cluster controller store, logs, rendered config); or the safeline per-instance dir (bundled PostgreSQL data, console state, nginx config, logs); for vmalert, only pgcli-managed rules/templates dirs (a user-supplied --rules-dir/--templates-dir is never deleted); never the S3 bucket or a PG metadata database. No-op for predixy and influx2tsdb, which are stateless. Never drops a seaweedfs filer metadata database or a Gitea --dsn PostgreSQL database")
+	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, pgadmin, grafana, prometheus, vmcluster, vlcluster, alertmanager, vmalert, gitea, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, beegfs, privoxy, rocketmq or safeline instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"valkey\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"vmc\"/\"vlc\"/\"alertmanager\"/\"vmalert\"/\"gitea\"/\"influx2tsdb\"/\"clickhouse\"/\"clickhouse-keeper\"/\"beegfs\"/\"privoxy\"/\"rocketmq\"/\"safeline\")")
+	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/garage/seaweedfs/redis/valkey/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea/VMCluster/VLCluster data directory (object storage / backup repository / key-value data / pgAdmin config+sessions, Grafana dashboards sqlite DB, Prometheus TSDB, Alertmanager silences+notification state, or Gitea repos + app.ini + its default SQLite DB; VMCluster vmstorage TSDB; VLCluster vlstorage logs) and pgcli-rendered files beside it, or the juicefs/zerofs host per-instance dir (cache, logs, sqlite meta), or the influxdb per-instance dir (data, generated influxdb.conf, local backups), or the clickhouse per-instance dir (data, logs, rendered config, local backups); or the rocketmq per-instance dir (broker store, cluster controller store, logs, rendered config); or the safeline per-instance dir (bundled PostgreSQL data, console state, nginx config, logs); for vmalert, only pgcli-managed rules/templates dirs (a user-supplied --rules-dir/--templates-dir is never deleted); never the S3 bucket or a PG metadata database. No-op for predixy and influx2tsdb, which are stateless. Never drops a seaweedfs filer metadata database or a Gitea --dsn PostgreSQL database")
 
 	// haproxy flags (top-level load balancer in front of a Patroni cluster)
 	addonInstallCmd.Flags().String("mode", "", "HAProxy routing mode: unified (default, all traffic to the leader) or split (separate read listener for replicas)")
@@ -1498,7 +1543,7 @@ func init() {
 	// minio flags (top-level single-node S3-compatible object storage)
 	addonInstallCmd.Flags().Int("api-port", 0, "MinIO/silo/rustfs S3 API host port (0=auto-assign from the shared minio_start_port pool); for garage, the S3 API port (0=auto from garage_start_port, default 3900 — garage takes four consecutive ports API/RPC/Web/Admin)")
 	addonInstallCmd.Flags().Int("console-port", 0, "MinIO/silo/rustfs web console host port (0=auto-assign, next free port)")
-	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo, rustfs, garage or seaweedfs server / PostgREST HTTP server / pgAdmin web server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network) — Redis, Predixy and Grafana default to \"0.0.0.0\" instead, since their password is always required (and a dashboard is meant to be viewed remotely); pass 127.0.0.1 to keep them loopback-only. Gitea also defaults to \"0.0.0.0\" — a Git host is pushed to from other machines, and its generated admin login plus closed self-registration are the gate. Prometheus and Alertmanager ALSO default to 0.0.0.0 but have NO auth at all — Alertmanager worse: anyone reaching its port can create silences (mute on-call). vmalert is the same: no auth, no TLS — its rule API and GET /-/reload are open to anyone who can reach the port, and it defaults to 0.0.0.0 to match Prometheus/Alertmanager; pass --listen 127.0.0.1 on an untrusted network. VMCluster and VLCluster are the same story: no auth at all, so 0.0.0.0 means anyone who reaches the port can ingest, query, or delete data; pass 127.0.0.1 to keep the cluster loopback-only. Both are guarded only by the network boundary, so pass 127.0.0.1 to keep them loopback-only. BeeGFS is a different shape again: its daemons always bind the fixed protocol ports on the host network, so --listen does NOT gate anything there — it only picks the address the cluster self-references and clients dial for mgmtd (sysMgmtdHost), defaulting to \"0.0.0.0\" because a parallel filesystem is mounted from other machines. InfluxDB defaults to \"0.0.0.0\" too: its HTTP API always requires authentication, while the unauthenticated backup/restore RPC endpoint is pinned to 127.0.0.1 regardless of --listen. ClickHouse defaults to \"127.0.0.1\": its HTTP and native listeners always require authentication, but loopback is the safer default — pass 0.0.0.0 to expose it on the network. Kafka defaults to \"127.0.0.1\": it has NO authentication, so expose it only on a trusted private network; Kafka --cluster mode requires 0.0.0.0 (or the advertised address) because peers and clients must reach it. RabbitMQ defaults to \"127.0.0.1\" and uses the same address for AMQP and the management UI; both require the admin login, but loopback is still the safer default — pass 0.0.0.0 to expose them on the network. In RabbitMQ --cluster mode --listen defaults to 0.0.0.0 (mandatory for cross-host distribution) and may not be loopback. RocketMQ does not use --listen: it always binds host networking (cluster ports are fixed), so restrict access with a firewall. ClickHouse --cluster requires 0.0.0.0 (or the advertised address) so peers and clients can reach it; ClickHouse Keeper defaults to 127.0.0.1 and requires a non-loopback bind whenever --peer is set. Privoxy defaults to \"0.0.0.0\": clients on other hosts and containers must reach the forward proxy, and --allow-network/--deny-network are the gate (with no ACL it is an open proxy — install warns about this). SafeLine defaults to \"0.0.0.0\" and binds only the console port: the console always requires its admin login over HTTPS (self-signed), and the protected sites' traffic ports are configured per site inside the console, not here")
+	addonInstallCmd.Flags().String("listen", "", "bind address for the haproxy listeners / MinIO, silo, rustfs, garage or seaweedfs server / PostgREST HTTP server / pgAdmin web server (default \"127.0.0.1\"; 0.0.0.0 exposes them on the network) — Redis, Valkey, Predixy and Grafana default to \"0.0.0.0\" instead, since their password is always required (and a dashboard is meant to be viewed remotely); pass 127.0.0.1 to keep them loopback-only. Gitea also defaults to \"0.0.0.0\" — a Git host is pushed to from other machines, and its generated admin login plus closed self-registration are the gate. Prometheus and Alertmanager ALSO default to 0.0.0.0 but have NO auth at all — Alertmanager worse: anyone reaching its port can create silences (mute on-call). vmalert is the same: no auth, no TLS — its rule API and GET /-/reload are open to anyone who can reach the port, and it defaults to 0.0.0.0 to match Prometheus/Alertmanager; pass --listen 127.0.0.1 on an untrusted network. VMCluster and VLCluster are the same story: no auth at all, so 0.0.0.0 means anyone who reaches the port can ingest, query, or delete data; pass 127.0.0.1 to keep the cluster loopback-only. Both are guarded only by the network boundary, so pass 127.0.0.1 to keep them loopback-only. BeeGFS is a different shape again: its daemons always bind the fixed protocol ports on the host network, so --listen does NOT gate anything there — it only picks the address the cluster self-references and clients dial for mgmtd (sysMgmtdHost), defaulting to \"0.0.0.0\" because a parallel filesystem is mounted from other machines. InfluxDB defaults to \"0.0.0.0\" too: its HTTP API always requires authentication, while the unauthenticated backup/restore RPC endpoint is pinned to 127.0.0.1 regardless of --listen. ClickHouse defaults to \"127.0.0.1\": its HTTP and native listeners always require authentication, but loopback is the safer default — pass 0.0.0.0 to expose it on the network. Kafka defaults to \"127.0.0.1\": it has NO authentication, so expose it only on a trusted private network; Kafka --cluster mode requires 0.0.0.0 (or the advertised address) because peers and clients must reach it. RabbitMQ defaults to \"127.0.0.1\" and uses the same address for AMQP and the management UI; both require the admin login, but loopback is still the safer default — pass 0.0.0.0 to expose them on the network. In RabbitMQ --cluster mode --listen defaults to 0.0.0.0 (mandatory for cross-host distribution) and may not be loopback. RocketMQ does not use --listen: it always binds host networking (cluster ports are fixed), so restrict access with a firewall. ClickHouse --cluster requires 0.0.0.0 (or the advertised address) so peers and clients can reach it; ClickHouse Keeper defaults to 127.0.0.1 and requires a non-loopback bind whenever --peer is set. Privoxy defaults to \"0.0.0.0\": clients on other hosts and containers must reach the forward proxy, and --allow-network/--deny-network are the gate (with no ACL it is an open proxy — install warns about this). SafeLine defaults to \"0.0.0.0\" and binds only the console port: the console always requires its admin login over HTTPS (self-signed), and the protected sites' traffic ports are configured per site inside the console, not here")
 	addonInstallCmd.Flags().String("root-user", "", "MinIO/silo/rustfs root user (default \"admin\"; the root password is generated on first install, printed once, and stored in the config). For garage this is the seeded access key: omit it to auto-generate a GK-prefixed key (garage has no \"admin\" user). For seaweedfs it is the s3.json identity access key: omit it to auto-generate an SW-prefixed key on a SINGLE-NODE install only — under --cluster both it and --root-password are REQUIRED, since each node reads only its own s3.json and must present the identical identity. For etcd it is the authentication username (default \"root\"; only with --auth)")
 	addonInstallCmd.Flags().String("root-password", "", "MinIO/silo/rustfs root password (generated on first install if omitted; pass the SAME value on every node of a distributed cluster so all pg.yaml files share one credential without copying it by hand). For garage this is the seeded secret key; for seaweedfs the s3.json identity secret key — required (with --root-user) on every node of a --cluster install")
 	addonInstallCmd.Flags().StringSlice("endpoint", nil, "MinIO/silo/rustfs distributed-mode endpoint(s), e.g. --endpoint http://10.0.0.1:9000/data (MinIO/silo: path is the in-container export dir — /data with a plain --data-dir node, or /data1../dataN on a --drive node (MNMD); repeat for every node's every drive. rustfs: one endpoint per node — scheme://host:port, no path; it has no multi-node single-drive mode so --drive is required, and it derives the /data/rustfs0../rustfsN suffix itself. The list AND root credentials must match every node's pg.yaml — enables cluster mode; omit for single-node)")
@@ -1508,40 +1553,40 @@ func init() {
 	addonInstallCmd.Flags().String("tls-key", "", "MinIO/silo/rustfs: private key for --tls-cert (PEM; mounted read-only as private.key for MinIO/silo, rustfs_key.pem for rustfs, key.pem for seaweedfs; copied into the instance config dir as private.key for rabbitmq). Must pair with the cert; both are required to enable BYO TLS. For etcd it is the bring-your-own key pairing with --tls-cert")
 	addonInstallCmd.Flags().String("tls-ca", "", "etcd only: CA file used to verify the cluster when using bring-your-own certificates (--tls-cert/--tls-key). Optional when the leaf is self-signed (it is then its own trust anchor). With generated certificates the CA is derived from <base_dir>/tls/etcd/<cluster>/ca.crt and this flag is not needed. Every member must share one CA")
 	addonInstallCmd.Flags().Bool("auth", false, "etcd only: enable username/password authentication (a single user with the root role; credentials are required for every client call). The password is generated on first install when --password is omitted and stored in pg.yaml (retrieve with `pg addon password etcd`). Without TLS the password travels in clear text. Patroni DCS and RabbitMQ etcd discovery are NOT wired for authenticated etcd — do not enable this on a cluster they consume")
-	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/seaweedfs/redis/predixy/PostgREST/pgAdmin/Grafana/Prometheus/Alertmanager/vmalert/Gitea container (or, for BeeGFS, the whole 3-container filesystem cluster) even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, a changed pgAdmin --email/--dsn/--pg-name, Grafana --admin-user or Gitea --admin-user/--ssh-port/--dsn seed/--allow-registration, a changed VMCluster/VLCluster port/roles/storage-node/image, or to force-recreate a Prometheus instance instead of hot-reloading its config). For juicefs it rebuilds the config entry from the flags (format is still skipped when the volume already exists in the metadata engine); for zerofs it re-renders config.toml and restarts the server/client, KEEPING the stored encryption password (a fresh one could not unwrap the bucket's existing data); for duckdb it rebuilds the config entry from the flags; for influxdb it rewrites the generated influxdb.conf and recreates the container, KEEPING the stored admin password — pass --config-option again to keep your overrides; for influx2tsdb it rewrites the target/port settings and recreates the stateless container; for clickhouse it rewrites the rendered config and secret, then recreates the container, KEEPING the stored admin password — pass --config-option again to keep your overrides; in ClickHouse cluster mode the identity fields (--cluster, --shard, --replica, --advertise-host, --peer, --keeper, --interserver-port and --tcp-port) are immutable after install, even with --force; for clickhouse-keeper it re-renders keeper_config.xml and recreates the container, keeping data — --server-id, --advertise-host, --peer, --client-port and --raft-port are immutable after install; for kafka it rewrites server.properties and recreates the container, KEEPING the stored cluster id and formatted data dir — pass --config-option again to keep your overrides; in Kafka cluster mode the identity fields (--cluster, --node-id, --cluster-id, --peer, --advertise-host, --controller-port) are immutable after install, even with --force; for rabbitmq it rewrites rabbitmq.conf and recreates the container, KEEPING the stored admin password — pass --config-option again to keep your overrides; in RabbitMQ cluster mode --cluster, --node-name and the Erlang cookie are immutable after install (etcd endpoints may be updated), even with --force; for rocketmq it re-renders the three configs and recreates the three containers, KEEPING broker data and the cluster controller store — pass --config-option again to keep your overrides; in RocketMQ cluster mode --cluster, --controller-id, --advertise-host, --peer and the fixed ports are immutable after install, even with --force; for safeline it recreates all seven containers, KEEPING the bundled PostgreSQL data and console state, and rotates the console admin password via resetadmin (the new one is printed and stored)")
+	addonInstallCmd.Flags().Bool("force", false, "recreate the MinIO/silo/rustfs/garage/seaweedfs/redis/valkey/predixy/PostgREST/pgAdmin/Grafana/Prometheus/Alertmanager/vmalert/Gitea container (or, for BeeGFS, the whole 3-container filesystem cluster) even if one already exists (to apply changed ports/listen/credentials, a changed PostgREST --dsn/--db-pool/--schema or Predixy --backend, a changed pgAdmin --email/--dsn/--pg-name, Grafana --admin-user or Gitea --admin-user/--ssh-port/--dsn seed/--allow-registration, a changed VMCluster/VLCluster port/roles/storage-node/image, or to force-recreate a Prometheus instance instead of hot-reloading its config). For juicefs it rebuilds the config entry from the flags (format is still skipped when the volume already exists in the metadata engine); for zerofs it re-renders config.toml and restarts the server/client, KEEPING the stored encryption password (a fresh one could not unwrap the bucket's existing data); for duckdb it rebuilds the config entry from the flags; for influxdb it rewrites the generated influxdb.conf and recreates the container, KEEPING the stored admin password — pass --config-option again to keep your overrides; for influx2tsdb it rewrites the target/port settings and recreates the stateless container; for clickhouse it rewrites the rendered config and secret, then recreates the container, KEEPING the stored admin password — pass --config-option again to keep your overrides; in ClickHouse cluster mode the identity fields (--cluster, --shard, --replica, --advertise-host, --peer, --keeper, --interserver-port and --tcp-port) are immutable after install, even with --force; for clickhouse-keeper it re-renders keeper_config.xml and recreates the container, keeping data — --server-id, --advertise-host, --peer, --client-port and --raft-port are immutable after install; for kafka it rewrites server.properties and recreates the container, KEEPING the stored cluster id and formatted data dir — pass --config-option again to keep your overrides; in Kafka cluster mode the identity fields (--cluster, --node-id, --cluster-id, --peer, --advertise-host, --controller-port) are immutable after install, even with --force; for rabbitmq it rewrites rabbitmq.conf and recreates the container, KEEPING the stored admin password — pass --config-option again to keep your overrides; in RabbitMQ cluster mode --cluster, --node-name and the Erlang cookie are immutable after install (etcd endpoints may be updated), even with --force; for rocketmq it re-renders the three configs and recreates the three containers, KEEPING broker data and the cluster controller store — pass --config-option again to keep your overrides; in RocketMQ cluster mode --cluster, --controller-id, --advertise-host, --peer and the fixed ports are immutable after install, even with --force; for safeline it recreates all seven containers, KEEPING the bundled PostgreSQL data and console state, and rotates the console admin password via resetadmin (the new one is printed and stored)")
 
-	// redis flags (top-level standalone KV store — the first version-selectable addon)
-	addonInstallCmd.Flags().String("version", "", "Redis major version to install: 7 or 8 (default \"8\"); each maps to a pinned upstream docker.io/library/redis tag. For juicefs/zerofs/duckdb it instead pins the host binary release to download (default: the version's pinned sha256); for influxdb it selects the pinned pgcli-influxdb image release (default \"1.13.1\"); for influx2tsdb it selects the pinned pgcli-influx2tsdb image release (default \"1.3.2\"); for clickhouse it selects the upstream ClickHouse LTS tag (default \"26.8.36.3\"); for clickhouse-keeper it selects the upstream clickhouse-keeper tag (default \"26.8.36.3\"); for kafka it selects the upstream apache/kafka tag (default \"4.4.0\"); for rabbitmq it selects the upstream rabbitmq tag (default \"4.4.0\", the -management image is derived automatically); for rocketmq it selects the upstream apache/rocketmq tag (default \"5.5.0\"; only 5.x releases are accepted); for safeline it selects the chaitin/safeline-* release tag (default \"9.4.7\"; every component image shares it). Ignored for every other addon")
+	// redis flags (top-level standalone KV store — the first version-selectable addon; valkey shares every flag)
+	addonInstallCmd.Flags().String("version", "", "Redis major version to install: 7 or 8 (default \"8\") / Valkey: 7, 8 or 9 (default \"9\"; Valkey majors do NOT correspond to Redis majors); each maps to a pinned upstream tag (docker.io/library/redis or docker.io/valkey/valkey). For juicefs/zerofs/duckdb it instead pins the host binary release to download (default: the version's pinned sha256); for influxdb it selects the pinned pgcli-influxdb image release (default \"1.13.1\"); for influx2tsdb it selects the pinned pgcli-influx2tsdb image release (default \"1.3.2\"); for clickhouse it selects the upstream ClickHouse LTS tag (default \"26.8.36.3\"); for clickhouse-keeper it selects the upstream clickhouse-keeper tag (default \"26.8.36.3\"); for kafka it selects the upstream apache/kafka tag (default \"4.4.0\"); for rabbitmq it selects the upstream rabbitmq tag (default \"4.4.0\", the -management image is derived automatically); for rocketmq it selects the upstream apache/rocketmq tag (default \"5.5.0\"; only 5.x releases are accepted); for safeline it selects the chaitin/safeline-* release tag (default \"9.4.7\"; every component image shares it). Ignored for every other addon")
 	addonInstallCmd.Flags().String("postgres-version", "", "safeline only: tag of the stack's bundled chaitin/safeline-postgres image (default \"15.18\" — upstream's pinned PostgreSQL; SafeLine has not validated PG 18 yet, so the pgcli-managed instances' PG 18 cannot be reused). Ignored for every other addon")
 	addonInstallCmd.Flags().String("subnet-prefix", "", "safeline only: first three octets of the stack's dedicated /24 bridge subnet, e.g. 172.22.222 (default \"172.22.222\"; gateway .1, fixed container addresses .2/.4/.5/.7/.8/.10). Each stack on a host needs its own subnet. Ignored for every other addon")
-	addonInstallCmd.Flags().String("password", "", "Redis requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls) / Predixy proxy password (REQUIRED, never generated: it must be the proxied cluster's requirepass — read it with `pg addon password redis --name <member>`) / pgAdmin, Grafana or Gitea WEB login password (generated on first install if omitted — not a PostgreSQL password; retrieve it with `pg addon password pgadmin`/`grafana`/`gitea`. For Grafana it only takes effect while grafana.db is absent; for Gitea the stored password is the one pgcli CREATES the admin account with, so it is inert on a revived store whose admin already exists) / documentdb: the MongoDB client user's password (generated on first install if omitted; retrieve with `pg addon password documentdb`) / BeeGFS connection-auth secret (generated on first install ONLY on a host running mgmtd; REQUIRED on a cross-host join (--roles without mgmtd) and must equal the cluster's value — retrieve it with `pg addon password beegfs` or `pg addon beegfs join-hint`) / etcd authentication password (with --auth; generated on first install if omitted and stored in pg.yaml — retrieve with `pg addon password etcd`. On a cross-host join the cluster's existing password is REQUIRED)")
+	addonInstallCmd.Flags().String("password", "", "Redis/Valkey requirepass password (generated on first install if omitted; pass it explicitly to pin the value across reinstalls) / Predixy proxy password (REQUIRED, never generated: it must be the proxied cluster's requirepass — read it with `pg addon password redis --name <member>`) / pgAdmin, Grafana or Gitea WEB login password (generated on first install if omitted — not a PostgreSQL password; retrieve it with `pg addon password pgadmin`/`grafana`/`gitea`. For Grafana it only takes effect while grafana.db is absent; for Gitea the stored password is the one pgcli CREATES the admin account with, so it is inert on a revived store whose admin already exists) / documentdb: the MongoDB client user's password (generated on first install if omitted; retrieve with `pg addon password documentdb`) / BeeGFS connection-auth secret (generated on first install ONLY on a host running mgmtd; REQUIRED on a cross-host join (--roles without mgmtd) and must equal the cluster's value — retrieve it with `pg addon password beegfs` or `pg addon beegfs join-hint`) / etcd authentication password (with --auth; generated on first install if omitted and stored in pg.yaml — retrieve with `pg addon password etcd`. On a cross-host join the cluster's existing password is REQUIRED)")
 	addonInstallCmd.Flags().String("admin-user", "", "Grafana WEB login user (GF_SECURITY_ADMIN_USER; default \"admin\") / Gitea WEB login user (created via `gitea admin user create`; default \"gitea\" — deliberately NOT the container's OS user \"git\") / InfluxDB InfluxQL admin username (default \"admin\") — the privileged account the CLI authenticates as; / ClickHouse admin username (default \"admin\") — the account created by the image entrypoint and used by every pg addon clickhouse client command; / RabbitMQ admin username (default \"admin\") — seeded on first boot and reconciled with rabbitmqctl on every start; unrelated to any PostgreSQL role")
 	addonInstallCmd.Flags().Bool("allow-registration", false, "Gitea: open self-service signup (GITEA__service__DISABLE_REGISTRATION=false; the web UI shows a Register entry). Closed by default — it is one of the two guards on the default 0.0.0.0 listen. Signups always create NORMAL users: Gitea offers no way for the register form to produce an admin, so this opens account spam, not takeover. The toggle needs --force to reach the live container; close it again with --allow-registration=false --force")
 	addonInstallCmd.Flags().String("email", "", "pgAdmin WEB login email (PGADMIN_DEFAULT_EMAIL; default \"admin@pgcli.lan\") — the account you sign into the web UI with, unrelated to any PostgreSQL role; the image rejects reserved TLDs such as .local")
-	addonInstallCmd.Flags().String("maxmemory", "", "Redis memory cap, e.g. 256mb or 2gb — turns the instance into a real cache (allkeys-lru evicts keys at the cap); empty means no cap")
-	addonInstallCmd.Flags().String("maxmemory-policy", "", "Redis eviction policy to pair with --maxmemory (noeviction | allkeys-lru | allkeys-lfu | volatile-lru | volatile-lfu | volatile-ttl; default allkeys-lru; requires --maxmemory)")
-	addonInstallCmd.Flags().Bool("aof", false, "Redis: enable AOF (appendonly yes) — a write-ahead log on top of the RDB snapshot, for crash-safe no-eviction stores; off by default")
-	addonInstallCmd.Flags().String("appendfsync", "", "Redis AOF flush strength: always (durability) | everysec (default) | no (throughput); requires --aof")
-	addonInstallCmd.Flags().String("save", "", `Redis RDB snapshot schedule, e.g. "900 1 300 10" (empty keeps Redis's own default; "no" disables snapshots, e.g. for an AOF-only instance)`)
-	addonInstallCmd.Flags().String("replica-of", "", "Redis: make this instance a read-only replica of the named local master addon (its host/port/password are resolved from the config; the master must already be installed and on the same major)")
-	addonInstallCmd.Flags().String("replica-of-host", "", "Redis: address of a remote master to replicate (cross-host; pair with --replica-of-port and --password matching the master's; mutually exclusive with --replica-of)")
-	addonInstallCmd.Flags().Int("replica-of-port", 0, "Redis: remote master's port, paired with --replica-of-host")
+	addonInstallCmd.Flags().String("maxmemory", "", "Redis/Valkey memory cap, e.g. 256mb or 2gb — turns the instance into a real cache (allkeys-lru evicts keys at the cap); empty means no cap")
+	addonInstallCmd.Flags().String("maxmemory-policy", "", "Redis/Valkey eviction policy to pair with --maxmemory (noeviction | allkeys-lru | allkeys-lfu | volatile-lru | volatile-lfu | volatile-ttl; default allkeys-lru; requires --maxmemory)")
+	addonInstallCmd.Flags().Bool("aof", false, "Redis/Valkey: enable AOF (appendonly yes) — a write-ahead log on top of the RDB snapshot, for crash-safe no-eviction stores; off by default")
+	addonInstallCmd.Flags().String("appendfsync", "", "Redis/Valkey AOF flush strength: always (durability) | everysec (default) | no (throughput); requires --aof")
+	addonInstallCmd.Flags().String("save", "", `Redis/Valkey RDB snapshot schedule, e.g. "900 1 300 10" (empty keeps the server's own default; "no" disables snapshots, e.g. for an AOF-only instance)`)
+	addonInstallCmd.Flags().String("replica-of", "", "Redis/Valkey: make this instance a read-only replica of the named local master addon of the SAME type (its host/port/password are resolved from the config; the master must already be installed and on the same major)")
+	addonInstallCmd.Flags().String("replica-of-host", "", "Redis/Valkey: address of a remote master to replicate (cross-host; pair with --replica-of-port and --password matching the master's; mutually exclusive with --replica-of)")
+	addonInstallCmd.Flags().Int("replica-of-port", 0, "Redis/Valkey: remote master's port, paired with --replica-of-host")
 
 	// start / stop flags
-	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, beegfs, privoxy, rocketmq or safeline instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"vmalert\"/\"gitea\"/\"influx2tsdb\"/\"clickhouse\"/\"clickhouse-keeper\"/\"beegfs\"/\"privoxy\"/\"rocketmq\"/\"safeline\")")
+	addonStartCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, beegfs, privoxy, rocketmq or safeline instance to start (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"valkey\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"vmalert\"/\"gitea\"/\"influx2tsdb\"/\"clickhouse\"/\"clickhouse-keeper\"/\"beegfs\"/\"privoxy\"/\"rocketmq\"/\"safeline\")")
 	addonStartCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to start")
-	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, beegfs, privoxy, rocketmq or safeline instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"vmalert\"/\"gitea\"/\"influx2tsdb\"/\"clickhouse\"/\"clickhouse-keeper\"/\"beegfs\"/\"privoxy\"/\"rocketmq\"/\"safeline\")")
+	addonStopCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, beegfs, privoxy, rocketmq or safeline instance to stop (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"valkey\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"alertmanager\"/\"vmalert\"/\"gitea\"/\"influx2tsdb\"/\"clickhouse\"/\"clickhouse-keeper\"/\"beegfs\"/\"privoxy\"/\"rocketmq\"/\"safeline\")")
 	addonStopCmd.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST to stop")
 
 	// list / password flags
-	addonListCmd.Flags().Bool("show-password", false, "also print stored credentials (Redis requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin/Grafana/Gitea web login password, BeeGFS conn-auth secret, etcd auth password) — off by default so the listing stays paste-safe")
-	addonPasswordCmd.Flags().String("name", "", "instance to reveal (redis/predixy/minio/silo/rustfs/garage/seaweedfs/pgadmin/grafana/gitea/influxdb/beegfs/etcd; default \"redis\"/\"predixy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"pgadmin\"/\"grafana\"/\"gitea\"/\"influxdb\"/\"beegfs\"/\"etcd\")")
+	addonListCmd.Flags().Bool("show-password", false, "also print stored credentials (Redis/Valkey requirepass, Predixy proxy password, MinIO/silo/rustfs/garage/seaweedfs key secret, pgAdmin/Grafana/Gitea web login password, BeeGFS conn-auth secret, etcd auth password) — off by default so the listing stays paste-safe")
+	addonPasswordCmd.Flags().String("name", "", "instance to reveal (redis/valkey/predixy/minio/silo/rustfs/garage/seaweedfs/pgadmin/grafana/gitea/influxdb/beegfs/etcd; default \"redis\"/\"valkey\"/\"predixy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"pgadmin\"/\"grafana\"/\"gitea\"/\"influxdb\"/\"beegfs\"/\"etcd\")")
 	addonPasswordCmd.Flags().String("file", "", "write the password to this file (mode 0600) instead of stdout, keeping it out of shell history and scrollback")
 	addonPasswordCmd.Flags().Bool("reset", false, "rotate and store a new password (SafeLine WAF only: reruns the console resetadmin bootstrap, saves admin_user/admin_password in pg.yaml and prints the new password; the stack must be running)")
 	addonReloadCmd.Flags().String("name", "", "instance to reload (default \"safeline\")")
 
 	// pgdog flags (top-level shared Postgres proxy addon)
-	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port) / PostgREST HTTP host port (0=auto-assign from postgrest_start_port) / Redis host port (0=auto-assign from redis_start_port, default 6379) / Predixy proxy host port (0=auto-assign from predixy_start_port, default 7617) / pgAdmin web host port (0=auto-assign from pgadmin_start_port, default 5050) / Grafana web host port (0=auto-assign from grafana_start_port, default 3000) / Prometheus web host port (0=auto-assign from prometheus_start_port, default 9090) / Alertmanager web host port (0=auto-assign from alertmanager_start_port, default 9093) / vmalert web/API host port (0=auto-assign from vmalert_start_port, default 8880) / Gitea web host port (0=auto-assign from gitea_start_port, default 3080) / influx2tsdb InfluxDB-protocol HTTP host port (0=auto-assign from influx2tsdb_start_port, default 8087) / Privoxy proxy host port (0=auto-assign from privoxy_start_port, default 8118; multiple instances increment from there and skip ports already listening on the host) / SafeLine console HTTPS host port (0=auto-assign from safeline_start_port, default 9443)")
+	addonInstallCmd.Flags().Int("port", 0, "PgDog client host port (0=auto-assign from pgdog_start_port; openmetrics takes the next free port) / PostgREST HTTP host port (0=auto-assign from postgrest_start_port) / Redis host port (0=auto-assign from redis_start_port, default 6379) / Valkey host port (0=auto-assign from valkey_start_port, default 6380) / Predixy proxy host port (0=auto-assign from predixy_start_port, default 7617) / pgAdmin web host port (0=auto-assign from pgadmin_start_port, default 5050) / Grafana web host port (0=auto-assign from grafana_start_port, default 3000) / Prometheus web host port (0=auto-assign from prometheus_start_port, default 9090) / Alertmanager web host port (0=auto-assign from alertmanager_start_port, default 9093) / vmalert web/API host port (0=auto-assign from vmalert_start_port, default 8880) / Gitea web host port (0=auto-assign from gitea_start_port, default 3080) / influx2tsdb InfluxDB-protocol HTTP host port (0=auto-assign from influx2tsdb_start_port, default 8087) / Privoxy proxy host port (0=auto-assign from privoxy_start_port, default 8118; multiple instances increment from there and skip ports already listening on the host) / SafeLine console HTTPS host port (0=auto-assign from safeline_start_port, default 9443)")
 	addonInstallCmd.Flags().Int("ssh-port", 0, "Gitea: host port for git-over-ssh (the image's OpenSSH) clone/push — any N>0 enables it. The image always runs sshd, so N=0 does not stop it, only parks it on an idle pool port (off 22). With no explicit value the port auto-assigns from gitea_ssh_start_port (default 2222); on Linux that port is bound directly (host networking), so the clone URL shows ssh://git@<listen>:<port>/...")
 	addonInstallCmd.Flags().String("host", "", "PgDog listen address (default 127.0.0.1)")
 	addonInstallCmd.Flags().String("pool-mode", "", "PgDog pooler mode: transaction (default) or session")
@@ -1581,6 +1626,8 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallSeaweedfs(cmd)
 	case "redis":
 		return runAddonInstallRedis(cmd)
+	case "valkey":
+		return runAddonInstallValkey(cmd)
 	case "predixy":
 		return runAddonInstallPredixy(cmd)
 	case "postgrest":
@@ -1644,7 +1691,7 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, safeline, privoxy)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, safeline, privoxy)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -4122,6 +4169,15 @@ var redisAppendFsyncs = []string{"always", "everysec", "no"}
 //     config, so the operator must supply it; it must still equal the master's,
 //     which only the operator can guarantee). No major check across hosts.
 func resolveRedisReplica(cfg *config.Config, rc *config.RedisConfig, selfName, replicaOf, replicaOfHost, version string, replicaOfPort int, passwordGiven bool) error {
+	return resolveKVReplica(cfg.Addons.Redis, "redis", "Redis", rc, selfName, replicaOf, replicaOfHost, version, replicaOfPort, passwordGiven)
+}
+
+// resolveKVReplica is the shared body behind resolveRedisReplica (members =
+// cfg.Addons.Redis) and resolveValkeyReplica (members = cfg.Addons.Valkey).
+// kind names the add-on type in the not-found error (it lists the members
+// map's instances); product names the server in the cross-major error. Valkey
+// follows the identical replication protocol, so the rules are shared verbatim.
+func resolveKVReplica(members map[string]config.RedisConfig, kind, product string, rc *config.RedisConfig, selfName, replicaOf, replicaOfHost, version string, replicaOfPort int, passwordGiven bool) error {
 	if replicaOf != "" && replicaOfHost != "" {
 		return fmt.Errorf("--replica-of (a local master addon) and --replica-of-host (a remote master) are mutually exclusive")
 	}
@@ -4135,21 +4191,22 @@ func resolveRedisReplica(cfg *config.Config, rc *config.RedisConfig, selfName, r
 		if replicaOf == selfName {
 			return fmt.Errorf("--replica-of %q cannot name the instance itself", replicaOf)
 		}
-		master, ok := cfg.Addons.Redis[replicaOf]
+		master, ok := members[replicaOf]
 		if !ok {
-			return fmt.Errorf("--replica-of %q is not an installed redis addon (available: %v)", replicaOf, sortedAddonNames(cfg.Addons.Redis))
+			return fmt.Errorf("--replica-of %q is not an installed %s addon (available: %v)", replicaOf, kind, sortedAddonNames(members))
 		}
 		// A replica must run the same major as its master — cross-version
-		// replication is unsupported by Redis. `version` is the raw --version
-		// flag (rc.Version is only the previously-stored value at this point);
-		// reject an explicit mismatch, else adopt the master's major so the
-		// version resolve below re-derives a matching image tag.
+		// replication is unsupported by the Redis-family servers. `version` is
+		// the raw --version flag (rc.Version is only the previously-stored
+		// value at this point); reject an explicit mismatch, else adopt the
+		// master's major so the version resolve below re-derives a matching
+		// image tag.
 		wantMajor := version
 		if wantMajor == "" {
 			wantMajor = rc.Version
 		}
 		if wantMajor != "" && wantMajor != master.Version {
-			return fmt.Errorf("replica major %q does not match master %q (%s) — Redis cannot replicate across majors", wantMajor, replicaOf, master.Version)
+			return fmt.Errorf("replica major %q does not match master %q (%s) — %s cannot replicate across majors", wantMajor, replicaOf, master.Version, product)
 		}
 		rc.Version = master.Version
 		rc.ReplicaHost = "127.0.0.1"
@@ -4274,6 +4331,14 @@ func redisRoleSummary(rc config.RedisConfig) string {
 // sets it, later members inherit it, and an explicit disagreement is rejected so
 // the copy-pasteable create command and the node-count guidance stay consistent.
 func resolveRedisCluster(cfg *config.Config, rc *config.RedisConfig, selfName, cluster, advertiseHost, replicaOf, replicaOfHost string, replicas int, replicasGiven, passwordGiven bool) error {
+	return resolveKVCluster(cfg.Addons.Redis, rc, selfName, cluster, advertiseHost, replicaOf, replicaOfHost, replicas, replicasGiven, passwordGiven)
+}
+
+// resolveKVCluster is the shared body behind resolveRedisCluster (members =
+// cfg.Addons.Redis) and resolveValkeyCluster (members = cfg.Addons.Valkey).
+// Valkey speaks the same native-cluster protocol, including the one-password
+// rule for `--cluster create` operands, so the rules are shared verbatim.
+func resolveKVCluster(members map[string]config.RedisConfig, rc *config.RedisConfig, selfName, cluster, advertiseHost, replicaOf, replicaOfHost string, replicas int, replicasGiven, passwordGiven bool) error {
 	if cluster == "" {
 		return nil
 	}
@@ -4293,11 +4358,11 @@ func resolveRedisCluster(cfg *config.Config, rc *config.RedisConfig, selfName, c
 	// Base password = the first OTHER configured member of this group, by name
 	// (deterministic; matches how the group's members were installed in order).
 	var base *config.RedisConfig
-	for _, name := range sortedAddonNames(cfg.Addons.Redis) {
+	for _, name := range sortedAddonNames(members) {
 		if name == selfName {
 			continue
 		}
-		other := cfg.Addons.Redis[name]
+		other := members[name]
 		if other.Cluster == cluster {
 			base = &other
 			break
@@ -4330,9 +4395,15 @@ func resolveRedisCluster(cfg *config.Config, rc *config.RedisConfig, selfName, c
 // exactly the node list `--cluster create` takes, so the summary hands the
 // operator a copy-pasteable command instead of a description.
 func redisClusterPeerAddrs(cfg *config.Config, self config.RedisConfig) []string {
+	return kvClusterPeerAddrs(cfg.Addons.Redis, self)
+}
+
+// kvClusterPeerAddrs is the shared body behind redisClusterPeerAddrs (members =
+// cfg.Addons.Redis) and valkeyClusterPeerAddrs (members = cfg.Addons.Valkey).
+func kvClusterPeerAddrs(members map[string]config.RedisConfig, self config.RedisConfig) []string {
 	var out []string
-	for _, name := range sortedAddonNames(cfg.Addons.Redis) {
-		m := cfg.Addons.Redis[name]
+	for _, name := range sortedAddonNames(members) {
+		m := members[name]
 		if m.Cluster == "" || m.Cluster != self.Cluster {
 			continue
 		}
@@ -4352,7 +4423,14 @@ func redisClusterPeerAddrs(cfg *config.Config, self config.RedisConfig) []string
 // the suggested command. Keeping the assembled command out of pgcli (no
 // automatic --cluster create) is the deliberate two-stage design.
 func redisClusterNextSteps(cfg *config.Config, selfName string, self config.RedisConfig) string {
-	peers := redisClusterPeerAddrs(cfg, self)
+	return kvClusterNextSteps(cfg.Addons.Redis, "redis-cli", selfName, self)
+}
+
+// kvClusterNextSteps is the shared body behind redisClusterNextSteps (client
+// "redis-cli") and valkeyClusterNextSteps (client "valkey-cli"): the suggested
+// assemble command names the right client binary for the add-on type.
+func kvClusterNextSteps(members map[string]config.RedisConfig, client, selfName string, self config.RedisConfig) string {
+	peers := kvClusterPeerAddrs(members, self)
 	operands := strings.Join(peers, " ")
 	minNodes := config.RedisClusterMinNodes(self.ClusterReplicas)
 	out := "\n"
@@ -4370,8 +4448,8 @@ func redisClusterNextSteps(cfg *config.Config, selfName string, self config.Redi
 		out += fmt.Sprintf("  Cluster:     %q — %d %s configured. Assemble once (pgcli does not run this):\n",
 			self.Cluster, len(peers), noun)
 	}
-	out += fmt.Sprintf("               pg redis-cli --name %s -- --cluster create %s --cluster-replicas %d\n",
-		selfName, operands, self.ClusterReplicas)
+	out += fmt.Sprintf("               pg %s --name %s -- --cluster create %s --cluster-replicas %d\n",
+		client, selfName, operands, self.ClusterReplicas)
 	out += "               (bus port = client+10000; for cross-host peers open it on the firewall, and give each member --advertise-host)\n"
 	return out
 }
@@ -6001,6 +6079,62 @@ func runAddonList(showPassword bool) error {
 		}
 	}
 
+	// valkey (the BSD-3 Redis fork — same fields, same display shape)
+	section("Infra add-ons (valkey):", len(cfg.Addons.Valkey) > 0)
+	if vm, err := podman.NewValkeyManager(cfg); err == nil {
+		for _, name := range sortedAddonNames(cfg.Addons.Valkey) {
+			vc := cfg.Addons.Valkey[name]
+			status := "stopped"
+			if running, err := vm.ContainerRunning(vc.ContainerName); err == nil && running {
+				status = "running"
+			}
+			fmt.Printf("  %s (name: %s)\n", "valkey", name)
+			fmt.Printf("    Status:      %s\n", status)
+			version := vc.Version
+			if version == "" {
+				version = config.ValkeyMajorForImageTag(vc.ImageTag)
+			}
+			if version != "" {
+				fmt.Printf("    Version:     %s\n", version)
+			}
+			fmt.Printf("    Address:     %s:%d\n", vc.Listen, vc.Port)
+			fmt.Printf("    Role:        %s\n", redisRoleSummary(vc))
+			if vc.ClusterEnabled() {
+				cluster := vc.Cluster
+				if vc.AdvertiseHost != "" {
+					cluster += " @" + vc.AdvertiseHost
+				}
+				fmt.Printf("    Cluster:     %s (bus %d)\n", cluster, vc.ClusterBusPort())
+			}
+			auth := "off"
+			if vc.Password != "" {
+				auth = "on (requirepass)"
+			}
+			fmt.Printf("    Auth:        %s\n", auth)
+			if showPassword && vc.Password != "" {
+				fmt.Printf("    Password:    %s\n", vc.Password)
+				fmt.Printf("    Raw DSN:     redis://:%s@%s:%d/0\n", vc.Password, vc.Listen, vc.Port)
+			}
+			if vc.MaxMemory != "" {
+				fmt.Printf("    Maxmemory:   %s (%s)\n", vc.MaxMemory, redisEffectivePolicy(vc))
+			}
+			fmt.Printf("    Persistence: %s\n", redisPersistenceSummary(vc))
+			fmt.Printf("    Data:        %s\n", vm.DataDir(&vc))
+			fmt.Printf("    Image:       %s\n", vc.ImageTag)
+			fmt.Printf("    Container:   %s\n", vc.ContainerName)
+			fmt.Printf("    Client:      pg valkey-cli --name %s ping\n", name)
+		}
+	} else if len(cfg.Addons.Valkey) > 0 {
+		// Configured but the manager is unavailable (podman missing): still show them.
+		for _, name := range sortedAddonNames(cfg.Addons.Valkey) {
+			vc := cfg.Addons.Valkey[name]
+			fmt.Printf("  %s (name: %s)\n", "valkey", name)
+			fmt.Printf("    Status:      n/a (%v)\n", err)
+			fmt.Printf("    Address:     %s:%d\n", vc.Listen, vc.Port)
+			fmt.Printf("    Container:   %s\n", vc.ContainerName)
+		}
+	}
+
 	// predixy (Redis cluster proxy — one plain endpoint in front of a cluster)
 	section("Infra add-ons (predixy):", len(cfg.Addons.Predixy) > 0)
 	if pm, err := podman.NewPredixyManager(cfg); err == nil {
@@ -7109,6 +7243,9 @@ func addonPasswords(cfg *config.Config) map[string]string {
 	for name, rc := range cfg.Addons.Redis {
 		out["redis:"+name] = rc.Password
 	}
+	for name, vc := range cfg.Addons.Valkey {
+		out["valkey:"+name] = vc.Password
+	}
 	for name, pc := range cfg.Addons.Predixy {
 		out["predixy:"+name] = pc.Password
 	}
@@ -7353,6 +7490,8 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemoveSeaweedfs(cmd)
 	case "redis":
 		return runAddonRemoveRedis(cmd)
+	case "valkey":
+		return runAddonRemoveValkey(cmd)
 	case "predixy":
 		return runAddonRemovePredixy(cmd)
 	case "postgrest":
@@ -7416,7 +7555,7 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, safeline, privoxy)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, safeline, privoxy)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -7711,6 +7850,8 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartSeaweedfs(cmd)
 	case "redis":
 		return runAddonStartRedis(cmd)
+	case "valkey":
+		return runAddonStartValkey(cmd)
 	case "predixy":
 		return runAddonStartPredixy(cmd)
 	case "pgbouncer":
@@ -7776,7 +7917,7 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 	case "safeline":
 		return runAddonStartSafeline(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, safeline, privoxy)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, safeline, privoxy)", addonName)
 	}
 }
 
@@ -7800,6 +7941,8 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopSeaweedfs(cmd)
 	case "redis":
 		return runAddonStopRedis(cmd)
+	case "valkey":
+		return runAddonStopValkey(cmd)
 	case "predixy":
 		return runAddonStopPredixy(cmd)
 	case "pgbouncer":
@@ -7864,7 +8007,7 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 	case "safeline":
 		return runAddonStopSafeline(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, safeline, privoxy)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, safeline, privoxy)", addonName)
 	}
 }
 

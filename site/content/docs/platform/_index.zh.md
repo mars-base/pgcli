@@ -50,6 +50,7 @@ pgcli 在 Linux 和 macOS 上都是驱动 [Podman](https://podman.io) 容器运�
 | 插件 —— **silo** | ✅ host 网络 | ✅ bridge，发布端口 |
 | 插件 —— **rustfs** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
 | 插件 —— **Redis** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
+| 插件 —— **Valkey** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
 | 插件 —— **Predixy** | ✅ host 网络（单机与跨机集群皆已验证） | ❌ 仅 Linux |
 | 插件 —— **Garage** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |
 | 插件 —— **SeaweedFS** | ✅ host 网络 | ⚠️ bridge 路径已实现但未实测 —— 暂按仅 Linux 对待 |

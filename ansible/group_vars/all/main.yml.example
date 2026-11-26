@@ -253,6 +253,18 @@ pgcli_images:
     archive: redis_8.10.2.tar
     auto_load: true
     addons: [redis]
+  - image: docker.io/valkey/valkey:7.2.16
+    archive: valkey_7.2.16.tar
+    auto_load: true
+    addons: [valkey]
+  - image: docker.io/valkey/valkey:8.1.12
+    archive: valkey_8.1.12.tar
+    auto_load: true
+    addons: [valkey]
+  - image: docker.io/valkey/valkey:9.2.0
+    archive: valkey_9.2.0.tar
+    auto_load: true
+    addons: [valkey]
   - image: docker.io/dpage/pgadmin4:9.18
     archive: pgadmin4_9.18.tar
     auto_load: true

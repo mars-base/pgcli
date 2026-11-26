@@ -31,7 +31,7 @@ export-images.sh ──▶ /srv/offline-images ──HTTP──▶ pgcli_images_
 ./scripts/export-images.sh --ansible ansible/group_vars/all/main.yml -o /srv/offline-images
 ```
 
-两种来源都解析出 52 个镜像，且镜像到文件名的映射一致。常用参数：
+两种来源都解析出 55 个镜像，且镜像到文件名的映射一致。常用参数：
 
 | 参数 | 说明 |
 |------|------|

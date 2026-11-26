@@ -38,6 +38,7 @@ type Config struct {
 	MinioStartPort           int                         `yaml:"minio_start_port,omitempty"`                   // starting MinIO API host port, default 9000 (console takes the next free port)
 	PostgrestStartPort       int                         `yaml:"postgrest_start_port,omitempty"`               // starting PostgREST HTTP host port, default 3500
 	RedisStartPort           int                         `yaml:"redis_start_port,omitempty"`                   // starting Redis host port, default 6379
+	ValkeyStartPort          int                         `yaml:"valkey_start_port,omitempty"`                  // starting Valkey host port, default 6380
 	PredixyStartPort         int                         `yaml:"predixy_start_port,omitempty"`                 // starting Predixy proxy listener host port, default 7617
 	PgAdminStartPort         int                         `yaml:"pgadmin_start_port,omitempty"`                 // starting pgAdmin 4 web host port, default 5050
 	SafelineStartPort        int                         `yaml:"safeline_start_port,omitempty"`                // starting SafeLine WAF console host port, default 9443
@@ -200,6 +201,7 @@ type TopAddonsConfig struct {
 	Garage           map[string]GarageConfig           `yaml:"garage,omitempty"`
 	Seaweedfs        map[string]SeaweedfsConfig        `yaml:"seaweedfs,omitempty"`
 	Redis            map[string]RedisConfig            `yaml:"redis,omitempty"`
+	Valkey           map[string]ValkeyConfig           `yaml:"valkey,omitempty"`
 	Predixy          map[string]PredixyConfig          `yaml:"predixy,omitempty"`
 	PgAdmin          map[string]PgAdminConfig          `yaml:"pgadmin,omitempty"`
 	Grafana          map[string]GrafanaConfig          `yaml:"grafana,omitempty"`
@@ -956,12 +958,29 @@ func RedisClusterMinNodes(replicas int) int {
 	return RedisClusterMinMasters * (1 + replicas)
 }
 
+// DefaultValkeyMajor is the Valkey major version installed when --version is
+// not given: "9", the current stable line upstream (docker.io/valkey/valkey).
+// Valkey majors do NOT correspond to Redis majors numerically — pick by
+// Valkey's own release lines.
+const DefaultValkeyMajor = "9"
+
+// DefaultValkeyPort is the base of the Valkey addon's pool and the fallback
+// for `pg valkey-cli --host`. 6380 keeps a default Valkey instance off the
+// default Redis port before either container exists: each pool only sees
+// host-used ports plus its own allocations, not the other pool's.
+const DefaultValkeyPort = 6380
+
+// Valkey cluster sizing reuses the Redis constants and helpers above: the
+// native-cluster protocol (16384 slots, --cluster create, cluster-replicas)
+// is identical, so there is nothing Valkey-specific to encode.
+
 // redisMajorImages maps a Redis major to the default upstream image tag. This
 // is pgcli's first version-selection mechanism — every other add-on pins a
 // single image — so the shape is deliberately local: a table plus the two
-// resolvers below, not an abstraction other add-ons must conform to. Should a
-// second versioned add-on appear (PG majors, etcd), lift this pattern rather
-// than invent a new one.
+// resolvers below, not an abstraction other add-ons must conform to. Valkey
+// (valkeyMajorImages below) copies this shape; should a third versioned
+// add-on appear (PG majors, etcd), lift the pattern rather than invent a new
+// one.
 //
 // Tags track the latest patch release of each major; bump them with the
 // matching docs/images.md row. Both are plain upstream images — pgcli builds no
@@ -1010,6 +1029,61 @@ func RedisMajorForImageTag(imageTag string) string {
 	}
 	major := string(digits)
 	if _, ok := redisMajorImages[major]; !ok {
+		return ""
+	}
+	return major
+}
+
+// valkeyMajorImages maps a Valkey major to the default upstream image tag,
+// mirroring redisMajorImages. Tags track the latest patch release of each
+// maintained Valkey line; bump them with the matching docs/images.md rows.
+// Plain upstream images (multi-arch manifest lists) — pgcli builds no wrapper.
+var valkeyMajorImages = map[string]string{
+	"7": "docker.io/valkey/valkey:7.2.16",
+	"8": "docker.io/valkey/valkey:8.1.12",
+	"9": "docker.io/valkey/valkey:9.2.0",
+}
+
+// ValkeyMajors returns the selectable Valkey majors, sorted ascending
+// ("7", "8", "9").
+func ValkeyMajors() []string {
+	majors := make([]string, 0, len(valkeyMajorImages))
+	for major := range valkeyMajorImages {
+		majors = append(majors, major)
+	}
+	sort.Strings(majors)
+	return majors
+}
+
+// ValkeyImageTagForMajor resolves a major to its default image tag; ok is
+// false for anything outside the table, which callers turn into an error
+// listing ValkeyMajors.
+func ValkeyImageTagForMajor(major string) (string, bool) {
+	tag, ok := valkeyMajorImages[major]
+	return tag, ok
+}
+
+// ValkeyMajorForImageTag reverse-parses an image tag to its major version —
+// the leading digit run after the colon ("docker.io/valkey/valkey:9.2.0" →
+// "9"). Used only for display when --image bypassed the table; returns "" for
+// unparseable or unknown majors, in which case the tag is shown verbatim.
+func ValkeyMajorForImageTag(imageTag string) string {
+	idx := strings.LastIndex(imageTag, ":")
+	if idx < 0 || idx == len(imageTag)-1 {
+		return ""
+	}
+	digits := make([]byte, 0, 2)
+	for _, ch := range imageTag[idx+1:] {
+		if ch < '0' || ch > '9' {
+			break
+		}
+		digits = append(digits, byte(ch))
+	}
+	if len(digits) == 0 {
+		return ""
+	}
+	major := string(digits)
+	if _, ok := valkeyMajorImages[major]; !ok {
 		return ""
 	}
 	return major
@@ -3754,6 +3828,14 @@ func (r RedisConfig) PeerAddr() string {
 	return "127.0.0.1"
 }
 
+// ValkeyConfig is the config for a Valkey add-on (docker.io/valkey/valkey).
+// Valkey is the Redis 7.2.4 fork: server flags, RDB/AOF persistence files,
+// replica and native-cluster semantics are identical, so the shape is a
+// straight alias — same YAML keys, same methods. Only the image table,
+// container prefix, data directory and client binary differ. Split this into
+// a real struct if the two ever diverge.
+type ValkeyConfig = RedisConfig
+
 // DefaultPredixyImageTag pins the Predixy image — a self-built wrapper of
 // joyieldInc/predixy on Alpine (embed/predixy.Containerfile, built and pushed by
 // `make container-build-predixy`). The wrapper exists because Predixy is
@@ -4827,6 +4909,7 @@ func Default() *Config {
 		MinioStartPort:           9000,
 		PostgrestStartPort:       3500,
 		RedisStartPort:           6379,
+		ValkeyStartPort:          6380,
 		PredixyStartPort:         7617,
 		PgAdminStartPort:         5050,
 		SafelineStartPort:        DefaultSafelineConsolePort,
@@ -5085,6 +5168,7 @@ type displayConfig struct {
 	MinioStartPort           int                         `yaml:"minio_start_port,omitempty"`
 	PostgrestStartPort       int                         `yaml:"postgrest_start_port,omitempty"`
 	RedisStartPort           int                         `yaml:"redis_start_port,omitempty"`
+	ValkeyStartPort          int                         `yaml:"valkey_start_port,omitempty"`
 	PredixyStartPort         int                         `yaml:"predixy_start_port,omitempty"`
 	PgAdminStartPort         int                         `yaml:"pgadmin_start_port,omitempty"`
 	SafelineStartPort        int                         `yaml:"safeline_start_port,omitempty"`
@@ -5145,6 +5229,7 @@ func (c *Config) Display() displayConfig {
 		MinioStartPort:           c.MinioStartPort,
 		PostgrestStartPort:       c.PostgrestStartPort,
 		RedisStartPort:           c.RedisStartPort,
+		ValkeyStartPort:          c.ValkeyStartPort,
 		PredixyStartPort:         c.PredixyStartPort,
 		PgAdminStartPort:         c.PgAdminStartPort,
 		SafelineStartPort:        c.SafelineStartPort,
@@ -6322,6 +6407,9 @@ func (c *Config) ApplyDefaults() {
 	if c.RedisStartPort == 0 {
 		c.RedisStartPort = d.RedisStartPort
 	}
+	if c.ValkeyStartPort == 0 {
+		c.ValkeyStartPort = d.ValkeyStartPort
+	}
 	if c.PredixyStartPort == 0 {
 		c.PredixyStartPort = d.PredixyStartPort
 	}
@@ -6922,6 +7010,31 @@ func (c *Config) ApplyDefaults() {
 			addon.Listen = "0.0.0.0"
 		}
 		c.Addons.Redis[name] = addon
+	}
+
+	// Top-level addons defaults (Valkey) — same shape as Redis above. The
+	// server flags and persistence files are identical, so only the container
+	// prefix and the default image table differ. Password is deliberately NOT
+	// generated here either; the CLI install handler fills it once.
+	for name, addon := range c.Addons.Valkey {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-valkey" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.Version == "" && addon.ImageTag == "" {
+			addon.Version = DefaultValkeyMajor
+		}
+		if addon.ImageTag == "" {
+			if tag, ok := ValkeyImageTagForMajor(addon.Version); ok {
+				addon.ImageTag = tag
+			}
+		}
+		if addon.Listen == "" {
+			addon.Listen = "0.0.0.0"
+		}
+		c.Addons.Valkey[name] = addon
 	}
 
 	// Top-level addons defaults (Predixy). Password and Backend are deliberately
@@ -8781,6 +8894,49 @@ func (c *Config) autoAssignPorts() {
 				next = addon.Port + 1
 			}
 			c.Addons.Redis[name] = addon
+		}
+	}
+
+	// Allocate ports for Valkey addons from their own pool (valkey_start_port,
+	// default 6380) — same one-port-per-instance shape as Redis above. The pool
+	// only sees host-used ports, so seed it with the Redis allocations too:
+	// otherwise a Redis pool that has climbed into 6380+ would collide with a
+	// Valkey auto-assignment before either container exists.
+	{
+		valkeyBase := c.ValkeyStartPort
+		assignedValkey := map[int]bool{}
+		for _, addon := range c.Addons.Redis {
+			if addon.Port != 0 {
+				assignedValkey[addon.Port] = true
+			}
+		}
+		for _, addon := range c.Addons.Valkey {
+			if addon.Port != 0 {
+				assignedValkey[addon.Port] = true
+			}
+		}
+		next := valkeyBase
+		nextFreeValkey := func() int {
+			for (usedPorts != nil && usedPorts[next]) || assignedValkey[next] {
+				next++
+			}
+			p := next
+			next++
+			return p
+		}
+		names := make([]string, 0, len(c.Addons.Valkey))
+		for name := range c.Addons.Valkey {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			addon := c.Addons.Valkey[name]
+			if addon.Port == 0 && valkeyBase > 0 {
+				addon.Port = nextFreeValkey()
+			} else if addon.Port >= next {
+				next = addon.Port + 1
+			}
+			c.Addons.Valkey[name] = addon
 		}
 	}
 

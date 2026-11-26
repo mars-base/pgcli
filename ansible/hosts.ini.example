@@ -295,6 +295,9 @@ ansible_group_priority=20
 # [addon_silo_single]
 # node1
 
+# [addon_valkey_single]
+# node1
+
 # [addon_victorialogs_single]
 # node1
 
@@ -319,8 +322,8 @@ ansible_group_priority=20
 # ── Add-on groups: clusters ────────────────────────────────────────────────
 # Variables live in the matching group_vars/addon_<type>_cluster/main.yml.
 # 3-member groups: etcd, seaweedfs, clickhouse-keeper, kafka, rabbitmq,
-# rocketmq. 4-member groups: minio, silo, rustfs, redis, clickhouse,
-# vmcluster, vlcluster.
+# rocketmq. 4-member groups: minio, silo, rustfs, redis, valkey,
+# clickhouse, vmcluster, vlcluster.
 
 # [addon_clickhouse_cluster]
 # node1
@@ -377,6 +380,12 @@ ansible_group_priority=20
 # node3
 
 # [addon_silo_cluster]
+# node1
+# node2
+# node3
+# node4
+
+# [addon_valkey_cluster]
 # node1
 # node2
 # node3

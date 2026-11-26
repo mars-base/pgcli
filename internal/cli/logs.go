@@ -72,11 +72,11 @@ var logsAddonCmd = &cobra.Command{
 	Short: "Show addon console output logs",
 	Long: `Show addon console output logs.
 
-Requires the addon type (pgbouncer, postgrest, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rocketmq, safeline, nginx, privoxy, patroni).
+Requires the addon type (pgbouncer, postgrest, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rocketmq, safeline, nginx, privoxy, patroni).
 Use -i for local instance addons, --pg-name for remote addons,
 --name for an etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage,
-seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rocketmq, safeline or Patroni member (default
-"etcd"/"pgdog"/"haproxy"/"minio"/"silo"/"rustfs"/"garage"/"seaweedfs"/"redis"/"predixy"/"pgadmin"/"grafana"/"prometheus"/"alertmanager"/"vmalert"/"gitea"/"beegfs"/"vmc"/"vlc"/"juicefs"/"zerofs"/"influxdb"/"influx2tsdb"/"clickhouse"/"clickhouse-keeper"/"kafka"/"rocketmq"/"safeline"; Patroni members have
+seaweedfs, redis, valkey, predixy, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rocketmq, safeline or Patroni member (default
+"etcd"/"pgdog"/"haproxy"/"minio"/"silo"/"rustfs"/"garage"/"seaweedfs"/"redis"/"valkey"/"predixy"/"pgadmin"/"grafana"/"prometheus"/"alertmanager"/"vmalert"/"gitea"/"beegfs"/"vmc"/"vlc"/"juicefs"/"zerofs"/"influxdb"/"influx2tsdb"/"clickhouse"/"clickhouse-keeper"/"kafka"/"rocketmq"/"safeline"; Patroni members have
 no default and also require --scope).
 
 juicefs and zerofs are host-binary addons, so their logs are plain
@@ -115,6 +115,8 @@ Examples:
   pg logs addon seaweedfs --name store -f
   pg logs addon redis --name cache
   pg logs addon redis --name cache -f
+  pg logs addon valkey --name cache
+  pg logs addon valkey --name cache -f
   pg logs addon predixy --name proxy
   pg logs addon predixy --name proxy -f
   pg logs addon pgadmin
@@ -191,7 +193,7 @@ Examples:
 			if err != nil {
 				return err
 			}
-		case "etcd", "pgdog", "haproxy", "minio", "silo", "rustfs", "garage", "seaweedfs", "redis", "predixy", "pgadmin", "grafana", "prometheus", "alertmanager", "vmalert", "nodeexporter", "pgexporter", "documentdb", "gitea", "beegfs", "nginx", "privoxy", "influxdb", "influx2tsdb", "clickhouse", "clickhouse-keeper", "kafka", "rabbitmq", "rocketmq", "safeline", "vmcluster", "vlcluster":
+		case "etcd", "pgdog", "haproxy", "minio", "silo", "rustfs", "garage", "seaweedfs", "redis", "valkey", "predixy", "pgadmin", "grafana", "prometheus", "alertmanager", "vmalert", "nodeexporter", "pgexporter", "documentdb", "gitea", "beegfs", "nginx", "privoxy", "influxdb", "influx2tsdb", "clickhouse", "clickhouse-keeper", "kafka", "rabbitmq", "rocketmq", "safeline", "vmcluster", "vlcluster":
 			// (patroni is handled above; it shares --name but requires --scope.)
 			if pgName != "" {
 				return fmt.Errorf("--pg-name selects a remote PgBouncer or PostgREST; use --name for an %s", addonType)
@@ -289,6 +291,15 @@ Examples:
 					return fmt.Errorf("redis instance %q not found (use 'pg addon list' to see available)", name)
 				}
 				containerName = rc.ContainerName
+			case "valkey":
+				if cfg.Addons.Valkey == nil {
+					return fmt.Errorf("no valkey addons configured")
+				}
+				vc, ok := cfg.Addons.Valkey[name]
+				if !ok {
+					return fmt.Errorf("valkey instance %q not found (use 'pg addon list' to see available)", name)
+				}
+				containerName = vc.ContainerName
 			case "predixy":
 				if cfg.Addons.Predixy == nil {
 					return fmt.Errorf("no predixy addons configured")
@@ -555,7 +566,7 @@ Examples:
 			}
 		case "pgbouncer":
 			if etcdName != "" {
-				return fmt.Errorf("--name selects an etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, beegfs, safeline, vmcluster, vlcluster instance, or Patroni member; use -i or --pg-name for PgBouncer")
+				return fmt.Errorf("--name selects an etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, beegfs, safeline, vmcluster, vlcluster instance, or Patroni member; use -i or --pg-name for PgBouncer")
 			}
 			if pgName != "" {
 				// Remote mode
@@ -581,7 +592,7 @@ Examples:
 			}
 		case "postgrest":
 			if etcdName != "" {
-				return fmt.Errorf("--name selects an etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage, seaweedfs, redis, predixy, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, beegfs, safeline, vmcluster, vlcluster instance, or Patroni member; use -i or --pg-name for PostgREST")
+				return fmt.Errorf("--name selects an etcd member, pgdog proxy, haproxy instance, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, beegfs, safeline, vmcluster, vlcluster instance, or Patroni member; use -i or --pg-name for PostgREST")
 			}
 			if pgName != "" {
 				// Remote mode
@@ -618,7 +629,7 @@ Examples:
 			}
 			return tailHostLog(m, tail, follow)
 		default:
-			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rocketmq, safeline, nginx, privoxy, patroni)", addonType)
+			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rocketmq, safeline, nginx, privoxy, patroni)", addonType)
 		}
 
 		return runPodmanLogs(containerName, tail, follow)
@@ -694,7 +705,7 @@ func init() {
 	logsAddonCmd.Flags().BoolP("follow", "f", false, "Stream logs continuously")
 	logsAddonCmd.Flags().IntP("tail", "n", 50, "Number of lines to show (0 = all)")
 	logsAddonCmd.Flags().String("pg-name", "", "Remote addon name (for remote PgBouncer or PostgREST)")
-	logsAddonCmd.Flags().String("name", "", "etcd member name, pgdog proxy name, haproxy instance name, minio/silo/rustfs/garage/redis/predixy/pgadmin/grafana/prometheus/alertmanager/vmalert/gitea/influxdb/influx2tsdb/clickhouse/clickhouse-keeper/kafka/rocketmq/safeline/beegfs/vmcluster/vlcluster instance name, or Patroni member name")
+	logsAddonCmd.Flags().String("name", "", "etcd member name, pgdog proxy name, haproxy instance name, minio/silo/rustfs/garage/redis/valkey/predixy/pgadmin/grafana/prometheus/alertmanager/vmalert/gitea/influxdb/influx2tsdb/clickhouse/clickhouse-keeper/kafka/rocketmq/safeline/beegfs/vmcluster/vlcluster instance name, or Patroni member name")
 	logsAddonCmd.Flags().String("scope", "", "Patroni cluster scope (required only with addon type patroni)")
 	logsAddonCmd.Flags().String("service", "", "beegfs: which container of the filesystem to read — mgmtd, meta or storage (default \"mgmtd\"); zerofs: server or mount (the FUSE client) (default \"server\"); vmcluster/vlcluster: storage, insert or select (default \"storage\"); rocketmq: namesrv, broker or proxy (default \"broker\"); safeline: postgres, mgt, detector, tengine, luigi, fvm or chaos (default \"mgt\")")
 

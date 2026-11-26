@@ -373,6 +373,9 @@ IMAGES := \
 	ghcr.io/pgdogdev/pgdog:v0.1.57 \
 	docker.io/library/redis:7.4.11 \
 	docker.io/library/redis:8.10.2 \
+	docker.io/valkey/valkey:7.2.16 \
+	docker.io/valkey/valkey:8.1.12 \
+	docker.io/valkey/valkey:9.2.0 \
 	docker.io/dpage/pgadmin4:9.18 \
 	docker.io/library/nginx:1.27-alpine \
 	ghcr.io/mars-base/pgcli/pgcli-privoxy:4.2.0 \

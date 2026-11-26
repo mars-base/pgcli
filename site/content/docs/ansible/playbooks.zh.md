@@ -34,9 +34,10 @@ uv run ansible-playbook playbooks/ping.yaml --limit crosshost
 | 4 | 主机 daemon | `all` | – | `daemon` |
 | 5 | 插件 | `all` | 1 | `addon` |
 | 6 | 组建 Redis 集群 | `all` | – | `addon` |
-| 7 | Patroni HA 成员 | `ha_cluster` | 1 | `ha` |
-| 8 | Patroni HA 备份收敛 | `ha_cluster` | – | `ha` |
-| 9 | Patroni HA 代理 | 代理主机 | – | `ha`、`haproxy` |
+| 7 | 组建 Valkey 集群 | `all` | – | `addon` |
+| 8 | Patroni HA 成员 | `ha_cluster` | 1 | `ha` |
+| 9 | Patroni HA 备份收敛 | `ha_cluster` | – | `ha` |
+| 10 | Patroni HA 代理 | 代理主机 | – | `ha`、`haproxy` |
 
 `serial: 1` 是刻意的：首台主机先安装插件或 bootstrap etcd，下一台再加入；
 跨机副本也要求主库先存在。
@@ -46,9 +47,9 @@ uv run ansible-playbook playbooks/ping.yaml --limit crosshost
 后缀的精确分组名”的 limit 会在校验 play 失败；不存在的分组会在 Ansible 匹配
 limit 的阶段报错。不带这类 limit 时列表为空，插件 play 是 no-op。
 
-Redis 组建 play 在所有成员都存在之后运行（插件 play 是 serial）。只有
-`--limit addon_redis_cluster` 且条目为 present 时才生效：等待所有成员应答，
-必要时执行一次集群组建，然后等待全部 16384 个 slot 分配完成。重跑会跳过组建步骤。
+Redis 与 Valkey 组建 play 在所有成员都存在之后运行（插件 play 是 serial）。各自
+只在 `--limit addon_<type>_cluster` 且条目为 present 时才生效：等待所有成员应答，
+必要时组建一次集群，然后等待全部 16384 个 slot 分配完成。重跑会跳过组建步骤。
 
 ```bash
 # 完整部署某个模式

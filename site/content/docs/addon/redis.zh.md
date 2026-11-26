@@ -88,7 +88,9 @@ Redis/Valkey 的选项空间远比这张表大，pgcli 有意不包装多节点*
 群](#原生集群)与[已知限制](#已知限制)。读副本是支持的（[读副本](#读副本)），
 pgcli 留下的只是*编排*那一层：主节点挂了不自动提升副本。引擎本身倒是可以用
 `--image` 变通：`pg addon install redis --image docker.io/valkey/valkey:8` 跑的
-是 [Valkey](https://valkey.io/)（Redis 的分支），大版本反解析为 `8`。
+是 [Valkey](https://valkey.io/)（Redis 的分支），大版本反解析为 `8`——不过
+Valkey 的正式归宿是独立 add-on [valkey](../valkey/)（自有版本表 7/8/9、独立配置
+命名空间、端口池与 `pg valkey-cli`）。
 
 ## 版本选择
 

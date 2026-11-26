@@ -35,7 +35,7 @@ consume:
 ./scripts/export-images.sh --ansible ansible/group_vars/all/main.yml -o /srv/offline-images
 ```
 
-Both sources resolve to 52 images with the same image-to-filename mapping.
+Both sources resolve to 55 images with the same image-to-filename mapping.
 Options:
 
 | Option | Meaning |
@@ -101,7 +101,7 @@ directly.
   script exits non-zero and lists the failures at the end.
 - Images are pulled with `--platform` before saving because `podman save`
   cannot write a multi-arch manifest list to `docker-archive`.
-- The 52 tarballs total several GB; make sure the output filesystem has room.
+- The 55 tarballs total several GB; make sure the output filesystem has room.
 
 ## Start the HTTP server
 

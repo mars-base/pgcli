@@ -20,7 +20,7 @@ hosts). See [Add-on clusters](./addon-cluster/) for the cluster form. The
 `ha_etcd` and S3 groups define `pgcli_addons` directly and keep working the
 same way. `type` takes any add-on accepted by `pg addon install` — see the
 [add-on reference](../../addon/) for the full list (pgbouncer, pgdog, etcd,
-haproxy, minio/silo/rustfs, redis, nginx, prometheus, kafka, and so on).
+haproxy, minio/silo/rustfs, redis/valkey, nginx, prometheus, kafka, and so on).
 
 ## Entry fields
 
@@ -171,6 +171,7 @@ the product flags; the S3 and HA groups are covered in their own pages here.
 | garage | standalone | v1 supports one host only |
 | seaweedfs | standalone + cluster | `weed mini` vs `weed server` |
 | redis | standalone + cluster | standalone vs `--cluster` sharding |
+| valkey | standalone + cluster | the BSD-3 Redis fork; same modes, `valkey-cli`, majors 7/8/9 |
 | predixy | standalone | one proxy fronting one or more Redis backends |
 | postgrest | standalone | |
 | pgadmin | standalone | |

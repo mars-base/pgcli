@@ -54,6 +54,7 @@ across machines, or that depend on Linux-only container internals, stay
 | Addon — **silo** | ✅ host network | ✅ bridge, published ports |
 | Addon — **rustfs** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
 | Addon — **Redis** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
+| Addon — **Valkey** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
 | Addon — **Predixy** | ✅ host network (single- and cross-host clusters) | ❌ Linux only |
 | Addon — **Garage** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |
 | Addon — **SeaweedFS** | ✅ host network | ⚠️ code-complete bridge path, untested — treated as Linux only |

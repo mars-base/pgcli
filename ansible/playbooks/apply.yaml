@@ -138,6 +138,7 @@
       - rustfs
       - seaweedfs
       - redis
+      - valkey
       - clickhouse
       - rabbitmq
       - kafka
@@ -324,6 +325,171 @@
           {{ _redis_cluster_members | join(', ') }} (replicas={{ _redis_cluster_replicas }})
       run_once: true
       when: _redis_cluster_enabled | bool
+
+- name: Assemble the Valkey cluster
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  tags: [addon]
+  pre_tasks:
+    - name: Resolve the rootless deployment environment
+      ansible.builtin.include_role:
+        name: pgcli
+        tasks_from: deploy-env
+      when: pgcli_deploy_rootless | bool
+      tags: [always]
+  become: true
+  become_user: "{{ pgcli_deploy_become_user }}"
+  module_defaults:
+    ansible.builtin.command:
+      chdir: "{{ pgcli_deploy_home }}"
+    ansible.builtin.shell:
+      chdir: "{{ pgcli_deploy_home }}"
+  environment: >-
+    {{ pgcli_deploy_env | combine({'PGCLI_DOWNLOAD_MIRROR': pgcli_download_mirror | default('')}) }}
+  vars:
+    _valkey_cluster_addons: >-
+      {{ addon_valkey_cluster_addons | default([], true)
+         | selectattr('type', 'equalto', 'valkey') | list }}
+    _valkey_cluster_addon: >-
+      {{ _valkey_cluster_addons[0] if _valkey_cluster_addons | length > 0 else {} }}
+    _valkey_cluster_enabled: >-
+      {{ (_addon_group == 'addon_valkey_cluster')
+         and (_valkey_cluster_addons | length > 0)
+         and (_valkey_cluster_addon.state | default('present') == 'present') }}
+    _valkey_cluster_port: >-
+      {{ (_valkey_cluster_addon.params[_valkey_cluster_addon.params.index('--port') + 1])
+         if ('--port' in (_valkey_cluster_addon.params | default([])))
+         else 6380 }}
+    _valkey_cluster_replicas: >-
+      {{ (_valkey_cluster_addon.params[_valkey_cluster_addon.params.index('--cluster-replicas') + 1])
+         if ('--cluster-replicas' in (_valkey_cluster_addon.params | default([])))
+         else 0 }}
+    _valkey_cluster_members: >-
+      {{ groups['addon_valkey_cluster']
+         | map('extract', hostvars, 'private_ip')
+         | map('regex_replace', '$', ':' ~ (_valkey_cluster_port | string))
+         | list }}
+  tasks:
+    # serial: 1 in the Add-ons play installs one member at a time; this play
+    # starts after all of them, so every member should answer here.
+    - name: Wait for every Valkey member to answer
+      ansible.builtin.command:
+        argv:
+          - "{{ pgcli_install_path }}"
+          - "-c"
+          - "{{ pgcli_config_path }}"
+          - "valkey-cli"
+          - "--name"
+          - "{{ _valkey_cluster_addon.name | default('valkey-cluster') }}"
+          - "ping"
+      register: _valkey_cluster_ping
+      until:
+        - _valkey_cluster_ping.rc == 0
+        - _valkey_cluster_ping.stdout is search('PONG')
+      retries: 30
+      delay: 2
+      changed_when: false
+      when: _valkey_cluster_enabled | bool
+
+    - name: Read the Valkey cluster state
+      ansible.builtin.command:
+        argv:
+          - "{{ pgcli_install_path }}"
+          - "-c"
+          - "{{ pgcli_config_path }}"
+          - "valkey-cli"
+          - "--name"
+          - "{{ _valkey_cluster_addon.name | default('valkey-cluster') }}"
+          - "cluster"
+          - "info"
+      register: _valkey_cluster_info
+      until:
+        - _valkey_cluster_info.rc == 0
+        - _valkey_cluster_info.stdout is search('cluster_state:')
+      retries: 10
+      delay: 2
+      changed_when: false
+      run_once: true
+      when: _valkey_cluster_enabled | bool
+
+    - name: Record the Valkey cluster state
+      ansible.builtin.set_fact:
+        _valkey_cluster_state: >-
+          {{ _valkey_cluster_info.stdout_lines
+             | select('match', '^cluster_state:') | first
+             | default('cluster_state:unknown', true)
+             | regex_replace('^cluster_state:', '') }}
+        _valkey_cluster_known_nodes: >-
+          {{ _valkey_cluster_info.stdout_lines
+             | select('match', '^cluster_known_nodes:') | first
+             | default('cluster_known_nodes:0', true)
+             | regex_replace('^cluster_known_nodes:', '') | int }}
+      when:
+        - _valkey_cluster_enabled | bool
+        - not (_valkey_cluster_info is skipped)
+
+    # A partly joined group (more than one known node but no slot coverage)
+    # cannot be repaired by --cluster create; resetting is destructive, so stop
+    # and let the operator decide.
+    - name: Refuse to assemble a partially formed Valkey cluster
+      ansible.builtin.fail:
+        msg: >-
+          {{ _valkey_cluster_members | first }} reports
+          cluster_state={{ _valkey_cluster_state }} with
+          cluster_known_nodes={{ _valkey_cluster_known_nodes }}. Expected either
+          a healthy cluster or {{ _valkey_cluster_members | length }} unassembled
+          members (known_nodes=1). Reset the members manually, then rerun.
+      when:
+        - _valkey_cluster_enabled | bool
+        - _valkey_cluster_state != 'ok'
+        - _valkey_cluster_known_nodes | int != 1
+
+    - name: Assemble the Valkey cluster
+      ansible.builtin.command:
+        argv: >-
+          {{ [pgcli_install_path, '-c', pgcli_config_path,
+              'valkey-cli', '--name', _valkey_cluster_addon.name, '--',
+              '--cluster', 'create']
+             + _valkey_cluster_members
+             + ['--cluster-replicas', _valkey_cluster_replicas | string,
+                '--cluster-yes'] }}
+      register: _valkey_cluster_create
+      run_once: true
+      when:
+        - _valkey_cluster_enabled | bool
+        - _valkey_cluster_state != 'ok'
+
+    - name: Wait for the Valkey cluster to become healthy
+      ansible.builtin.command:
+        argv:
+          - "{{ pgcli_install_path }}"
+          - "-c"
+          - "{{ pgcli_config_path }}"
+          - "valkey-cli"
+          - "--name"
+          - "{{ _valkey_cluster_addon.name | default('valkey-cluster') }}"
+          - "cluster"
+          - "info"
+      register: _valkey_cluster_verify
+      until:
+        - _valkey_cluster_verify.rc == 0
+        - _valkey_cluster_verify.stdout is search('cluster_state:ok')
+        - _valkey_cluster_verify.stdout is search('cluster_slots_assigned:16384')
+        - _valkey_cluster_verify.stdout is search('cluster_known_nodes:' ~ (_valkey_cluster_members | length | string))
+      retries: 30
+      delay: 2
+      changed_when: false
+      run_once: true
+      when: _valkey_cluster_enabled | bool
+
+    - name: Report the Valkey cluster state
+      ansible.builtin.debug:
+        msg: >-
+          Valkey cluster {{ 'assembled' if _valkey_cluster_create is changed else 'already healthy' }}:
+          {{ _valkey_cluster_members | join(', ') }} (replicas={{ _valkey_cluster_replicas }})
+      run_once: true
+      when: _valkey_cluster_enabled | bool
 
 - name: Patroni HA members
   hosts: ha_cluster

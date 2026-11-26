@@ -80,8 +80,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartNodeExporter(c) && !hasAutostartPGExporter(c) && !hasAutostartDocumentDB(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartVmalert(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouseKeeper(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartRabbitMQ(c) && !hasAutostartRocketMQ(c) && !hasAutostartSafeline(c) && !hasAutostartNginx(c) && !hasAutostartPrivoxy(c) && !hasAutostartHTTP(c) && !hasAutostartDaemons(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --vmalert / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --kafka / --rabbitmq / --safeline / --nginx / --nodeexporter / --pgexporter / --documentdb / --daemon / --http / --privoxy)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartValkey(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartNodeExporter(c) && !hasAutostartPGExporter(c) && !hasAutostartDocumentDB(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartVmalert(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouseKeeper(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartRabbitMQ(c) && !hasAutostartRocketMQ(c) && !hasAutostartSafeline(c) && !hasAutostartNginx(c) && !hasAutostartPrivoxy(c) && !hasAutostartHTTP(c) && !hasAutostartDaemons(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --valkey / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --vmalert / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --kafka / --rabbitmq / --safeline / --nginx / --nodeexporter / --pgexporter / --documentdb / --daemon / --http / --privoxy)")
 		return nil
 	}
 
@@ -201,10 +201,16 @@ func startAutostart() error {
 		firstErr = err
 	}
 
-	// predixy proxies (top-level infra addon). Strictly after redis: the proxy
-	// dials its cluster backends at startup, so a same-host cluster is up by the
-	// time the listener comes over (a cross-host backend set is the operator's
-	// own reachability concern — ordering cannot help there).
+	// valkey instances (top-level infra addon, the BSD-3 Redis fork). Same
+	// placement as redis, whose ordering constraints it shares.
+	if err := startAutostartValkey(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// predixy proxies (top-level infra addon). Strictly after redis and valkey:
+	// the proxy dials its cluster backends at startup, so a same-host cluster is
+	// up by the time the listener comes over (a cross-host backend set is the
+	// operator's own reachability concern — ordering cannot help there).
 	if err := startAutostartPredixies(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
@@ -992,6 +998,49 @@ func startAutostartRedis(c *config.Config) error {
 		rc := c.Addons.Redis[name]
 		if err := rm.StartContainer(&rc); err != nil {
 			fmt.Printf("  [X] redis autostart (%s): %v\n", name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// hasAutostartValkey reports whether any valkey instance is autostart-enabled.
+func hasAutostartValkey(c *config.Config) bool {
+	for _, vc := range c.Addons.Valkey {
+		if vc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartValkey starts each autostart-enabled valkey instance.
+// Start-only semantics like redis: the container comes up with the
+// port/password already in the config, recreating it if it was removed, and
+// Valkey replays its RDB/AOF from the data dir.
+func startAutostartValkey(c *config.Config) error {
+	var names []string
+	for name, vc := range c.Addons.Valkey {
+		if vc.Autostart {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	vm, err := podman.NewValkeyManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, name := range names {
+		vc := c.Addons.Valkey[name]
+		if err := vm.StartContainer(&vc); err != nil {
+			fmt.Printf("  [X] valkey autostart (%s): %v\n", name, err)
 			if firstErr == nil {
 				firstErr = err
 			}

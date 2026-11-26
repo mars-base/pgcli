@@ -34,6 +34,9 @@ pgcli 使用的容器镜像及其默认 tag。
 | `ghcr.io/pgdogdev/pgdog` | `v0.1.57` | PostgreSQL 代理 / 连接池 | `config.go:1967` |
 | `docker.io/library/redis` | `7.4.11` | Redis 大版本 7（`--version 7`），纯上游镜像无 wrapper | `redisMajorImages["7"]` |
 | `docker.io/library/redis` | `8.10.2` | Redis 大版本 8（默认，`--version 8`），纯上游镜像无 wrapper | `redisMajorImages["8"]` |
+| `docker.io/valkey/valkey` | `7.2.16` | Valkey（Redis 的 BSD-3 分支）大版本 7（`--version 7`），纯上游镜像无 wrapper，多架构 manifest list | `valkeyMajorImages["7"]` |
+| `docker.io/valkey/valkey` | `8.1.12` | Valkey 大版本 8（`--version 8`），纯上游镜像无 wrapper，多架构 manifest list | `valkeyMajorImages["8"]` |
+| `docker.io/valkey/valkey` | `9.2.0` | Valkey 大版本 9（默认，`--version 9`），纯上游镜像无 wrapper，多架构 manifest list | `valkeyMajorImages["9"]` |
 | `ghcr.io/mars-base/pgcli/predixy` | `7.0.1-alpine` | Predixy（Redis 集群代理），建立在上游 free edition 二进制之上的 wrapper，单架构 amd64 | `DefaultPredixyImageTag` |
 | `docker.io/dpage/pgadmin4` | `9.18` | pgAdmin 4（PostgreSQL 官方 Web 管理界面），纯上游镜像无 wrapper，双架构 manifest list | `DefaultPgAdminImageTag` |
 | `docker.io/library/nginx` | `1.27-alpine` | nginx HTTP 反向代理，纯上游镜像无 wrapper，双架构 manifest list | `DefaultNginxImageTag` |
@@ -121,6 +124,14 @@ podman pull --platform linux/amd64 docker.io/library/redis:7.4.11
 podman save -o "$TARGET/redis_7.4.11.tar" docker.io/library/redis:7.4.11
 podman pull --platform linux/amd64 docker.io/library/redis:8.10.2
 podman save -o "$TARGET/redis_8.10.2.tar" docker.io/library/redis:8.10.2
+
+# Valkey 上游镜像同为多架构 manifest list，先按目标平台 pull 再 save
+podman pull --platform linux/amd64 docker.io/valkey/valkey:7.2.16
+podman save -o "$TARGET/valkey_7.2.16.tar" docker.io/valkey/valkey:7.2.16
+podman pull --platform linux/amd64 docker.io/valkey/valkey:8.1.12
+podman save -o "$TARGET/valkey_8.1.12.tar" docker.io/valkey/valkey:8.1.12
+podman pull --platform linux/amd64 docker.io/valkey/valkey:9.2.0
+podman save -o "$TARGET/valkey_9.2.0.tar" docker.io/valkey/valkey:9.2.0
 
 # predixy 镜像本身就是单架构 amd64（上游只发 amd64 二进制），直接 save
 podman pull ghcr.io/mars-base/pgcli/predixy:7.0.1-alpine
@@ -304,6 +315,11 @@ done
 - **redis**：纯上游 `docker.io/library/redis`，无 wrapper；两个大版本各自
   pin 一个补丁 tag（`redisMajorImages` 映射表，默认大版本 8），tag 跟随各大
   版本的最新补丁、与 `internal/config/config.go` 的映射表一起升级
+- **valkey**：Redis 7.2.4 的 BSD-3 分支（Linux Foundation 托管），纯上游
+  `docker.io/valkey/valkey`，无 wrapper；三个大版本各自 pin 一个补丁 tag
+  （`valkeyMajorImages` 映射表，默认大版本 9），tag 跟随各大版本的最新补丁、
+  与 `internal/config/config.go` 的映射表一起升级。Valkey 版本号与 Redis
+  的版本号没有对应关系，选版本按 Valkey 自己的发布线
 - **predixy**：pgcli 自建 wrapper（`ghcr.io/mars-base/pgcli/predixy`），把上游
   joyieldInc/predixy 的 **free edition** amd64 glibc 二进制放到 alpine:3.22 +
   gcompat + libgcc 上跑；上游只发 amd64 二进制，所以这是**单架构镜像**（不是
@@ -504,7 +520,8 @@ done
 
 ---
 
-**最后更新**：2026-11-26（补录 clickhouse-keeper 镜像并同步 Makefile IMAGES 与 Ansible
+**最后更新**：2026-11-26（新增 valkey 三个大版本镜像并同步 Makefile IMAGES 与 Ansible
+`pgcli_images`；同日补录 clickhouse-keeper 镜像并同步 Makefile IMAGES 与 Ansible
 `pgcli_images`——此前代码在用但三个清单均未收录；2026-11-24 SafeLine 全栈 7 个镜像进入
 主镜像表；2026-11-13 pgcli-privoxy 接入 pg addon 并进入主镜像表、同步 Makefile IMAGES；2026-11-03 新增 vmalert 镜像并同步 Makefile IMAGES；2026-11-02 补入 RabbitMQ、RocketMQ、node_exporter、pg_exporter 镜像并同步 Makefile IMAGES；同日新增 pgcli-mongosh；同步补入 pgcli-documentdb-gateway；2026-10-28 新增 Kafka 4.4.0 镜像；2026-10-27 新增 clickhouse 与 influx2tsdb 镜像；2026-10-23 新增 vlagent 镜像；同日新增 victorialogs 镜像；此前新增 vmcluster 三镜像于 2026-10-22；
 此前新增 victoriametrics 镜像；

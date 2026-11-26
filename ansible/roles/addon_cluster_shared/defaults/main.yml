@@ -25,6 +25,7 @@ addon_cluster_shared_password_files:
   - rustfs_root_password
   - seaweedfs_root_password
   - redis_password
+  - valkey_password
   - clickhouse_admin_password
 addon_cluster_shared_types:
   - minio
@@ -32,5 +33,6 @@ addon_cluster_shared_types:
   - rustfs
   - seaweedfs
   - redis
+  - valkey
   - clickhouse
   - rabbitmq

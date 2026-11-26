@@ -18,7 +18,7 @@ uv run ansible-playbook playbooks/apply.yaml \
 [插件集群](./addon-cluster/)。`ha_etcd` 与 S3 分组直接定义 `pgcli_addons`，
 用法不变。`type` 接受 `pg addon install` 支持的所有插件——完整列表见
 [插件参考](../../addon/)（pgbouncer、pgdog、etcd、haproxy、
-minio/silo/rustfs、redis、nginx、prometheus、kafka 等）。
+minio/silo/rustfs、redis/valkey、nginx、prometheus、kafka 等）。
 
 ## 条目字段
 
@@ -160,6 +160,7 @@ S3 与 HA 分组见本站的对应页面。
 | garage | 单机 | v1 只支持单机 |
 | seaweedfs | 单机 + 集群 | `weed mini` vs `weed server` |
 | redis | 单机 + 集群 | 单机 vs `--cluster` 分片 |
+| valkey | 单机 + 集群 | Redis 的 BSD-3 分支；模式相同，客户端 `valkey-cli`，大版本 7/8/9 |
 | predixy | 单机 | 一个代理可接一个或多个 Redis 后端 |
 | postgrest | 单机 | |
 | pgadmin | 单机 | |

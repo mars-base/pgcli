@@ -1,0 +1,34 @@
+---
+# valkey cluster add-on group (addon_valkey_cluster).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_valkey_cluster --tags addon
+
+# 4 cluster-enabled members. apply.yaml assembles the slots after every member
+# is up, then waits for cluster_state:ok and full 16384-slot coverage.
+_addon_cluster_valkey_ip: "{{ hostvars[inventory_hostname]['private_ip'] }}"
+_addon_cluster_valkey_password: ""
+
+# apply.yaml assembles the slots and reads --cluster-replicas from each
+# entry's params (default 0 = masters only). Other useful flags:
+#   - "--cluster-replicas=0"
+#   - "--maxmemory=256mb"
+#   - "--maxmemory-policy=allkeys-lru"
+#   - "--aof"
+
+addon_valkey_cluster_addons:
+  - type: valkey
+    state: present
+    name: valkey-cluster
+    params:
+      - "--cluster"
+      - "pgcli-valkey-cluster"
+      - "--advertise-host"
+      - "{{ _addon_cluster_valkey_ip }}"
+      - "--port"
+      - "6380"
+      - "--password"
+      - "{{ _addon_cluster_valkey_password }}"
+      - "--listen"
+      - "0.0.0.0"
+      - "--data-dir"
+      - "/data/pg/addon/valkey/cluster"

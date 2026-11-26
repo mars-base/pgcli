@@ -105,7 +105,7 @@ pgcli_addons: >-
 
 | 材料 | 位置 |
 |------|------|
-| 随机口令（`minio_root_password`、`silo_root_password`、`rustfs_root_password`、`seaweedfs_root_password`、`redis_password`、`clickhouse_admin_password`） | 控制机 `var/addon_cluster/shared/` |
+| 随机口令（`minio_root_password`、`silo_root_password`、`rustfs_root_password`、`seaweedfs_root_password`、`redis_password`、`valkey_password`、`clickhouse_admin_password`） | 控制机 `var/addon_cluster/shared/` |
 | 共享 CA（`ca.crt`、`ca.key`）、服务器密钥/CSR/证书、链证书与合并 PEM | 同一目录；CA 私钥不会离开控制机 |
 | RabbitMQ Erlang cookie 与管理密码 | 由 `pg addon rabbitmq secret generate` 生成并写入 etcd |
 
@@ -141,6 +141,7 @@ etcd 的 `/pgcli/rabbitmq/clusters/<name>/secrets/`，每个成员用
 | `rustfs` | 4 | 9300 API，9301 console | MNMD；每台一块盘。裸 SigV4 请求必须带 `x-amz-content-sha256` 头 |
 | `seaweedfs` | 前三台 | 8400 master，8401 volume，8402 filer，8403 S3 | master 必须为奇数；filer 元数据库需要先在 PostgreSQL 中创建 |
 | `redis` | 4 | 6379（集群总线 16379） | 安装四个 cluster-enabled 成员；随后由 `apply.yaml` 组建 slot 并等待集群健康 |
+| `valkey` | 4 | 6380（集群总线 16380） | Redis 的 BSD-3 分支，形态相同：四个 cluster-enabled 成员；`apply.yaml` 负责组建并校验 |
 | `clickhouse-keeper` | 前三台 | 9181 client，9234 Raft | 3 成员 Raft 法定人数；`--server-id` = 主机下标 + 1 |
 | `clickhouse` | 4 | 8123 HTTP，9000 native，9009 interserver | 基于上面的 Keeper 组成 2 shard × 2 replica；先部署 Keeper |
 | `kafka` | 前三台 | 9092 broker，19093 controller | KRaft 法定人数；512 MiB 堆适配参考 VM |
@@ -153,7 +154,7 @@ etcd 的 `/pgcli/rabbitmq/clusters/<name>/secrets/`，每个成员用
 `addon_clickhouse_keeper_cluster`、`addon_kafka_cluster`、
 `addon_rabbitmq_cluster`、`addon_rocketmq_cluster`）在 `hosts.ini` 中只列前三台
 主机，因此组文件里不再需要 `[:3]` 切片或 `state` 表达式。四成员布局列出全部四台。
-MinIO/silo MNSD 至少需要四个 endpoint；Redis、vmcluster、vlcluster 也使用全部四台。
+MinIO/silo MNSD 至少需要四个 endpoint；Redis、Valkey、vmcluster、vlcluster 也使用全部四台。
 
 ## 创建、验证、销毁
 
@@ -177,6 +178,7 @@ play 使用 `serial: 1` 并按 inventory 顺序执行。对于法定人数型插
 | `etcd` | `pg etcdctl endpoint health`、`pg etcdctl member list` |
 | `minio` / `silo` / `rustfs` / `seaweedfs` | 用 `pg mc` 访问 API 端口，再从另一成员读回对象（见下） |
 | `redis` | `pg redis-cli -- --cluster check 192.0.2.10:6379`（play 在组建后会自动做同等校验） |
+| `valkey` | `pg valkey-cli -- --cluster check 192.0.2.10:6380`（play 在组建后会自动做同等校验） |
 | `clickhouse-keeper` | `pg addon clickhouse-keeper status --name keeper-cluster` |
 | `clickhouse` | `pg addon clickhouse cluster status --name clickhouse-cluster` |
 | `kafka` | `pg addon kafka cluster status --name kafka-cluster`；`pg addon kafka topic list --name kafka-cluster` |
@@ -198,21 +200,27 @@ pg mc cat n2/demo/hostname
 
 silo 用 9200，rustfs 用 9300，seaweedfs 用 8403，并换成对应的口令文件。
 
-Redis 不需要手工步骤：`apply.yaml` 会等所有成员应答，若集群尚未组建则执行一次
-`--cluster create ... --cluster-yes`（`--cluster-replicas` 取自插件参数，默认
-`0`），然后等待 `cluster_state:ok` 且全部 16384 个 slot 覆盖、已知节点数符合预期。
-集群健康后重跑会跳过组建步骤。部分成员已加入但 slot 未覆盖的集群不会被自动重置：
-play 会停止并提示手工重置成员后重跑。只用 `pg addon` 安装时，等价命令为：
+Redis 与 Valkey 不需要手工步骤：`apply.yaml` 会等所有成员应答，若集群尚未组建则
+执行一次 `--cluster create ... --cluster-yes`（`--cluster-replicas` 取自插件
+参数，默认 `0`），然后等待 `cluster_state:ok` 且全部 16384 个 slot 覆盖、已知
+节点数符合预期。集群健康后重跑会跳过组建步骤。部分成员已加入但 slot 未覆盖的
+集群不会被自动重置：play 会停止并提示手工重置成员后重跑。只用 `pg addon` 安装
+时，等价命令为：
 
 ```bash
 pg redis-cli -- --cluster create \
   192.0.2.10:6379 192.0.2.11:6379 192.0.2.12:6379 192.0.2.13:6379 \
   --cluster-replicas 0 --cluster-yes
 pg redis-cli -- --cluster check 192.0.2.10:6379
+
+pg valkey-cli -- --cluster create \
+  192.0.2.10:6380 192.0.2.11:6380 192.0.2.12:6380 192.0.2.13:6380 \
+  --cluster-replicas 0 --cluster-yes
+pg valkey-cli -- --cluster check 192.0.2.10:6380
 ```
 
-非交互运行必须带 `--cluster-yes`：否则 `redis-cli` 会等待确认输入，然后不应用
-配置直接退出。
+非交互运行必须带 `--cluster-yes`：否则客户端会等待确认输入，然后不应用配置
+直接退出。
 
 VictoriaMetrics 集群：
 

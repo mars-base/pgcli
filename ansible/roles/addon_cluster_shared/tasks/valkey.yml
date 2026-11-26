@@ -1,0 +1,6 @@
+---
+- name: Load the shared Valkey password
+  tags: [addon]
+  ansible.builtin.set_fact:
+    _addon_cluster_valkey_password: "{{ lookup('file', addon_cluster_shared_dir ~ '/valkey_password') }}"
+  no_log: true

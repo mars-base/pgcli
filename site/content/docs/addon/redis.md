@@ -109,9 +109,10 @@ replicas are supported
 ([Read replicas](#read-replicas)); it is the *orchestration* (promoting a
 replica automatically when the master dies) that pgcli leaves to you.
 And `--image` is the escape hatch for the
-engine itself: `pg addon install redis --image docker.io/valkey/valkey:8`
-runs [Valkey](https://valkey.io/) (the Redis fork), its major reverse-parsing
-as `8`.
+engine itself: `pg addon install redis --image docker.io/valkey/valkey:8` runs
+[Valkey](https://valkey.io/), its major reverse-parsing as `8` — though the
+dedicated [valkey](../valkey/) add-on is the supported home for Valkey (its own
+version table 7/8/9, config namespace, port pool and `pg valkey-cli`).
 
 ## Version selection
 

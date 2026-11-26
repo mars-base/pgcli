@@ -36,9 +36,10 @@ whatever the selected hosts declare in `group_vars/`.
 | 4 | Host daemons | `all` | – | `daemon` |
 | 5 | Add-ons | `all` | 1 | `addon` |
 | 6 | Assemble the Redis cluster | `all` | – | `addon` |
-| 7 | Patroni HA members | `ha_cluster` | 1 | `ha` |
-| 8 | Patroni HA backup convergence | `ha_cluster` | – | `ha` |
-| 9 | Patroni HA proxy | proxy host | – | `ha`, `haproxy` |
+| 7 | Assemble the Valkey cluster | `all` | – | `addon` |
+| 8 | Patroni HA members | `ha_cluster` | 1 | `ha` |
+| 9 | Patroni HA backup convergence | `ha_cluster` | – | `ha` |
+| 10 | Patroni HA proxy | proxy host | – | `ha`, `haproxy` |
 
 `serial: 1` is deliberate: the first host installs the add-ons or bootstraps
 etcd, then the next host joins; cross-host replicas need their primary to
@@ -51,10 +52,11 @@ existing group with a mode suffix fails the validation play, and a group name
 that does not exist fails while Ansible matches the limit. Without such a
 limit the list is empty and the add-on play is a no-op.
 
-The Redis assembly play runs after all members exist (the add-on play is
-serial). It only acts when `--limit addon_redis_cluster` selects present
-entries: it waits for every member, creates the cluster once if needed, and
-waits until all 16384 slots are assigned. Reruns skip the create step.
+The Redis and Valkey assembly plays run after all members exist (the add-on
+play is serial). Each only acts when `--limit addon_<type>_cluster` selects
+present entries: it waits for every member, creates the cluster once if
+needed, and waits until all 16384 slots are assigned. Reruns skip the create
+step.
 
 ```bash
 # Full stack for one deployment mode

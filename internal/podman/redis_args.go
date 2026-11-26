@@ -8,40 +8,56 @@ import (
 )
 
 // redisContainerDataDir is the container-side path the host data dir is bind-
-// mounted to, and the value passed to redis-server --dir. RDB snapshots
-// (dump.rdb) land there, so `pg addon remove` without --clean-data survives a
-// reinstall of the same addon name.
+// mounted to, and the value passed to the server's --dir. RDB/AOF persistence
+// files land there, so `pg addon remove` without --clean-data survives a
+// reinstall of the same addon name. Shared by Redis and Valkey (identical
+// layout).
 const redisContainerDataDir = "/data"
 
 // redisServerArgs builds the redis-server argv (everything after the image
-// tag). bindHost is the already-resolved --bind value: createContainer passes
+// tag); valkeyServerArgs below is the same argv with valkey-server as argv[0].
+// bindHost is the already-resolved --bind value: createContainer passes
 // proxyBindHost(m.bridge, rc.Listen), so the bridge widening (loopback →
 // 0.0.0.0 for macOS -p mapping) happens at the caller and this stays a pure
 // function testable without podman.
+func redisServerArgs(rc *config.RedisConfig, bindHost string) []string {
+	return kvServerArgs("redis-server", rc, bindHost)
+}
+
+// valkeyServerArgs builds the valkey-server argv. Valkey is the Redis 7.2.4
+// fork: every flag below is accepted verbatim, so the builder is shared and
+// only argv[0] differs.
+func valkeyServerArgs(rc *config.RedisConfig, bindHost string) []string {
+	return kvServerArgs("valkey-server", rc, bindHost)
+}
+
+// kvServerArgs builds the server argv common to Redis and Valkey (binary is
+// "redis-server" or "valkey-server").
 //
 // --requirepass is always emitted: rc.Password is generated at first install
-// (config.ApplyDefaults never fills it), and Redis has no auth otherwise — a
-// Listen default of 0.0.0.0 would be a bare open port without it. --dir pins
-// the persistence files' location. Every knob beyond port/requirepass/bind/dir
-// is opt-in, and empty means "leave Redis's own default alone": --maxmemory
-// pairs with allkeys-lru unless MaxMemoryPolicy says otherwise, --appendonly
-// comes with an optional --appendfsync strength, and --save overrides (or, as
-// "no", disables) the RDB snapshot schedule. A non-empty ReplicaHost turns the
-// instance into a read replica: --replicaof <host> <port> plus --masterauth
-// (which equals requirepass, since resolveRedisReplica pins a replica's
-// password to the master's). A non-empty Cluster instead makes it a native-
-// cluster member: --cluster-enabled yes with its nodes.conf under --dir (so it
-// self-heals across restarts), --masterauth=rc.Password (so any member Redis
-// later promotes to follower can authenticate to its master — the group shares
-// one password), and, when AdvertiseHost is set, --cluster-announce-* so
-// cross-host peers can reach it; Redis opens the +10000 bus port itself.
-// Cluster and ReplicaHost are mutually exclusive, enforced by the CLI layer.
+// (config.ApplyDefaults never fills it), and neither server has auth otherwise
+// — a Listen default of 0.0.0.0 would be a bare open port without it. --dir
+// pins the persistence files' location. Every knob beyond
+// port/requirepass/bind/dir is opt-in, and empty means "leave the server's own
+// default alone": --maxmemory pairs with allkeys-lru unless MaxMemoryPolicy
+// says otherwise, --appendonly comes with an optional --appendfsync strength,
+// and --save overrides (or, as "no", disables) the RDB snapshot schedule. A
+// non-empty ReplicaHost turns the instance into a read replica: --replicaof
+// <host> <port> plus --masterauth (which equals requirepass, since
+// resolveRedisReplica pins a replica's password to the master's). A non-empty
+// Cluster instead makes it a native-cluster member: --cluster-enabled yes with
+// its nodes.conf under --dir (so it self-heals across restarts),
+// --masterauth=rc.Password (so any member the server later promotes to
+// follower can authenticate to its master — the group shares one password),
+// and, when AdvertiseHost is set, --cluster-announce-* so cross-host peers can
+// reach it; the server opens the +10000 bus port itself. Cluster and
+// ReplicaHost are mutually exclusive, enforced by the CLI layer.
 //
 // The flag values are validated by the CLI layer, not here — see
 // validateRedisKnobs in internal/cli/addon.go.
-func redisServerArgs(rc *config.RedisConfig, bindHost string) []string {
+func kvServerArgs(binary string, rc *config.RedisConfig, bindHost string) []string {
 	args := []string{
-		"redis-server",
+		binary,
 		"--port", fmt.Sprintf("%d", rc.Port),
 		"--requirepass", rc.Password,
 		"--bind", bindHost,
