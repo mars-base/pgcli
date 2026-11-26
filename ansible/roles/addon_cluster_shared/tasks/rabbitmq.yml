@@ -36,6 +36,7 @@
       - --admin-password-file
       - "{{ addon_cluster_shared_dir }}/rabbitmq_admin_password"
       - --force
+    chdir: "{{ addon_cluster_shared_dir }}"
   delegate_to: localhost
   become: false
   when:

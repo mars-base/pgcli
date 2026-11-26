@@ -3,6 +3,10 @@
 # var/addon_cluster/shared (gitignored). Every member gets the same values;
 # the CA private key never leaves the controller. Each add-on's own shared
 # variables are loaded by add-on-specific task files at the end of this file.
+#
+# The controller-side shell tasks set chdir explicitly: the calling play sets
+# module_defaults chdir to the deployment account's home, which the controller
+# user running these delegated tasks cannot enter.
 - name: Ensure the controller-side shared directory exists
   tags: [addon]
   ansible.builtin.file:
@@ -17,6 +21,7 @@
   ansible.builtin.shell:
     cmd: "openssl rand -hex 16 > {{ addon_cluster_shared_dir }}/{{ item }}"
     creates: "{{ addon_cluster_shared_dir }}/{{ item }}"
+    chdir: "{{ addon_cluster_shared_dir }}"
   loop: "{{ addon_cluster_shared_password_files }}"
   delegate_to: localhost
   become: false
@@ -40,6 +45,7 @@
       -out {{ addon_cluster_shared_dir }}/ca.crt
       -subj "/CN=pgcli-addon-cluster-ca"
     creates: "{{ addon_cluster_shared_dir }}/ca.crt"
+    chdir: "{{ addon_cluster_shared_dir }}"
   delegate_to: localhost
   become: false
 
@@ -61,6 +67,7 @@
       -out {{ addon_cluster_shared_dir }}/server.csr
       -subj "/CN=pgcli-addon-cluster"
     creates: "{{ addon_cluster_shared_dir }}/server.csr"
+    chdir: "{{ addon_cluster_shared_dir }}"
   delegate_to: localhost
   become: false
 
@@ -77,6 +84,7 @@
       -days {{ addon_cluster_shared_cert_days }} -sha256
       -extfile {{ addon_cluster_shared_dir }}/server-san.cnf
     creates: "{{ addon_cluster_shared_dir }}/server.crt"
+    chdir: "{{ addon_cluster_shared_dir }}"
   delegate_to: localhost
   become: false
 
@@ -88,6 +96,7 @@
       {{ addon_cluster_shared_dir }}/ca.crt
       > {{ addon_cluster_shared_dir }}/server-chain.crt
     creates: "{{ addon_cluster_shared_dir }}/server-chain.crt"
+    chdir: "{{ addon_cluster_shared_dir }}"
   delegate_to: localhost
   become: false
 
@@ -99,6 +108,7 @@
       {{ addon_cluster_shared_dir }}/server.key
       > {{ addon_cluster_shared_dir }}/server.pem
     creates: "{{ addon_cluster_shared_dir }}/server.pem"
+    chdir: "{{ addon_cluster_shared_dir }}"
   delegate_to: localhost
   become: false
 
