@@ -1,7 +1,10 @@
 ---
 # valkey standalone add-on group (addon_valkey_single).
 #
-#   uv run ansible-playbook playbooks/apply.yaml --limit addon_valkey_single --tags addon
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_valkey_single --tags pgcli,addon
+#
+# --tags pgcli installs/upgrades pgcli on fresh hosts before the add-on play;
+# on hosts that already run pgcli, --tags addon alone reconciles the add-on.
 
 # Single-node test group for the valkey add-on (the BSD-3 fork of Redis).
 

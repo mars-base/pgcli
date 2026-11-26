@@ -1,7 +1,10 @@
 ---
 # valkey cluster add-on group (addon_valkey_cluster).
 #
-#   uv run ansible-playbook playbooks/apply.yaml --limit addon_valkey_cluster --tags addon
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_valkey_cluster --tags pgcli,addon
+#
+# --tags pgcli installs/upgrades pgcli on fresh hosts before the add-on play;
+# on hosts that already run pgcli, --tags addon alone reconciles the add-on.
 
 # 4 cluster-enabled members. apply.yaml assembles the slots after every member
 # is up, then waits for cluster_state:ok and full 16384-slot coverage.
