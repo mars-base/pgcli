@@ -178,17 +178,26 @@ pgcli_images_force_load: false
 # time; add any custom image tags here as well.
 #
 # Entries without auto_load are core images, loaded during installation.
-# Entries with `auto_load: true` are loaded lazily by the pg_addon role when
-# an add-on of one of their `addons` types is first created; `addons` uses the
-# add-on type name (`-` becomes `_`). This keeps the first deployment short on
-# a host with an empty image store.
+# Entries with `auto_load: true` are loaded lazily when first needed. For
+# add-on images `addons` names the add-on types that need them (`-` becomes
+# `_`) and pg_addon loads them on first create. The core images reuse the
+# same fields with deployment features instead of add-on types: pgcli-pg is
+# tagged `instance`, pgcli-patroni `ha`, pgcli-backup `backup`; pg_instance
+# and the HA play load them right before their first pg create / ha create /
+# backup setup. Remove auto_load from an entry to load it at install time.
 pgcli_images:
   - image: ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3
     archive: pgcli-pg_18-2.59.3.tar
+    auto_load: true
+    addons: [instance]
   - image: ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5
     archive: pgcli-patroni_18-4.1.5.tar
+    auto_load: true
+    addons: [ha]
   - image: ghcr.io/mars-base/pgcli/pgcli-backup:2.59.3
     archive: pgcli-backup_2.59.3.tar
+    auto_load: true
+    addons: [backup]
   - image: ghcr.io/mars-base/pgcli/pgcli-minio:20250422221226
     archive: pgcli-minio_20250422221226.tar
     auto_load: true
@@ -400,7 +409,8 @@ pgcli_images:
 
 # Install-time subset: everything the pgcli role must have before instances
 # and add-ons are reconciled. Entries with auto_load: true are excluded here
-# and loaded on demand by the pg_addon role instead.
+# and loaded on demand instead: add-on images by the pg_addon role, core
+# images by the instance/HA/backup consumers.
 _pgcli_images_install: >-
   {{ (pgcli_images | selectattr('auto_load', 'defined') | rejectattr('auto_load') | list)
      + (pgcli_images | rejectattr('auto_load', 'defined') | list) }}

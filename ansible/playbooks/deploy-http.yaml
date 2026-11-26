@@ -17,8 +17,8 @@
 # consumers never use a URL the server did not bind.
 #
 # A file-server host only needs the pg binary and runs no containers, so the
-# install play skips the offline image check/load and the installer's image
-# pull. Override with -e pgcli_load_images=true (and
+# install play skips the offline image check/load, every on-demand image load,
+# and the installer's image pull. Override with -e pgcli_load_images=true (and
 # -e pgcli_install_skip_pull=false) when the host should also carry images.
 #
 # Usage:

@@ -171,12 +171,14 @@ registry。此时有两项要求：
 
 1. `pgcli_images` 中每条 `archive` 必须与服务器上的文件名完全一致；用
    `--ansible` 模式导出即可自动保证。
-2. 核心镜像（不带 `auto_load` 的条目）必须全部存在；安装 play 会先向服务器和
-   每个核心 archive 发送 `HEAD` 请求，任一不可达就中止并报出文件名。
+2. 清单引用的每个 archive 都必须存在；安装 play 会先向服务器和每个 archive
+   发送 `HEAD` 请求（包括之后才按需加载的条目），任一不可达就中止并报出文件名。
 
-带 `auto_load: true` 的插件镜像按需下载：首次创建对应类型的 add-on 时才拉取并
-加载，因此可以只导出实际用到的插件镜像。清单裁剪与懒加载规则见
-[离线与隔离环境安装](./offline/)。
+带 `auto_load: true` 的镜像由消费者按需加载：首次创建对应类型的 add-on 时，
+或对核心条目 `pgcli-pg` / `pgcli-patroni` / `pgcli-backup` 而言，在首次
+`pg create`、`ha create` / `pg backup setup` 之前。去掉条目上的 `auto_load`
+则改为安装阶段加载。因此可以只导出实际用到的镜像，但清单中保留的每条都必须
+真实存在于服务器上。清单裁剪与懒加载规则见 [离线与隔离环境安装](./offline/)。
 
 如果同时设置了 `pgcli_proxy_url`，服务器主机名会自动加入 `NO_PROXY`，局域网
 下载不会绕到代理上。

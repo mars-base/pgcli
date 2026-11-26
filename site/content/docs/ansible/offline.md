@@ -114,8 +114,16 @@ those archive names:
 pgcli_images:
   - image: ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3
     archive: pgcli-pg_18-2.59.3.tar
+    auto_load: true
+    addons: [instance]
   - image: ghcr.io/mars-base/pgcli/pgcli-backup:2.59.3
     archive: pgcli-backup_2.59.3.tar
+    auto_load: true
+    addons: [backup]
+  - image: ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5
+    archive: pgcli-patroni_18-4.1.5.tar
+    auto_load: true
+    addons: [ha]
   - image: docker.io/edoburu/pgbouncer:v1.25.2-p0
     archive: pgbouncer_v1.25.2-p0.tar
     auto_load: true
@@ -124,22 +132,38 @@ pgcli_images:
 
 How the list is consumed:
 
-- **Entries without `auto_load`** are core images. The install play loads them
-  into podman's local store after checking that each archive is present.
-- **`auto_load: true` with `addons: [type]`** marks add-on images. They are
-  loaded on demand by the `pg_addon` role when an add-on of a matching type is
-  first created (`-` in the type name becomes `_`). `pg_ha_haproxy` uses the
-  same mechanism for HAProxy.
+- **Entries without `auto_load`** load at install time, after the pre-flight
+  check confirms their archives are present.
+- **`auto_load: true` with `addons: [...]`** is skipped at install time and
+  loaded from the server right before first use. `addons` names the consumers:
+  an add-on type (`pgbouncer`; `-` in the type name becomes `_`) is loaded by
+  the `pg_addon` role when an add-on of that type is first created, and
+  `pg_ha_haproxy` does the same for `haproxy`. The default core images reuse
+  the field with deployment features instead: `pgcli-pg` carries `instance`
+  (the `pg_instance` role loads it before the first `pg create`),
+  `pgcli-patroni` carries `ha` (the HA play loads it before `ha create`), and
+  `pgcli-backup` carries `backup` (both roles load it before
+  `pg backup setup`, when an S3 repository is configured).
+- A host that never runs a feature never transfers its image. Remove
+  `auto_load` from an entry to load it at install time again.
 - Setting `pgcli_images_http_url` makes `scripts/install.sh` run with
   `--skip-pull`; no image is pulled from a registry.
-- Before changing anything, the install play sends `HEAD` requests to the
-  server root and to every core archive, and aborts with the offending names
-  if any is unreachable. Lazy add-on archives are fetched when first needed.
+- Before changing anything, the install play validates the manifest
+  (`auto_load` entries must list at least one consumer in `addons`) and sends
+  `HEAD` requests to the server root and to every archive in the manifest,
+  including the ones only loaded later on demand, aborting with the offending
+  names. The tarballs themselves are transferred when first needed.
+- The preload only covers what the Ansible plays use. Manual commands run
+  outside them (ad-hoc `pg backup ...`, `pgcli_daemons` entries) do not fetch
+  the image; load it beforehand on such hosts, or remove `auto_load` from the
+  entry.
 
-Trim the list to the images a scenario actually uses: the first run on a host
-with an empty store transfers only the listed core archives. Keep `pgcli-pg`
-and `pgcli-backup`; add one entry per add-on type in use (remove `auto_load`
-to preload it during install instead of on first use).
+Trim the list to the images a scenario uses: entries you drop are never
+checked or transferred. Entries you keep must exist on the image server —
+the pre-flight `HEAD` check verifies all of them, whether they load at
+install time or on demand. The lazy core entries (`pgcli-pg`,
+`pgcli-patroni`, `pgcli-backup`) cost nothing until their feature runs, so
+keeping them is safe.
 
 Transferred tarballs are cached on the target host. The cache is kept across
 runs — only missing images are transferred again — and is safe to delete:

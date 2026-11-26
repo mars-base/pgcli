@@ -26,6 +26,34 @@
          + (_pg_ha_clusters | selectattr('state', 'defined')
             | rejectattr('state', 'equalto', 'absent') | list) }}
 
+# The core images are auto_load entries tagged with deployment features
+# instead of add-on types: pgcli-patroni is `ha`, pgcli-backup `backup`.
+# Fetch the ones this play needs from the offline server before the first
+# `ha create` / `pg backup setup`.
+- name: Select the images needed by the HA members
+  ansible.builtin.set_fact:
+    _pg_ha_images: >-
+      {{ ((pgcli_images | selectattr('auto_load', 'defined') | selectattr('auto_load')
+           | selectattr('addons', 'defined')
+           | selectattr('addons', 'contains', 'ha') | list)
+          if (_pg_ha_active_clusters | length > 0) else [])
+         + ((pgcli_images | selectattr('auto_load', 'defined') | selectattr('auto_load')
+             | selectattr('addons', 'defined')
+             | selectattr('addons', 'contains', 'backup') | list)
+            if (_pg_ha_active_clusters | length > 0 and _pg_ha_s3_enabled | bool)
+            else []) }}
+
+- name: Load the HA images from the offline server
+  ansible.builtin.include_role:
+    name: pgcli
+    tasks_from: images
+  vars:
+    _pgcli_images_to_load: "{{ _pg_ha_images }}"
+  when:
+    - pgcli_images_http_url | length > 0
+    - pgcli_load_images | default(true) | bool
+    - _pg_ha_images | length > 0
+
 - name: Validate HA inputs
   ansible.builtin.assert:
     that:

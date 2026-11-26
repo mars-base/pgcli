@@ -24,14 +24,17 @@
       server or clear pgcli_images_http_url to use public registries.
   when: _pgcli_image_server_check.status | default(0) != 200
 
-- name: Check the enabled image archives
+# Every archive the manifest references is checked up front, including
+# auto_load entries that are only loaded on demand later; a tarball missing
+# from the server fails the play before any host change.
+- name: Check the referenced image archives
   ansible.builtin.uri:
     url: "{{ _pgcli_images_base_url }}/{{ item.archive }}"
     method: HEAD
     status_code: 200
     timeout: 10
     use_proxy: false
-  loop: "{{ _pgcli_images_install | default(pgcli_images) }}"
+  loop: "{{ pgcli_images }}"
   loop_control:
     label: "{{ item.archive }}"
   register: _pgcli_image_url_checks

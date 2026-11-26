@@ -167,6 +167,23 @@
         state: present
         timeout: 30
 
+# auto_load entries are fetched by whichever add-on type or deployment feature
+# `addons` names; an entry without it would be skipped at install time and
+# never loaded at use time.
+- name: Validate the auto_load manifest entries
+  ansible.builtin.assert:
+    that:
+      - item.addons | default([]) | length > 0
+    fail_msg: >-
+      pgcli_images entry {{ item.image }} sets auto_load: true but has no
+      addons list; name the add-on type(s) or feature(s) that load it
+      (instance, ha, backup, or an add-on type).
+  loop: >-
+    {{ pgcli_images | selectattr('auto_load', 'defined')
+       | selectattr('auto_load') | list }}
+  loop_control:
+    label: "{{ item.image }}"
+
 # Fail fast before installing or loading anything when the offline image
 # server is configured but unusable from this host. Skipped when the caller
 # disables image handling: a host that only runs the pg binary (for example a

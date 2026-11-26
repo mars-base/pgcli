@@ -189,13 +189,18 @@ never contacts a registry. Two requirements follow:
 
 1. Every `archive` in `pgcli_images` must match a filename on the server
    exactly. Exporting with `--ansible` guarantees this.
-2. All core images (entries without `auto_load`) must be present. Before
-   changing anything, the install play sends `HEAD` requests to the server root
-   and to every core archive; any miss aborts with the specific filename.
+2. Every archive referenced by the manifest must be present. Before changing
+   anything, the install play sends `HEAD` requests to the server root and to
+   every archive, including the entries that are only loaded on demand; any
+   miss aborts with the specific filename.
 
-Images marked `auto_load: true` are fetched on demand: the first time an add-on
-of that type is created. You can therefore export only the add-on images you
-actually use. Manifest trimming and lazy loading are covered in
+Images marked `auto_load: true` are fetched on demand by their consumer: the
+first time an add-on of the matching type is created, or — for the core
+`pgcli-pg` / `pgcli-patroni` / `pgcli-backup` entries — before the first
+`pg create`, `ha create` / `pg backup setup`. Remove `auto_load` from an entry
+to load it at install time instead. You can therefore export only the images
+you actually use, as long as every entry left in the manifest exists on the
+server. Manifest trimming and lazy loading are covered in
 [Offline and air-gapped installs](./offline/).
 
 If `pgcli_proxy_url` is set as well, the image server hostname is added to

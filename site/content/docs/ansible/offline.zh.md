@@ -84,8 +84,16 @@ pg http stop http-18080
 pgcli_images:
   - image: ghcr.io/mars-base/pgcli/pgcli-pg:18-2.59.3
     archive: pgcli-pg_18-2.59.3.tar
+    auto_load: true
+    addons: [instance]
   - image: ghcr.io/mars-base/pgcli/pgcli-backup:2.59.3
     archive: pgcli-backup_2.59.3.tar
+    auto_load: true
+    addons: [backup]
+  - image: ghcr.io/mars-base/pgcli/pgcli-patroni:18-4.1.5
+    archive: pgcli-patroni_18-4.1.5.tar
+    auto_load: true
+    addons: [ha]
   - image: docker.io/edoburu/pgbouncer:v1.25.2-p0
     archive: pgbouncer_v1.25.2-p0.tar
     auto_load: true
@@ -94,12 +102,14 @@ pgcli_images:
 
 清单的消费方式：
 
-- **不带 `auto_load` 的条目**是核心镜像。安装 play 在确认 archive 存在后把它们加载进 podman 本地存储。
-- **`auto_load: true` + `addons: [type]`** 标记为插件镜像。首次创建对应类型的 add-on 时，由 `pg_addon` 角色按需加载（类型名中的 `-` 写成 `_`）。`pg_ha_haproxy` 对 HAProxy 使用同一机制。
+- **不带 `auto_load` 的条目**在安装阶段加载，加载前预检已确认其 archive 存在。
+- **`auto_load: true` + `addons: [...]`** 在安装阶段跳过，由使用方在首次使用前从服务器加载。`addons` 声明消费者：插件类型（如 `pgbouncer`，类型名中的 `-` 写成 `_`）由 `pg_addon` 角色在首次创建该类型 add-on 时加载，`pg_ha_haproxy` 对 `haproxy` 用同一机制。默认核心镜像复用该字段、以部署功能充当消费者：`pgcli-pg` 标 `instance`（`pg_instance` 角色在首次 `pg create` 前加载），`pgcli-patroni` 标 `ha`（HA play 在 `ha create` 前加载），`pgcli-backup` 标 `backup`（两个角色在配置了 S3 仓库、首次 `pg backup setup` 前加载）。
+- 从不运行某个功能的主机就不会传输对应镜像。去掉条目上的 `auto_load` 即恢复安装阶段加载。
 - 设置 `pgcli_images_http_url` 后，`scripts/install.sh` 会带 `--skip-pull` 运行，不会从任何 registry 拉取镜像。
-- 改动任何东西之前，安装 play 会向服务器根目录和每个核心 archive 发送 `HEAD` 请求；任一不可达就带着具体文件名中止。插件镜像的 archive 在首次需要时才下载。
+- 改动任何东西之前，安装 play 会校验清单（`auto_load` 条目必须在 `addons` 里至少列出一个消费者），并向服务器根目录和清单中的每个 archive 发送 `HEAD` 请求（包括之后才按需加载的条目）；任一不可达就带着具体文件名中止。tar 包本身在首次需要时才传输。
+- 预加载只覆盖 Ansible play 用到的镜像。play 之外的手动命令（临时 `pg backup ...`、`pgcli_daemons` 条目）不会触发加载；这类主机请先手动加载镜像，或去掉该条目的 `auto_load`。
 
-按场景裁剪清单：在镜像存储为空的主机上，第一次运行只会传输清单里的核心 archive。`pgcli-pg` 和 `pgcli-backup` 必须保留；用到的插件各留一条（去掉 `auto_load` 改为安装阶段预加载，或保留它改为首次使用时加载）。
+按场景裁剪清单：删掉的条目不会被检查也不会被传输；保留的条目必须真实存在于镜像服务器上——无论安装阶段加载还是按需加载，预检 `HEAD` 都会验证。懒加载的核心条目（`pgcli-pg`、`pgcli-patroni`、`pgcli-backup`）在对应功能运行前不产生传输，保留它们没有额外代价。
 
 下载过的 tar 包会缓存在目标主机上，缓存跨多次运行保留（只重新传输缺失的镜像），可以随时删除：
 

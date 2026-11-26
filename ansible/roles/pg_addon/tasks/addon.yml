@@ -48,9 +48,9 @@
     _addon_site_ids: {}
     _addon_rate_rules_rest: []
 
-# Offline installs only preload the core images. Entries marked auto_load: true
-# in pgcli_images declare the add-on types that need them; pull exactly this
-# add-on's images from the offline server before `pg addon install` runs.
+# Entries marked auto_load: true in pgcli_images declare the add-on types that
+# need them; pull exactly this add-on's images from the offline server before
+# `pg addon install` runs.
 - name: Resolve the add-on images
   ansible.builtin.set_fact:
     _addon_images: >-
@@ -67,6 +67,7 @@
   when:
     - _addon_state == 'present'
     - pgcli_images_http_url | length > 0
+    - pgcli_load_images | default(true) | bool
     - _addon_images | length > 0
 
 # --monitor-password carries a plaintext secret in the params list. Detect it

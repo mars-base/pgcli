@@ -64,6 +64,46 @@
             | selectattr('backup_target', 'equalto', 's3')
             | rejectattr('host', 'defined') | list) }}
 
+# The core images are auto_load entries tagged with deployment features
+# instead of add-on types: pgcli-pg is `instance`, pgcli-backup `backup`.
+# Fetch the ones this host needs from the offline server right before the
+# first `pg create` / `pg backup setup`.
+#
+# Split into two tasks: keys in one set_fact are templated against the
+# pre-task context, so _pg_instance_images cannot see entries defined above it.
+- name: Select this host's instance entries
+  ansible.builtin.set_fact:
+    _pg_instance_entries: >-
+      {{ (pgcli_instances | selectattr('host', 'defined')
+          | selectattr('host', 'equalto', inventory_hostname) | list)
+         + (pgcli_instances | rejectattr('host', 'defined') | list) }}
+
+- name: Select the images needed by this host's instances
+  ansible.builtin.set_fact:
+    _pg_instance_images: >-
+      {{ ((pgcli_images | selectattr('auto_load', 'defined') | selectattr('auto_load')
+           | selectattr('addons', 'defined')
+           | selectattr('addons', 'contains', 'instance') | list)
+          if (((_pg_instance_entries | rejectattr('state', 'defined') | list)
+               + (_pg_instance_entries | selectattr('state', 'defined')
+                  | rejectattr('state', 'equalto', 'absent') | list)) | length > 0)
+          else [])
+         + ((pgcli_images | selectattr('auto_load', 'defined') | selectattr('auto_load')
+             | selectattr('addons', 'defined')
+             | selectattr('addons', 'contains', 'backup') | list)
+            if (_s3_backed_instances | length > 0) else []) }}
+
+- name: Load the instance images from the offline server
+  ansible.builtin.include_role:
+    name: pgcli
+    tasks_from: images
+  vars:
+    _pgcli_images_to_load: "{{ _pg_instance_images }}"
+  when:
+    - pgcli_images_http_url | length > 0
+    - pgcli_load_images | default(true) | bool
+    - _pg_instance_images | length > 0
+
 - name: Validate the S3 repository host
   ansible.builtin.assert:
     that:
