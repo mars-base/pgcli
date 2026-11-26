@@ -40,9 +40,10 @@ Image source (one of):
 Options:
   -o, --output DIR      output directory (default: $OUT)
       --platform ARCH   platform to pull (default: $PLATFORM)
-  -b, --binaries        also emit the pg binary (cross-built for --platform)
-                        and the podman-launcher binary, named as the Ansible
-                        roles expect: pg and podman-launcher-linux_<arch>
+  -b, --binaries        also emit the pg binary (always rebuilt for
+                        --platform) and the podman-launcher binary, named as
+                        the Ansible roles expect: pg and
+                        podman-launcher-linux_<arch>
   -f, --force           re-export archives that already exist
   -n, --dry-run         print the planned exports without pulling or saving
   -h, --help            show this help
@@ -50,8 +51,10 @@ Options:
 Archive names match the offline manifest convention:
   <repository-basename>_<tag>.tar    e.g. pgcli-pg_18-2.59.3.tar
 
---binaries needs go and make (for pg) and curl (for the launcher); set
-PODMAN_LAUNCHER_URL to fetch the launcher from a mirror instead of:
+--binaries rebuilds pg with go and make on every run, so the exported binary
+always matches the current checkout; hosts without that toolchain skip it.
+The launcher needs curl; set PODMAN_LAUNCHER_URL to fetch it from a mirror
+instead of:
   https://github.com/89luca89/podman-launcher/releases/latest/download/podman-launcher-<arch>
 
 After exporting, serve the directory with:
@@ -133,16 +136,16 @@ add_entry() {
     archives+=("$archive")
 }
 
-# Cross-build the pg binary for the selected platform. BINARY is overridden so
+# Build the pg binary for the selected platform on every run, so the exported
+# artifact always matches the current checkout. Hosts without a Go toolchain
+# skip the binary instead of failing the image export. BINARY is overridden so
 # the checkout's bin/pg (possibly built for this host) is left untouched.
 export_pg_binary() {
     local dest="$OUT/pg" staged="pg-export-$$"
-    if [[ -f $dest && $FORCE != true ]]; then
-        printf 'SKIP    %s (exists)\n' "$dest"
+    if ! command -v go >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
+        printf 'SKIP    %s (go or make not found in PATH)\n' "$dest"
         return 0
     fi
-    command -v go >/dev/null 2>&1 || die "go not found in PATH (required by --binaries)"
-    command -v make >/dev/null 2>&1 || die "make not found in PATH (required by --binaries)"
     printf 'BUILD   pg (%s)\n' "$PLATFORM"
     if ! GOOS="$BIN_OS" GOARCH="$BIN_ARCH" \
         make -C "$REPO_ROOT" build BINARY="$staged" >/dev/null; then
