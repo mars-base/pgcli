@@ -80,8 +80,8 @@ func TestGenerateLeaf(t *testing.T) {
 	if !containsIP(leaf.IPAddresses, net.ParseIP("10.0.0.9")) {
 		t.Errorf("IP SAN missing 10.0.0.9: %v", leaf.IPAddresses)
 	}
-	if res.NotAfter.Before(time.Now().Add(824 * 24 * time.Hour)) {
-		t.Errorf("NotAfter %v is short of the 825-day default", res.NotAfter)
+	if res.NotAfter.Before(time.Now().Add(10*365*24*time.Hour - time.Minute)) {
+		t.Errorf("NotAfter %v is short of the 10-year default", res.NotAfter)
 	}
 }
 
@@ -105,6 +105,9 @@ func TestGenerateCA(t *testing.T) {
 	// root could not sign client certs (etcd raft peer mTLS).
 	if len(crt.ExtKeyUsage) != 0 || len(crt.UnknownExtKeyUsage) != 0 {
 		t.Errorf("CA must not restrict extended key usage, got %v / unknown %v", crt.ExtKeyUsage, crt.UnknownExtKeyUsage)
+	}
+	if res.NotAfter.Before(time.Now().Add(10*365*24*time.Hour - time.Minute)) {
+		t.Errorf("NotAfter %v is short of the 10-year default", res.NotAfter)
 	}
 }
 

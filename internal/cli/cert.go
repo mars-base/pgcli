@@ -16,7 +16,7 @@ func init() {
 	certCmd.Flags().StringSliceVar(&certHost, "host", []string{"127.0.0.1"}, "comma-separated hostnames and IPs for the certificate SAN (IPs are detected automatically); repeatable")
 	certCmd.Flags().StringVar(&certCertFile, "cert-file", "cert.pem", "path to write the PEM certificate")
 	certCmd.Flags().StringVar(&certKeyFile, "key-file", "key.pem", "path to write the PEM private key (PKCS8, mode 0600)")
-	certCmd.Flags().DurationVar(&certValid, "valid-duration", 825*24*time.Hour, "how long the certificate stays valid (e.g. 720h)")
+	certCmd.Flags().DurationVar(&certValid, "valid-duration", 10*365*24*time.Hour, "how long the certificate stays valid (default: 10 years; e.g. 720h)")
 	certCmd.Flags().BoolVar(&certCA, "ca", false, "issue a self-signed CA (CA:TRUE, keyCertSign) instead of a server leaf — do not feed this to a MinIO/silo/rustfs --tls-cert")
 	certCmd.Flags().IntVar(&certRSA, "rsa", 0, "RSA key size in bits (0 = use ECDSA)")
 	certCmd.Flags().StringVar(&certECDSA, "ecdsa", "P-256", "ECDSA curve (P-224, P-256, P-384, P-521)")

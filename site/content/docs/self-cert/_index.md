@@ -41,7 +41,7 @@ yourself.
 # data dir). pgcli's base dir already lives under ~/.pgcli:
 mkdir -p ~/.pgcli/certs
 
-# A leaf valid for one DNS name and two IPs, ECDSA P-256, 825 days (defaults):
+# A leaf valid for one DNS name and two IPs, ECDSA P-256, 10 years (defaults):
 pg cert --host "rustfs.test,127.0.0.1,10.0.0.9" \
   --cert-file ~/.pgcli/certs/rustfs.crt \
   --key-file  ~/.pgcli/certs/rustfs.key
@@ -62,7 +62,7 @@ generator, not an addon command.
 | `--host` | `127.0.0.1` | Comma-separated DNS names and/or IPs to encode as SANs (repeatable). Entries are auto-detected as one or the other, so `"rustfs.test,10.0.0.9"` needs no special syntax; `*.wild.test` works as a wildcard DNS entry. |
 | `--cert-file` | `cert.pem` | Path to write the PEM certificate. |
 | `--key-file` | `key.pem` | Path to write the PEM private key (PKCS8, mode `0600`). |
-| `--valid-duration` | `825` days | How long the cert stays valid, e.g. `--valid-duration 8760h` for a year. |
+| `--valid-duration` | `10` years (`87600h`) | How long the cert stays valid, e.g. `--valid-duration 8760h` for a year. |
 | `--ecdsa` | `P-256` | Curve: `P-224`/`P-256`/`P-384`/`P-521`. Set to `""` to disable ECDSA (and pair with `--rsa`). |
 | `--rsa` | *(off)* | RSA key size (e.g. `2048`, `4096`); set only when you specifically need RSA instead of the default ECDSA key. |
 | `--ca` | `false` | Make the cert its own CA (`CA:TRUE`, `keyCertSign`) — for when you want a private root to sign further certs with, **not** the usual case for `--tls-cert`. |

@@ -30,7 +30,7 @@ import (
 // noted on each field.
 type Options struct {
 	Hosts      []string      // DNS names and/or IPs for the SAN; defaults to 127.0.0.1 when empty
-	Valid      time.Duration // validity window from now; defaults to 825 days
+	Valid      time.Duration // validity window from now; defaults to 10 years
 	CA         bool          // issue a self-signed CA (CA:TRUE, keyCertSign) instead of a leaf
 	RSABits    int           // when > 0, generate an RSA key of this size instead of ECDSA
 	ECDSACurve string        // P-224|P-256|P-384|P-521; defaults to P-256 when RSABits == 0
@@ -59,7 +59,7 @@ func Generate(opts Options) (*Result, error) {
 
 	valid := opts.Valid
 	if valid <= 0 {
-		valid = 825 * 24 * time.Hour
+		valid = 10 * 365 * 24 * time.Hour
 	}
 
 	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)

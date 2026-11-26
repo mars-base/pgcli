@@ -255,7 +255,7 @@ SANs cover any mix of DNS names and IPs you ask for:
 
 ```bash
 # A leaf cert valid for a hostname AND two IPs, ECDSA P-256 (the default),
-# 825 days (the default validity) — the shape most BYO installs want:
+# 10 years (the default validity) — the shape most BYO installs want:
 pg cert --host "minio.test,127.0.0.1,10.0.0.9" \
   --cert-file minio.crt --key-file minio.key
 
@@ -271,7 +271,7 @@ files wherever you point it and prints the SANs. Flags:
 | `--host` | `127.0.0.1` | Comma-separated DNS names and/or IPs to encode as SANs (repeatable). Entries are auto-detected as one or the other, so `"minio.test,10.0.0.9"` needs no special syntax; `*.wild.test` works as a wildcard DNS entry. |
 | `--cert-file` | `cert.pem` | Path to write the PEM certificate. |
 | `--key-file` | `key.pem` | Path to write the PEM private key (PKCS8). |
-| `--valid-duration` | `825` days (`19800h`) | How long the cert stays valid, e.g. `--valid-duration 8760h` for a year. |
+| `--valid-duration` | `10` years (`87600h`) | How long the cert stays valid, e.g. `--valid-duration 8760h` for a year. |
 | `--ecdsa` | `P-256` | Curve: `P-224`/`P-256`/`P-384`/`P-521`. Set to `""` to disable ECDSA (and pair with `--rsa`). |
 | `--rsa` | *(off)* | RSA key size (e.g. `2048`, `4096`); set only when you specifically need RSA instead of the default ECDSA key. |
 | `--ca` | `false` | Make the cert its own CA (`CA:TRUE`, `keyCertSign`) — for when you want a private root to sign further certs with, not the usual case for `--tls-cert`. |
