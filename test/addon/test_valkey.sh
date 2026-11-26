@@ -22,6 +22,9 @@
 #      SIGKILL (no graceful save), the --save no + --aof shape is AOF-only, and
 #      the knob-combination validators reject nonsense before anything is
 #      pulled or created.
+#   6. IO THREADS — --io-threads lands in the config/argv and the running
+#      server, the 1-128 guard rejects out-of-range values up front, and 0
+#      resets to the server default.
 #
 # Usage:
 #   bash test/addon/test_valkey.sh                 # full test, cleans up
@@ -219,6 +222,7 @@ cleanup() {
     pg addon remove valkey --name "imgtest"  --clean-data 2>/dev/null || true
     pg addon remove valkey --name "aoftest"  --clean-data 2>/dev/null || true
     pg addon remove valkey --name "rdbtest"  --clean-data 2>/dev/null || true
+    pg addon remove valkey --name "iotest"   --clean-data 2>/dev/null || true
     rm -rf "$CONFIG_DIR"
     [ -d "$TEST_DIR" ] && { podman unshare rm -rf "$TEST_DIR" 2>/dev/null || rm -rf "$TEST_DIR" 2>/dev/null || true; }
     green "  Cleanup done"
@@ -627,6 +631,51 @@ main() {
     run_test "remove aoftest --clean-data" pg addon remove valkey --name aoftest --clean-data
     run_test "aoftest gone" vk_gone aoftest
     run_test "aoftest data deleted" test ! -d "$(data_dir_of aoftest)"
+
+    # ---- IO threads (--io-threads) ----
+    # io-threads parallelizes network I/O only — command execution stays on the
+    # main thread. Pin the whole path: flag → config → container argv → the
+    # running server's own config, plus the range guard and the 0 "server
+    # default" reset (0 is a Changed-only sentinel; --force recreates the
+    # container without the flag so the server falls back to its own 1).
+    section "IO threads (--io-threads)"
+    TESTS=$((TESTS + 1))
+    if IO_OUT="$(pg addon install valkey --name iotest --io-threads 4 2>&1)"; then
+        pass "install valkey --name iotest --io-threads 4"
+    else
+        fail "install with --io-threads"; echo "$IO_OUT" | sed 's/^/      | /'
+    fi
+    echo "$IO_OUT" | sed 's/^/      /'
+    run_grep "summary shows the io-threads line" "IO threads:  4" echo "$IO_OUT"
+    run_test "io_threads stored" test "$(valkey_field iotest io_threads)" = "4"
+    TESTS=$((TESTS + 1))
+    if vk_cmd iotest | grep -qE -- '--io-threads",[[:space:]]*"4"'; then
+        pass "--io-threads 4 in the container argv"
+    else
+        fail "--io-threads 4 missing from the argv: $(vk_cmd iotest)"
+    fi
+    run_test "running server reports io-threads 4" \
+        test "$(pg valkey-cli --name iotest config get io-threads 2>/dev/null | tail -n1 | tr -d '\r')" = "4"
+    run_fails "--io-threads above the server range" "--io-threads must be 1-128" \
+        pg addon install valkey --name badio --io-threads 129
+    run_not_grep "badio never entered the config" "badio:" cat "$CONFIG_FILE"
+    TESTS=$((TESTS + 1))
+    if IORESET_OUT="$(pg addon install valkey --name iotest --io-threads 0 --force 2>&1)"; then
+        pass "re-install --io-threads 0 --force (back to the server default)"
+    else
+        fail "--io-threads 0 reinstall"; echo "$IORESET_OUT" | sed 's/^/      | /'
+    fi
+    run_test "io_threads dropped from the config" test -z "$(valkey_field iotest io_threads)"
+    TESTS=$((TESTS + 1))
+    if vk_cmd iotest | grep -qF -- '--io-threads'; then
+        fail "--io-threads still in the argv after the reset: $(vk_cmd iotest)"
+    else
+        pass "--io-threads gone from the argv after the reset"
+    fi
+    wait_port "$(valkey_field iotest port)" >/dev/null 2>&1 || true
+    run_test "reset server reports io-threads 1" \
+        test "$(pg valkey-cli --name iotest config get io-threads 2>/dev/null | tail -n1 | tr -d '\r')" = "1"
+    run_test "remove iotest --clean-data" pg addon remove valkey --name iotest --clean-data
 
     # ---- Read replicas (--replica-of / --replica-of-host) ----
     # The master under test is $CACHE (major 9); $LEGACY (major 7) is still
