@@ -359,6 +359,9 @@ pg etcdctl endpoint status -- -w table
 
 pg 自身参数解析器不接受的 etcdctl 参数（`-w table`、`--hex` 等）放在 `--` 之后。
 
+需要客户端证书认证的端点（例如 K3s 的内嵌 etcd）用 `--ca`、`--cert`、`--key`
+传主机路径，pgcli 会把文件挂进容器；pgcli 自己的 etcd 成员改用用户名/密码认证。
+
 ### 查看
 
 ```bash

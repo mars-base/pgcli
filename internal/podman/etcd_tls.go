@@ -30,6 +30,10 @@ import (
 const (
 	etcdCertsDir  = "/etcd-certs"
 	etcdctlCAPath = "/etcdctl-ca/ca.crt"
+	// Client-certificate material for endpoints that require mTLS (for
+	// example K3s embedded etcd).
+	etcdctlCertPath = "/etcdctl-tls/client.crt"
+	etcdctlKeyPath  = "/etcdctl-tls/client.key"
 
 	etcdCAPublishCertKey = "/_pgcli/pki/etcd/ca.crt"
 	etcdCAPublishKeyKey  = "/_pgcli/pki/etcd/ca.key"

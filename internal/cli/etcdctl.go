@@ -14,6 +14,8 @@ import (
 
 func init() {
 	etcdctlCmd.Flags().String("ca", "", "CA bundle on the host used to verify the etcd endpoints; mounted into the etcdctl container (overrides the member's CA)")
+	etcdctlCmd.Flags().String("cert", "", "client certificate (PEM) on the host for endpoints that require client-certificate auth; mounted into the etcdctl container")
+	etcdctlCmd.Flags().String("key", "", "client private key (PEM) on the host, paired with --cert")
 	rootCmd.AddCommand(etcdctlCmd)
 }
 
@@ -29,6 +31,10 @@ demand).
 The target cluster is chosen from ETCDCTL_ENDPOINTS (etcdctl's native env var).
 When it is unset, pgcli falls back to the first etcd member's client URL.
 
+Endpoints that require client-certificate authentication (K3s embedded etcd,
+for example) take --ca together with --cert and --key; the files are mounted
+into the container and handed to etcdctl through its native env vars.
+
 Any etcdctl flag that pg's own flag parser would otherwise reject (for example
 -w table or --hex) goes after -- .
 
@@ -40,7 +46,8 @@ Examples:
   pg etcdctl endpoint status -- -w table
   pg etcdctl get foo -- --hex
   ETCDCTL_ENDPOINTS=http://127.0.0.1:2381 pg etcdctl member list
-  ETCDCTL_ENDPOINTS=https://10.0.0.9:2379 pg etcdctl --ca /path/to/ca.crt member list`,
+  ETCDCTL_ENDPOINTS=https://10.0.0.9:2379 pg etcdctl --ca /path/to/ca.crt member list
+  ETCDCTL_ENDPOINTS=https://127.0.0.1:2379 pg etcdctl --ca ca.crt --cert client.crt --key client.key member list`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := loadConfigForDSN(); err != nil {
@@ -80,6 +87,30 @@ Examples:
 				return fmt.Errorf("--ca: %w", err)
 			}
 			opts.CAFile = caPath
+		}
+
+		certFlag, _ := cmd.Flags().GetString("cert")
+		keyFlag, _ := cmd.Flags().GetString("key")
+		if (certFlag == "") != (keyFlag == "") {
+			return fmt.Errorf("--cert and --key must be given together")
+		}
+		if certFlag != "" {
+			certPath, err := filepath.Abs(certFlag)
+			if err != nil {
+				return fmt.Errorf("--cert: %w", err)
+			}
+			if _, err := os.Stat(certPath); err != nil {
+				return fmt.Errorf("--cert: %w", err)
+			}
+			keyPath, err := filepath.Abs(keyFlag)
+			if err != nil {
+				return fmt.Errorf("--key: %w", err)
+			}
+			if _, err := os.Stat(keyPath); err != nil {
+				return fmt.Errorf("--key: %w", err)
+			}
+			opts.CertFile = certPath
+			opts.KeyFile = keyPath
 		}
 
 		// Args after `--` (e.g. `-w table`, `--hex`) reach us stripped of the

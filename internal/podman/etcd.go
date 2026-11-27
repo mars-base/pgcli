@@ -536,6 +536,8 @@ func (m *EtcdManager) EnsureImage(imageTag string) error {
 // Zero value keeps the plaintext, unauthenticated behaviour.
 type EtcdctlOpts struct {
 	CAFile   string
+	CertFile string
+	KeyFile  string
 	Username string
 	Password string
 }
@@ -579,33 +581,8 @@ func (m *EtcdManager) runEtcdctl(imageTag, endpoint string, interactive bool, op
 		return "", err
 	}
 
-	runArgs := []string{"run", "--rm"}
-	if interactive && isTerminal(os.Stdin) {
-		runArgs = append(runArgs, "-it")
-	} else {
-		runArgs = append(runArgs, "-i=false")
-	}
-	runArgs = append(runArgs,
-		"--network", "host",
-		// Same reason as createContainer: etcdctl's gRPC transport honors
-		// HTTP(S)_PROXY, so podman's proxy injection would hijack requests to
-		// advertised (LAN) endpoints.
-		"--http-proxy=false",
-		"-e", "ETCDCTL_ENDPOINTS="+endpoint,
-	)
-	if opts.CAFile != "" && !hasLongFlag(args, "--cacert") && !hasLongFlag(args, "--insecure-skip-tls-verify") {
-		runArgs = append(runArgs,
-			"-v", fmt.Sprintf("%s:%s:ro,z", hostMountPath(opts.CAFile), etcdctlCAPath),
-			"-e", "ETCDCTL_CACERT="+etcdctlCAPath,
-		)
-	}
-	if opts.Username != "" && !hasLongFlag(args, "--user") {
-		// Credentials go through the environment rather than argv so they do
-		// not show up in `ps`.
-		runArgs = append(runArgs, "-e", "ETCDCTL_USER="+opts.Username+":"+opts.Password)
-	}
-	runArgs = append(runArgs, imageTag, "etcdctl")
-	runArgs = append(runArgs, args...)
+	attach := interactive && isTerminal(os.Stdin)
+	runArgs := etcdctlRunArgs(imageTag, endpoint, attach, opts, args)
 
 	slog.Debug("podman etcdctl", "endpoint", endpoint, "args", args)
 	cmd := podmanCommand(m.podman, runArgs...)
@@ -627,6 +604,52 @@ func (m *EtcdManager) runEtcdctl(imageTag, endpoint string, interactive bool, op
 		return "", fmt.Errorf("etcdctl %s: %w", strings.Join(args, " "), err)
 	}
 	return string(out), nil
+}
+
+// etcdctlRunArgs builds the podman run argv for a short-lived etcdctl
+// container. Mounts must precede the image; client-certificate material goes
+// through ETCDCTL_CERT/ETCDCTL_KEY so it works for mTLS endpoints such as K3s
+// embedded etcd.
+func etcdctlRunArgs(imageTag, endpoint string, attach bool, opts EtcdctlOpts, args []string) []string {
+	runArgs := []string{"run", "--rm"}
+	if attach {
+		runArgs = append(runArgs, "-it")
+	} else {
+		runArgs = append(runArgs, "-i=false")
+	}
+	runArgs = append(runArgs,
+		"--network", "host",
+		// Same reason as createContainer: etcdctl's gRPC transport honors
+		// HTTP(S)_PROXY, so podman's proxy injection would hijack requests to
+		// advertised (LAN) endpoints.
+		"--http-proxy=false",
+		"-e", "ETCDCTL_ENDPOINTS="+endpoint,
+	)
+	if opts.CAFile != "" && !hasLongFlag(args, "--cacert") && !hasLongFlag(args, "--insecure-skip-tls-verify") {
+		runArgs = append(runArgs,
+			"-v", fmt.Sprintf("%s:%s:ro,z", hostMountPath(opts.CAFile), etcdctlCAPath),
+			"-e", "ETCDCTL_CACERT="+etcdctlCAPath,
+		)
+	}
+	if opts.CertFile != "" && !hasLongFlag(args, "--cert") {
+		runArgs = append(runArgs,
+			"-v", fmt.Sprintf("%s:%s:ro,z", hostMountPath(opts.CertFile), etcdctlCertPath),
+			"-e", "ETCDCTL_CERT="+etcdctlCertPath,
+		)
+	}
+	if opts.KeyFile != "" && !hasLongFlag(args, "--key") {
+		runArgs = append(runArgs,
+			"-v", fmt.Sprintf("%s:%s:ro,z", hostMountPath(opts.KeyFile), etcdctlKeyPath),
+			"-e", "ETCDCTL_KEY="+etcdctlKeyPath,
+		)
+	}
+	if opts.Username != "" && !hasLongFlag(args, "--user") {
+		// Credentials go through the environment rather than argv so they do
+		// not show up in `ps`.
+		runArgs = append(runArgs, "-e", "ETCDCTL_USER="+opts.Username+":"+opts.Password)
+	}
+	runArgs = append(runArgs, imageTag, "etcdctl")
+	return append(runArgs, args...)
 }
 
 // StartContainer brings an existing etcd member container up for the boot

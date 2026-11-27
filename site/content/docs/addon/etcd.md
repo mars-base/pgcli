@@ -405,6 +405,11 @@ pg etcdctl endpoint status -- -w table
 etcdctl flags that pg's own parser would reject (`-w table`, `--hex`, …) go
 after `--`.
 
+Endpoints that require client-certificate auth (K3s embedded etcd, for
+example) take `--ca`, `--cert` and `--key` with host paths; pgcli mounts the
+files into the container. Its own etcd members authenticate with
+username/password instead.
+
 ### List
 
 ```bash
