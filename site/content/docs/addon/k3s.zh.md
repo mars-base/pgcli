@@ -131,7 +131,8 @@ pg addon install k3s --name k3s --role agent \
 ```
 
 等首台 server 的 `/readyz` 通过后再启动加入者。`--tls-san` 列出所有 server 地址，客户端
-无论打到哪台 server，API 证书都有效。`pg k3s kubectl --name k3s -- get nodes` 中 server 显示
+无论打到哪台 server，API 证书都有效；agent 地址不需要——agent 既不提供 API 也不运行
+etcd。`pg k3s kubectl --name k3s -- get nodes` 中 server 显示
 `control-plane`，agent 显示 `<none>`（role 标签在节点注册后几秒才写入）。
 
 Ansible 的组 `addon_k3s_cluster` 同时覆盖单机与集群：在组里列出任意数量主机，用
@@ -145,10 +146,10 @@ token 与可选 CA 由 `k3s_shared` role 分发，play 为 `serial: 1`；先于�
 
 **NAT 网络下的 peer 校验。** etcd 3.7 会用观测到的源地址校验加入节点的证书。节点间流量
 经过 NAT（例如实验室宿主机对 VM 互访做 SNAT）时，join 会报
-`tls: "<观测到的地址>" does not match any of the DNSNames`。Ansible 分组会自动处理：
-每台 server 的 `--tls-san` 除了节点 IP，还包含运行剧本的机器到初始 server 的出口
-地址——宿主机改写 VM 互访流量时，它就是 SNAT 源地址。可设 `addon_k3s_host_ip`
-覆盖该自动探测，或用 `addon_k3s_extra_tls_sans: ["<地址>"]` 手工追加。
+`tls: "<观测到的地址>" does not match any of the DNSNames`。Ansible 分组里每台 server
+的 `--tls-san` 包含 server 的 IP，其余地址通过 `addon_k3s_extra_tls_sans` 显式追加——
+把 SNAT 源地址写进去，例如 `addon_k3s_extra_tls_sans: ["10.0.0.254"]`。直连的三层网络
+（通常的实体服务器部署）除 server IP 外不需要任何额外 SAN。
 直接用 `pg addon install` 时需自行把观测到的源地址作为额外的 `--tls-san` 传入。
 
 ## 自定义 CA
@@ -255,6 +256,45 @@ pg start                # 按顺序启动 autostart 的 K3s 节点：cluster-ini
 
 `pg start` 按该顺序启动节点容器，但不等待集群就绪。多主机集群请先在初始 server 所在主机上
 执行 `pg start`。
+
+## 移除节点
+
+移除 agent：
+
+```bash
+# 在任一健康的 server 上：封锁调度并删除 Node 对象。
+pg k3s kubectl --name k3s -- drain node4 --ignore-daemonsets --delete-emptydir-data
+pg k3s kubectl --name k3s -- delete node node4
+# 在被移除的主机上：删除容器与数据。
+pg addon remove k3s --name k3s --clean-data
+```
+
+移除 server，在存活的 server 上操作：
+
+```bash
+# 1. 趁被移除节点还健康时先驱逐工作负载。
+pg k3s kubectl --name k3s -- drain node3 --ignore-daemonsets --delete-emptydir-data
+
+# 2. 趁所有成员都在运行时摘掉它的 etcd 成员：成员移除是一条 raft 记录，需要
+#    当前成员的法定人数，而偶数成员（比如两台 server）在少一台时就已失去法定
+#    人数。滞留在成员列表里的节点即使主机下线也仍计入法定人数。K3s 的内嵌
+#    etcd 启用了客户端证书认证，需带上 K3s 写入数据目录的证书。
+TLS=/data/pg/addon/k3s/k3s/data/server/tls/etcd   # <data-dir>/server/tls/etcd
+export ETCDCTL_ENDPOINTS=https://127.0.0.1:2379
+pg etcdctl --ca $TLS/server-ca.crt \
+  --cert $TLS/server-client.crt --key $TLS/server-client.key member list
+pg etcdctl --ca $TLS/server-ca.crt \
+  --cert $TLS/server-client.crt --key $TLS/server-client.key member remove <member-id>
+
+# 3. 删除 Node 对象。
+pg k3s kubectl --name k3s -- delete node node3
+```
+
+然后在被移除的主机上执行 `pg addon remove k3s --name k3s --clean-data`。
+`--clean-data` 必不可少：角色和成员关系都保存在数据目录里，残留目录会让之后的重装
+以旧身份加入。由 Ansible 管理的集群还要按
+[add-on 集群章节](../ansible/addon-cluster.md) 的说明把主机从组 inventory 和
+`addon_k3s_roles` 中删掉。
 
 ## 限制
 

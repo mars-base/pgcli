@@ -378,9 +378,9 @@ example 100 years via `addon_k3s_ca_days: 36500`; 0 keeps the K3s default,
 any custom lifetime must be greater than 10 days) only to the initial server
 before its first start. Registry mirrors are
 rendered to a `registries.yaml` that every member mounts. Server certificates
-carry every member IP plus the playbook machine's address toward the initial
-server (the SNAT source for NATed VM-to-VM traffic); `addon_k3s_host_ip`
-overrides the auto-detected value.
+carry the server IPs; a direct L3 network (bare metal) needs nothing more.
+List any extra address peers are seen through — the SNAT source for NATed
+VM-to-VM traffic — in `addon_k3s_extra_tls_sans`.
 
 ```yaml
 addon_etcd_single_addons:

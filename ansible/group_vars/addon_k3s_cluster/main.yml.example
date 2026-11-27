@@ -89,16 +89,11 @@ addon_k3s_token_file: ""
 # reinstall.
 addon_k3s_ca_days: 0
 
-# Extra address added to every server's --tls-san. VM-to-VM traffic can be
-# SNAT'd by the virtualization host, and etcd checks a peer's certificate
-# against the observed source address, so the machine running this playbook
-# must be a SAN. Empty auto-detects the local address used to reach the
-# initial server (the SNAT source); set it explicitly to override. The
-# detected or configured value is always added automatically.
-addon_k3s_host_ip: ""
-
-# Further --tls-san values beyond the member IPs and addon_k3s_host_ip, e.g.
-# ["10.0.0.254"] for another NAT source peers are seen through.
+# Extra addresses added to every server's --tls-san, beyond the server IPs.
+# Leave empty on a direct L3 network — the usual bare-metal deployment. If
+# VM-to-VM traffic is SNAT'd by the virtualization host, etcd checks a peer's
+# certificate against the observed source address, so that SNAT source must be
+# listed here — for example ["10.0.0.254"].
 addon_k3s_extra_tls_sans: []
 
 # containerd registry mirrors rendered into each member's registries.yaml:
@@ -148,26 +143,21 @@ _addon_k3s_node_ip: >-
 _addon_k3s_init_ip: >-
   {{ hostvars[_addon_k3s_init_server].private_ip
      | default(hostvars[_addon_k3s_init_server].ansible_host, true) }}
-# Every member's address (servers and agents) goes into the API certificate
-# so clients and joining nodes can reach any node. Host order follows the
-# group; duplicates are dropped.
+# Server addresses go into the TLS certificates: whichever server a client or
+# joining node dials must be covered by the API certificate, and etcd peers
+# only run on servers. Agent addresses are not needed — an agent serves neither
+# the API nor etcd; use addon_k3s_extra_tls_sans if a client really reaches the
+# API through an agent address. Host order follows the group; duplicates are
+# dropped.
 _addon_k3s_cluster_node_ips: >-
   {%- set out = [] -%}
-  {%- for host in _addon_k3s_cluster_hosts -%}
+  {%- for host in _addon_k3s_server_hosts -%}
   {%- set ip = hostvars[host].private_ip | default(hostvars[host].ansible_host, true) -%}
   {%- if ip not in out -%}
   {%- set _ = out.append(ip) -%}
   {%- endif -%}
   {%- endfor -%}
   {{ out }}
-
-# Local address used to reach the initial server. When VM-to-VM traffic is
-# SNAT'd by the virtualization host, this is the source address the peers see,
-# and etcd checks peer certificates against it.
-_addon_k3s_host_ip: >-
-  {{ addon_k3s_host_ip if addon_k3s_host_ip | default('', true) | length > 0
-     else (lookup('pipe', 'ip -4 route get ' ~ _addon_k3s_init_ip)
-           | regex_findall('src ([0-9.]+)') | first | default('')) }}
 
 _addon_k3s_shared_remote_dir: /data/pg/addon/shared
 _addon_k3s_registries_path: "{{ _addon_k3s_shared_remote_dir }}/k3s-registries.yaml"
@@ -196,9 +186,6 @@ _addon_k3s_cluster_flags: >-
   {%- for san in addon_k3s_extra_tls_sans -%}
   {%- set _ = out.extend(['--tls-san', san]) -%}
   {%- endfor -%}
-  {%- if (_addon_k3s_host_ip | length > 0) and (_addon_k3s_host_ip not in _addon_k3s_cluster_node_ips) -%}
-  {%- set _ = out.extend(['--tls-san', _addon_k3s_host_ip]) -%}
-  {%- endif -%}
   {%- for component in addon_k3s_disable -%}
   {%- set _ = out.extend(['--disable', component]) -%}
   {%- endfor -%}

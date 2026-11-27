@@ -177,10 +177,12 @@ retry the join until that API answers, so group order does not decide the
 topology. The verify play then waits for every node to be `Ready`, and hosts
 added to the group join on the next run.
 
-Every server's `--tls-san` carries all member IPs plus the address this
-playbook machine uses toward the initial server — the SNAT source when the
-virtualization host rewrites VM-to-VM traffic, which etcd peer certificates
-must accept. `addon_k3s_host_ip` overrides the auto-detected value.
+Every server's `--tls-san` carries the server IPs; agent addresses are left
+out (an agent serves neither the API nor etcd). A direct L3 network — the
+usual bare-metal deployment — needs no extra values. When the virtualization
+host rewrites VM-to-VM traffic, etcd peer certificates must accept the
+observed SNAT source — list it in `addon_k3s_extra_tls_sans`, for example
+`["10.0.0.254"]`.
 
 The group file also exposes the node image (`addon_k3s_version`, or a full
 `addon_k3s_image`), the host directories (`addon_k3s_data_dir`,
@@ -223,6 +225,16 @@ expressions. The four-member layouts list all four hosts. MinIO/silo MNSD needs
 at least four endpoints; Redis, Valkey, vmcluster and vlcluster also use all
 four. k3s accepts any number of hosts (a single node grows by adding hosts and
 re-running the play).
+
+To remove a single k3s member, take the node out of the cluster first (drain
+and delete the Node object; for a server remove its etcd member as well) and
+run `pg addon remove k3s --name k3s --clean-data` on that host — the K3s
+add-on page has the exact commands. Then drop the host from the
+`addon_k3s_cluster` group in `hosts.ini` and from `addon_k3s_roles`: a host
+left in the inventory is reinstalled and rejoined on the next run. Setting the
+group file's add-on entry to `state: absent` instead removes K3s from every
+member (with `--clean-data` unless the entry sets `clean_data: false`), which
+is the whole-cluster teardown path.
 
 ## Create, verify, destroy
 

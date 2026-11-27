@@ -123,11 +123,11 @@ pg addon install k3s --name k3s --role agent \
   --token-file /tmp/k3s-token
 ```
 
-Wait for the first server to answer `/readyz` before starting the joiners. List every server address in `--tls-san` so the API certificate is valid whichever server clients hit. `pg k3s kubectl --name k3s -- get nodes` shows `control-plane` for servers and `<none>` for agents (K3s writes the role label a few seconds after the node registers).
+Wait for the first server to answer `/readyz` before starting the joiners. List every server address in `--tls-san` so the API certificate is valid whichever server clients hit; agent addresses are not needed — an agent serves neither the API nor etcd. `pg k3s kubectl --name k3s -- get nodes` shows `control-plane` for servers and `<none>` for agents (K3s writes the role label a few seconds after the node registers).
 
 The Ansible group `addon_k3s_cluster` covers both: list one or more hosts, declare each role in `addon_k3s_roles` (`server` or `agent`; hosts left out are agents — group order does not decide the role), and name the server that bootstraps embedded etcd with `addon_k3s_cluster_init_server` (empty picks the first server, and it does not have to be the group's first host). The `k3s_shared` role distributes the token and the optional CA, and the play is `serial: 1`; joining nodes started before the bootstrap server retry until its API answers, and hosts added to the group join on the next run — see [Deploying add-ons with Ansible](../ansible/addons.md) and the [add-on cluster chapter](../ansible/addon-cluster.md). The CLI standalone example above keeps SQLite.
 
-**NATed peer networks.** etcd 3.7 checks a joining peer's certificate against the source address it observes. When peers see each other through NAT (a host that SNATs VM-to-VM traffic, for example), the join fails with `tls: "<observed address>" does not match any of the DNSNames`. The Ansible group handles this: every server's `--tls-san` gets the node IPs plus the address this playbook machine uses toward the initial server — the SNAT source when the virtualization host rewrites VM-to-VM traffic. Set `addon_k3s_host_ip` to override that detection, and `addon_k3s_extra_tls_sans: ["<address>"]` to add further values manually. With plain `pg addon install`, pass the observed address as an extra `--tls-san` yourself.
+**NATed peer networks.** etcd 3.7 checks a joining peer's certificate against the source address it observes. When peers see each other through NAT (a host that SNATs VM-to-VM traffic, for example), the join fails with `tls: "<observed address>" does not match any of the DNSNames`. The Ansible group handles this: every server's `--tls-san` gets the server IPs, and `addon_k3s_extra_tls_sans` adds any further addresses — put the SNAT source there, e.g. `addon_k3s_extra_tls_sans: ["10.0.0.254"]`. A direct L3 network — the usual bare-metal deployment — needs nothing beyond the server IPs. With plain `pg addon install`, pass the observed address as an extra `--tls-san` yourself.
 
 ## Custom CA
 
@@ -217,6 +217,48 @@ pg start                # starts autostart K3s nodes: cluster-init server, joini
 ```
 
 `pg start` starts the node containers in that order; it does not wait for cluster readiness. On a multi-host cluster, run `pg start` on the initial server's host first.
+
+## Removing a node
+
+Removing an agent:
+
+```bash
+# On any healthy server: stop scheduling and drop the Node object.
+pg k3s kubectl --name k3s -- drain node4 --ignore-daemonsets --delete-emptydir-data
+pg k3s kubectl --name k3s -- delete node node4
+# On the removed host: delete the container and its data.
+pg addon remove k3s --name k3s --clean-data
+```
+
+Removing a server, from a remaining server:
+
+```bash
+# 1. Evict workloads while the departing node is still healthy.
+pg k3s kubectl --name k3s -- drain node3 --ignore-daemonsets --delete-emptydir-data
+
+# 2. Remove the etcd member while every member is still running: the change is
+#    a raft entry and needs the current membership's quorum, which an
+#    even-sized cluster (two servers, for example) loses as soon as one member
+#    is down. A member left in the list keeps counting toward quorum even
+#    after its server is gone. K3s turns on client-certificate auth for
+#    embedded etcd, so pass the certificates K3s wrote into the data directory.
+TLS=/data/pg/addon/k3s/k3s/data/server/tls/etcd   # <data-dir>/server/tls/etcd
+export ETCDCTL_ENDPOINTS=https://127.0.0.1:2379
+pg etcdctl --ca $TLS/server-ca.crt \
+  --cert $TLS/server-client.crt --key $TLS/server-client.key member list
+pg etcdctl --ca $TLS/server-ca.crt \
+  --cert $TLS/server-client.crt --key $TLS/server-client.key member remove <member-id>
+
+# 3. Drop the Node object.
+pg k3s kubectl --name k3s -- delete node node3
+```
+
+Then run `pg addon remove k3s --name k3s --clean-data` on the departing host.
+`--clean-data` matters: role and membership live in the data directory, so a
+leftover directory makes a later reinstall join with the old identity. In an
+Ansible-managed cluster also drop the host from the group's inventory and
+`addon_k3s_roles` as described in the
+[add-on cluster chapter](../ansible/addon-cluster.md).
 
 ## Limitations
 

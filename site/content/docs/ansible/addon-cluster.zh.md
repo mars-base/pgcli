@@ -156,9 +156,10 @@ play 为 `serial: 1`；安装完引导 server 后只等待它的 `/readyz`，先
 加入的 server 会持续重试，直到该 API 可用，因此主机顺序不决定拓扑。verify play
 随后等待所有节点 `Ready`；之后往组里加主机、重跑剧本即自动加入。
 
-每台 server 的 `--tls-san` 包含全部成员 IP，外加运行剧本的机器到初始 server 的
-出口地址——宿主机改写 VM 互访流量时它就是 SNAT 源地址，etcd peer 证书必须接受它。
-可设 `addon_k3s_host_ip` 覆盖自动探测值。
+每台 server 的 `--tls-san` 包含 server 的 IP（agent 不加入——agent 既不提供 API 也
+不运行 etcd）。直连三层网络（通常的实体服务器部署）不需要额外取值。宿主机改写
+VM 互访流量时，etcd peer 证书必须接受观测到的 SNAT 源地址——把它写进
+`addon_k3s_extra_tls_sans`，例如 `["10.0.0.254"]`。
 
 组文件还暴露了节点镜像（`addon_k3s_version`，或完整的 `addon_k3s_image`）、宿主目录
 （`addon_k3s_data_dir`、`addon_k3s_kubelet_dir`、`addon_k3s_cni_dir`、
@@ -195,6 +196,13 @@ play 为 `serial: 1`；安装完引导 server 后只等待它的 `/readyz`，先
 主机，因此组文件里不再需要 `[:3]` 切片或 `state` 表达式。四成员布局列出全部四台。
 MinIO/silo MNSD 至少需要四个 endpoint；Redis、Valkey、vmcluster、vlcluster 也使用
 全部四台。k3s 接受任意数量主机（单机集群之后加主机、重跑剧本即可扩容）。
+
+移除单个 k3s 成员：先把节点从集群中摘除（drain 并删除 Node 对象；server 还要先移除
+etcd 成员），再在该主机上执行 `pg addon remove k3s --name k3s --clean-data`——具体
+命令见 K3s 插件文档。然后把该主机从 `hosts.ini` 的 `addon_k3s_cluster` 组和
+`addon_k3s_roles` 中删掉：留在 inventory 里的主机会在下次运行时被重新安装并重新
+加入。把组文件里的插件条目改成 `state: absent` 则是整集群销毁的路径，会把 K3s 从
+所有成员上移除（默认带 `--clean-data`，除非条目设了 `clean_data: false`）。
 
 ## 创建、验证、销毁
 
