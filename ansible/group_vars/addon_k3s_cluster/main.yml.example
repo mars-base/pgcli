@@ -114,11 +114,12 @@ addon_k3s_registries_file: ""
 addon_k3s_disable: []
 
 # Firewall backend for the embedded kube-proxy: nftables (Kubernetes 1.31+),
-# ipvs, or empty for kube-proxy's own default (iptables). kube-proxy runs on
-# every node, so servers and agents share the setting. nftables moves the
-# Service and NodePort rules to native "ip"/"ip6" "kube-proxy" nft tables; flannel
+# ipvs, or empty for kube-proxy's own default (iptables). Ships as nftables;
+# set it to "" to keep kube-proxy's iptables mode. kube-proxy runs on every
+# node, so servers and agents share the setting. nftables moves the Service
+# and NodePort rules to native "ip"/"ip6" "kube-proxy" nft tables; flannel
 # and the CNI plugins keep using the iptables frontend (nft-backed on Debian 12).
-addon_k3s_kube_proxy_mode: ""
+addon_k3s_kube_proxy_mode: nftables
 
 # ===========================================================================
 # Derived values — normally nothing to edit below this line.
@@ -198,6 +199,9 @@ _addon_k3s_cluster_flags: >-
   {%- if (_addon_k3s_host_ip | length > 0) and (_addon_k3s_host_ip not in _addon_k3s_cluster_node_ips) -%}
   {%- set _ = out.extend(['--tls-san', _addon_k3s_host_ip]) -%}
   {%- endif -%}
+  {%- for component in addon_k3s_disable -%}
+  {%- set _ = out.extend(['--disable', component]) -%}
+  {%- endfor -%}
   {%- endif -%}
   {%- if _addon_k3s_is_initial_server | bool -%}
   {%- set _ = out.extend(['--cluster-init']) -%}
@@ -207,9 +211,6 @@ _addon_k3s_cluster_flags: >-
   {%- if (_addon_k3s_is_initial_server | bool) and (addon_k3s_ca_days | int > 0) -%}
   {%- set _ = out.extend(['--ca-dir', _addon_k3s_shared_remote_dir ~ '/k3s-ca']) -%}
   {%- endif -%}
-  {%- for component in addon_k3s_disable -%}
-  {%- set _ = out.extend(['--disable', component]) -%}
-  {%- endfor -%}
   {%- if addon_k3s_kube_proxy_mode | default('', true) | length > 0 -%}
   {%- set _ = out.extend(['--kube-proxy-arg', 'proxy-mode=' ~ addon_k3s_kube_proxy_mode]) -%}
   {%- endif -%}

@@ -188,7 +188,8 @@ The group file also exposes the node image (`addon_k3s_version`, or a full
 `addon_k3s_base_dir`), optional log files (`addon_k3s_log_file`,
 `addon_k3s_container_log_file`), `addon_k3s_disable` for bundled components,
 `addon_k3s_kube_proxy_mode` for the embedded kube-proxy firewall backend
-(`nftables` on Kubernetes 1.31+; empty leaves kube-proxy's iptables default;
+(the shipped group file sets `nftables` on Kubernetes 1.31+; empty leaves
+kube-proxy's iptables default;
 flannel and the CNI plugins keep the iptables frontend, nft-backed on
 Debian 12; selecting `nftables` also installs the `nftables` package through
 the firewall role's install tasks) and `addon_k3s_extra_tls_sans` for
