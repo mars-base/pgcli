@@ -365,14 +365,22 @@ Each add-on has an inventory group with a fixed topology: `addon_<type>_single`
 `kafka`, `rabbitmq`, `rocketmq`, `k3s`, `vmcluster` and `vlcluster`). Declare entries in
 `group_vars/addon_<type>_<mode>/main.yml` and apply only that group:
 
-A `k3s` cluster group runs one node per host: the first
-`addon_k3s_server_count` hosts (default 3) are servers — the first bootstraps
-the embedded-etcd cluster — and the rest are agents that join it. The
-`k3s_shared` role prepares the shared material on the controller: the generated
-token is copied to every member, and an optional custom CA (for example 100
-years via `_addon_cluster_k3s_ca_days: 36500`) only to the initial server
-before its first start. Registry mirrors are rendered to a `registries.yaml`
-that every member mounts.
+A `k3s` group is the only k3s group and takes any number of hosts (one host
+makes a single-node cluster). `addon_k3s_roles` declares each host's role
+explicitly — hosts left out are agents, and group order does not decide the
+role — and `addon_k3s_cluster_init_server` names the one server that
+bootstraps embedded etcd with `--cluster-init` (empty picks the first server;
+it need not be the group's first host). Joins retry until the bootstrap
+server answers, and a host added to the group joins on the next run. The
+`k3s_shared` role prepares the shared material on the controller: the
+generated token is copied to every member, and an optional custom CA (for
+example 100 years via `addon_k3s_ca_days: 36500`; 0 keeps the K3s default,
+any custom lifetime must be greater than 10 days) only to the initial server
+before its first start. Registry mirrors are
+rendered to a `registries.yaml` that every member mounts. Server certificates
+carry every member IP plus the playbook machine's address toward the initial
+server (the SNAT source for NATed VM-to-VM traffic); `addon_k3s_host_ip`
+overrides the auto-detected value.
 
 ```yaml
 addon_etcd_single_addons:

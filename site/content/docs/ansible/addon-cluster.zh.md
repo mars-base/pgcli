@@ -42,7 +42,8 @@ node4
 
 `private_ip` 是必需的：peer 参数、宣告地址和共享证书的 SAN 都用它。主机顺序很
 重要——插件 play 以 `serial: 1` 按 inventory 顺序执行，首台主机先完成 bootstrap，
-其余成员再加入。
+其余成员再加入。（k3s 是例外：它的角色来自 `addon_k3s_roles`，与主机顺序无关，
+见下文。）
 
 每个分组都有自己独立、自包含的 `group_vars` 目录。按需复制并修改：
 
@@ -108,7 +109,7 @@ pgcli_addons: >-
 | 随机口令（`minio_root_password`、`silo_root_password`、`rustfs_root_password`、`seaweedfs_root_password`、`redis_password`、`valkey_password`、`clickhouse_admin_password`） | 控制机 `var/addon_cluster/shared/` |
 | 共享 CA（`ca.crt`、`ca.key`）、服务器密钥/CSR/证书、链证书与合并 PEM | 同一目录；CA 私钥不会离开控制机 |
 | RabbitMQ Erlang cookie 与管理密码 | 由 `pg addon rabbitmq secret generate` 生成并写入 etcd |
-| K3s 集群 token ——以及 `_addon_cluster_k3s_ca_days > 0` 时的自定义 CA 集合 | 控制机 `var/addon_cluster/shared/`；token 分发到每个成员，CA 只给初始 server |
+| K3s 集群 token ——以及 `addon_k3s_ca_days > 10` 时的自定义 CA 集合 | 控制机 `var/addon_cluster/shared/`；token 分发到每个成员，CA 只给初始 server |
 
 成员上的文件位于 `/data/pg/addon/shared/`（`ca.crt`、`server-chain.crt`、
 `server.key`、`server.pem`；私钥类文件权限 `0600`）。服务器证书覆盖所选
@@ -137,21 +138,33 @@ etcd 的 `/pgcli/rabbitmq/clusters/<name>/secrets/`，每个成员用
 K3s 由专属的 `k3s_shared` role 准备（每台主机一个节点，且始终以 root 运行，
 因为需要 rootful podman）：
 
-- **Token** —— `_addon_cluster_k3s_token_file` 留空时，在控制机生成一次
+- **Token** —— `addon_k3s_token_file` 留空时，在控制机生成一次
   `var/addon_cluster/shared/k3s_token`（`openssl rand -hex 32`）；填值则复用该文件。
   token 复制到每个成员的 `/data/pg/addon/shared/k3s-token`（0600）——每个节点都需要。
-- **自定义 CA** —— `_addon_cluster_k3s_ca_days: 0` 沿用 K3s 自签的 10 年 CA。正数
-  会用 vendored 的 `generate-custom-ca-certs.sh` 生成完整 CA 集合（任意年限，
+- **自定义 CA** —— `addon_k3s_ca_days: 0` 沿用 K3s 自签的 10 年 CA。大于 10 的数
+  会用 vendored 的 `generate-custom-ca-certs.sh` 生成完整 CA 集合（更长的任意年限，
   `36500` = 100 年），并在**初始 server 首启之前**用 `--ca-dir` 注入——只注入它。
-- **Registry mirror** —— `_addon_k3s_registry_mirrors`（或完整
-  `_addon_k3s_registries_file`）渲染到每个成员的
+- **Registry mirror** —— `addon_k3s_registry_mirrors`（或完整
+  `addon_k3s_registries_file`）渲染到每个成员的
   `/data/pg/addon/shared/k3s-registries.yaml`；文件变化时 play 会追加 `--force`
   重建节点容器，让 containerd 重新读取。
 
-角色按主机顺序拆分：前 `addon_k3s_server_count` 个成员（默认 3）是 server（首台
-`--cluster-init` 引导嵌入式 etcd），其余为 agent，加入首台 server。`apply.yaml`
-在安装下一个成员之前等待当前 server 的 `/readyz`（插件 play 为 `serial: 1`），
-其 verify play 随后等待所有节点 `Ready`。
+角色靠变量显式声明：`addon_k3s_roles` 把成员映射为 `server` 或 `agent`（未列出的
+主机默认 agent），`addon_k3s_cluster_init_server` 指定唯一一台用 `--cluster-init`
+引导嵌入式 etcd 的 server（留空取第一个 server，它不必是组内第一台主机）。插件
+play 为 `serial: 1`；安装完引导 server 后只等待它的 `/readyz`，先启动的 agent 和
+加入的 server 会持续重试，直到该 API 可用，因此主机顺序不决定拓扑。verify play
+随后等待所有节点 `Ready`；之后往组里加主机、重跑剧本即自动加入。
+
+每台 server 的 `--tls-san` 包含全部成员 IP，外加运行剧本的机器到初始 server 的
+出口地址——宿主机改写 VM 互访流量时它就是 SNAT 源地址，etcd peer 证书必须接受它。
+可设 `addon_k3s_host_ip` 覆盖自动探测值。
+
+组文件还暴露了节点镜像（`addon_k3s_version`，或完整的 `addon_k3s_image`）、宿主目录
+（`addon_k3s_data_dir`、`addon_k3s_kubelet_dir`、`addon_k3s_cni_dir`、
+`addon_k3s_log_dir`，均位于 `addon_k3s_base_dir` 下）、可选日志文件
+（`addon_k3s_log_file`、`addon_k3s_container_log_file`）、`addon_k3s_disable`
+（关闭自带组件）以及 `addon_k3s_extra_tls_sans`（额外 SAN）。
 
 ## 内置布局
 
@@ -169,7 +182,7 @@ K3s 由专属的 `k3s_shared` role 准备（每台主机一个节点，且始终
 | `kafka` | 前三台 | 9092 broker，19093 controller | KRaft 法定人数；512 MiB 堆适配参考 VM |
 | `rabbitmq` | 前三台 | 5672 AMQP，15672 management | 依赖 etcd；共享 cookie/密码来自 etcd |
 | `rocketmq` | 前三台 | 9876 namesrv，10911 broker，8080 proxy，8081 gRPC | 小主机使用缩减后的堆 |
-| `k3s` | 3 server + 1 agent | 6443 API，2379/2380 etcd，10250 kubelet，8472/udp VXLAN | 首台 server 引导嵌入式 etcd，第四台以 agent 加入；`addon_k3s_server_count` 可调 server 数量 |
+| `k3s` | 任意数量主机 | 6443 API，2379/2380 etcd，10250 kubelet，8472/udp VXLAN | 角色显式声明：`addon_k3s_roles` 映射 server/agent，`addon_k3s_cluster_init_server` 指定 `--cluster-init` 引导 server，其余节点加入它 |
 | `vmcluster` | 4 | 8480 insert，8481 select，8482 storage，8483/8484 internal | 首台承担 storage+insert+select，其余仅 storage |
 | `vlcluster` | 4 | 9430 insert，9431 select，9432 storage | 同样的访问/存储拆分；存储分片但不复制 |
 
@@ -177,7 +190,8 @@ K3s 由专属的 `k3s_shared` role 准备（每台主机一个节点，且始终
 `addon_clickhouse_keeper_cluster`、`addon_kafka_cluster`、
 `addon_rabbitmq_cluster`、`addon_rocketmq_cluster`）在 `hosts.ini` 中只列前三台
 主机，因此组文件里不再需要 `[:3]` 切片或 `state` 表达式。四成员布局列出全部四台。
-MinIO/silo MNSD 至少需要四个 endpoint；Redis、Valkey、vmcluster、vlcluster 与 k3s 也使用全部四台。
+MinIO/silo MNSD 至少需要四个 endpoint；Redis、Valkey、vmcluster、vlcluster 也使用
+全部四台。k3s 接受任意数量主机（单机集群之后加主机、重跑剧本即可扩容）。
 
 ## 创建、验证、销毁
 

@@ -183,7 +183,7 @@ S3 与 HA 分组见本站的对应页面。
 | kafka | 单机 + 集群 | KRaft controller 法定人数 |
 | rabbitmq | 单机 + 集群 | etcd 节点发现 |
 | rocketmq | 单机 + 集群 | standalone vs DLedger 集群 |
-| k3s | 单机 + 集群 | rootful 容器；所有 server（含单机）都用 `--cluster-init` 引导嵌入式 etcd，单机集群之后可原地加 server 扩容，token 由控制机生成 |
+| k3s | 仅集群组（一台或多台主机） | rootful 容器；`addon_k3s_roles` 显式指定每台的 server/agent 角色（未列出的默认 agent，与主机顺序无关），`addon_k3s_cluster_init_server` 指定用 `--cluster-init` 引导嵌入式 etcd 的 server，单机集群之后可原地加主机扩容；token 由控制机生成 |
 | gitea | 单机 | |
 | beegfs | 单机 | v1 每台主机一个文件系统 |
 | juicefs | 单机 | 宿主二进制；外部 S3 + 元数据 |

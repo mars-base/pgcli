@@ -422,9 +422,11 @@
     - not (_addon_autostart | bool)
     - (_addon_cfg.autostart | default(false)) | bool
 
-# A fresh K3s server returns from `addon install` before its API answers. The
-# next host in this serial:1 play joins it, so wait for /readyz here first.
-# Agents have no local API; the K3s verify play waits for every node instead.
+# A fresh K3s cluster-init server returns from `addon install` before its API
+# answers. Every other member joins that one API, so wait for it here before
+# the play moves on. Joining servers and agents have no API of their own yet:
+# k3s retries the join until the bootstrap server answers, so their position
+# in the group does not matter (the K3s verify play waits for every node).
 - name: Wait for the K3s API server to become ready
   ansible.builtin.command:
     argv:
@@ -448,6 +450,7 @@
     - addon.type == 'k3s'
     - _addon_state == 'present'
     - _addon_cfg.role | default('server') == 'server'
+    - (_addon_cfg.cluster_init | default(false)) | bool
 
 # ---------------------------------------------------------------------------
 # Declarative protected sites (safeline only). Each apply reads the console's

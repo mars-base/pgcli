@@ -587,14 +587,11 @@
 
 # K3s verification: the serial Add-ons play already waited for each server's
 # API, but agents join asynchronously. Wait for every node to report Ready and
-# assert the expected topology (single: the first host is the only server, the
-# rest agents; cluster: the first addon_k3s_server_count hosts are servers,
-# the rest agents). A group that is not in the inventory is skipped, and
-# --limit narrows the play as usual.
+# assert the topology declared by addon_k3s_roles (every host in the group is
+# a node; the ones mapped to server must show control-plane). A group that is
+# not in the inventory is skipped, and --limit narrows the play as usual.
 - name: Verify the K3s nodes
-  hosts: >-
-    {{ ((groups['addon_k3s_cluster'] | default([])) + (groups['addon_k3s_single'] | default([])))
-       | unique }}
+  hosts: addon_k3s_cluster
   gather_facts: false
   become: true
   become_user: root
@@ -602,15 +599,8 @@
     _addon_k3s_name: >-
       {{ lookup('vars', 'addon_' ~ _addon_kind ~ '_addons', default=[])
          | map(attribute='name', default='k3s') | first }}
-    _addon_k3s_expected_servers: >-
-      {{ ([groups['addon_k3s_cluster'] | default([]) | length,
-           addon_k3s_server_count | default(3) | int] | min)
-         if _addon_mode | default('') == 'cluster'
-         else ([groups['addon_k3s_single'] | default([]) | length, 1] | min) }}
-    _addon_k3s_expected_nodes: >-
-      {{ (groups['addon_k3s_cluster'] | default([]) | length)
-         if _addon_mode | default('') == 'cluster'
-         else (groups['addon_k3s_single'] | default([]) | length) }}
+    _addon_k3s_expected_servers: "{{ _addon_k3s_server_hosts | length }}"
+    _addon_k3s_expected_nodes: "{{ _addon_k3s_cluster_hosts | length }}"
   tasks:
     - name: Wait for every K3s node to be Ready
       ansible.builtin.command:
@@ -633,8 +623,9 @@
       retries: 6
       delay: 10
       changed_when: false
-      run_once: true
-      when: _addon_type | default('') == 'k3s'
+      when:
+        - _addon_type | default('') == 'k3s'
+        - _addon_k3s_is_initial_server | bool
       tags: [addon]
 
     - name: Read the K3s node list
@@ -653,8 +644,9 @@
           - "--no-headers"
       register: _addon_k3s_nodes
       changed_when: false
-      run_once: true
-      when: _addon_type | default('') == 'k3s'
+      when:
+        - _addon_type | default('') == 'k3s'
+        - _addon_k3s_is_initial_server | bool
       tags: [addon]
 
     - name: Assert the expected K3s topology is Ready
@@ -669,6 +661,7 @@
           Expected {{ _addon_k3s_expected_servers }} server(s) and
           {{ (_addon_k3s_expected_nodes | int) - (_addon_k3s_expected_servers | int) }}
           agent(s), all Ready; got: {{ _addon_k3s_nodes.stdout_lines | join(' | ') }}
-      run_once: true
-      when: _addon_type | default('') == 'k3s'
+      when:
+        - _addon_type | default('') == 'k3s'
+        - _addon_k3s_is_initial_server | bool
       tags: [addon]

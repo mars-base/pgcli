@@ -194,7 +194,7 @@ the product flags; the S3 and HA groups are covered in their own pages here.
 | kafka | standalone + cluster | KRaft controller quorum |
 | rabbitmq | standalone + cluster | etcd peer discovery |
 | rocketmq | standalone + cluster | standalone vs DLedger cluster |
-| k3s | standalone + cluster | rootful pods; every server (a lone one too) bootstraps embedded etcd with `--cluster-init`, so a single-node cluster can grow later; token generated on the controller |
+| k3s | cluster group only (one or more hosts) | rootful pods; `addon_k3s_roles` sets each host's server/agent role (hosts left out are agents; order does not matter) and `addon_k3s_cluster_init_server` picks the `--cluster-init` bootstrap server, so a single-node cluster can grow later by adding hosts; token generated on the controller |
 | gitea | standalone | |
 | beegfs | standalone | v1 is one filesystem per host |
 | juicefs | standalone | host binary; external S3 + metadata |

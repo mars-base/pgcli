@@ -59,13 +59,13 @@ present entries: it waits for every member, creates the cluster once if
 needed, and waits until all 16384 slots are assigned. Reruns skip the create
 step.
 
-K3s rides the serial add-on play too: after each server installs, the play
-waits for its `/readyz` before the next member joins. The verify play at the
-end runs on the union of the `addon_k3s_single` and `addon_k3s_cluster`
-groups (groups absent from the inventory are skipped): it waits for every
-node to be `Ready`, then asserts the topology — one node for a single
-install, or `addon_k3s_server_count` servers plus the remaining hosts as
-agents in a cluster.
+K3s rides the serial add-on play too: roles come from `addon_k3s_roles` and the
+bootstrap server from `addon_k3s_cluster_init_server`; after installing the
+bootstrap server the play waits for its `/readyz`, while joiners started
+earlier retry until that API answers. The verify play at the end runs on the
+`addon_k3s_cluster` group when the inventory defines it: it waits for every
+node to be `Ready`, then asserts the topology — one node per group host and
+one control-plane per server in `addon_k3s_roles`.
 
 ```bash
 # Full stack for one deployment mode

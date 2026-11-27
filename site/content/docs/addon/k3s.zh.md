@@ -121,17 +121,22 @@ pg addon install k3s --name k3s --role agent \
 无论打到哪台 server，API 证书都有效。`pg k3s kubectl --name k3s -- get nodes` 中 server 显示
 `control-plane`，agent 显示 `<none>`（role 标签在节点注册后几秒才写入）。
 
-Ansible 的插件组会替你完成这套编排（默认 3 server + 1 agent、`serial: 1`，token 与可选 CA
-由 `k3s_shared` role 分发）——见 [用 Ansible 部署插件](../ansible/addons.md) 与
-[插件集群章节](../ansible/addon-cluster.md)。单机组（`addon_k3s_single`）可以列一台或
-多台主机：第一台作为 server 传 `--cluster-init`（得到嵌入式 etcd，之后还能继续加 server
-扩容），其余主机作为 agent 自动加入；上面的命令行单机示例则保持 SQLite。
+Ansible 的组 `addon_k3s_cluster` 同时覆盖单机与集群：在组里列出任意数量主机，用
+`addon_k3s_roles` 显式声明每台的 `server`/`agent` 角色（未列出的默认 agent，角色
+与主机顺序无关），再用 `addon_k3s_cluster_init_server` 指定唯一一台以 `--cluster-init`
+引导嵌入式 etcd 的 server（留空取角色表里的第一个 server，它不必是组内第一台主机）。
+token 与可选 CA 由 `k3s_shared` role 分发，play 为 `serial: 1`；先于初始 server 启动
+的加入节点会持续重试，直到其 API 可用，之后往组里加主机重跑剧本即自动加入——见
+[用 Ansible 部署插件](../ansible/addons.md) 与 [插件集群章节](../ansible/addon-cluster.md)。
+上面的命令行单机示例则保持 SQLite。
 
 **NAT 网络下的 peer 校验。** etcd 3.7 会用观测到的源地址校验加入节点的证书。节点间流量
 经过 NAT（例如实验室宿主机对 VM 互访做 SNAT）时，join 会报
-`tls: "<观测到的地址>" does not match any of the DNSNames`。把该源地址加进每台 server 的
-`--tls-san`——或在集群组里设置 `_addon_cluster_k3s_extra_tls_sans: ["<地址>"]`——让它同样
-进入 etcd peer 证书。
+`tls: "<观测到的地址>" does not match any of the DNSNames`。Ansible 分组会自动处理：
+每台 server 的 `--tls-san` 除了节点 IP，还包含运行剧本的机器到初始 server 的出口
+地址——宿主机改写 VM 互访流量时，它就是 SNAT 源地址。可设 `addon_k3s_host_ip`
+覆盖该自动探测，或用 `addon_k3s_extra_tls_sans: ["<地址>"]` 手工追加。
+直接用 `pg addon install` 时需自行把观测到的源地址作为额外的 `--tls-san` 传入。
 
 ## 自定义 CA
 
@@ -161,8 +166,8 @@ pgcli 会在**初始 server 首启之前**把它们复制到 `<data-dir>/server/
 `k3s certificate rotate-ca` 轮换，或清空数据目录重装（数据存储里已经写入了原始信任材料）。
 
 Ansible role 可以为初始 server 生成并分发这套 CA：在
-`group_vars/addon_k3s_cluster/main.yml` 里设 `_addon_cluster_k3s_ca_days: 36500`
-（0 表示沿用 K3s 默认）。
+`group_vars/addon_k3s_cluster/main.yml` 里设 `addon_k3s_ca_days: 36500`
+（0 表示沿用 K3s 默认；自定义年限须大于 10 天）。
 
 ## Registry mirror 与 air-gap
 

@@ -52,11 +52,11 @@ Redis 与 Valkey 组建 play 在所有成员都存在之后运行（插件 play 
 只在 `--limit addon_<type>_cluster` 且条目为 present 时才生效：等待所有成员应答，
 必要时组建一次集群，然后等待全部 16384 个 slot 分配完成。重跑会跳过组建步骤。
 
-K3s 同样走 serial 的插件 play：每台 server 安装后先等它的 `/readyz`，下一个成员
-才开始加入。末尾的校验 play 运行在 `addon_k3s_single` 与 `addon_k3s_cluster` 分组的
-并集上（不在 inventory 里的分组自动跳过）：先等所有节点 `Ready`，再断言拓扑——
-单机安装是一个节点，集群则是 `addon_k3s_server_count` 台 server 加其余主机作为
-agent。
+K3s 同样走 serial 的插件 play：角色来自 `addon_k3s_roles`，引导 server 由
+`addon_k3s_cluster_init_server` 指定；安装完引导 server 后只等它的 `/readyz`，
+先启动的加入节点会持续重试直到该 API 可用。末尾的校验 play 在 inventory 定义了
+`addon_k3s_cluster` 分组时运行：先等所有节点 `Ready`，再断言拓扑——每个组内主机
+一个节点，`addon_k3s_roles` 里的每个 server 对应一个 control-plane。
 
 ```bash
 # 完整部署某个模式

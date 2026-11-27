@@ -108,9 +108,9 @@ pg addon install k3s --name k3s --role agent \
 
 Wait for the first server to answer `/readyz` before starting the joiners. List every server address in `--tls-san` so the API certificate is valid whichever server clients hit. `pg k3s kubectl --name k3s -- get nodes` shows `control-plane` for servers and `<none>` for agents (K3s writes the role label a few seconds after the node registers).
 
-The Ansible add-on groups build this layout for you (3 servers + 1 agent by default, `serial: 1`, token and optional CA distributed by the `k3s_shared` role) — see [Deploying add-ons with Ansible](../ansible/addons.md) and the [add-on cluster chapter](../ansible/addon-cluster.md). The single group (`addon_k3s_single`) takes one or more hosts: the first becomes a `--cluster-init` server (its embedded-etcd datastore can take more servers later) and the rest join it as agents; the CLI standalone example above keeps SQLite.
+The Ansible group `addon_k3s_cluster` covers both: list one or more hosts, declare each role in `addon_k3s_roles` (`server` or `agent`; hosts left out are agents — group order does not decide the role), and name the server that bootstraps embedded etcd with `addon_k3s_cluster_init_server` (empty picks the first server, and it does not have to be the group's first host). The `k3s_shared` role distributes the token and the optional CA, and the play is `serial: 1`; joining nodes started before the bootstrap server retry until its API answers, and hosts added to the group join on the next run — see [Deploying add-ons with Ansible](../ansible/addons.md) and the [add-on cluster chapter](../ansible/addon-cluster.md). The CLI standalone example above keeps SQLite.
 
-**NATed peer networks.** etcd 3.7 checks a joining peer's certificate against the source address it observes. When peers see each other through NAT (a host that SNATs VM-to-VM traffic, for example), the join fails with `tls: "<observed address>" does not match any of the DNSNames`. Add that observed source address to every server's `--tls-san` — or set `_addon_cluster_k3s_extra_tls_sans: ["<address>"]` in the cluster group — so it lands in the etcd peer certificates too.
+**NATed peer networks.** etcd 3.7 checks a joining peer's certificate against the source address it observes. When peers see each other through NAT (a host that SNATs VM-to-VM traffic, for example), the join fails with `tls: "<observed address>" does not match any of the DNSNames`. The Ansible group handles this: every server's `--tls-san` gets the node IPs plus the address this playbook machine uses toward the initial server — the SNAT source when the virtualization host rewrites VM-to-VM traffic. Set `addon_k3s_host_ip` to override that detection, and `addon_k3s_extra_tls_sans: ["<address>"]` to add further values manually. With plain `pg addon install`, pass the observed address as an extra `--tls-san` yourself.
 
 ## Custom CA
 
@@ -134,7 +134,7 @@ service.key
 
 pgcli copies them into `<data-dir>/server/tls` (keys with mode 0600) **before the initial server's first start** and refuses partial sets. It is valid only on the standalone or `--cluster-init` server; joining servers and agents learn the CA from the cluster. On repeat installs the existing CA is kept when it matches the source; a different CA is refused — rotate it with `k3s certificate rotate-ca` or clear the data directory (the datastore already holds the original trust material).
 
-The Ansible role can generate and distribute this CA for the initial server: set `_addon_cluster_k3s_ca_days: 36500` in `group_vars/addon_k3s_cluster/main.yml` (0 keeps the K3s default).
+The Ansible role can generate and distribute this CA for the initial server: set `addon_k3s_ca_days: 36500` in `group_vars/addon_k3s_cluster/main.yml` (0 keeps the K3s default; a custom lifetime must be greater than 10 days).
 
 ## Registry mirrors and air-gap
 

@@ -9,19 +9,48 @@
 # module_defaults chdir to the deployment account's home, which the controller
 # user running these delegated tasks cannot enter.
 
+- name: Validate the K3s role selection
+  ansible.builtin.assert:
+    that:
+      - _addon_k3s_roles is mapping
+      - (_addon_k3s_roles | dict2items
+         | rejectattr('value', 'in', ['server', 'agent']) | list | length) == 0
+      - (_addon_k3s_roles | dict2items | map(attribute='key')
+         | difference(_addon_k3s_cluster_hosts) | length) == 0
+      - _addon_k3s_server_hosts | length > 0
+      - _addon_k3s_init_server in _addon_k3s_server_hosts
+    fail_msg: >-
+      addon_k3s_roles maps inventory hostnames to server or agent (hosts left
+      out are agents) and must name at least one server from
+      groups['addon_k3s_cluster']; addon_k3s_cluster_init_server picks the
+      --cluster-init bootstrap server and must be one of them (empty uses the
+      first server). Got roles {{ _addon_k3s_roles }} and init server
+      "{{ _addon_k3s_init_server }}".
+  tags: [addon]
+
+- name: Validate the K3s custom CA lifetime
+  ansible.builtin.assert:
+    that:
+      - (addon_k3s_ca_days | int) == 0 or (addon_k3s_ca_days | int) > 10
+    fail_msg: >-
+      addon_k3s_ca_days is 0 (keep the K3s self-signed 10-year CA) or a
+      custom CA lifetime in days greater than 10; got
+      {{ addon_k3s_ca_days }}.
+  tags: [addon]
+
 - name: Validate the K3s registry configuration
   ansible.builtin.assert:
     that:
-      - _addon_k3s_registry_mirrors is mapping
-      - not ((_addon_k3s_registry_mirrors | length > 0) and (_addon_k3s_registries_file | length > 0))
-      - (_addon_k3s_registry_mirrors | dict2items | selectattr('value', 'string') | list | length) == 0
-      - (_addon_k3s_registry_mirrors | dict2items | map(attribute='value') | flatten
+      - addon_k3s_registry_mirrors is mapping
+      - not ((addon_k3s_registry_mirrors | length > 0) and (addon_k3s_registries_file | length > 0))
+      - (addon_k3s_registry_mirrors | dict2items | selectattr('value', 'string') | list | length) == 0
+      - (addon_k3s_registry_mirrors | dict2items | map(attribute='value') | flatten
          | reject('match', '^https?://') | list | length) == 0
     fail_msg: >-
-      _addon_k3s_registry_mirrors is a mapping of registry to a list of
+      addon_k3s_registry_mirrors is a mapping of registry to a list of
       http(s) endpoints, one entry per mirrored registry
       (docker.io: ["https://<id>.mirror.aliyuncs.com"]). It is mutually
-      exclusive with _addon_k3s_registries_file, a complete registries.yaml
+      exclusive with addon_k3s_registries_file, a complete registries.yaml
       on the controller.
   tags: [addon]
 
@@ -37,17 +66,17 @@
 - name: Resolve the K3s token source
   ansible.builtin.set_fact:
     _addon_k3s_token_src: >-
-      {{ _addon_cluster_k3s_token_file if _addon_cluster_k3s_token_file | length > 0
+      {{ addon_k3s_token_file if addon_k3s_token_file | length > 0
          else _addon_k3s_shared_dir ~ '/k3s_token' }}
   tags: [addon]
 
 - name: Check the supplied K3s token file exists
   ansible.builtin.stat:
-    path: "{{ _addon_cluster_k3s_token_file }}"
+    path: "{{ addon_k3s_token_file }}"
   register: _addon_k3s_token_stat
   delegate_to: localhost
   become: false
-  when: _addon_cluster_k3s_token_file | length > 0
+  when: addon_k3s_token_file | length > 0
   tags: [addon]
 
 - name: Require the supplied K3s token file
@@ -55,9 +84,9 @@
     that:
       - _addon_k3s_token_stat.stat.exists | default(false)
     fail_msg: >-
-      _addon_cluster_k3s_token_file points at a missing controller file:
-      {{ _addon_cluster_k3s_token_file }}.
-  when: _addon_cluster_k3s_token_file | length > 0
+      addon_k3s_token_file points at a missing controller file:
+      {{ addon_k3s_token_file }}.
+  when: addon_k3s_token_file | length > 0
   tags: [addon]
 
 - name: Generate the K3s cluster token
@@ -67,7 +96,7 @@
     chdir: "{{ _addon_k3s_shared_dir }}"
   delegate_to: localhost
   become: false
-  when: _addon_cluster_k3s_token_file | length == 0
+  when: addon_k3s_token_file | length == 0
   tags: [addon]
 
 - name: Restrict the K3s token permissions
@@ -76,7 +105,7 @@
     mode: '0600'
   delegate_to: localhost
   become: false
-  when: _addon_cluster_k3s_token_file | length == 0
+  when: addon_k3s_token_file | length == 0
   tags: [addon]
 
 # K3s runs rootful (host network, privileged), so the material it reads must
@@ -107,11 +136,11 @@
     chdir: "{{ _addon_k3s_shared_dir }}"
   environment:
     DATA_DIR: "{{ _addon_k3s_shared_dir }}/k3s-ca"
-    DAYS: "{{ _addon_cluster_k3s_ca_days | string }}"
+    DAYS: "{{ addon_k3s_ca_days | string }}"
   delegate_to: localhost
   become: false
   when:
-    - _addon_cluster_k3s_ca_days | int > 0
+    - addon_k3s_ca_days | int > 0
     - _addon_k3s_is_initial_server | bool
   tags: [addon]
 
@@ -123,7 +152,7 @@
   become: true
   become_user: root
   when:
-    - _addon_cluster_k3s_ca_days | int > 0
+    - addon_k3s_ca_days | int > 0
     - _addon_k3s_is_initial_server | bool
   tags: [addon]
 
@@ -138,7 +167,7 @@
   become: true
   become_user: root
   when:
-    - _addon_cluster_k3s_ca_days | int > 0
+    - addon_k3s_ca_days | int > 0
     - _addon_k3s_is_initial_server | bool
   tags: [addon]
 
@@ -152,19 +181,19 @@
   become_user: root
   no_log: true
   when:
-    - _addon_cluster_k3s_ca_days | int > 0
+    - addon_k3s_ca_days | int > 0
     - _addon_k3s_is_initial_server | bool
   tags: [addon]
 
 - name: Copy the custom registries file to the member
   ansible.builtin.copy:
-    src: "{{ _addon_k3s_registries_file }}"
+    src: "{{ addon_k3s_registries_file }}"
     dest: "{{ _addon_k3s_registries_path }}"
     mode: '0600'
   register: _addon_k3s_registries_copy
   become: true
   become_user: root
-  when: _addon_k3s_registries_file | length > 0
+  when: addon_k3s_registries_file | length > 0
   tags: [addon]
 
 - name: Render the registry mirrors as registries.yaml on the member
@@ -176,8 +205,8 @@
   become: true
   become_user: root
   when:
-    - _addon_k3s_registries_file | length == 0
-    - _addon_k3s_registry_mirrors | length > 0
+    - addon_k3s_registries_file | length == 0
+    - addon_k3s_registry_mirrors | length > 0
   tags: [addon]
 
 # containerd reads registries.yaml only at node start, and pgcli only
