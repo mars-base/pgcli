@@ -76,6 +76,8 @@ not supported in nftables mode before Kubernetes 1.38 (KEP-6032).
 
 ## Single-node install
 
+**The SQLite single-node install is for local testing and development.** Production deployments should use the HA cluster layout below (embedded etcd, at least three servers).
+
 ```bash
 # Every node needs a pre-generated token: K3s would otherwise mint its
 # own per-cluster token on first boot and other members could not join.
@@ -95,6 +97,24 @@ pg k3s kubectl --name k3s -- get nodes -o wide
 ```
 
 > **kubectl flags go after `--`.** pg's own parser handles the arguments first: `-o` is pg's global config-output flag and `-n` is unknown to it. Anything after `--` reaches kubectl untouched.
+
+**Expansion: agents can join, servers cannot.**
+
+- **Agents can join** a SQLite single-node cluster at any time with `--role agent --server https://<server>:6443` and the same token:
+
+  ```bash
+  # On the agent host, with the same token file as the server:
+  pg addon install k3s --name k3s --role agent \
+    --server https://10.0.0.11:6443 \
+    --token-file /tmp/k3s-token
+  ```
+
+  Then confirm the node is `Ready` from the server:
+
+  ```bash
+  pg k3s kubectl --name k3s -- get nodes -o wide
+  ```
+- **Servers cannot join** a SQLite-backed cluster — multiple servers require embedded etcd. The upstream-supported conversion is to restart the existing server with `--cluster-init`; K3s converts the datastore to embedded etcd, after which further servers join exactly as in the HA layout. With pgcli that restart is `--force` with the new flags (the container is recreated and the data directory is kept). If growth is uncertain, install the first server in the HA shape from the start (`--cluster-init`; the Ansible group always does).
 
 ## HA cluster
 
@@ -125,7 +145,7 @@ pg addon install k3s --name k3s --role agent \
 
 Wait for the first server to answer `/readyz` before starting the joiners. List every server address in `--tls-san` so the API certificate is valid whichever server clients hit; agent addresses are not needed — an agent serves neither the API nor etcd. `pg k3s kubectl --name k3s -- get nodes` shows `control-plane` for servers and `<none>` for agents (K3s writes the role label a few seconds after the node registers).
 
-The Ansible group `addon_k3s_cluster` covers both: list one or more hosts, declare each role in `addon_k3s_roles` (`server` or `agent`; hosts left out are agents — group order does not decide the role), and name the server that bootstraps embedded etcd with `addon_k3s_cluster_init_server` (empty picks the first server, and it does not have to be the group's first host). The `k3s_shared` role distributes the token and the optional CA, and the play is `serial: 1`; joining nodes started before the bootstrap server retry until its API answers, and hosts added to the group join on the next run — see [Deploying add-ons with Ansible](../ansible/addons.md) and the [add-on cluster chapter](../ansible/addon-cluster.md). The CLI standalone example above keeps SQLite.
+The Ansible group `addon_k3s_cluster` always builds the cluster mode (embedded etcd) and never the SQLite standalone form: the bootstrap server gets `--cluster-init` even when the group lists a single host, which is then a one-member etcd cluster and grows by adding hosts; only the CLI standalone example above (no `--cluster-init`) uses SQLite. List one or more hosts, declare each role in `addon_k3s_roles` (`server` or `agent`; hosts left out are agents — group order does not decide the role), and name the server that bootstraps embedded etcd with `addon_k3s_cluster_init_server` (empty picks the first server, and it does not have to be the group's first host). The `k3s_shared` role distributes the token and the optional CA, and the play is `serial: 1`; joining nodes started before the bootstrap server retry until its API answers, and hosts added to the group join on the next run — see [Deploying add-ons with Ansible](../ansible/addons.md) and the [add-on cluster chapter](../ansible/addon-cluster.md).
 
 **NATed peer networks.** etcd 3.7 checks a joining peer's certificate against the source address it observes. When peers see each other through NAT (a host that SNATs VM-to-VM traffic, for example), the join fails with `tls: "<observed address>" does not match any of the DNSNames`. The Ansible group handles this: every server's `--tls-san` gets the server IPs, and `addon_k3s_extra_tls_sans` adds any further addresses — put the SNAT source there, e.g. `addon_k3s_extra_tls_sans: ["10.0.0.254"]`. A direct L3 network — the usual bare-metal deployment — needs nothing beyond the server IPs. With plain `pg addon install`, pass the observed address as an extra `--tls-san` yourself.
 
@@ -263,7 +283,7 @@ Ansible-managed cluster also drop the host from the group's inventory and
 ## Limitations
 
 - **One node per host.** The fixed host-network ports (6443/2379/2380/10250/8472) make a second node impossible; use more hosts for more nodes.
-- **Role and membership are part of the data directory.** Changing `role`, `--cluster-init` or `--server` requires removing the node with `--clean-data` and reinstalling; `--force` alone keeps the old datastore.
+- **Role and membership are part of the data directory.** Changing `role` or joining a different cluster requires removing the node with `--clean-data` and reinstalling. The one upstream-supported in-place change is converting a SQLite single-node server to embedded etcd: restart it with `--cluster-init` (`--force` recreates the container and keeps the data), after which more servers can join.
 - **Traefik/ServiceLB bind ports 80 and 443 on the host.** Disable them with `--disable traefik` (ServiceLB keeps serving LoadBalancer services) or `--disable servicelb` when nginx/safeline/other web add-ons use those ports.
 - **Token and CA rotation are manual.** pgcli does not rotate them; use `k3s certificate rotate-ca` or reinstall from a clean data directory.
 - **No daemon integration.** Nodes rely on `--restart unless-stopped` for self-healing and on `pg start --autostart` for boot order, like the other add-ons.

@@ -80,6 +80,8 @@ nf_tables；只有 alternatives 指向 `iptables-legacy` 的主机才是真 lega
 
 ## 单机安装
 
+**SQLite 单机安装仅用于本地测试与开发。** 生产环境应使用下面的 HA 集群形态（嵌入式 etcd，至少三台 server）。
+
 ```bash
 # 每个节点都需要预生成的 token：否则 K3s 会在首启时自造一个
 # 集群 token，其他成员无法加入。
@@ -101,6 +103,29 @@ pg k3s kubectl --name k3s -- get nodes -o wide
 
 > **kubectl 的 flag 要放在 `--` 之后。** 参数先经过 pg 自己的解析：`-o` 是 pg 的全局
 > config 输出参数，`-n` 它不认识。`--` 之后的参数原样交给 kubectl。
+
+扩容：**agent 可以加入，server 不能**。
+
+- **agent 可加入**：SQLite 单机 server 之后可以随时添加 agent——以 `--role agent
+  --server https://<server>:6443` 加入同一个 token 即可：
+
+  ```bash
+  # 在 agent 主机上，token 文件与 server 相同：
+  pg addon install k3s --name k3s --role agent \
+    --server https://10.0.0.11:6443 \
+    --token-file /tmp/k3s-token
+  ```
+
+  加入后在 server 上确认节点已 `Ready`：
+
+  ```bash
+  pg k3s kubectl --name k3s -- get nodes -o wide
+  ```
+- **server 不可加入**：多 server 需要嵌入式 etcd，无法直接加入 SQLite 单机。K3s 官方
+  支持把现有 SQLite 单机原地转换为嵌入式 etcd：以 `--cluster-init` 重启该 server 即可
+  （在 pgcli 里用 `--force` 以新参数重建容器、保留数据），之后就能按 HA 集群的方式
+  继续加入 server。不确定之后是否会扩容时，直接按 HA 集群形态安装首台 server
+  （带 `--cluster-init`；Ansible 组始终如此）。
 
 ## HA 集群
 
@@ -135,14 +160,16 @@ pg addon install k3s --name k3s --role agent \
 etcd。`pg k3s kubectl --name k3s -- get nodes` 中 server 显示
 `control-plane`，agent 显示 `<none>`（role 标签在节点注册后几秒才写入）。
 
-Ansible 的组 `addon_k3s_cluster` 同时覆盖单机与集群：在组里列出任意数量主机，用
-`addon_k3s_roles` 显式声明每台的 `server`/`agent` 角色（未列出的默认 agent，角色
-与主机顺序无关），再用 `addon_k3s_cluster_init_server` 指定唯一一台以 `--cluster-init`
-引导嵌入式 etcd 的 server（留空取角色表里的第一个 server，它不必是组内第一台主机）。
-token 与可选 CA 由 `k3s_shared` role 分发，play 为 `serial: 1`；先于初始 server 启动
-的加入节点会持续重试，直到其 API 可用，之后往组里加主机重跑剧本即自动加入——见
-[用 Ansible 部署插件](../ansible/addons.md) 与 [插件集群章节](../ansible/addon-cluster.md)。
-上面的命令行单机示例则保持 SQLite。
+Ansible 的组 `addon_k3s_cluster` 始终组建**集群模式**（嵌入式 etcd），不会部署 SQLite
+单机：初始 server 总是带 `--cluster-init`，即使组里只列一台主机——那是一个单成员 etcd
+集群，加主机即扩容；只有上面的命令行单机示例（不传 `--cluster-init`）才使用 SQLite。
+在组里列出任意数量主机，用 `addon_k3s_roles` 显式声明每台的 `server`/`agent` 角色
+（未列出的默认 agent，角色与主机顺序无关），再用 `addon_k3s_cluster_init_server`
+指定唯一一台以 `--cluster-init` 引导嵌入式 etcd 的 server（留空取角色表里的第一个
+server，它不必是组内第一台主机）。token 与可选 CA 由 `k3s_shared` role 分发，play 为
+`serial: 1`；先于初始 server 启动的加入节点会持续重试，直到其 API 可用，之后往组里
+加主机重跑剧本即自动加入——见 [用 Ansible 部署插件](../ansible/addons.md) 与
+[插件集群章节](../ansible/addon-cluster.md)。
 
 **NAT 网络下的 peer 校验。** etcd 3.7 会用观测到的源地址校验加入节点的证书。节点间流量
 经过 NAT（例如实验室宿主机对 VM 互访做 SNAT）时，join 会报
@@ -300,8 +327,9 @@ pg k3s kubectl --name k3s -- delete node node3
 
 - **每台主机一个节点。** host 网络端口固定（6443/2379/2380/10250/8472），无法跑第二个节点；
   更多节点请加主机。
-- **角色与成员关系属于数据目录。** 修改 `role`、`--cluster-init` 或 `--server` 需要
-  `--clean-data` 删除节点后重装；仅 `--force` 会保留旧数据存储。
+- **角色与成员关系属于数据目录。** 修改 `role` 或改投其他集群需要 `--clean-data` 删除
+  节点后重装。唯一受上游支持的原地变更，是把 SQLite 单机 server 转换为嵌入式 etcd：
+  以 `--cluster-init` 重启（`--force` 重建容器、保留数据），之后即可加入更多 server。
 - **Traefik/ServiceLB 会占用宿主 80/443。** 当 nginx/safeline/其他 Web 插件占用这些端口时，
   用 `--disable traefik`（保留 ServiceLB 服务 LoadBalancer）或 `--disable servicelb`。
 - **token 与 CA 轮换需要手动。** pgcli 不自动轮换；用 `k3s certificate rotate-ca`，或从干净

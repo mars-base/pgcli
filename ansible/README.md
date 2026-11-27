@@ -366,7 +366,8 @@ Each add-on has an inventory group with a fixed topology: `addon_<type>_single`
 `group_vars/addon_<type>_<mode>/main.yml` and apply only that group:
 
 A `k3s` group is the only k3s group and takes any number of hosts (one host
-makes a single-node cluster). `addon_k3s_roles` declares each host's role
+makes a single-node embedded-etcd cluster — the group never deploys the SQLite
+standalone form). `addon_k3s_roles` declares each host's role
 explicitly — hosts left out are agents, and group order does not decide the
 role — and `addon_k3s_cluster_init_server` names the one server that
 bootstraps embedded etcd with `--cluster-init` (empty picks the first server;

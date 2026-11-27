@@ -151,7 +151,9 @@ K3s 由专属的 `k3s_shared` role 准备（每台主机一个节点，且始终
 
 角色靠变量显式声明：`addon_k3s_roles` 把成员映射为 `server` 或 `agent`（未列出的
 主机默认 agent），`addon_k3s_cluster_init_server` 指定唯一一台用 `--cluster-init`
-引导嵌入式 etcd 的 server（留空取第一个 server，它不必是组内第一台主机）。插件
+引导嵌入式 etcd 的 server（留空取第一个 server，它不必是组内第一台主机）。这个组
+始终组建**嵌入式 etcd 集群模式**——即使只列一台主机，也一样带 `--cluster-init`，
+形成单成员 etcd 集群；SQLite 单机只存在于命令行安装方式。插件
 play 为 `serial: 1`；安装完引导 server 后只等待它的 `/readyz`，先启动的 agent 和
 加入的 server 会持续重试，直到该 API 可用，因此主机顺序不决定拓扑。verify play
 随后等待所有节点 `Ready`；之后往组里加主机、重跑剧本即自动加入。
@@ -195,7 +197,8 @@ VM 互访流量时，etcd peer 证书必须接受观测到的 SNAT 源地址—�
 `addon_rabbitmq_cluster`、`addon_rocketmq_cluster`）在 `hosts.ini` 中只列前三台
 主机，因此组文件里不再需要 `[:3]` 切片或 `state` 表达式。四成员布局列出全部四台。
 MinIO/silo MNSD 至少需要四个 endpoint；Redis、Valkey、vmcluster、vlcluster 也使用
-全部四台。k3s 接受任意数量主机（单机集群之后加主机、重跑剧本即可扩容）。
+全部四台。k3s 接受任意数量主机，且始终使用嵌入式 etcd 集群模式：只列一台就是
+单成员 etcd 集群，加主机、重跑剧本即可扩容；生产环境应至少列出三台 server。
 
 移除单个 k3s 成员：先把节点从集群中摘除（drain 并删除 Node 对象；server 还要先移除
 etcd 成员），再在该主机上执行 `pg addon remove k3s --name k3s --clean-data`——具体

@@ -171,7 +171,10 @@ root because it needs rootful podman):
 Roles are explicit: `addon_k3s_roles` maps members to `server` or `agent`
 (hosts left out are agents) and `addon_k3s_cluster_init_server` names the one
 server that `--cluster-init`s the embedded etcd (empty picks the first
-server). The add-on play is `serial: 1`; after installing the bootstrap server
+server). The group always builds the embedded-etcd cluster mode — even a
+single listed host gets `--cluster-init` and forms a one-member etcd cluster;
+the SQLite standalone form exists only through the CLI install. The add-on
+play is `serial: 1`; after installing the bootstrap server
 it waits for its `/readyz`, while agents and joining servers started earlier
 retry the join until that API answers, so group order does not decide the
 topology. The verify play then waits for every node to be `Ready`, and hosts
@@ -223,8 +226,10 @@ The three-node layouts (`addon_etcd_cluster`, `addon_seaweedfs_cluster`,
 hosts in `hosts.ini`, so their group files need no `[:3]` slices or `state`
 expressions. The four-member layouts list all four hosts. MinIO/silo MNSD needs
 at least four endpoints; Redis, Valkey, vmcluster and vlcluster also use all
-four. k3s accepts any number of hosts (a single node grows by adding hosts and
-re-running the play).
+four. k3s accepts any number of hosts and always runs the embedded-etcd
+cluster mode: one host is a one-member etcd cluster, and the cluster grows by
+adding hosts and re-running the play. Production clusters list at least three
+servers.
 
 To remove a single k3s member, take the node out of the cluster first (drain
 and delete the Node object; for a server remove its etcd member as well) and
