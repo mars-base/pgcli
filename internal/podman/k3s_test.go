@@ -59,6 +59,7 @@ func TestK3sRunArgsServer(t *testing.T) {
 		AdvertiseAddress: "10.0.0.5",
 		TLSSAN:           []string{"10.0.0.5", "api.example.com"},
 		Disable:          []string{"traefik", "servicelb"},
+		KubeProxyArgs:    []string{"proxy-mode=nftables"},
 		LogFile:          filepath.Join(t.TempDir(), "k3s.log"),
 		ContainerLogFile: filepath.Join(t.TempDir(), "container.log"),
 	})
@@ -133,6 +134,7 @@ func TestK3sRunArgsServer(t *testing.T) {
 		"--tls-san", "api.example.com",
 		"--disable", "traefik",
 		"--disable", "servicelb",
+		"--kube-proxy-arg", "proxy-mode=nftables",
 		"--log", "/var/log/k3s.log",
 		"--alsologtostderr",
 		"--private-registry", "/run/k3s-registries.yaml",
@@ -154,6 +156,7 @@ func TestK3sRunArgsAgent(t *testing.T) {
 		AdvertiseAddress: "10.0.0.6",
 		TLSSAN:           []string{"10.0.0.6"},
 		Disable:          []string{"traefik"},
+		KubeProxyArgs:    []string{"proxy-mode=nftables"},
 	})
 	args := k3sRunArgs(&kc, "")
 	idx := slices.Index(args, kc.ImageTag)
@@ -173,6 +176,9 @@ func TestK3sRunArgsAgent(t *testing.T) {
 	if !slices.Contains(agentArgs, "--server") || !slices.Contains(agentArgs, "https://10.0.0.5:6443") {
 		t.Errorf("agent argv missing join flags: %q", agentArgs)
 	}
+	if idx := slices.Index(agentArgs, "--kube-proxy-arg"); idx < 0 || agentArgs[idx+1] != "proxy-mode=nftables" {
+		t.Errorf("agent argv missing --kube-proxy-arg: %q", agentArgs)
+	}
 	if slices.Contains(args, "--private-registry") {
 		t.Error("no registries file: --private-registry must be omitted")
 	}
@@ -180,7 +186,7 @@ func TestK3sRunArgsAgent(t *testing.T) {
 
 func TestK3sRunArgsMinimal(t *testing.T) {
 	kc := k3sTestConfig(t, config.K3sConfig{})
-	for _, flag := range []string{"--advertise-address", "--tls-san", "--disable", "--log", "--alsologtostderr", "--private-registry", "--cluster-init", "--server"} {
+	for _, flag := range []string{"--advertise-address", "--tls-san", "--disable", "--kube-proxy-arg", "--log", "--alsologtostderr", "--private-registry", "--cluster-init", "--server"} {
 		if slices.Contains(k3sRunArgs(&kc, ""), flag) {
 			t.Errorf("minimal server argv must omit %s", flag)
 		}

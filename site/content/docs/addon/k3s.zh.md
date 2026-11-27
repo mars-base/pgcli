@@ -40,6 +40,7 @@ host 网络端口必须空闲：
 | `--advertise-address` | | 仅 server：对端与客户端访问本节点的地址；也会写进导出的 kubeconfig |
 | `--tls-san` | | 仅 server：API 证书的额外 TLS SAN（可重复） |
 | `--disable` | | 仅 server：关闭自带组件，如 `traefik`、`servicelb`、`metrics-server`（可重复） |
+| `--kube-proxy-arg` | | 传给内嵌 kube-proxy 的自定义参数，如 `proxy-mode=nftables`（K8s 1.31+，可重复；kube-proxy 在每个节点都运行） |
 | `--ca-dir` | | 自定义 CA 目录，**仅初始 server** 且**仅在其首启之前**；见[自定义 CA](#自定义-ca) |
 | `--registry-mirror` | | containerd registry mirror `REGISTRY=ENDPOINT`（可重复，如 `docker.io=https://<id>.mirror.aliyuncs.com`）；与 `--registries-file` 互斥 |
 | `--registries-file` | | 完整 `registries.yaml`（可含 auth/TLS）；与 `--registry-mirror` 互斥 |
@@ -64,6 +65,18 @@ host 网络端口必须空闲：
 | `--log-file` | `/var/log/k3s.log` |
 | `--token-file` | `/run/k3s-token`（只读） |
 | 生成/用户的 `registries.yaml` | `/run/k3s-registries.yaml`（只读） |
+
+## kube-proxy 与 nftables
+
+`--kube-proxy-arg` 把自定义参数透传给内嵌 kube-proxy。Kubernetes 1.31+（本版本为
+v1.37）可用 `--kube-proxy-arg proxy-mode=nftables` 把 Service/NodePort 规则从
+KUBE-* iptables 链改为原生 `ip`/`ip6` `kube-proxy` nft 表。flannel 和内置 CNI 插件仍调用
+iptables 前端；Debian 12 上该前端由 nftables 提供（`iptables-nft`），规则最终仍写入
+nf_tables；只有 alternatives 指向 `iptables-legacy` 的主机才是真 legacy。
+
+在运行中的集群上切换 proxy mode 是有损操作（应在安装时指定，或用 `--force` 重建
+节点），且 Kubernetes 1.38 之前的 nftables 模式不支持 127.0.0.1 上的 NodePort
+（KEP-6032）。
 
 ## 单机安装
 

@@ -113,6 +113,13 @@ addon_k3s_registries_file: ""
 # used on these hosts.
 addon_k3s_disable: []
 
+# Firewall backend for the embedded kube-proxy: nftables (Kubernetes 1.31+),
+# ipvs, or empty for kube-proxy's own default (iptables). kube-proxy runs on
+# every node, so servers and agents share the setting. nftables moves the
+# Service and NodePort rules to native "ip"/"ip6" "kube-proxy" nft tables; flannel
+# and the CNI plugins keep using the iptables frontend (nft-backed on Debian 12).
+addon_k3s_kube_proxy_mode: ""
+
 # ===========================================================================
 # Derived values — normally nothing to edit below this line.
 # ===========================================================================
@@ -203,6 +210,9 @@ _addon_k3s_cluster_flags: >-
   {%- for component in addon_k3s_disable -%}
   {%- set _ = out.extend(['--disable', component]) -%}
   {%- endfor -%}
+  {%- if addon_k3s_kube_proxy_mode | default('', true) | length > 0 -%}
+  {%- set _ = out.extend(['--kube-proxy-arg', 'proxy-mode=' ~ addon_k3s_kube_proxy_mode]) -%}
+  {%- endif -%}
   {%- if (addon_k3s_registry_mirrors | length > 0) or (addon_k3s_registries_file | length > 0) -%}
   {%- set _ = out.extend(['--registries-file', _addon_k3s_registries_path]) -%}
   {%- endif -%}

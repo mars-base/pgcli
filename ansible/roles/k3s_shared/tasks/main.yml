@@ -28,6 +28,28 @@
       "{{ _addon_k3s_init_server }}".
   tags: [addon]
 
+# kube-proxy's nftables backend and the host firewall role share the nftables
+# package; only the package is needed here, not the firewall ruleset.
+# The add-on play runs with gather_facts: false, so the firewall role's
+# os_family checks need this minimal fact set.
+- name: Gather minimal facts for the nftables backend
+  ansible.builtin.setup:
+    gather_subset:
+      - min
+  when: addon_k3s_kube_proxy_mode | default('', true) == 'nftables'
+  tags: [addon]
+
+- name: Install nftables for the kube-proxy nftables backend
+  ansible.builtin.include_role:
+    name: nftables
+    tasks_from: install
+    apply:
+      become: true
+      tags:
+        - addon
+  when: addon_k3s_kube_proxy_mode | default('', true) == 'nftables'
+  tags: [addon]
+
 - name: Validate the K3s custom CA lifetime
   ansible.builtin.assert:
     that:

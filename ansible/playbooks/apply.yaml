@@ -596,9 +596,10 @@
   become: true
   become_user: root
   vars:
-    _addon_k3s_name: >-
-      {{ lookup('vars', 'addon_' ~ _addon_kind ~ '_addons', default=[])
-         | map(attribute='name', default='k3s') | first }}
+    _addon_k3s_entries: >-
+      {{ lookup('vars', 'addon_' ~ _addon_kind ~ '_addons', default=[]) }}
+    _addon_k3s_name: "{{ _addon_k3s_entries | map(attribute='name', default='k3s') | first }}"
+    _addon_k3s_state: "{{ _addon_k3s_entries | map(attribute='state', default='present') | first | default('present') }}"
     _addon_k3s_expected_servers: "{{ _addon_k3s_server_hosts | length }}"
     _addon_k3s_expected_nodes: "{{ _addon_k3s_cluster_hosts | length }}"
   tasks:
@@ -625,6 +626,7 @@
       changed_when: false
       when:
         - _addon_type | default('') == 'k3s'
+        - _addon_k3s_state == 'present'
         - _addon_k3s_is_initial_server | bool
       tags: [addon]
 
@@ -646,6 +648,7 @@
       changed_when: false
       when:
         - _addon_type | default('') == 'k3s'
+        - _addon_k3s_state == 'present'
         - _addon_k3s_is_initial_server | bool
       tags: [addon]
 
@@ -663,5 +666,6 @@
           agent(s), all Ready; got: {{ _addon_k3s_nodes.stdout_lines | join(' | ') }}
       when:
         - _addon_type | default('') == 'k3s'
+        - _addon_k3s_state == 'present'
         - _addon_k3s_is_initial_server | bool
       tags: [addon]

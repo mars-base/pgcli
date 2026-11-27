@@ -3272,18 +3272,22 @@ type K3sConfig struct {
 	AdvertiseAddress string   `yaml:"advertise_address,omitempty"`
 	TLSSAN           []string `yaml:"tls_san,omitempty"`
 	Disable          []string `yaml:"disable,omitempty"`
+	// KubeProxyArgs are extra flags for the embedded kube-proxy, passed as
+	// repeated --kube-proxy-arg. kube-proxy runs on every node, so both roles
+	// accept them (e.g. proxy-mode=nftables).
+	KubeProxyArgs []string `yaml:"kube_proxy_args,omitempty"`
 
-	DataDir    string `yaml:"data_dir,omitempty"`     // host dir -> /var/lib/rancher/k3s
-	KubeletDir string `yaml:"kubelet_dir,omitempty"`  // host dir -> /var/lib/kubelet
-	CNIDir     string `yaml:"cni_dir,omitempty"`      // host dir -> /var/lib/cni
-	LogDir     string `yaml:"log_dir,omitempty"`      // host dir -> /var/log
-	LogFile    string `yaml:"log_file,omitempty"`     // optional host file -> /var/log/k3s.log
+	DataDir    string `yaml:"data_dir,omitempty"`    // host dir -> /var/lib/rancher/k3s
+	KubeletDir string `yaml:"kubelet_dir,omitempty"` // host dir -> /var/lib/kubelet
+	CNIDir     string `yaml:"cni_dir,omitempty"`     // host dir -> /var/lib/cni
+	LogDir     string `yaml:"log_dir,omitempty"`     // host dir -> /var/log
+	LogFile    string `yaml:"log_file,omitempty"`    // optional host file -> /var/log/k3s.log
 	// ContainerLogFile optionally pins Podman's k8s-file log path. Empty uses
 	// Podman's own default logging.
 	ContainerLogFile string `yaml:"container_log_file,omitempty"`
 
-	TokenFile string `yaml:"token_file"`          // host token file, mounted read-only at /run/k3s-token
-	CADir     string `yaml:"ca_dir,omitempty"`    // custom CA for the initial server only
+	TokenFile string `yaml:"token_file"`       // host token file, mounted read-only at /run/k3s-token
+	CADir     string `yaml:"ca_dir,omitempty"` // custom CA for the initial server only
 	// RegistriesFile is a complete registries.yaml (may include auth/TLS).
 	// Mutually exclusive with RegistryMirrors.
 	RegistriesFile  string              `yaml:"registries_file,omitempty"`
@@ -6408,6 +6412,11 @@ func (c *Config) Validate() error {
 			}
 			if !filepath.IsAbs(kc.CADir) {
 				return fmt.Errorf("%s.ca_dir must be an absolute path, got %q", path, kc.CADir)
+			}
+		}
+		for _, arg := range kc.KubeProxyArgs {
+			if strings.TrimSpace(arg) == "" {
+				return fmt.Errorf("%s.kube_proxy_args must not contain empty entries", path)
 			}
 		}
 		if kc.RegistriesFile != "" && len(kc.RegistryMirrors) > 0 {

@@ -40,6 +40,7 @@ func runAddonInstallK3s(cmd *cobra.Command) error {
 	advertiseAddress, _ := cmd.Flags().GetString("advertise-address")
 	tlsSAN, _ := cmd.Flags().GetStringArray("tls-san")
 	disable, _ := cmd.Flags().GetStringArray("disable")
+	kubeProxyArgs, _ := cmd.Flags().GetStringArray("kube-proxy-arg")
 	tokenFile, _ := cmd.Flags().GetString("token-file")
 	caDir, _ := cmd.Flags().GetString("ca-dir")
 	registriesFile, _ := cmd.Flags().GetString("registries-file")
@@ -111,6 +112,9 @@ func runAddonInstallK3s(cmd *cobra.Command) error {
 	}
 	if cmd.Flags().Changed("disable") {
 		existing.Disable = disable
+	}
+	if cmd.Flags().Changed("kube-proxy-arg") {
+		existing.KubeProxyArgs = kubeProxyArgs
 	}
 	if cmd.Flags().Changed("token-file") && tokenFile != "" {
 		existing.TokenFile = podman.HostMountPath(tokenFile)
@@ -216,6 +220,9 @@ func runAddonInstallK3s(cmd *cobra.Command) error {
 		fmt.Printf("  Log file:    %s\n", kc.LogFile)
 	}
 	fmt.Printf("  Token file:  %s\n", kc.TokenFile)
+	if len(kc.KubeProxyArgs) > 0 {
+		fmt.Printf("  kube-proxy:  %s\n", strings.Join(kc.KubeProxyArgs, ", "))
+	}
 	if kc.CADir != "" {
 		fmt.Printf("  Custom CA:   %s\n", kc.CADir)
 	}

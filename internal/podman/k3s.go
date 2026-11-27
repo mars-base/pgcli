@@ -627,6 +627,9 @@ func k3sRunArgs(kc *config.K3sConfig, registries string) []string {
 			args = append(args, "--disable", disabled)
 		}
 	}
+	for _, proxyArg := range kc.KubeProxyArgs {
+		args = append(args, "--kube-proxy-arg", proxyArg)
+	}
 	if kc.LogFile != "" {
 		args = append(args, "--log", "/var/log/k3s.log", "--alsologtostderr")
 	}

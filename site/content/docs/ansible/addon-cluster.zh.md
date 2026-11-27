@@ -164,7 +164,10 @@ play 为 `serial: 1`；安装完引导 server 后只等待它的 `/readyz`，先
 （`addon_k3s_data_dir`、`addon_k3s_kubelet_dir`、`addon_k3s_cni_dir`、
 `addon_k3s_log_dir`，均位于 `addon_k3s_base_dir` 下）、可选日志文件
 （`addon_k3s_log_file`、`addon_k3s_container_log_file`）、`addon_k3s_disable`
-（关闭自带组件）以及 `addon_k3s_extra_tls_sans`（额外 SAN）。
+（关闭自带组件）、`addon_k3s_kube_proxy_mode`（内嵌 kube-proxy 的防火墙后端，K8s 1.31+
+可选 `nftables`；留空沿用 kube-proxy 默认的 iptables；flannel 与 CNI 插件仍走 iptables
+前端，在 Debian 12 上由 nft 兼容层提供；选 `nftables` 时 play 还会通过防火墙 role 的
+安装任务补装 `nftables` 软件包）以及 `addon_k3s_extra_tls_sans`（额外 SAN）。
 
 ## 内置布局
 

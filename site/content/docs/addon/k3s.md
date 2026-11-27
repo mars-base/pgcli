@@ -32,6 +32,7 @@ One node per host: the API, etcd and kubelet ports are fixed, so `pg.yaml` allow
 | `--advertise-address` | | Server only: address peers and clients use to reach this node; also rewritten into the exported kubeconfig |
 | `--tls-san` | | Server only: extra TLS SAN for the API certificate (repeatable) |
 | `--disable` | | Server only: bundled component to disable, e.g. `traefik`, `servicelb`, `metrics-server` (repeatable) |
+| `--kube-proxy-arg` | | Custom flag for the embedded kube-proxy, e.g. `proxy-mode=nftables` (Kubernetes 1.31+, repeatable; kube-proxy runs on every node) |
 | `--ca-dir` | | Custom CA directory, **initial server only** and **before its first start**; see [Custom CA](#custom-ca) |
 | `--registry-mirror` | | containerd registry mirror `REGISTRY=ENDPOINT` (repeatable, e.g. `docker.io=https://<id>.mirror.aliyuncs.com`); mutually exclusive with `--registries-file` |
 | `--registries-file` | | Complete `registries.yaml` to mount (may include auth/TLS); mutually exclusive with `--registry-mirror` |
@@ -56,6 +57,22 @@ The controller mounts are:
 | `--log-file` | `/var/log/k3s.log` |
 | `--token-file` | `/run/k3s-token` (read-only) |
 | generated/user `registries.yaml` | `/run/k3s-registries.yaml` (read-only) |
+
+## kube-proxy and nftables
+
+`--kube-proxy-arg` forwards custom flags to the embedded kube-proxy. On
+Kubernetes 1.31+ (this build runs v1.37)
+`--kube-proxy-arg proxy-mode=nftables` moves the Service and NodePort rules
+from the KUBE-* iptables chains to native `ip`/`ip6` `kube-proxy` nftables
+tables.
+flannel and the bundled CNI plugins keep programming the iptables frontend; on
+Debian 12 that frontend is nftables-backed (`iptables-nft`), so every rule
+still lands in nf_tables, while hosts whose alternatives point at
+`iptables-legacy` stay legacy.
+
+Switching the proxy mode on a running cluster is disruptive (set it on
+install, or recreate the node with `--force`), and NodePorts on 127.0.0.1 are
+not supported in nftables mode before Kubernetes 1.38 (KEP-6032).
 
 ## Single-node install
 

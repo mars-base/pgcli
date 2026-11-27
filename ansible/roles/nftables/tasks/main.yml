@@ -1,12 +1,6 @@
 ---
-- name: Require a supported host
-  ansible.builtin.assert:
-    that:
-      - ansible_facts.os_family in ['Debian', 'RedHat']
-    fail_msg: >-
-      The nftables role supports Debian-family (Debian, Ubuntu) and
-      RedHat-family (Fedora, Rocky) hosts only.
-    quiet: true
+- name: Install the nftables package
+  ansible.builtin.import_tasks: install.yml
 
 - name: Require nftables_ssh_sources to be a list
   ansible.builtin.assert:
@@ -84,20 +78,6 @@
         == nftables_sets | map(attribute='name') | unique | list | length
     fail_msg: "nftables_sets contains duplicate set names."
     quiet: true
-
-- name: Install nftables (Debian family)
-  ansible.builtin.apt:
-    name: nftables
-    state: present
-    update_cache: true
-    cache_valid_time: 3600
-  when: ansible_facts.os_family == 'Debian'
-
-- name: Install nftables (RedHat family)
-  ansible.builtin.dnf:
-    name: nftables
-    state: present
-  when: ansible_facts.os_family == 'RedHat'
 
 - name: Remove iptables persistence packages
   ansible.builtin.apt:

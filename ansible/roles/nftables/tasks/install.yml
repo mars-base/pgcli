@@ -1,0 +1,25 @@
+---
+# Package-only entry point: the nftables role uses it from tasks/main.yml, and
+# the K3s add-on includes it to satisfy the kube-proxy nftables backend.
+- name: Require a supported host
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.os_family in ['Debian', 'RedHat']
+    fail_msg: >-
+      The nftables role supports Debian-family (Debian, Ubuntu) and
+      RedHat-family (Fedora, Rocky) hosts only.
+    quiet: true
+
+- name: Install nftables (Debian family)
+  ansible.builtin.apt:
+    name: nftables
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: ansible_facts.os_family == 'Debian'
+
+- name: Install nftables (RedHat family)
+  ansible.builtin.dnf:
+    name: nftables
+    state: present
+  when: ansible_facts.os_family == 'RedHat'
