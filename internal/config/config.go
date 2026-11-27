@@ -3272,6 +3272,14 @@ type K3sConfig struct {
 	AdvertiseAddress string   `yaml:"advertise_address,omitempty"`
 	TLSSAN           []string `yaml:"tls_san,omitempty"`
 	Disable          []string `yaml:"disable,omitempty"`
+	// ClusterCIDR is the Pod network range (--cluster-cidr); empty keeps the
+	// K3s default 10.42.0.0/16. Server-only, and every server must use the
+	// same value. A comma-separated IPv4/IPv6 pair selects dual-stack, which
+	// must be set when the cluster is created.
+	ClusterCIDR string `yaml:"cluster_cidr,omitempty"`
+	// ServiceCIDR is the Service VIP range (--service-cidr); empty keeps the
+	// K3s default 10.43.0.0/16. Same server-only and dual-stack rules.
+	ServiceCIDR string `yaml:"service_cidr,omitempty"`
 	// KubeProxyArgs are extra flags for the embedded kube-proxy, passed as
 	// repeated --kube-proxy-arg. kube-proxy runs on every node, so both roles
 	// accept them (e.g. proxy-mode=nftables).
@@ -3304,6 +3312,21 @@ func (k K3sConfig) InitialServer() bool {
 
 // Joiner reports whether the node joins an existing server.
 func (k K3sConfig) Joiner() bool { return k.ServerURL != "" }
+
+// validK3sCIDRList accepts one CIDR, or two comma-separated CIDRs for
+// dual-stack (one per address family).
+func validK3sCIDRList(value string) bool {
+	parts := strings.Split(value, ",")
+	if len(parts) > 2 {
+		return false
+	}
+	for _, part := range parts {
+		if _, _, err := net.ParseCIDR(strings.TrimSpace(part)); err != nil {
+			return false
+		}
+	}
+	return true
+}
 
 // ValidateK3sCADir checks that dir contains the complete custom CA file set
 // K3s expects before the initial server boot. Empty means no custom CA.
@@ -6396,8 +6419,8 @@ func (c *Config) Validate() error {
 			if kc.ClusterInit {
 				return fmt.Errorf("%s: cluster_init is only valid on a server", path)
 			}
-			if kc.AdvertiseAddress != "" || len(kc.TLSSAN) > 0 || len(kc.Disable) > 0 {
-				return fmt.Errorf("%s: advertise_address, tls_san and disable are server-only options", path)
+			if kc.AdvertiseAddress != "" || len(kc.TLSSAN) > 0 || len(kc.Disable) > 0 || kc.ClusterCIDR != "" || kc.ServiceCIDR != "" {
+				return fmt.Errorf("%s: advertise_address, tls_san, disable, cluster_cidr and service_cidr are server-only options", path)
 			}
 			if kc.CADir != "" {
 				return fmt.Errorf("%s: ca_dir is only valid on the initial server", path)
@@ -6405,6 +6428,12 @@ func (c *Config) Validate() error {
 		}
 		if kc.ClusterInit && kc.ServerURL != "" {
 			return fmt.Errorf("%s: cluster_init and server_url are mutually exclusive", path)
+		}
+		if kc.ClusterCIDR != "" && !validK3sCIDRList(kc.ClusterCIDR) {
+			return fmt.Errorf("%s.cluster_cidr %q must be a CIDR or an IPv4/IPv6 pair for dual-stack", path, kc.ClusterCIDR)
+		}
+		if kc.ServiceCIDR != "" && !validK3sCIDRList(kc.ServiceCIDR) {
+			return fmt.Errorf("%s.service_cidr %q must be a CIDR or an IPv4/IPv6 pair for dual-stack", path, kc.ServiceCIDR)
 		}
 		if kc.CADir != "" {
 			if kc.Role != "server" || kc.Joiner() {

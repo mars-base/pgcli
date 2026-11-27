@@ -32,6 +32,8 @@ One node per host: the API, etcd and kubelet ports are fixed, so `pg.yaml` allow
 | `--advertise-address` | | Server only: address peers and clients use to reach this node; also rewritten into the exported kubeconfig |
 | `--tls-san` | | Server only: extra TLS SAN for the API certificate (repeatable) |
 | `--disable` | | Server only: bundled component to disable, e.g. `traefik`, `servicelb`, `metrics-server` (repeatable) |
+| `--cluster-cidr` | `10.42.0.0/16` | Server only: Pod network range (`--cluster-cidr`); a comma-separated IPv4/IPv6 pair selects dual-stack, which must be set at cluster creation; every server must use the same value |
+| `--service-cidr` | `10.43.0.0/16` | Server only: Service VIP range (`--service-cidr`); same dual-stack and all-servers-identical rules |
 | `--kube-proxy-arg` | | Custom flag for the embedded kube-proxy, e.g. `proxy-mode=nftables` (Kubernetes 1.31+, repeatable; kube-proxy runs on every node) |
 | `--ca-dir` | | Custom CA directory, **initial server only** and **before its first start**; see [Custom CA](#custom-ca) |
 | `--registry-mirror` | | containerd registry mirror `REGISTRY=ENDPOINT` (repeatable, e.g. `docker.io=https://<id>.mirror.aliyuncs.com`); mutually exclusive with `--registries-file` |
@@ -144,6 +146,8 @@ pg addon install k3s --name k3s --role agent \
 ```
 
 Wait for the first server to answer `/readyz` before starting the joiners. List every server address in `--tls-san` so the API certificate is valid whichever server clients hit; agent addresses are not needed — an agent serves neither the API nor etcd. `pg k3s kubectl --name k3s -- get nodes` shows `control-plane` for servers and `<none>` for agents (K3s writes the role label a few seconds after the node registers).
+
+**Pod and Service CIDRs.** Set `--cluster-cidr` / `--service-cidr` only when the defaults (`10.42.0.0/16` and `10.43.0.0/16`) collide with existing networks. Every server must pass the same values — a server started with different ranges fails to join — and they are fixed at cluster creation. For dual-stack, pass a comma-separated IPv4/IPv6 pair on the bootstrap server, e.g. `--cluster-cidr 10.42.0.0/16,2001:db8:42::/56 --service-cidr 10.43.0.0/16,2001:db8:43::/112`.
 
 The Ansible group `addon_k3s_cluster` always builds the cluster mode (embedded etcd) and never the SQLite standalone form: the bootstrap server gets `--cluster-init` even when the group lists a single host, which is then a one-member etcd cluster and grows by adding hosts; only the CLI standalone example above (no `--cluster-init`) uses SQLite. List one or more hosts, declare each role in `addon_k3s_roles` (`server` or `agent`; hosts left out are agents — group order does not decide the role), and name the server that bootstraps embedded etcd with `addon_k3s_cluster_init_server` (empty picks the first server, and it does not have to be the group's first host). The `k3s_shared` role distributes the token and the optional CA, and the play is `serial: 1`; joining nodes started before the bootstrap server retry until its API answers, and hosts added to the group join on the next run — see [Deploying add-ons with Ansible](../ansible/addons.md) and the [add-on cluster chapter](../ansible/addon-cluster.md).
 

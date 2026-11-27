@@ -81,6 +81,8 @@ func TestK3sValidateRoles(t *testing.T) {
 	valid := []K3sConfig{
 		{},
 		{ClusterInit: true, AdvertiseAddress: "10.0.0.1", TLSSAN: []string{"10.0.0.1"}},
+		{ClusterCIDR: "10.42.0.0/16", ServiceCIDR: "10.43.0.0/16"},
+		{ClusterCIDR: "10.42.0.0/16,2001:db8:42::/56", ServiceCIDR: "10.43.0.0/16,2001:db8:43::/112"},
 		{Role: "server", ServerURL: "https://10.0.0.1:6443"},
 		{Role: "agent", ServerURL: "https://10.0.0.1:6443"},
 	}
@@ -99,6 +101,11 @@ func TestK3sValidateRoles(t *testing.T) {
 		{"agent without server", K3sConfig{Role: "agent"}, "must set server_url"},
 		{"agent cluster init", K3sConfig{Role: "agent", ServerURL: "https://10.0.0.1:6443", ClusterInit: true}, "cluster_init is only valid"},
 		{"agent advertise", K3sConfig{Role: "agent", ServerURL: "https://10.0.0.1:6443", AdvertiseAddress: "10.0.0.2"}, "server-only"},
+		{"agent cluster cidr", K3sConfig{Role: "agent", ServerURL: "https://10.0.0.1:6443", ClusterCIDR: "10.42.0.0/16"}, "server-only"},
+		{"agent service cidr", K3sConfig{Role: "agent", ServerURL: "https://10.0.0.1:6443", ServiceCIDR: "10.43.0.0/16"}, "server-only"},
+		{"bad cluster cidr", K3sConfig{ClusterCIDR: "10.42.0.0"}, "cluster_cidr"},
+		{"bad service cidr", K3sConfig{ServiceCIDR: "not-a-cidr"}, "service_cidr"},
+		{"too many cidrs", K3sConfig{ClusterCIDR: "10.42.0.0/16,10.44.0.0/16,2001:db8:42::/56"}, "cluster_cidr"},
 		{"agent ca", K3sConfig{Role: "agent", ServerURL: "https://10.0.0.1:6443", CADir: "/ca"}, "ca_dir is only valid"},
 		{"init and join", K3sConfig{ClusterInit: true, ServerURL: "https://10.0.0.1:6443"}, "mutually exclusive"},
 		{"ca on joiner", K3sConfig{ServerURL: "https://10.0.0.1:6443", CADir: "/ca"}, "ca_dir is only valid"},

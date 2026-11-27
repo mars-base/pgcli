@@ -197,8 +197,11 @@ The group file also exposes the node image (`addon_k3s_version`, or a full
 kube-proxy's iptables default;
 flannel and the CNI plugins keep the iptables frontend, nft-backed on
 Debian 12; selecting `nftables` also installs the `nftables` package through
-the firewall role's install tasks) and `addon_k3s_extra_tls_sans` for
-additional SANs.
+the firewall role's install tasks), `addon_k3s_extra_tls_sans` for
+additional SANs, and `addon_k3s_cluster_cidr` / `addon_k3s_service_cidr` for
+custom Pod and Service network ranges (empty keeps the K3s defaults
+`10.42.0.0/16` and `10.43.0.0/16`; a comma-separated IPv4/IPv6 pair selects
+dual-stack; the same values reach every server).
 
 ## Shipped layouts
 

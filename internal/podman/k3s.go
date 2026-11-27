@@ -626,6 +626,12 @@ func k3sRunArgs(kc *config.K3sConfig, registries string) []string {
 		for _, disabled := range kc.Disable {
 			args = append(args, "--disable", disabled)
 		}
+		if kc.ClusterCIDR != "" {
+			args = append(args, "--cluster-cidr", kc.ClusterCIDR)
+		}
+		if kc.ServiceCIDR != "" {
+			args = append(args, "--service-cidr", kc.ServiceCIDR)
+		}
 	}
 	for _, proxyArg := range kc.KubeProxyArgs {
 		args = append(args, "--kube-proxy-arg", proxyArg)

@@ -1494,6 +1494,8 @@ func init() {
 	addonInstallCmd.Flags().String("advertise-address", "", "k3s server: address peers and clients use to reach this node; also rewritten into the exported kubeconfig")
 	addonInstallCmd.Flags().StringArray("tls-san", nil, "k3s server: extra TLS SAN for the API certificate (repeatable)")
 	addonInstallCmd.Flags().StringArray("disable", nil, "k3s server: bundled component to disable, e.g. traefik or servicelb (repeatable) — disable traefik when ports 80/443 are already used on this host")
+	addonInstallCmd.Flags().String("cluster-cidr", "", "k3s server: Pod network CIDR (--cluster-cidr; K3s default 10.42.0.0/16); a comma-separated IPv4/IPv6 pair selects dual-stack; every server must use the same value")
+	addonInstallCmd.Flags().String("service-cidr", "", "k3s server: Service network CIDR (--service-cidr; K3s default 10.43.0.0/16); a comma-separated IPv4/IPv6 pair selects dual-stack; every server must use the same value")
 	addonInstallCmd.Flags().StringArray("kube-proxy-arg", nil, "k3s: custom flag for the embedded kube-proxy, e.g. proxy-mode=nftables (Kubernetes 1.31+; repeatable; kube-proxy runs on every node, so both server and agent accept it)")
 	addonInstallCmd.Flags().String("token-file", "", "k3s: host file holding the cluster token, mounted read-only (REQUIRED on every node; generate once with `openssl rand -hex 32 > k3s-token && chmod 600 k3s-token` and copy it to every node)")
 	addonInstallCmd.Flags().String("ca-dir", "", "k3s: directory with the complete custom CA set (server-ca, client-ca, request-header-ca, etcd-peer-ca, etcd-server-ca and service.key); only valid on the standalone/--cluster-init server and only before its first start")

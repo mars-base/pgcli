@@ -170,7 +170,10 @@ VM 互访流量时，etcd peer 证书必须接受观测到的 SNAT 源地址—�
 （关闭自带组件）、`addon_k3s_kube_proxy_mode`（内嵌 kube-proxy 的防火墙后端，随附组文件默认
 `nftables`（K8s 1.31+）；留空沿用 kube-proxy 默认的 iptables；flannel 与 CNI 插件仍走 iptables
 前端，在 Debian 12 上由 nft 兼容层提供；选 `nftables` 时 play 还会通过防火墙 role 的
-安装任务补装 `nftables` 软件包）以及 `addon_k3s_extra_tls_sans`（额外 SAN）。
+安装任务补装 `nftables` 软件包）、`addon_k3s_extra_tls_sans`（额外 SAN），以及
+`addon_k3s_cluster_cidr` / `addon_k3s_service_cidr`（自定义 Pod 与 Service 网段，
+留空沿用 K3s 默认的 `10.42.0.0/16` 与 `10.43.0.0/16`；逗号分隔的 IPv4/IPv6 对表示
+双栈；所有 server 使用相同的值）。
 
 ## 内置布局
 

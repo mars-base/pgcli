@@ -59,6 +59,8 @@ func TestK3sRunArgsServer(t *testing.T) {
 		AdvertiseAddress: "10.0.0.5",
 		TLSSAN:           []string{"10.0.0.5", "api.example.com"},
 		Disable:          []string{"traefik", "servicelb"},
+		ClusterCIDR:      "10.42.0.0/16",
+		ServiceCIDR:      "10.43.0.0/16,2001:db8:43::/112",
 		KubeProxyArgs:    []string{"proxy-mode=nftables"},
 		LogFile:          filepath.Join(t.TempDir(), "k3s.log"),
 		ContainerLogFile: filepath.Join(t.TempDir(), "container.log"),
@@ -134,6 +136,8 @@ func TestK3sRunArgsServer(t *testing.T) {
 		"--tls-san", "api.example.com",
 		"--disable", "traefik",
 		"--disable", "servicelb",
+		"--cluster-cidr", "10.42.0.0/16",
+		"--service-cidr", "10.43.0.0/16,2001:db8:43::/112",
 		"--kube-proxy-arg", "proxy-mode=nftables",
 		"--log", "/var/log/k3s.log",
 		"--alsologtostderr",
@@ -156,6 +160,8 @@ func TestK3sRunArgsAgent(t *testing.T) {
 		AdvertiseAddress: "10.0.0.6",
 		TLSSAN:           []string{"10.0.0.6"},
 		Disable:          []string{"traefik"},
+		ClusterCIDR:      "10.42.0.0/16",
+		ServiceCIDR:      "10.43.0.0/16",
 		KubeProxyArgs:    []string{"proxy-mode=nftables"},
 	})
 	args := k3sRunArgs(&kc, "")
@@ -167,7 +173,8 @@ func TestK3sRunArgsAgent(t *testing.T) {
 		t.Errorf("first arg after image = %q, want agent", args[idx+1])
 	}
 	agentArgs := args[idx+2:]
-	if slices.Contains(agentArgs, "--advertise-address") || slices.Contains(agentArgs, "--tls-san") || slices.Contains(agentArgs, "--disable") {
+	if slices.Contains(agentArgs, "--advertise-address") || slices.Contains(agentArgs, "--tls-san") || slices.Contains(agentArgs, "--disable") ||
+		slices.Contains(agentArgs, "--cluster-cidr") || slices.Contains(agentArgs, "--service-cidr") {
 		t.Errorf("agent argv carries server-only flags: %q", agentArgs)
 	}
 	if slices.Contains(agentArgs, "--cluster-init") {
@@ -186,7 +193,7 @@ func TestK3sRunArgsAgent(t *testing.T) {
 
 func TestK3sRunArgsMinimal(t *testing.T) {
 	kc := k3sTestConfig(t, config.K3sConfig{})
-	for _, flag := range []string{"--advertise-address", "--tls-san", "--disable", "--kube-proxy-arg", "--log", "--alsologtostderr", "--private-registry", "--cluster-init", "--server"} {
+	for _, flag := range []string{"--advertise-address", "--tls-san", "--disable", "--cluster-cidr", "--service-cidr", "--kube-proxy-arg", "--log", "--alsologtostderr", "--private-registry", "--cluster-init", "--server"} {
 		if slices.Contains(k3sRunArgs(&kc, ""), flag) {
 			t.Errorf("minimal server argv must omit %s", flag)
 		}

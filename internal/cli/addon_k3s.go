@@ -40,6 +40,8 @@ func runAddonInstallK3s(cmd *cobra.Command) error {
 	advertiseAddress, _ := cmd.Flags().GetString("advertise-address")
 	tlsSAN, _ := cmd.Flags().GetStringArray("tls-san")
 	disable, _ := cmd.Flags().GetStringArray("disable")
+	clusterCIDR, _ := cmd.Flags().GetString("cluster-cidr")
+	serviceCIDR, _ := cmd.Flags().GetString("service-cidr")
 	kubeProxyArgs, _ := cmd.Flags().GetStringArray("kube-proxy-arg")
 	tokenFile, _ := cmd.Flags().GetString("token-file")
 	caDir, _ := cmd.Flags().GetString("ca-dir")
@@ -112,6 +114,12 @@ func runAddonInstallK3s(cmd *cobra.Command) error {
 	}
 	if cmd.Flags().Changed("disable") {
 		existing.Disable = disable
+	}
+	if cmd.Flags().Changed("cluster-cidr") {
+		existing.ClusterCIDR = strings.TrimSpace(clusterCIDR)
+	}
+	if cmd.Flags().Changed("service-cidr") {
+		existing.ServiceCIDR = strings.TrimSpace(serviceCIDR)
 	}
 	if cmd.Flags().Changed("kube-proxy-arg") {
 		existing.KubeProxyArgs = kubeProxyArgs
@@ -208,6 +216,12 @@ func runAddonInstallK3s(cmd *cobra.Command) error {
 		}
 		if kc.AdvertiseAddress != "" {
 			fmt.Printf("  API:         https://%s:6443\n", kc.AdvertiseAddress)
+		}
+		if kc.ClusterCIDR != "" {
+			fmt.Printf("  Pod CIDR:    %s\n", kc.ClusterCIDR)
+		}
+		if kc.ServiceCIDR != "" {
+			fmt.Printf("  Service CIDR: %s\n", kc.ServiceCIDR)
 		}
 	} else {
 		fmt.Printf("  Joins:       %s\n", kc.ServerURL)

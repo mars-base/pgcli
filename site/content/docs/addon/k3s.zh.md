@@ -40,6 +40,8 @@ host 网络端口必须空闲：
 | `--advertise-address` | | 仅 server：对端与客户端访问本节点的地址；也会写进导出的 kubeconfig |
 | `--tls-san` | | 仅 server：API 证书的额外 TLS SAN（可重复） |
 | `--disable` | | 仅 server：关闭自带组件，如 `traefik`、`servicelb`、`metrics-server`（可重复） |
+| `--cluster-cidr` | `10.42.0.0/16` | 仅 server：Pod 网段（`--cluster-cidr`）；逗号分隔的 IPv4/IPv6 对表示双栈，必须在建集群时设置；所有 server 必须一致 |
+| `--service-cidr` | `10.43.0.0/16` | 仅 server：Service VIP 网段（`--service-cidr`）；双栈与所有 server 一致的要求同上 |
 | `--kube-proxy-arg` | | 传给内嵌 kube-proxy 的自定义参数，如 `proxy-mode=nftables`（K8s 1.31+，可重复；kube-proxy 在每个节点都运行） |
 | `--ca-dir` | | 自定义 CA 目录，**仅初始 server** 且**仅在其首启之前**；见[自定义 CA](#自定义-ca) |
 | `--registry-mirror` | | containerd registry mirror `REGISTRY=ENDPOINT`（可重复，如 `docker.io=https://<id>.mirror.aliyuncs.com`）；与 `--registries-file` 互斥 |
@@ -159,6 +161,12 @@ pg addon install k3s --name k3s --role agent \
 无论打到哪台 server，API 证书都有效；agent 地址不需要——agent 既不提供 API 也不运行
 etcd。`pg k3s kubectl --name k3s -- get nodes` 中 server 显示
 `control-plane`，agent 显示 `<none>`（role 标签在节点注册后几秒才写入）。
+
+**Pod / Service 网段。** 只有当默认网段（`10.42.0.0/16` 与 `10.43.0.0/16`）与现有网络
+冲突时才需要改 `--cluster-cidr` / `--service-cidr`。所有 server 必须传相同的值——网段
+不一致的 server 无法加入——且只在建集群时生效。双栈在初始 server 上传逗号分隔的
+IPv4/IPv6 对，例如
+`--cluster-cidr 10.42.0.0/16,2001:db8:42::/56 --service-cidr 10.43.0.0/16,2001:db8:43::/112`。
 
 Ansible 的组 `addon_k3s_cluster` 始终组建**集群模式**（嵌入式 etcd），不会部署 SQLite
 单机：初始 server 总是带 `--cluster-init`，即使组里只列一台主机——那是一个单成员 etcd
