@@ -1,0 +1,42 @@
+---
+# Shared material for K3s nodes: the cluster token, an optional custom CA set
+# and the containerd registries file. Generated once on the controller, then
+# pushed to every member by the k3s_shared role before pg_addon renders the
+# install commands.
+#
+# These variables are also defined in group_vars/addon_k3s_single and
+# group_vars/addon_k3s_cluster so the add-on entries can reference them
+# without relying on role-default scoping.
+_addon_k3s_shared_dir: "{{ playbook_dir | dirname }}/var/addon_cluster/shared"
+_addon_k3s_shared_remote_dir: /data/pg/addon/shared
+
+# Controller path of a token to reuse; empty generates one under the shared
+# directory. Every node needs the same token.
+_addon_cluster_k3s_token_file: ""
+
+# Custom CA lifetime in days. 0 keeps the K3s self-signed CA (10 years);
+# a positive value generates a CA set with that lifetime (36500 = 100 years)
+# and injects it into the initial server before its first start.
+_addon_cluster_k3s_ca_days: 0
+
+# containerd registry mirrors rendered into registries.yaml on the member.
+# Mutually exclusive with a full registries file.
+_addon_k3s_registry_mirrors: {}
+_addon_k3s_registries_file: ""
+
+_addon_k3s_registries_path: "{{ _addon_k3s_shared_remote_dir }}/k3s-registries.yaml"
+
+# The CA files K3s reads from <data-dir>/server/tls before the first start.
+_addon_k3s_ca_certs:
+  - server-ca.crt
+  - client-ca.crt
+  - request-header-ca.crt
+  - etcd/peer-ca.crt
+  - etcd/server-ca.crt
+_addon_k3s_ca_keys:
+  - server-ca.key
+  - client-ca.key
+  - request-header-ca.key
+  - etcd/peer-ca.key
+  - etcd/server-ca.key
+  - service.key

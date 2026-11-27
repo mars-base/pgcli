@@ -342,7 +342,7 @@ entirely. The same operations are available directly through
 
 ## Add-ons
 
-pgcli manages 41 add-on types — PostgreSQL sidecars, storage systems,
+pgcli manages 42 add-on types — PostgreSQL sidecars, storage systems,
 observability stacks, messaging systems and supporting services. Most run as
 managed host-network containers; JuiceFS, ZeroFS and DuckDB are installed as
 host binaries.
@@ -355,14 +355,24 @@ host binaries.
 | Filesystems | `beegfs`, `juicefs`, `zerofs` |
 | Databases and analytics | `clickhouse`, `clickhouse-keeper`, `influxdb`, `influx2tsdb`, `documentdb`, `duckdb` |
 | Messaging and coordination | `etcd`, `redis`, `valkey`, `kafka`, `rabbitmq`, `rocketmq` |
+| Container orchestration | `k3s` |
 | Web and admin | `gitea`, `pgadmin`, `postgrest` |
 | Web application firewall | `safeline` |
 
 Each add-on has an inventory group with a fixed topology: `addon_<type>_single`
 (one host) or `addon_<type>_cluster` (multi-host; `etcd`, `minio`, `silo`,
 `rustfs`, `seaweedfs`, `redis`, `valkey`, `clickhouse`, `clickhouse-keeper`,
-`kafka`, `rabbitmq`, `rocketmq`, `vmcluster` and `vlcluster`). Declare entries in
+`kafka`, `rabbitmq`, `rocketmq`, `k3s`, `vmcluster` and `vlcluster`). Declare entries in
 `group_vars/addon_<type>_<mode>/main.yml` and apply only that group:
+
+A `k3s` cluster group runs one node per host: the first
+`addon_k3s_server_count` hosts (default 3) are servers — the first bootstraps
+the embedded-etcd cluster — and the rest are agents that join it. The
+`k3s_shared` role prepares the shared material on the controller: the generated
+token is copied to every member, and an optional custom CA (for example 100
+years via `_addon_cluster_k3s_ca_days: 36500`) only to the initial server
+before its first start. Registry mirrors are rendered to a `registries.yaml`
+that every member mounts.
 
 ```yaml
 addon_etcd_single_addons:
@@ -392,11 +402,11 @@ invisible challenge, with `where` match conditions or `all_visitors: true`);
 they are applied on every run, after the sites and their upstreams are
 reconciled. Dropping a site from the list does not delete
 it from the console, and certificate renewal stays manual
-(`pg addon safeline cert update`). SafeLine needs rootful podman, so a safeline add-on group
-is always reconciled as root: when the host's deployment identity is rootless
+(`pg addon safeline cert update`). SafeLine and K3s need rootful podman, so their
+add-on groups are always reconciled as root: when the host's deployment identity is rootless
 (for example a host that also belongs to an active scenario group), the
-safeline group's list still wins over the scenario group's `pgcli_addons` and
-the play prints a notice, runs the safeline commands as root (rootful podman),
+add-on group's list still wins over the scenario group's `pgcli_addons` and
+the play prints a notice, runs the add-on commands as root (rootful podman),
 and keeps the stack in the deployment account's config (restoring the config's
 ownership to that account afterwards). See the
 [add-on reference](https://pgcli.pages.dev/docs/addon/)

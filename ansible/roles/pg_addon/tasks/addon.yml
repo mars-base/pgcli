@@ -422,6 +422,33 @@
     - not (_addon_autostart | bool)
     - (_addon_cfg.autostart | default(false)) | bool
 
+# A fresh K3s server returns from `addon install` before its API answers. The
+# next host in this serial:1 play joins it, so wait for /readyz here first.
+# Agents have no local API; the K3s verify play waits for every node instead.
+- name: Wait for the K3s API server to become ready
+  ansible.builtin.command:
+    argv:
+      - "{{ pgcli_install_path }}"
+      - "-c"
+      - "{{ pgcli_config_path }}"
+      - k3s
+      - kubectl
+      - "--name"
+      - "{{ addon.name }}"
+      # kubectl flags after -- reach kubectl, not pg's own flag parser
+      - "--"
+      - get
+      - "--raw=/readyz"
+  register: _addon_k3s_ready
+  until: _addon_k3s_ready.rc == 0
+  retries: 90
+  delay: 2
+  changed_when: false
+  when:
+    - addon.type == 'k3s'
+    - _addon_state == 'present'
+    - _addon_cfg.role | default('server') == 'server'
+
 # ---------------------------------------------------------------------------
 # Declarative protected sites (safeline only). Each apply reads the console's
 # site list and reconciles by identity (the domain set plus the entry port

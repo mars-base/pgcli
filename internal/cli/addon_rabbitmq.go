@@ -1831,7 +1831,7 @@ func init() {
 
 	addonInstallCmd.Flags().Int("amqp-port", 0, "RabbitMQ AMQP host port (0=auto-assign from rabbitmq_start_port, default 5672)")
 	addonInstallCmd.Flags().Int("management-port", 0, "RabbitMQ management web UI/API host port (0=auto-assign from rabbitmq_management_start_port, default 15672)")
-	addonInstallCmd.Flags().String("node-name", "", "RabbitMQ cluster: this member's Erlang node name NODE@HOST, e.g. rabbit@node1 (required on first install; HOST must resolve from every member and must not be loopback; immutable after install)")
+	addonInstallCmd.Flags().String("node-name", "", "RabbitMQ cluster: this member's Erlang node name NODE@HOST, e.g. rabbit@node1 (required on first install; HOST must resolve from every member and must not be loopback; immutable after install); k3s: Kubernetes node name (default: hostname)")
 	addonInstallCmd.Flags().StringSlice("etcd", nil, "RabbitMQ cluster: local etcd addon member name(s) used for peer discovery, e.g. --etcd dcs (repeatable or comma-separated); alternative to --etcd-endpoints")
 	addonInstallCmd.Flags().StringSlice("etcd-endpoints", nil, "RabbitMQ cluster: etcd endpoints as host:port for peer discovery, e.g. 10.0.0.1:2379,10.0.0.2:2379 (repeatable or comma-separated; an http:// prefix is stripped; takes precedence over --etcd)")
 	addonInstallCmd.Flags().String("erlang-cookie-file", "", "RabbitMQ cluster: file holding the shared Erlang cookie (required on first cluster install unless --secrets-from-etcd; must be identical on every member and is immutable after install)")

@@ -27,6 +27,7 @@ func init() {
 		c.Flags().Bool("postgrest", false, "select the PostgREST addon (use with -i for a local one, --pg-name for a remote one)")
 		c.Flags().String("pg-name", "", "name of a remote PgBouncer or PostgREST (top-level addons)")
 		c.Flags().Bool("etcd", false, "select an etcd member (top-level addons)")
+		c.Flags().Bool("k3s", false, "select a K3s node (top-level addons; autostart starts the rootful node container)")
 		c.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, pgadmin, grafana, prometheus, alertmanager, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs or vlagent or vmalert instance, gitea, beegfs, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, safeline, nginx, privoxy, daemon or SQLite database, or Patroni member")
 		c.Flags().Bool("pgdog", false, "select a PgDog proxy (top-level addons)")
 		c.Flags().Bool("ha", false, "select Patroni HA members (top-level addons; requires --scope)")
@@ -86,7 +87,7 @@ Use 'pg autostart disable' to opt out.`,
 
 var autostartEnableCmd = &cobra.Command{
 	Use:   "enable",
-	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/garage/seaweedfs/redis/valkey/predixy/pgadmin/grafana/prometheus/alertmanager/victoriametrics/nodeexporter/pgexporter/documentdb/vmcluster/vlcluster/victorialogs/vlagent/vmalert/gitea/beegfs/juicefs/zerofs/influxdb/influx2tsdb/clickhouse/clickhouse-keeper/kafka/rabbitmq/rocketmq/safeline/nginx/privoxy instance, a pg daemon, a pg http server, a SQLite database, or a Patroni member",
+	Short: "Enable auto-start for an instance, the backup container, a PgBouncer, a PostgREST, an etcd member, a K3s node, a PgDog proxy, an HAProxy instance, a MinIO/silo/rustfs/garage/seaweedfs/redis/valkey/predixy/pgadmin/grafana/prometheus/alertmanager/victoriametrics/nodeexporter/pgexporter/documentdb/vmcluster/vlcluster/victorialogs/vlagent/vmalert/gitea/beegfs/juicefs/zerofs/influxdb/influx2tsdb/clickhouse/clickhouse-keeper/kafka/rabbitmq/rocketmq/safeline/nginx/privoxy instance, a pg daemon, a pg http server, a SQLite database, or a Patroni member",
 	Long: `Enable auto-start on boot for exactly one target:
 
   pg autostart enable -i myinst          # instance
@@ -96,6 +97,7 @@ var autostartEnableCmd = &cobra.Command{
   pg autostart enable --postgrest -i myinst      # local PostgREST for an instance
   pg autostart enable --postgrest --pg-name x    # remote PostgREST
   pg autostart enable --etcd --name m1           # etcd member (default name "etcd")
+  pg autostart enable --k3s --name k3s           # K3s node — starts the rootful container (default name "k3s")
   pg autostart enable --pgdog --name proxy       # PgDog proxy (default name "pgdog")
   pg autostart enable --haproxy --name lb        # HAProxy instance (default name "haproxy")
   pg autostart enable --minio --name store       # MinIO instance (default name "minio")
@@ -136,6 +138,10 @@ var autostartEnableCmd = &cobra.Command{
 
 Etcd autostart only starts the member's existing container at boot; it never
 re-registers membership (a data-dir-initialized etcd rejoins on plain start).
+K3s autostart likewise only starts the existing node container; the container's
+own --restart unless-stopped policy also revives it whenever podman restarts.
+In an HA cluster the boot service starts the --cluster-init server first, then
+the joining servers, then agents.
 PgDog autostart likewise only starts the existing container, reading the
 pgdog.toml/users.toml already on disk — install the proxy first.
 HAProxy autostart likewise only starts the existing container, reading the
@@ -332,6 +338,7 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 	pgbSel, _ := cmd.Flags().GetBool("pgbouncer")
 	prSel, _ := cmd.Flags().GetBool("postgrest")
 	etcdSel, _ := cmd.Flags().GetBool("etcd")
+	k3sSel, _ := cmd.Flags().GetBool("k3s")
 	pgdogSel, _ := cmd.Flags().GetBool("pgdog")
 	haSel, _ := cmd.Flags().GetBool("ha")
 	haproxySel, _ := cmd.Flags().GetBool("haproxy")
@@ -393,6 +400,9 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		sel++
 	}
 	if etcdSel {
+		sel++
+	}
+	if k3sSel {
 		sel++
 	}
 	if pgdogSel {
@@ -519,13 +529,13 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		sel++
 	}
 	if sel != 1 {
-		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --valkey, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --nodeexporter, --pgexporter, --documentdb, --vmcluster, --vlcluster, --victorialogs, --vlagent, --vmalert, --gitea, --beegfs, --juicefs, --zerofs, --influxdb, --influx2tsdb, --clickhouse, --clickhouse-keeper, --kafka, --rabbitmq, --rocketmq, --safeline, --sqlite, --daemon, --http, --nginx, or --privoxy")
+		return fmt.Errorf("select exactly one target: -i <name>, --backup, --pgbouncer, --postgrest, --etcd, --k3s, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --valkey, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --nodeexporter, --pgexporter, --documentdb, --vmcluster, --vlcluster, --victorialogs, --vlagent, --vmalert, --gitea, --beegfs, --juicefs, --zerofs, --influxdb, --influx2tsdb, --clickhouse, --clickhouse-keeper, --kafka, --rabbitmq, --rocketmq, --safeline, --sqlite, --daemon, --http, --nginx, or --privoxy")
 	}
 	if pgName != "" && !pgbSel && !prSel {
 		return fmt.Errorf("--pg-name requires --pgbouncer or --postgrest")
 	}
-	if addonName != "" && !etcdSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !garageSel && !seaweedfsSel && !redisSel && !valkeySel && !predixySel && !pgadminSel && !grafanaSel && !prometheusSel && !alertmanagerSel && !victoriaMetricsSel && !nodeExporterSel && !pgExporterSel && !documentDBSel && !vmclusterSel && !vlclusterSel && !victoriaLogsSel && !vlagentSel && !vmalertSel && !giteaSel && !beegfsSel && !juicefsSel && !zerofsSel && !influxdbSel && !influx2tsdbSel && !clickhouseSel && !clickHouseKeeperSel && !kafkaSel && !rabbitmqSel && !rocketmqSel && !safelineSel && !sqliteSel && !daemonSel && !httpSel && !nginxSel && !privoxySel {
-		return fmt.Errorf("--name requires --etcd, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --valkey, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --nodeexporter, --pgexporter, --documentdb, --vmcluster, --vlcluster, --victorialogs, --vlagent, --vmalert, --gitea, --beegfs, --juicefs, --zerofs, --influxdb, --influx2tsdb, --clickhouse, --clickhouse-keeper, --kafka, --rabbitmq, --rocketmq, --safeline, --sqlite, --daemon, --http, --nginx, or --privoxy")
+	if addonName != "" && !etcdSel && !k3sSel && !pgdogSel && !haSel && !haproxySel && !minioSel && !siloSel && !rustfsSel && !garageSel && !seaweedfsSel && !redisSel && !valkeySel && !predixySel && !pgadminSel && !grafanaSel && !prometheusSel && !alertmanagerSel && !victoriaMetricsSel && !nodeExporterSel && !pgExporterSel && !documentDBSel && !vmclusterSel && !vlclusterSel && !victoriaLogsSel && !vlagentSel && !vmalertSel && !giteaSel && !beegfsSel && !juicefsSel && !zerofsSel && !influxdbSel && !influx2tsdbSel && !clickhouseSel && !clickHouseKeeperSel && !kafkaSel && !rabbitmqSel && !rocketmqSel && !safelineSel && !sqliteSel && !daemonSel && !httpSel && !nginxSel && !privoxySel {
+		return fmt.Errorf("--name requires --etcd, --k3s, --pgdog, --ha, --haproxy, --minio, --silo, --rustfs, --garage, --seaweedfs, --redis, --valkey, --predixy, --pgadmin, --grafana, --prometheus, --alertmanager, --victoriametrics, --nodeexporter, --pgexporter, --documentdb, --vmcluster, --vlcluster, --victorialogs, --vlagent, --vmalert, --gitea, --beegfs, --juicefs, --zerofs, --influxdb, --influx2tsdb, --clickhouse, --clickhouse-keeper, --kafka, --rabbitmq, --rocketmq, --safeline, --sqlite, --daemon, --http, --nginx, or --privoxy")
 	}
 	if sqliteSel && addonName == "" {
 		return fmt.Errorf("--sqlite requires --name <database>")
@@ -1067,6 +1077,17 @@ func runAutostartToggle(cmd *cobra.Command, enable bool) error {
 		ec.Autostart = enable
 		cfg.Addons.Etcd[addonName] = ec
 		targetDesc = fmt.Sprintf("etcd member %q", addonName)
+	case k3sSel:
+		if addonName == "" {
+			addonName = "k3s"
+		}
+		kc, ok := cfg.Addons.K3s[addonName]
+		if !ok {
+			return fmt.Errorf("k3s node %q not found in config", addonName)
+		}
+		kc.Autostart = enable
+		cfg.Addons.K3s[addonName] = kc
+		targetDesc = fmt.Sprintf("k3s node %q", addonName)
 	case backupSel:
 		cfg.Backup.Autostart = enable
 		targetDesc = "backup container"
@@ -1184,6 +1205,11 @@ func countAutostartTargets(c *config.Config) int {
 	}
 	for _, ec := range c.Addons.Etcd {
 		if ec.Autostart {
+			n++
+		}
+	}
+	for _, kc := range c.Addons.K3s {
+		if kc.Autostart {
 			n++
 		}
 	}
@@ -1359,6 +1385,9 @@ func runAutostartStatus(cmd *cobra.Command, args []string) error {
 	}
 	for name, ec := range cfg.Addons.Etcd {
 		fmt.Printf("  etcd %-17s %s\n", name, onOff(ec.Autostart))
+	}
+	for name, kc := range cfg.Addons.K3s {
+		fmt.Printf("  k3s %-18s %s\n", name, onOff(kc.Autostart))
 	}
 	for name, pd := range cfg.Addons.PgDog {
 		fmt.Printf("  pgdog %-16s %s\n", name, onOff(pd.Autostart))

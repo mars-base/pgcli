@@ -38,6 +38,7 @@ uv run ansible-playbook playbooks/ping.yaml --limit crosshost
 | 8 | Patroni HA 成员 | `ha_cluster` | 1 | `ha` |
 | 9 | Patroni HA 备份收敛 | `ha_cluster` | – | `ha` |
 | 10 | Patroni HA 代理 | 代理主机 | – | `ha`、`haproxy` |
+| 11 | 校验 K3s 节点 | K3s 分组主机 | – | `addon` |
 
 `serial: 1` 是刻意的：首台主机先安装插件或 bootstrap etcd，下一台再加入；
 跨机副本也要求主库先存在。
@@ -50,6 +51,12 @@ limit 的阶段报错。不带这类 limit 时列表为空，插件 play 是 no-
 Redis 与 Valkey 组建 play 在所有成员都存在之后运行（插件 play 是 serial）。各自
 只在 `--limit addon_<type>_cluster` 且条目为 present 时才生效：等待所有成员应答，
 必要时组建一次集群，然后等待全部 16384 个 slot 分配完成。重跑会跳过组建步骤。
+
+K3s 同样走 serial 的插件 play：每台 server 安装后先等它的 `/readyz`，下一个成员
+才开始加入。末尾的校验 play 运行在 `addon_k3s_single` 与 `addon_k3s_cluster` 分组的
+并集上（不在 inventory 里的分组自动跳过）：先等所有节点 `Ready`，再断言拓扑——
+单机安装是一个节点，集群则是 `addon_k3s_server_count` 台 server 加其余主机作为
+agent。
 
 ```bash
 # 完整部署某个模式

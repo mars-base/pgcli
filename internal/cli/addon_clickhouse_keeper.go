@@ -647,6 +647,6 @@ func init() {
 
 	addonInstallCmd.Flags().Int("server-id", 0, "clickhouse-keeper: this member's 1-based Raft server id (unique within the cluster; immutable after install)")
 	addonInstallCmd.Flags().Int("raft-port", 0, "clickhouse-keeper Raft peer port (0=default 9234; immutable after install)")
-	addonInstallCmd.Flags().String("log-dir", "", "clickhouse-keeper log directory (default <base_dir>/addon/clickhouse-keeper/<name>/logs)")
+	addonInstallCmd.Flags().String("log-dir", "", "clickhouse-keeper log directory (default <base_dir>/addon/clickhouse-keeper/<name>/logs); k3s: host directory mounted at /var/log (default <base_dir>/addon/k3s/<name>/log)")
 	addonInstallCmd.Flags().String("config-dir", "", "clickhouse-keeper config directory; keeper_config.xml is written there (default <base_dir>/addon/clickhouse-keeper/<name>/config)")
 }

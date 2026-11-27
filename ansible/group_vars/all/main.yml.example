@@ -370,6 +370,10 @@ pgcli_images:
     archive: rocketmq_5.5.0.tar
     auto_load: true
     addons: [rocketmq]
+  - image: docker.io/rancher/k3s:v1.37.2-k3s1
+    archive: k3s_v1.37.2-k3s1.tar
+    auto_load: true
+    addons: [k3s]
   - image: docker.io/prom/node-exporter:v1.12.1
     archive: node-exporter_v1.12.1.tar
     auto_load: true

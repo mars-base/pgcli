@@ -51,6 +51,13 @@ func TestEnsurePodmanReadyRepairsStaleState(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("linux-only")
 	}
+
+	// Other addon managers in this package run the one-shot repair probe,
+	// which would make ensurePodmanReady skip the stale-state path below.
+	savedGlobal := podmanStateRepaired
+	defer func() { podmanStateRepaired = savedGlobal }()
+	podmanStateRepaired = false
+
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "podman")
 	state := filepath.Join(dir, "state")

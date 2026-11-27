@@ -108,6 +108,7 @@ pgcli_addons: >-
 | 随机口令（`minio_root_password`、`silo_root_password`、`rustfs_root_password`、`seaweedfs_root_password`、`redis_password`、`valkey_password`、`clickhouse_admin_password`） | 控制机 `var/addon_cluster/shared/` |
 | 共享 CA（`ca.crt`、`ca.key`）、服务器密钥/CSR/证书、链证书与合并 PEM | 同一目录；CA 私钥不会离开控制机 |
 | RabbitMQ Erlang cookie 与管理密码 | 由 `pg addon rabbitmq secret generate` 生成并写入 etcd |
+| K3s 集群 token ——以及 `_addon_cluster_k3s_ca_days > 0` 时的自定义 CA 集合 | 控制机 `var/addon_cluster/shared/`；token 分发到每个成员，CA 只给初始 server |
 
 成员上的文件位于 `/data/pg/addon/shared/`（`ca.crt`、`server-chain.crt`、
 `server.key`、`server.pem`；私钥类文件权限 `0600`）。服务器证书覆盖所选
@@ -133,6 +134,25 @@ etcd 的 `/pgcli/rabbitmq/clusters/<name>/secrets/`，每个成员用
 在控制机上执行，所以控制机需要有 `pgcli_install_path` 指向的 `pg` 二进制，并且能
 访问 `_addon_cluster_rabbitmq_etcd_endpoints` 中的第一个 endpoint。
 
+K3s 由专属的 `k3s_shared` role 准备（每台主机一个节点，且始终以 root 运行，
+因为需要 rootful podman）：
+
+- **Token** —— `_addon_cluster_k3s_token_file` 留空时，在控制机生成一次
+  `var/addon_cluster/shared/k3s_token`（`openssl rand -hex 32`）；填值则复用该文件。
+  token 复制到每个成员的 `/data/pg/addon/shared/k3s-token`（0600）——每个节点都需要。
+- **自定义 CA** —— `_addon_cluster_k3s_ca_days: 0` 沿用 K3s 自签的 10 年 CA。正数
+  会用 vendored 的 `generate-custom-ca-certs.sh` 生成完整 CA 集合（任意年限，
+  `36500` = 100 年），并在**初始 server 首启之前**用 `--ca-dir` 注入——只注入它。
+- **Registry mirror** —— `_addon_k3s_registry_mirrors`（或完整
+  `_addon_k3s_registries_file`）渲染到每个成员的
+  `/data/pg/addon/shared/k3s-registries.yaml`；文件变化时 play 会追加 `--force`
+  重建节点容器，让 containerd 重新读取。
+
+角色按主机顺序拆分：前 `addon_k3s_server_count` 个成员（默认 3）是 server（首台
+`--cluster-init` 引导嵌入式 etcd），其余为 agent，加入首台 server。`apply.yaml`
+在安装下一个成员之前等待当前 server 的 `/readyz`（插件 play 为 `serial: 1`），
+其 verify play 随后等待所有节点 `Ready`。
+
 ## 内置布局
 
 | 类型 | 成员 | 端口 | 说明 |
@@ -149,6 +169,7 @@ etcd 的 `/pgcli/rabbitmq/clusters/<name>/secrets/`，每个成员用
 | `kafka` | 前三台 | 9092 broker，19093 controller | KRaft 法定人数；512 MiB 堆适配参考 VM |
 | `rabbitmq` | 前三台 | 5672 AMQP，15672 management | 依赖 etcd；共享 cookie/密码来自 etcd |
 | `rocketmq` | 前三台 | 9876 namesrv，10911 broker，8080 proxy，8081 gRPC | 小主机使用缩减后的堆 |
+| `k3s` | 3 server + 1 agent | 6443 API，2379/2380 etcd，10250 kubelet，8472/udp VXLAN | 首台 server 引导嵌入式 etcd，第四台以 agent 加入；`addon_k3s_server_count` 可调 server 数量 |
 | `vmcluster` | 4 | 8480 insert，8481 select，8482 storage，8483/8484 internal | 首台承担 storage+insert+select，其余仅 storage |
 | `vlcluster` | 4 | 9430 insert，9431 select，9432 storage | 同样的访问/存储拆分；存储分片但不复制 |
 
@@ -156,7 +177,7 @@ etcd 的 `/pgcli/rabbitmq/clusters/<name>/secrets/`，每个成员用
 `addon_clickhouse_keeper_cluster`、`addon_kafka_cluster`、
 `addon_rabbitmq_cluster`、`addon_rocketmq_cluster`）在 `hosts.ini` 中只列前三台
 主机，因此组文件里不再需要 `[:3]` 切片或 `state` 表达式。四成员布局列出全部四台。
-MinIO/silo MNSD 至少需要四个 endpoint；Redis、Valkey、vmcluster、vlcluster 也使用全部四台。
+MinIO/silo MNSD 至少需要四个 endpoint；Redis、Valkey、vmcluster、vlcluster 与 k3s 也使用全部四台。
 
 ## 创建、验证、销毁
 
@@ -186,6 +207,7 @@ play 使用 `serial: 1` 并按 inventory 顺序执行。对于法定人数型插
 | `kafka` | `pg addon kafka cluster status --name kafka-cluster`；`pg addon kafka topic list --name kafka-cluster` |
 | `rabbitmq` | `pg addon rabbitmq cluster status --name rabbitmq-cluster` |
 | `rocketmq` | `pg addon rocketmq cluster status --name rocketmq-cluster` |
+| `k3s` | `pg k3s kubectl --name k3s -- get nodes -o wide`；play 的 verify 步骤已经等到所有节点 `Ready` |
 | `vmcluster` | 写入一条样本后通过 vmselect 查询（见下） |
 | `vlcluster` | 写入一条样本后通过 vlselect 查询（见下） |
 

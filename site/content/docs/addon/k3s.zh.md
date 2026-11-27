@@ -1,0 +1,252 @@
+---
+title: "K3s"
+description: "以托管插件方式运行 K3s（轻量 Kubernetes）——单机或 HA server/agent 集群，rootful Podman 容器 + host 网络，支持自定义 CA、containerd registry mirror 与 kubectl/kubeconfig 透传；仅 Linux rootful"
+weight: 71
+---
+
+`pg addon install k3s` 以托管插件方式运行一个 **K3s** 节点。它是**顶层基础设施插件**
+（不代理某个 PostgreSQL 实例）：每台主机最多一个节点，跑在 **rootful Podman 容器**里，
+使用 host 网络与 `--privileged --userns=host --cgroupns=host`，与 K3s 官方容器安装形态一致。
+两种角色都支持，因此既能建单机集群，也能用 `server`/`agent` 成员组建多主机 HA 集群
+（嵌入式 etcd）。
+
+**运行要求：** Linux + **rootful podman**。节点容器需要 host 网络、privileged 模式与
+host cgroup namespace，rootless podman 与其他平台都做不到；不满足时 pgcli 直接拒绝安装。
+host 网络端口必须空闲：
+
+| 角色 | TCP | UDP |
+|---|---|---|
+| `server` | 6443（API）、2379/2380（etcd）、10250（kubelet） | 8472（VXLAN） |
+| `agent` | 10250（kubelet） | 8472（VXLAN） |
+
+80/443 只在被占用时给出警告：K3s 自带的 Traefik 与 ServiceLB 启动后会占用它们，与同机的
+`nginx`/`safeline` 冲突——若确实如此，用 `--disable traefik`/`--disable servicelb` 关掉。
+
+每台主机只能有一个节点：API、etcd、kubelet 端口固定，因此 `pg.yaml` 只允许一个
+`addons.k3s` 条目，第二个直接报错。
+
+## 参数
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--name` | `k3s` | 节点名（map key、容器名后缀、`pg k3s ...` 默认 `--name`） |
+| `--version` | `v1.37.2-k3s1` | K3s 发行 tag，拉取 `docker.io/rancher/k3s:<tag>`。上游写作 `v1.37.2+k3s1`——Docker tag 用 `-`，含 `+` 会被拒绝 |
+| `--image` | | 完整镜像引用覆盖（优先于 `--version`，两者互斥） |
+| `--role` | `server` | `server` 或 `agent` |
+| `--cluster-init` | false | 仅 server：用**嵌入式 etcd** 引导 HA 集群的首台 server（单机 server 不传它，用 SQLite） |
+| `--server` | | 加入已有集群：`https://<first-server>:6443`。与 `--cluster-init` 互斥；agent 必填 |
+| `--token-file` | | **每个节点必填**：存放集群 token 的宿主文件，只读挂载到 `/run/k3s-token` |
+| `--node-name` | 宿主 hostname | Kubernetes 节点名（`--node-name`）；集群内必须唯一 |
+| `--advertise-address` | | 仅 server：对端与客户端访问本节点的地址；也会写进导出的 kubeconfig |
+| `--tls-san` | | 仅 server：API 证书的额外 TLS SAN（可重复） |
+| `--disable` | | 仅 server：关闭自带组件，如 `traefik`、`servicelb`、`metrics-server`（可重复） |
+| `--ca-dir` | | 自定义 CA 目录，**仅初始 server** 且**仅在其首启之前**；见[自定义 CA](#自定义-ca) |
+| `--registry-mirror` | | containerd registry mirror `REGISTRY=ENDPOINT`（可重复，如 `docker.io=https://<id>.mirror.aliyuncs.com`）；与 `--registries-file` 互斥 |
+| `--registries-file` | | 完整 `registries.yaml`（可含 auth/TLS）；与 `--registry-mirror` 互斥 |
+| `--data-dir` | `<base_dir>/addon/k3s/<name>/data` | K3s 数据目录（容器内 `/var/lib/rancher/k3s`） |
+| `--kubelet-dir` | `<base_dir>/addon/k3s/<name>/kubelet` | kubelet 根目录（容器内 `/var/lib/kubelet`） |
+| `--cni-dir` | `<base_dir>/addon/k3s/<name>/cni` | CNI 状态目录（容器内 `/var/lib/cni`） |
+| `--log-dir` | `<base_dir>/addon/k3s/<name>/log` | 挂载到容器 `/var/log` 的宿主目录 |
+| `--log-file` | | 把 K3s server/agent 日志另写到该宿主文件（`--log /var/log/k3s.log --alsologtostderr`） |
+| `--container-log-file` | | 把 Podman 的 `k8s-file` 容器日志固定到该宿主文件（默认用 Podman 自己的日志存储） |
+| `--force` | false | 按当前配置重建节点容器、保留宿主数据；修改参数或 registry mirror 后必须用它生效 |
+
+`--dsn` 与 `--pg-name` 不适用（K3s 直接用 host 网络），传入会被拒绝。
+
+宿主挂载关系：
+
+| 宿主路径 | 容器路径 |
+|---|---|
+| `--data-dir` | `/var/lib/rancher/k3s` |
+| `--kubelet-dir` | `/var/lib/kubelet` |
+| `--cni-dir` | `/var/lib/cni` |
+| `--log-dir` | `/var/log` |
+| `--log-file` | `/var/log/k3s.log` |
+| `--token-file` | `/run/k3s-token`（只读） |
+| 生成/用户的 `registries.yaml` | `/run/k3s-registries.yaml`（只读） |
+
+## 单机安装
+
+```bash
+# 每个节点都需要预生成的 token：否则 K3s 会在首启时自造一个
+# 集群 token，其他成员无法加入。
+openssl rand -hex 32 > /tmp/k3s-token
+chmod 600 /tmp/k3s-token
+
+pg addon install k3s --name k3s --role server \
+  --token-file /tmp/k3s-token \
+  --advertise-address 10.0.0.11
+```
+
+安装会按需拉取镜像、创建目录、在配置了 mirror 时渲染 `registries.yaml`、启动容器并保存
+`pg.yaml`。它**不会阻塞等到集群就绪**——K3s 在后台引导：
+
+```bash
+pg k3s kubectl --name k3s -- get --raw=/readyz
+pg k3s kubectl --name k3s -- get nodes -o wide
+```
+
+> **kubectl 的 flag 要放在 `--` 之后。** 参数先经过 pg 自己的解析：`-o` 是 pg 的全局
+> config 输出参数，`-n` 它不认识。`--` 之后的参数原样交给 kubectl。
+
+## HA 集群
+
+HA 集群 = 首台 server 传 `--cluster-init`（嵌入式 etcd），其余 server 用 `--server` 加入，
+agent 也加入同一个 API。所有节点必须使用同一个 token。
+
+```bash
+# 1. 在控制机生成一个 token，复制到每个节点（权限 0600）。
+openssl rand -hex 32 > /tmp/k3s-token && chmod 600 /tmp/k3s-token
+
+# 2. 首台 server：引导嵌入式 etcd 数据存储。
+pg addon install k3s --name k3s --role server --cluster-init \
+  --token-file /tmp/k3s-token \
+  --advertise-address 10.0.0.11 \
+  --tls-san 10.0.0.11 --tls-san 10.0.0.12 --tls-san 10.0.0.13
+
+# 3. 其余 server：加入首台（不传 --cluster-init）。
+pg addon install k3s --name k3s --role server \
+  --server https://10.0.0.11:6443 \
+  --token-file /tmp/k3s-token \
+  --advertise-address 10.0.0.12 \
+  --tls-san 10.0.0.11 --tls-san 10.0.0.12 --tls-san 10.0.0.13
+
+# 4. agent：加入同一个 API。
+pg addon install k3s --name k3s --role agent \
+  --server https://10.0.0.11:6443 \
+  --token-file /tmp/k3s-token
+```
+
+等首台 server 的 `/readyz` 通过后再启动加入者。`--tls-san` 列出所有 server 地址，客户端
+无论打到哪台 server，API 证书都有效。`pg k3s kubectl --name k3s -- get nodes` 中 server 显示
+`control-plane`，agent 显示 `<none>`（role 标签在节点注册后几秒才写入）。
+
+Ansible 的插件组会替你完成这套编排（默认 3 server + 1 agent、`serial: 1`，token 与可选 CA
+由 `k3s_shared` role 分发）——见 [用 Ansible 部署插件](../ansible/addons.md) 与
+[插件集群章节](../ansible/addon-cluster.md)。单机组（`addon_k3s_single`）可以列一台或
+多台主机：第一台作为 server 传 `--cluster-init`（得到嵌入式 etcd，之后还能继续加 server
+扩容），其余主机作为 agent 自动加入；上面的命令行单机示例则保持 SQLite。
+
+**NAT 网络下的 peer 校验。** etcd 3.7 会用观测到的源地址校验加入节点的证书。节点间流量
+经过 NAT（例如实验室宿主机对 VM 互访做 SNAT）时，join 会报
+`tls: "<观测到的地址>" does not match any of the DNSNames`。把该源地址加进每台 server 的
+`--tls-san`——或在集群组里设置 `_addon_cluster_k3s_extra_tls_sans: ["<地址>"]`——让它同样
+进入 etcd peer 证书。
+
+## 自定义 CA
+
+K3s 自带 **10 年自签 CA**，且不会自动轮换，也没有参数能改年限。要使用更长寿命的 CA，先用
+K3s 官方脚本 [`contrib/util/generate-custom-ca-certs.sh`](https://github.com/k3s-io/k3s/blob/master/contrib/util/generate-custom-ca-certs.sh)
+生成完整集合，再用 `--ca-dir` 传入：
+
+```bash
+DATA_DIR=/tmp/k3s-ca DAYS=36500 bash generate-custom-ca-certs.sh
+find /tmp/k3s-ca -name '*.crt' -o -name '*.key'   # 查看目录结构
+```
+
+目录必须包含 K3s 要求的完整集合：
+
+```text
+server-ca.crt            server-ca.key
+client-ca.crt            client-ca.key
+request-header-ca.crt    request-header-ca.key
+etcd/peer-ca.crt         etcd/peer-ca.key
+etcd/server-ca.crt       etcd/server-ca.key
+service.key
+```
+
+pgcli 会在**初始 server 首启之前**把它们复制到 `<data-dir>/server/tls`（key 权限 0600），
+文件不全直接报错。它只对单机 server 或 `--cluster-init` server 有效；加入的 server 与 agent
+从集群获得 CA。重复安装时，源 CA 与现有文件一致则跳过；不一致会拒绝——请用
+`k3s certificate rotate-ca` 轮换，或清空数据目录重装（数据存储里已经写入了原始信任材料）。
+
+Ansible role 可以为初始 server 生成并分发这套 CA：在
+`group_vars/addon_k3s_cluster/main.yml` 里设 `_addon_cluster_k3s_ca_days: 36500`
+（0 表示沿用 K3s 默认）。
+
+## Registry mirror 与 air-gap
+
+containerd 只在节点启动时读取一次 mirror 配置。支持两种互斥形式：
+
+```bash
+# 渲染形式：pgcli 写 <base>/addon/k3s/<name>/registries.yaml（0600）。
+pg addon install k3s ... \
+  --registry-mirror docker.io=https://<id>.mirror.aliyuncs.com
+
+# 完整形式：你自己的 registries.yaml，可含 auth/TLS 段。
+pg addon install k3s ... --registries-file /etc/k3s/registries.yaml
+```
+
+文件只读挂载到 `/run/k3s-registries.yaml`，并以 `--private-registry` 传给 K3s。修改 mirror
+需要重建容器（保留宿主数据）才能生效：
+
+```bash
+pg addon install k3s ... --registry-mirror docker.io=https://new-mirror.example.com --force
+```
+
+mirror 只影响 **Pod 镜像**——K3s 节点镜像本身由 Podman 拉取（用 `pg mirror` 单独配置，
+或用 Ansible 的离线镜像预载 tarball）。真正 air-gap 的集群还需要 K3s 的
+**airgap-images tarball**（pause、coredns、traefik、metrics-server、
+local-path-provisioner 等），放到 containerd 能导入的位置。
+
+## kubectl 与 kubeconfig
+
+`pg k3s` 通过 `podman exec` 驱动本机的节点容器；宿主无需安装任何东西，也不涉及远程集群。
+
+```bash
+pg k3s kubectl get nodes                          # 唯一配置的节点
+pg k3s kubectl -- get nodes -o wide
+pg k3s kubectl -- get pods -n kube-system
+pg k3s kubectl -- apply -f manifest.yaml
+pg k3s kubectl --name k3s get pods                # 多个节点：指定其一
+```
+
+`kubectl` 与 `kubeconfig` 仅限 server；agent 会被拒绝。配置了多个节点时必须用 `--name`
+选择 server。stdin 已接上，因此 `kubectl apply -f -` 可用。
+
+```bash
+pg k3s kubeconfig --name k3s > kubeconfig.yaml       # 输出到 stdout
+pg k3s kubeconfig --name k3s --output ~/.kube/config # 权限 0600
+```
+
+server 安装时若给了 `--advertise-address`，kubeconfig 里的 loopback API 地址
+（`https://127.0.0.1:6443`）会被改写成该地址，文件可直接在其他主机使用。远程集群请用导出
+的 kubeconfig 配合任意 kubectl——`pg k3s` 只操作本机。
+
+## 生命周期
+
+```bash
+pg addon list                          # "Infra add-ons (k3s):" 段
+pg addon start k3s --name k3s          # 启动容器（不存在则重建）
+pg addon stop k3s --name k3s           # 停止，保留数据
+pg logs addon k3s --name k3s -f        # 容器日志
+pg addon remove k3s --name k3s         # 删除容器与配置条目
+pg addon remove k3s --name k3s --clean-data   # 同时删除 data/kubelet/cni/log
+```
+
+`--clean-data` 删除 data、kubelet、CNI、log 四个目录以及 pgcli 渲染的 `registries.yaml`；
+用户提供的 token/CA/registries 原文件永不删除。
+
+autostart 走已有的容器启动路径：
+
+```bash
+pg autostart enable --k3s --name k3s
+pg autostart list
+pg start                # 按顺序启动 autostart 的 K3s 节点：cluster-init server、加入的 server、单机 server、agent
+```
+
+`pg start` 按该顺序启动节点容器，但不等待集群就绪。多主机集群请先在初始 server 所在主机上
+执行 `pg start`。
+
+## 限制
+
+- **每台主机一个节点。** host 网络端口固定（6443/2379/2380/10250/8472），无法跑第二个节点；
+  更多节点请加主机。
+- **角色与成员关系属于数据目录。** 修改 `role`、`--cluster-init` 或 `--server` 需要
+  `--clean-data` 删除节点后重装；仅 `--force` 会保留旧数据存储。
+- **Traefik/ServiceLB 会占用宿主 80/443。** 当 nginx/safeline/其他 Web 插件占用这些端口时，
+  用 `--disable traefik`（保留 ServiceLB 服务 LoadBalancer）或 `--disable servicelb`。
+- **token 与 CA 轮换需要手动。** pgcli 不自动轮换；用 `k3s certificate rotate-ca`，或从干净
+  数据目录重装。
+- **不接入 pg daemon。** 与其他插件一样，节点依靠 `--restart unless-stopped` 自愈、依靠
+  `pg start --autostart` 控制开机顺序。

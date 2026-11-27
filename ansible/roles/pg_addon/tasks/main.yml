@@ -1,39 +1,48 @@
 ---
-# SafeLine needs rootful podman (fixed bridge container addresses and
-# host-network traffic proxies) and refuses rootless. When the selected add-on
-# group is safeline, run its commands as root even if this host's deployment
-# identity is rootless (for example a host that also belongs to an active
-# scenario group), while the stack stays in the deployment account's pgcli
-# config. A scenario group's own pgcli_addons list would otherwise shadow the
-# --limit selection, so the safeline group list is selected explicitly.
-- name: Note whether safeline overrides the deployment identity
+# SafeLine and K3s need rootful podman (fixed bridge container addresses /
+# host-network privileged containers) and refuse rootless. When the selected
+# add-on group is safeline or k3s, run its commands as root even if this
+# host's deployment identity is rootless (for example a host that also belongs
+# to an active scenario group), while the stack stays in the deployment
+# account's pgcli config. A scenario group's own pgcli_addons list would
+# otherwise shadow the --limit selection, so the add-on group list is selected
+# explicitly.
+- name: Note whether the add-on overrides the deployment identity
   ansible.builtin.set_fact:
-    _addon_safeline_rootful: >-
-      {{ _addon_type == 'safeline' and (pgcli_deploy_rootless | bool) }}
-    _addon_safeline_deploy_user: "{{ pgcli_deploy_user }}"
-    _addon_safeline_deploy_home: "{{ pgcli_deploy_home }}"
-    _addon_safeline_config_path: "{{ pgcli_config_path }}"
+    _addon_rootful_required: >-
+      {{ _addon_type in ['safeline', 'k3s'] and (pgcli_deploy_rootless | bool) }}
+    _addon_rootful_deploy_user: "{{ pgcli_deploy_user }}"
+    _addon_rootful_deploy_home: "{{ pgcli_deploy_home }}"
+    _addon_rootful_config_path: "{{ pgcli_config_path }}"
 
-- name: Select the safeline add-on group over scenario-group add-on lists
+- name: Select the rootful add-on group over scenario-group add-on lists
   ansible.builtin.set_fact:
     pgcli_addons: "{{ lookup('vars', 'addon_' ~ _addon_kind ~ '_addons', default=[]) }}"
-  when: _addon_type == 'safeline'
+  when: _addon_type in ['safeline', 'k3s']
 
-- name: Run safeline with rootful privileges
+- name: Run the add-on with rootful privileges
   ansible.builtin.set_fact:
     pgcli_deploy_rootless: false
     pgcli_deploy_become_user: root
-    pgcli_deploy_home: "{{ _addon_safeline_deploy_home }}"
-    pgcli_config_path: "{{ _addon_safeline_config_path }}"
-  when: _addon_safeline_rootful | bool
+    pgcli_deploy_home: "{{ _addon_rootful_deploy_home }}"
+    pgcli_config_path: "{{ _addon_rootful_config_path }}"
+  when: _addon_rootful_required | bool
 
-- name: Show the safeline deployment notice
+# Rootful podman must not inherit the deployment account's session bus.
+- name: Drop the rootless runtime directory for rootful k3s
+  ansible.builtin.set_fact:
+    pgcli_deploy_run_dir: ""
+  when:
+    - _addon_rootful_required | bool
+    - _addon_type == 'k3s'
+
+- name: Show the rootful deployment notice
   ansible.builtin.debug:
     msg: >-
-      SafeLine requires rootful podman: running the safeline commands as root
-      (rootful podman) while keeping the stack in the deployment account's
-      config {{ _addon_safeline_config_path }}.
-  when: _addon_safeline_rootful | bool
+      {{ _addon_type }} requires rootful podman: running the {{ _addon_type }}
+      commands as root (rootful podman) while keeping the stack in the
+      deployment account's config {{ _addon_rootful_config_path }}.
+  when: _addon_rootful_required | bool
 
 - name: Ensure the pgcli config exists
   ansible.builtin.include_role:
@@ -72,25 +81,25 @@
     loop_var: addon
     label: "{{ addon.type }}{{ ('/' + addon.name) if addon.name is defined else '' }}"
 
-# The safeline commands run as root, so state files they create (or add-on conf
+# The add-on commands run as root, so state files they create (or add-on conf
 # files they write next to the config) would be root-owned. Hand the deployment
 # account its pgcli state back, keeping the file modes pgcli set.
 - name: Check the deployment account's pgcli state directory
   ansible.builtin.stat:
-    path: "{{ _addon_safeline_config_path }}"
-  register: _addon_safeline_cfg_stat
+    path: "{{ _addon_rootful_config_path }}"
+  register: _addon_rootful_cfg_stat
   when:
-    - _addon_safeline_rootful | bool
-    - _addon_safeline_deploy_user | length > 0
+    - _addon_rootful_required | bool
+    - _addon_rootful_deploy_user | length > 0
 
 - name: Restore the deployment account's pgcli state ownership
   ansible.builtin.file:
-    path: "{{ _addon_safeline_config_path | dirname }}"
+    path: "{{ _addon_rootful_config_path | dirname }}"
     state: directory
     recurse: true
-    owner: "{{ _addon_safeline_deploy_user }}"
-    group: "{{ _addon_safeline_deploy_user }}"
+    owner: "{{ _addon_rootful_deploy_user }}"
+    group: "{{ _addon_rootful_deploy_user }}"
   when:
-    - _addon_safeline_rootful | bool
-    - _addon_safeline_deploy_user | length > 0
-    - _addon_safeline_cfg_stat.stat.exists | default(false)
+    - _addon_rootful_required | bool
+    - _addon_rootful_deploy_user | length > 0
+    - _addon_rootful_cfg_stat.stat.exists | default(false)

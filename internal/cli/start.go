@@ -80,8 +80,8 @@ func startAutostart() error {
 	}
 	sort.Strings(names)
 
-	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartValkey(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartNodeExporter(c) && !hasAutostartPGExporter(c) && !hasAutostartDocumentDB(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartVmalert(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouseKeeper(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartRabbitMQ(c) && !hasAutostartRocketMQ(c) && !hasAutostartSafeline(c) && !hasAutostartNginx(c) && !hasAutostartPrivoxy(c) && !hasAutostartHTTP(c) && !hasAutostartDaemons(c) {
-		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --valkey / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --vmalert / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --kafka / --rabbitmq / --safeline / --nginx / --nodeexporter / --pgexporter / --documentdb / --daemon / --http / --privoxy)")
+	if len(names) == 0 && !c.Backup.Autostart && !hasAutostartPgbouncer(c) && !hasAutostartPostgrest(c) && !hasAutostartEtcd(c) && !hasAutostartK3s(c) && !hasAutostartPgDog(c) && !hasAutostartPatroni(c) && !hasAutostartHAProxy(c) && !hasAutostartMinio(c) && !hasAutostartSilo(c) && !hasAutostartRustfs(c) && !hasAutostartGarage(c) && !hasAutostartSeaweedfs(c) && !hasAutostartSQLite(c) && !hasAutostartRedis(c) && !hasAutostartValkey(c) && !hasAutostartPredixy(c) && !hasAutostartPgAdmin(c) && !hasAutostartGrafana(c) && !hasAutostartPrometheus(c) && !hasAutostartAlertmanager(c) && !hasAutostartVictoriaMetrics(c) && !hasAutostartNodeExporter(c) && !hasAutostartPGExporter(c) && !hasAutostartDocumentDB(c) && !hasAutostartVMCluster(c) && !hasAutostartVLCluster(c) && !hasAutostartVictoriaLogs(c) && !hasAutostartVlagent(c) && !hasAutostartVmalert(c) && !hasAutostartGitea(c) && !hasAutostartBeeGFS(c) && !hasAutostartJuicefs(c) && !hasAutostartZerofs(c) && !hasAutostartInfluxDB(c) && !hasAutostartInflux2TSDB(c) && !hasAutostartClickHouseKeeper(c) && !hasAutostartClickHouse(c) && !hasAutostartKafka(c) && !hasAutostartRabbitMQ(c) && !hasAutostartRocketMQ(c) && !hasAutostartSafeline(c) && !hasAutostartNginx(c) && !hasAutostartPrivoxy(c) && !hasAutostartHTTP(c) && !hasAutostartDaemons(c) {
+		fmt.Println("-> No autostart targets configured (pg autostart enable -i <name> / --backup / --pgbouncer / --postgrest / --etcd / --k3s / --pgdog / --ha / --haproxy / --minio / --silo / --rustfs / --garage / --seaweedfs / --sqlite / --redis / --valkey / --predixy / --pgadmin / --grafana / --prometheus / --alertmanager / --victoriametrics / --vmcluster / --vlcluster / --victorialogs / --vlagent / --vmalert / --gitea / --beegfs / --juicefs / --zerofs / --influxdb / --influx2tsdb / --clickhouse / --kafka / --rabbitmq / --safeline / --nginx / --nodeexporter / --pgexporter / --documentdb / --daemon / --http / --privoxy)")
 		return nil
 	}
 
@@ -135,6 +135,12 @@ func startAutostart() error {
 
 	// etcd members (top-level infra addon).
 	if err := startAutostartEtcds(c); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// K3s nodes (top-level infra addon). Ordered cluster-init server → other
+	// servers → agents so a joining member finds its API server already up.
+	if err := startAutostartK3s(c); err != nil && firstErr == nil {
 		firstErr = err
 	}
 
@@ -546,6 +552,71 @@ func startAutostartEtcds(c *config.Config) error {
 		}
 	}
 	return firstErr
+}
+
+func hasAutostartK3s(c *config.Config) bool {
+	for _, kc := range c.Addons.K3s {
+		if kc.Autostart {
+			return true
+		}
+	}
+	return false
+}
+
+// startAutostartK3s starts each autostart-enabled K3s node in HA boot order:
+// the --cluster-init server first (it owns the embedded etcd datastore), then
+// joining servers, then agents, name-sorted within each group for readable
+// boot logs. Each host runs at most one node, so in practice the order only
+// matters across a group of hosts sharing one pg.yaml.
+func startAutostartK3s(c *config.Config) error {
+	var nodes []config.K3sConfig
+	for _, kc := range c.Addons.K3s {
+		if kc.Autostart {
+			nodes = append(nodes, kc)
+		}
+	}
+	if len(nodes) == 0 {
+		return nil
+	}
+	sortK3sBootOrder(nodes)
+
+	km, err := podman.NewK3sManager(c)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, kc := range nodes {
+		if err := km.StartContainer(&kc); err != nil {
+			fmt.Printf("  [X] k3s autostart (%s): %v\n", kc.Name, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// sortK3sBootOrder orders autostart K3s nodes so the cluster-init server comes
+// up before joining servers and agents, with names breaking ties.
+func sortK3sBootOrder(nodes []config.K3sConfig) {
+	rank := func(kc config.K3sConfig) int {
+		switch {
+		case kc.Role == "server" && kc.ClusterInit:
+			return 0
+		case kc.Role == "server" && kc.Joiner():
+			return 1
+		case kc.Role == "server":
+			return 2
+		default:
+			return 3
+		}
+	}
+	sort.Slice(nodes, func(i, j int) bool {
+		if ri, rj := rank(nodes[i]), rank(nodes[j]); ri != rj {
+			return ri < rj
+		}
+		return nodes[i].Name < nodes[j].Name
+	})
 }
 
 func hasAutostartPgDog(c *config.Config) bool {

@@ -1,0 +1,89 @@
+---
+# K3s add-on group (addon_k3s_single).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_k3s_single --tags addon
+#
+# One or more hosts. The first host is the server: it bootstraps the embedded
+# etcd with --cluster-init even when it is alone, so more servers can join
+# later instead of being stuck on a single-server SQLite datastore. Every
+# remaining host is an agent that joins its API. A host can carry only one K3s
+# node: the API (6443), etcd (2379/2380) and kubelet (10250) ports are fixed.
+#
+# Shared material (token, optional custom CA, rendered registries.yaml) is
+# prepared on the controller by the k3s_shared role and pushed to every member
+# before the install command runs. K3s runs as root even on a host whose
+# deployment account is rootless.
+
+_addon_k3s_single_hosts: "{{ groups['addon_k3s_single'] }}"
+_addon_k3s_single_index: "{{ _addon_k3s_single_hosts.index(inventory_hostname) | int }}"
+_addon_k3s_role: "{{ 'server' if (_addon_k3s_single_index | int) == 0 else 'agent' }}"
+_addon_k3s_is_initial_server: "{{ (_addon_k3s_single_index | int) == 0 }}"
+
+# Kubernetes node name is inventory_hostname; this is the advertise address.
+# Node-to-node addresses prefer private_ip and fall back to ansible_host.
+_addon_k3s_node_ip: >-
+  {{ hostvars[inventory_hostname].private_ip
+     | default(hostvars[inventory_hostname].ansible_host, true) }}
+_addon_k3s_cluster_first_ip: >-
+  {{ hostvars[_addon_k3s_single_hosts[0]].private_ip
+     | default(hostvars[_addon_k3s_single_hosts[0]].ansible_host, true) }}
+
+# Controller path of a token to reuse; empty generates one under
+# var/addon_cluster/shared and copies it to every member.
+_addon_cluster_k3s_token_file: ""
+# Custom CA lifetime in days. 0 keeps the K3s self-signed CA (10 years);
+# 36500 generates a 100-year CA and injects it before the first start.
+# Changing it on an initialized node requires clearing the data directory.
+_addon_cluster_k3s_ca_days: 0
+# containerd registry mirrors rendered into registries.yaml on every member:
+#   docker.io: ["https://<id>.mirror.aliyuncs.com"]
+# A change is applied by recreating the node containers (--force), which keeps
+# the host data. Mutually exclusive with _addon_k3s_registries_file.
+_addon_k3s_registry_mirrors: {}
+# Complete registries.yaml on the controller (may include auth/TLS).
+_addon_k3s_registries_file: ""
+# Bundled components to disable on the server, e.g. [traefik] when ports 80/443
+# are already used on that host.
+_addon_k3s_disable: []
+
+_addon_k3s_shared_remote_dir: /data/pg/addon/shared
+_addon_k3s_registries_path: "{{ _addon_k3s_shared_remote_dir }}/k3s-registries.yaml"
+
+_addon_k3s_single_flags: >-
+  {%- set out = ['--role', _addon_k3s_role,
+                 '--node-name', inventory_hostname,
+                 '--token-file', _addon_k3s_shared_remote_dir ~ '/k3s-token',
+                 '--data-dir', '/data/pg/addon/k3s/k3s/data',
+                 '--kubelet-dir', '/data/pg/addon/k3s/k3s/kubelet',
+                 '--cni-dir', '/data/pg/addon/k3s/k3s/cni',
+                 '--log-dir', '/data/pg/addon/k3s/k3s/log'] -%}
+  {%- if _addon_k3s_role == 'server' -%}
+  {%- if _addon_k3s_node_ip | length > 0 -%}
+  {%- set _ = out.extend(['--advertise-address', _addon_k3s_node_ip]) -%}
+  {%- endif -%}
+  {%- set _ = out.extend(['--cluster-init']) -%}
+  {%- for component in _addon_k3s_disable -%}
+  {%- set _ = out.extend(['--disable', component]) -%}
+  {%- endfor -%}
+  {%- if (_addon_k3s_is_initial_server | bool) and (_addon_cluster_k3s_ca_days | int > 0) -%}
+  {%- set _ = out.extend(['--ca-dir', _addon_k3s_shared_remote_dir ~ '/k3s-ca']) -%}
+  {%- endif -%}
+  {%- else -%}
+  {%- set _ = out.extend(['--server', 'https://' ~ _addon_k3s_cluster_first_ip ~ ':6443']) -%}
+  {%- endif -%}
+  {%- if (_addon_k3s_registry_mirrors | length > 0) or (_addon_k3s_registries_file | length > 0) -%}
+  {%- set _ = out.extend(['--registries-file', _addon_k3s_registries_path]) -%}
+  {%- endif -%}
+  {{ out }}
+
+# Default flags for entries that do not set their own params.
+addon_k3s_single_params: []
+
+addon_k3s_single_addons:
+  - type: k3s
+    state: present
+    name: k3s
+    params: "{{ _addon_k3s_single_flags }}"
+    # A changed registries.yaml only takes effect after the node container is
+    # recreated; a first install recreates as well (there is nothing running).
+    args: "{{ ['--force'] if _addon_k3s_registries_changed | default(false) | bool else [] }}"

@@ -193,7 +193,7 @@ Examples:
 			if err != nil {
 				return err
 			}
-		case "etcd", "pgdog", "haproxy", "minio", "silo", "rustfs", "garage", "seaweedfs", "redis", "valkey", "predixy", "pgadmin", "grafana", "prometheus", "alertmanager", "vmalert", "nodeexporter", "pgexporter", "documentdb", "gitea", "beegfs", "nginx", "privoxy", "influxdb", "influx2tsdb", "clickhouse", "clickhouse-keeper", "kafka", "rabbitmq", "rocketmq", "safeline", "vmcluster", "vlcluster":
+		case "etcd", "pgdog", "haproxy", "minio", "silo", "rustfs", "garage", "seaweedfs", "redis", "valkey", "predixy", "pgadmin", "grafana", "prometheus", "alertmanager", "vmalert", "nodeexporter", "pgexporter", "documentdb", "gitea", "beegfs", "nginx", "privoxy", "influxdb", "influx2tsdb", "clickhouse", "clickhouse-keeper", "kafka", "rabbitmq", "rocketmq", "safeline", "vmcluster", "vlcluster", "k3s":
 			// (patroni is handled above; it shares --name but requires --scope.)
 			if pgName != "" {
 				return fmt.Errorf("--pg-name selects a remote PgBouncer or PostgREST; use --name for an %s", addonType)
@@ -219,6 +219,15 @@ Examples:
 					return fmt.Errorf("etcd member %q not found (use 'pg addon list' to see available)", name)
 				}
 				containerName = ec.ContainerName
+			case "k3s":
+				if cfg.Addons.K3s == nil {
+					return fmt.Errorf("no k3s nodes configured")
+				}
+				kc, ok := cfg.Addons.K3s[name]
+				if !ok {
+					return fmt.Errorf("k3s node %q not found (use 'pg addon list' to see available)", name)
+				}
+				containerName = kc.ContainerName
 			case "pgdog":
 				if cfg.Addons.PgDog == nil {
 					return fmt.Errorf("no pgdog addons configured")
@@ -629,7 +638,7 @@ Examples:
 			}
 			return tailHostLog(m, tail, follow)
 		default:
-			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rocketmq, safeline, nginx, privoxy, patroni)", addonType)
+			return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, postgrest, pgadmin, grafana, prometheus, alertmanager, vmalert, gitea, beegfs, vmcluster, vlcluster, juicefs, zerofs, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rocketmq, safeline, nginx, privoxy, k3s, patroni)", addonType)
 		}
 
 		return runPodmanLogs(containerName, tail, follow)
@@ -705,7 +714,7 @@ func init() {
 	logsAddonCmd.Flags().BoolP("follow", "f", false, "Stream logs continuously")
 	logsAddonCmd.Flags().IntP("tail", "n", 50, "Number of lines to show (0 = all)")
 	logsAddonCmd.Flags().String("pg-name", "", "Remote addon name (for remote PgBouncer or PostgREST)")
-	logsAddonCmd.Flags().String("name", "", "etcd member name, pgdog proxy name, haproxy instance name, minio/silo/rustfs/garage/redis/valkey/predixy/pgadmin/grafana/prometheus/alertmanager/vmalert/gitea/influxdb/influx2tsdb/clickhouse/clickhouse-keeper/kafka/rocketmq/safeline/beegfs/vmcluster/vlcluster instance name, or Patroni member name")
+	logsAddonCmd.Flags().String("name", "", "etcd member name, k3s node name, pgdog proxy name, haproxy instance name, minio/silo/rustfs/garage/redis/valkey/predixy/pgadmin/grafana/prometheus/alertmanager/vmalert/gitea/influxdb/influx2tsdb/clickhouse/clickhouse-keeper/kafka/rocketmq/safeline/beegfs/vmcluster/vlcluster instance name, or Patroni member name")
 	logsAddonCmd.Flags().String("scope", "", "Patroni cluster scope (required only with addon type patroni)")
 	logsAddonCmd.Flags().String("service", "", "beegfs: which container of the filesystem to read — mgmtd, meta or storage (default \"mgmtd\"); zerofs: server or mount (the FUSE client) (default \"server\"); vmcluster/vlcluster: storage, insert or select (default \"storage\"); rocketmq: namesrv, broker or proxy (default \"broker\"); safeline: postgres, mgt, detector, tengine, luigi, fvm or chaos (default \"mgt\")")
 

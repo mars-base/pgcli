@@ -33,8 +33,8 @@
 # instance_addon_mixed and ha_etcd can also define pgcli_addons. Any active
 # scenario/HA group would override the add-on selection for its hosts. The
 # scenario groups stay commented out here and while testing add-on groups.
-# safeline is the exception: its add-on group always selects its own list and
-# runs the safeline commands as root (rootful podman), even on a host whose
+# safeline and k3s are the exceptions: their add-on groups always select their
+# own list and run the commands as root (rootful podman), even on a host whose
 # scenario group is configured rootless; the stack stays in the deployment
 # account's pgcli config.
 
@@ -238,6 +238,12 @@ ansible_group_priority=20
 # [addon_juicefs_single]
 # node1
 
+# The k3s single group takes one or more hosts: the first is the server, the
+# rest are agents that join it.
+# [addon_k3s_single]
+# node1
+# node2
+
 # [addon_kafka_single]
 # node1
 
@@ -323,7 +329,11 @@ ansible_group_priority=20
 # Variables live in the matching group_vars/addon_<type>_cluster/main.yml.
 # 3-member groups: etcd, seaweedfs, clickhouse-keeper, kafka, rabbitmq,
 # rocketmq. 4-member groups: minio, silo, rustfs, redis, valkey,
-# clickhouse, vmcluster, vlcluster.
+# clickhouse, vmcluster, vlcluster, k3s.
+#
+# The k3s cluster layout is 3 servers (embedded etcd; the first host runs
+# --cluster-init) + 1 agent; tune addon_k3s_server_count. Host order is
+# bootstrap order.
 
 # [addon_clickhouse_cluster]
 # node1
@@ -340,6 +350,12 @@ ansible_group_priority=20
 # node1
 # node2
 # node3
+
+# [addon_k3s_cluster]
+# node1
+# node2
+# node3
+# node4
 
 # [addon_kafka_cluster]
 # node1

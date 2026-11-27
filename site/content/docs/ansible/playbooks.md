@@ -40,6 +40,7 @@ whatever the selected hosts declare in `group_vars/`.
 | 8 | Patroni HA members | `ha_cluster` | 1 | `ha` |
 | 9 | Patroni HA backup convergence | `ha_cluster` | – | `ha` |
 | 10 | Patroni HA proxy | proxy host | – | `ha`, `haproxy` |
+| 11 | Verify the K3s nodes | K3s group hosts | – | `addon` |
 
 `serial: 1` is deliberate: the first host installs the add-ons or bootstraps
 etcd, then the next host joins; cross-host replicas need their primary to
@@ -57,6 +58,14 @@ play is serial). Each only acts when `--limit addon_<type>_cluster` selects
 present entries: it waits for every member, creates the cluster once if
 needed, and waits until all 16384 slots are assigned. Reruns skip the create
 step.
+
+K3s rides the serial add-on play too: after each server installs, the play
+waits for its `/readyz` before the next member joins. The verify play at the
+end runs on the union of the `addon_k3s_single` and `addon_k3s_cluster`
+groups (groups absent from the inventory are skipped): it waits for every
+node to be `Ready`, then asserts the topology — one node for a single
+install, or `addon_k3s_server_count` servers plus the remaining hosts as
+agents in a cluster.
 
 ```bash
 # Full stack for one deployment mode

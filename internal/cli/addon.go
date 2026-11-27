@@ -380,6 +380,7 @@ var addonInstallCmd = &cobra.Command{
 Currently supported add-ons:
   pgbouncer   connection pooler (transaction mode)
   etcd        standalone key-value store (HA cluster DCS)
+  k3s         K3s — single-node or HA Kubernetes from the official docker.io/rancher/k3s image, run as a ROOTFUL Podman container on the host network (server/agent, --cluster-init for the first HA server, --server to join, custom CA via --ca-dir, containerd mirrors via --registry-mirror); every node needs a pre-generated --token-file; one node per host; Linux rootful only; drive it with "pg k3s kubectl" / "pg k3s kubeconfig"
   pgdog       Postgres proxy (pooling, load balancing, sharding)
   haproxy     TCP load balancer in front of a Patroni cluster (unified or read/write split), or a custom haproxy.cfg via --conf-file for any native proxying
   minio       single-node S3-compatible object storage (web console included; Linux host network, macOS bridge)
@@ -1094,7 +1095,7 @@ var addonRemoveCmd = &cobra.Command{
 For local add-ons, use -i to specify the instance.
 For remote add-ons, use --pg-name to specify the pooler name.
 
-Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/garage/seaweedfs/redis/valkey/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/beegfs/juicefs/zerofs/duckdb/influxdb/influx2tsdb/clickhouse/kafka/rocketmq) use --name.
+Infra add-ons (etcd/pgdog/haproxy/minio/silo/rustfs/garage/seaweedfs/redis/valkey/predixy/pgadmin/grafana/prometheus/alertmanager/gitea/beegfs/juicefs/zerofs/duckdb/influxdb/influx2tsdb/clickhouse/kafka/rocketmq/k3s) use --name.
 Remove keeps the data directory; pass --clean-data for object-storage/KV/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea/BeeGFS/DuckDB
 data to go too. For beegfs the unit is the filesystem on THIS host — its role containers (all three on a converged host, the configured subset on a cross-host member) go, and --clean-data deletes their data dirs.
 For juicefs/zerofs (host-binary addons) remove unmounts and stops the processes but NEVER touches object storage or the
@@ -1113,6 +1114,9 @@ For rocketmq remove deletes the three containers and the config entry;
 --clean-data additionally deletes the instance dir (broker store, controller
 store, logs, rendered config). On a cluster member this only affects THIS host —
 the other members' DLedger peer lists still reference it.
+For k3s remove deletes the node container and the config entry; --clean-data
+additionally deletes the data/kubelet/CNI/log directories. User-supplied token,
+CA and registries files are never deleted.
 
 Examples:
   pg addon remove pgbouncer -i proj01
@@ -1164,6 +1168,7 @@ regenerating config or re-registering cluster members.
 
 Supported add-ons:
   etcd       pg addon start etcd [--name m1]
+  k3s        pg addon start k3s [--name k3s]   (starts the rootful K3s node container; PostgreSQL pods stay down until the API server is ready)
   pgdog      pg addon start pgdog [--name proxy]
   haproxy    pg addon start haproxy [--name lb]
   minio      pg addon start minio [--name store]
@@ -1232,6 +1237,7 @@ back up later with 'pg addon start <addon>'.
 
 Supported add-ons:
   etcd       pg addon stop etcd [--name m1]
+  k3s        pg addon stop k3s [--name k3s]   (stops the rootful K3s node container, keeps data)
   pgdog      pg addon stop pgdog [--name proxy]
   haproxy    pg addon stop haproxy [--name lb]
   minio      pg addon stop minio [--name store]
@@ -1479,7 +1485,23 @@ func init() {
 	addonInstallCmd.Flags().String("advertise-host", "", "peer-visible host: etcd member peer/client URLs, redis/valkey native-cluster --cluster-announce-ip, garage cluster rpc_public_addr, and seaweedfs cluster weed -ip that peers dial (empty=127.0.0.1 single-host; set a LAN IP or FQDN for cross-host clusters — required on every garage or seaweedfs --cluster member; Kafka advertises this broker host:port to clients and may not be 0.0.0.0; in Kafka --cluster mode it is also this node's controller voter address, must be a concrete non-loopback IP, and is required on every fresh cluster install. RabbitMQ does not use --advertise-host: its peer-visible identity is --node-name NAME@HOST. RocketMQ advertises this host to clients and peers; required on every fresh cluster install and must be a concrete non-loopback IPv4 in cluster mode (standalone defaults to 127.0.0.1). ClickHouse advertises this host to peers (interserver) and is required on every fresh --cluster install; clickhouse-keeper advertises this host to Raft peers and is required on every fresh install (both must be concrete non-loopback addresses)")
 	addonInstallCmd.Flags().String("join", "", "client endpoint of an existing cluster member to join cross-host, e.g. http://10.0.0.12:2379 or https://10.0.0.12:2379 (implies --initial-cluster-state existing; requires --advertise-host). For etcd the scheme must match --tls, the member must use the same auth setting as the cluster, and with TLS the cluster CA is fetched automatically (credentials required when auth is enabled). RabbitMQ does not use --join: members discover each other through etcd")
 	addonRemoveCmd.Flags().String("name", "", "name of the etcd member, pgdog proxy, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, pgadmin, grafana, prometheus, vmcluster, vlcluster, alertmanager, vmalert, gitea, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, beegfs, privoxy, rocketmq or safeline instance to remove (default \"etcd\"/\"pgdog\"/\"haproxy\"/\"minio\"/\"silo\"/\"rustfs\"/\"garage\"/\"seaweedfs\"/\"redis\"/\"valkey\"/\"predixy\"/\"pgadmin\"/\"grafana\"/\"prometheus\"/\"vmc\"/\"vlc\"/\"alertmanager\"/\"vmalert\"/\"gitea\"/\"influx2tsdb\"/\"clickhouse\"/\"clickhouse-keeper\"/\"beegfs\"/\"privoxy\"/\"rocketmq\"/\"safeline\")")
-	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/garage/seaweedfs/redis/valkey/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea/VMCluster/VLCluster data directory (object storage / backup repository / key-value data / pgAdmin config+sessions, Grafana dashboards sqlite DB, Prometheus TSDB, Alertmanager silences+notification state, or Gitea repos + app.ini + its default SQLite DB; VMCluster vmstorage TSDB; VLCluster vlstorage logs) and pgcli-rendered files beside it, or the juicefs/zerofs host per-instance dir (cache, logs, sqlite meta), or the influxdb per-instance dir (data, generated influxdb.conf, local backups), or the clickhouse per-instance dir (data, logs, rendered config, local backups); or the rocketmq per-instance dir (broker store, cluster controller store, logs, rendered config); or the safeline per-instance dir (bundled PostgreSQL data, console state, nginx config, logs); for vmalert, only pgcli-managed rules/templates dirs (a user-supplied --rules-dir/--templates-dir is never deleted); never the S3 bucket or a PG metadata database. No-op for predixy and influx2tsdb, which are stateless. Never drops a seaweedfs filer metadata database or a Gitea --dsn PostgreSQL database")
+	addonRemoveCmd.Flags().Bool("clean-data", false, "also delete the MinIO/silo/rustfs/garage/seaweedfs/redis/valkey/pgAdmin/Grafana/Prometheus/Alertmanager/Gitea/VMCluster/VLCluster data directory (object storage / backup repository / key-value data / pgAdmin config+sessions, Grafana dashboards sqlite DB, Prometheus TSDB, Alertmanager silences+notification state, or Gitea repos + app.ini + its default SQLite DB; VMCluster vmstorage TSDB; VLCluster vlstorage logs) and pgcli-rendered files beside it, or the juicefs/zerofs host per-instance dir (cache, logs, sqlite meta), or the influxdb per-instance dir (data, generated influxdb.conf, local backups), or the clickhouse per-instance dir (data, logs, rendered config, local backups); or the rocketmq per-instance dir (broker store, cluster controller store, logs, rendered config); or the safeline per-instance dir (bundled PostgreSQL data, console state, nginx config, logs); or the k3s data/kubelet/CNI/log directories (user token/CA/registries files are kept); for vmalert, only pgcli-managed rules/templates dirs (a user-supplied --rules-dir/--templates-dir is never deleted); never the S3 bucket or a PG metadata database. No-op for predixy and influx2tsdb, which are stateless. Never drops a seaweedfs filer metadata database or a Gitea --dsn PostgreSQL database")
+
+	// k3s flags (top-level K3s node; one per host, fixed host-network ports)
+	addonInstallCmd.Flags().String("role", "", "k3s node role: server (default) or agent — one K3s node per host, because the API/etcd/kubelet host-network ports are fixed")
+	addonInstallCmd.Flags().Bool("cluster-init", false, "k3s server: bootstrap the first server of an HA cluster with the embedded etcd datastore (a standalone server omits it and uses SQLite)")
+	addonInstallCmd.Flags().String("server", "", "k3s: existing API server to join, https://<first-server>:6443 (mutually exclusive with --cluster-init)")
+	addonInstallCmd.Flags().String("advertise-address", "", "k3s server: address peers and clients use to reach this node; also rewritten into the exported kubeconfig")
+	addonInstallCmd.Flags().StringArray("tls-san", nil, "k3s server: extra TLS SAN for the API certificate (repeatable)")
+	addonInstallCmd.Flags().StringArray("disable", nil, "k3s server: bundled component to disable, e.g. traefik or servicelb (repeatable) — disable traefik when ports 80/443 are already used on this host")
+	addonInstallCmd.Flags().String("token-file", "", "k3s: host file holding the cluster token, mounted read-only (REQUIRED on every node; generate once with `openssl rand -hex 32 > k3s-token && chmod 600 k3s-token` and copy it to every node)")
+	addonInstallCmd.Flags().String("ca-dir", "", "k3s: directory with the complete custom CA set (server-ca, client-ca, request-header-ca, etcd-peer-ca, etcd-server-ca and service.key); only valid on the standalone/--cluster-init server and only before its first start")
+	addonInstallCmd.Flags().String("registries-file", "", "k3s: complete containerd registries.yaml to mount (may include auth/TLS); mutually exclusive with --registry-mirror")
+	addonInstallCmd.Flags().StringArray("registry-mirror", nil, "k3s: containerd registry mirror REGISTRY=ENDPOINT (repeatable, e.g. docker.io=https://<id>.mirror.aliyuncs.com); pgcli renders registries.yaml and restarts the node on --force")
+	addonInstallCmd.Flags().String("kubelet-dir", "", "k3s: host directory for the kubelet root (default <base_dir>/addon/k3s/<name>/kubelet)")
+	addonInstallCmd.Flags().String("cni-dir", "", "k3s: host directory for CNI state (default <base_dir>/addon/k3s/<name>/cni)")
+	addonInstallCmd.Flags().String("log-file", "", "k3s: also write the K3s server/agent log to this host file (mounted at /var/log/k3s.log)")
+	addonInstallCmd.Flags().String("container-log-file", "", "k3s: pin Podman's k8s-file container log to this host file (default: Podman's own log storage)")
 
 	// haproxy flags (top-level load balancer in front of a Patroni cluster)
 	addonInstallCmd.Flags().String("mode", "", "HAProxy routing mode: unified (default, all traffic to the leader) or split (separate read listener for replicas)")
@@ -1694,10 +1716,12 @@ func runAddonInstall(addonName string, cmd *cobra.Command) error {
 		return runAddonInstallRocketMQ(cmd)
 	case "safeline":
 		return runAddonInstallSafeline(cmd)
+	case "k3s":
+		return runAddonInstallK3s(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, safeline, privoxy)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, safeline, k3s, privoxy)", addonName)
 	}
 
 	dsn, _ := cmd.Flags().GetString("dsn")
@@ -5497,6 +5521,7 @@ func runAddonList(showPassword bool) error {
 	pgm, _ := podman.NewPostgrestManager(cfg)
 	em, _ := podman.NewEtcdManager(cfg)
 	dm, _ := podman.NewPgDogManager(cfg)
+	km, _ := podman.NewK3sManager(cfg)
 
 	// Empty add-on types are omitted entirely; printed sections are separated
 	// by a blank line so the first one does not start with a leading newline.
@@ -5620,6 +5645,55 @@ func runAddonList(showPassword bool) error {
 		fmt.Printf("    Peer port:   %d\n", ec.PeerPort)
 		fmt.Printf("    Image:       %s\n", ec.ImageTag)
 		fmt.Printf("    Container:   %s\n", ec.ContainerName)
+	}
+
+	// k3s (Kubernetes node, top-level addon; rootful Linux only)
+	section("Infra add-ons (k3s):", len(cfg.Addons.K3s) > 0)
+	for name, kc := range cfg.Addons.K3s {
+		status := "stopped"
+		if km != nil {
+			if running, err := km.ContainerRunning(kc.ContainerName); err == nil && running {
+				status = "running"
+			}
+		}
+		datastore := "-"
+		if kc.Role == "server" {
+			switch {
+			case kc.ClusterInit:
+				datastore = "etcd (cluster-init)"
+			case kc.Joiner():
+				datastore = "join"
+			default:
+				datastore = "sqlite"
+			}
+		}
+		fmt.Printf("  %s (name: %s)\n", "k3s", name)
+		fmt.Printf("    Status:      %s\n", status)
+		fmt.Printf("    Role:        %s\n", kc.Role)
+		fmt.Printf("    Node:        %s\n", kc.NodeName)
+		fmt.Printf("    Datastore:   %s\n", datastore)
+		if kc.ServerURL != "" {
+			fmt.Printf("    Joins:       %s\n", kc.ServerURL)
+		}
+		if kc.Role == "server" {
+			fmt.Printf("    API:         https://%s:6443\n", k3sAPIHost(kc))
+		}
+		fmt.Printf("    Data dir:    %s\n", kc.DataDir)
+		fmt.Printf("    Token file:  %s\n", kc.TokenFile)
+		if len(kc.RegistryMirrors) > 0 {
+			mirrors := make([]string, 0, len(kc.RegistryMirrors))
+			for registry := range kc.RegistryMirrors {
+				mirrors = append(mirrors, registry)
+			}
+			sort.Strings(mirrors)
+			fmt.Printf("    Mirrors:     %s\n", strings.Join(mirrors, ", "))
+		}
+		if kc.RegistriesFile != "" {
+			fmt.Printf("    Registries:  %s\n", kc.RegistriesFile)
+		}
+		fmt.Printf("    Autostart:   %s\n", onOff(kc.Autostart))
+		fmt.Printf("    Image:       %s\n", kc.ImageTag)
+		fmt.Printf("    Container:   %s\n", kc.ContainerName)
 	}
 
 	// pgdog (shared infrastructure proxy, top-level addon)
@@ -7575,10 +7649,12 @@ func runAddonRemove(addonName string, cmd *cobra.Command) error {
 		return runAddonRemoveRocketMQ(cmd)
 	case "safeline":
 		return runAddonRemoveSafeline(cmd)
+	case "k3s":
+		return runAddonRemoveK3s(cmd)
 	case "pgbouncer":
 		// falls through to the PgBouncer flow below
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, safeline, privoxy)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, safeline, k3s, privoxy)", addonName)
 	}
 
 	pgName, _ := cmd.Flags().GetString("pg-name")
@@ -7939,8 +8015,10 @@ func runAddonStart(addonName string, cmd *cobra.Command) error {
 		return runAddonStartRocketMQ(cmd)
 	case "safeline":
 		return runAddonStartSafeline(cmd)
+	case "k3s":
+		return runAddonStartK3s(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, safeline, privoxy)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, safeline, k3s, privoxy)", addonName)
 	}
 }
 
@@ -8029,8 +8107,10 @@ func runAddonStop(addonName string, cmd *cobra.Command) error {
 		return runAddonStopRocketMQ(cmd)
 	case "safeline":
 		return runAddonStopSafeline(cmd)
+	case "k3s":
+		return runAddonStopK3s(cmd)
 	default:
-		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, safeline, privoxy)", addonName)
+		return fmt.Errorf("unknown addon: %s (available: pgbouncer, etcd, pgdog, haproxy, minio, silo, rustfs, garage, seaweedfs, redis, valkey, predixy, postgrest, pgadmin, grafana, prometheus, victoriametrics, nodeexporter, pgexporter, documentdb, vmcluster, vlcluster, victorialogs, vlagent, vmalert, alertmanager, gitea, beegfs, juicefs, zerofs, nginx, duckdb, influxdb, influx2tsdb, clickhouse, clickhouse-keeper, kafka, rabbitmq, rocketmq, safeline, k3s, privoxy)", addonName)
 	}
 }
 

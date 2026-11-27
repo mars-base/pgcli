@@ -157,6 +157,15 @@
         - _addon_mode == 'cluster'
         - _addon_type in addon_cluster_shared_required_types
       tags: [addon]
+
+    # Token, optional custom CA and registries.yaml. Single and cluster K3s
+    # groups both need it; the role pushes the token to every member and the
+    # custom CA only to the initial server.
+    - name: Prepare shared K3s material
+      ansible.builtin.include_role:
+        name: k3s_shared
+      when: _addon_type == 'k3s'
+      tags: [addon]
   roles:
     - role: pg_addon
       tags: [addon]
@@ -575,3 +584,91 @@
     - role: pg_ha_haproxy
       tags: [ha, haproxy]
       when: _pg_hap_deployment.enabled | default(false) | bool
+
+# K3s verification: the serial Add-ons play already waited for each server's
+# API, but agents join asynchronously. Wait for every node to report Ready and
+# assert the expected topology (single: the first host is the only server, the
+# rest agents; cluster: the first addon_k3s_server_count hosts are servers,
+# the rest agents). A group that is not in the inventory is skipped, and
+# --limit narrows the play as usual.
+- name: Verify the K3s nodes
+  hosts: >-
+    {{ ((groups['addon_k3s_cluster'] | default([])) + (groups['addon_k3s_single'] | default([])))
+       | unique }}
+  gather_facts: false
+  become: true
+  become_user: root
+  vars:
+    _addon_k3s_name: >-
+      {{ lookup('vars', 'addon_' ~ _addon_kind ~ '_addons', default=[])
+         | map(attribute='name', default='k3s') | first }}
+    _addon_k3s_expected_servers: >-
+      {{ ([groups['addon_k3s_cluster'] | default([]) | length,
+           addon_k3s_server_count | default(3) | int] | min)
+         if _addon_mode | default('') == 'cluster'
+         else ([groups['addon_k3s_single'] | default([]) | length, 1] | min) }}
+    _addon_k3s_expected_nodes: >-
+      {{ (groups['addon_k3s_cluster'] | default([]) | length)
+         if _addon_mode | default('') == 'cluster'
+         else (groups['addon_k3s_single'] | default([]) | length) }}
+  tasks:
+    - name: Wait for every K3s node to be Ready
+      ansible.builtin.command:
+        argv:
+          - "{{ pgcli_install_path }}"
+          - "-c"
+          - "{{ pgcli_config_path }}"
+          - k3s
+          - kubectl
+          - "--name"
+          - "{{ _addon_k3s_name }}"
+          - "--"
+          - wait
+          - "--for=condition=Ready"
+          - node
+          - "--all"
+          - "--timeout=300s"
+      register: _addon_k3s_wait
+      until: _addon_k3s_wait.rc == 0
+      retries: 6
+      delay: 10
+      changed_when: false
+      run_once: true
+      when: _addon_type | default('') == 'k3s'
+      tags: [addon]
+
+    - name: Read the K3s node list
+      ansible.builtin.command:
+        argv:
+          - "{{ pgcli_install_path }}"
+          - "-c"
+          - "{{ pgcli_config_path }}"
+          - k3s
+          - kubectl
+          - "--name"
+          - "{{ _addon_k3s_name }}"
+          - "--"
+          - get
+          - nodes
+          - "--no-headers"
+      register: _addon_k3s_nodes
+      changed_when: false
+      run_once: true
+      when: _addon_type | default('') == 'k3s'
+      tags: [addon]
+
+    - name: Assert the expected K3s topology is Ready
+      ansible.builtin.assert:
+        that:
+          - (_addon_k3s_nodes.stdout_lines | length) == (_addon_k3s_expected_nodes | int)
+          - (_addon_k3s_nodes.stdout_lines | select('search', '^\S+\s+Ready\s') | list | length)
+            == (_addon_k3s_expected_nodes | int)
+          - (_addon_k3s_nodes.stdout_lines | select('search', 'control-plane') | list | length)
+            == (_addon_k3s_expected_servers | int)
+        fail_msg: >-
+          Expected {{ _addon_k3s_expected_servers }} server(s) and
+          {{ (_addon_k3s_expected_nodes | int) - (_addon_k3s_expected_servers | int) }}
+          agent(s), all Ready; got: {{ _addon_k3s_nodes.stdout_lines | join(' | ') }}
+      run_once: true
+      when: _addon_type | default('') == 'k3s'
+      tags: [addon]

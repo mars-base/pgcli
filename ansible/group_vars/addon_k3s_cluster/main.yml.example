@@ -1,0 +1,114 @@
+---
+# K3s HA cluster add-on group (addon_k3s_cluster).
+#
+#   uv run ansible-playbook playbooks/apply.yaml --limit addon_k3s_cluster --tags addon
+#
+# Host order is bootstrap order: host 1 starts the embedded-etcd cluster
+# (--cluster-init), the next servers (--server) and the remaining agents join
+# it. The default layout is 3 servers (etcd quorum) + 1 agent; tune
+# addon_k3s_server_count. One K3s node per host: the API (6443), etcd
+# (2379/2380) and kubelet (10250) ports are fixed.
+#
+# Shared material (token, optional custom CA, rendered registries.yaml) is
+# prepared once on the controller by the k3s_shared role: the token goes to
+# every member, the custom CA only to the initial server. K3s runs as root
+# even on a host whose deployment account is rootless.
+
+_addon_k3s_cluster_hosts: "{{ groups['addon_k3s_cluster'] }}"
+_addon_k3s_cluster_index: "{{ _addon_k3s_cluster_hosts.index(inventory_hostname) | int }}"
+addon_k3s_server_count: 3
+_addon_k3s_role: >-
+  {{ 'agent' if (_addon_k3s_cluster_index | int) >= (addon_k3s_server_count | int)
+     else 'server' }}
+_addon_k3s_is_initial_server: >-
+  {{ (_addon_k3s_role == 'server') and ((_addon_k3s_cluster_index | int) == 0) }}
+
+# Node-to-node addresses prefer private_ip and fall back to ansible_host.
+_addon_k3s_node_ip: >-
+  {{ hostvars[inventory_hostname].private_ip
+     | default(hostvars[inventory_hostname].ansible_host, true) }}
+_addon_k3s_cluster_first_ip: >-
+  {{ hostvars[_addon_k3s_cluster_hosts[0]].private_ip
+     | default(hostvars[_addon_k3s_cluster_hosts[0]].ansible_host, true) }}
+# Every server's address goes into the API certificate so clients and joining
+# nodes can reach any server.
+_addon_k3s_cluster_server_ips: >-
+  {%- set out = [] -%}
+  {%- for host in _addon_k3s_cluster_hosts[:(addon_k3s_server_count | int)] -%}
+  {%- set _ = out.append(hostvars[host].private_ip | default(hostvars[host].ansible_host, true)) -%}
+  {%- endfor -%}
+  {{ out }}
+
+# Extra --tls-san values added to every server certificate. Needed when peers
+# see each other through NAT: etcd 3.7 checks a peer's client certificate
+# against the observed source address, so the NAT source address must be a
+# SAN too (e.g. _addon_cluster_k3s_extra_tls_sans: ["10.0.0.254"]).
+_addon_cluster_k3s_extra_tls_sans: []
+
+# Controller path of a token to reuse; empty generates one under
+# var/addon_cluster/shared and copies it to every member.
+_addon_cluster_k3s_token_file: ""
+# Custom CA lifetime in days. 0 keeps the K3s self-signed CA (10 years);
+# 36500 generates a 100-year CA and injects it into the initial server before
+# its first start. Changing it on an initialized cluster requires rotate-ca.
+_addon_cluster_k3s_ca_days: 0
+# containerd registry mirrors rendered into registries.yaml on every member:
+#   docker.io: ["https://<id>.mirror.aliyuncs.com"]
+# A change is applied by recreating the node containers (--force), which keeps
+# the host data. Mutually exclusive with _addon_k3s_registries_file.
+_addon_k3s_registry_mirrors: {}
+# Complete registries.yaml on the controller (may include auth/TLS).
+_addon_k3s_registries_file: ""
+# Bundled components to disable, e.g. [traefik] when ports 80/443 are already
+# used on these hosts.
+_addon_k3s_disable: []
+
+_addon_k3s_shared_remote_dir: /data/pg/addon/shared
+_addon_k3s_registries_path: "{{ _addon_k3s_shared_remote_dir }}/k3s-registries.yaml"
+
+_addon_k3s_cluster_flags: >-
+  {%- set out = ['--role', _addon_k3s_role,
+                 '--node-name', inventory_hostname,
+                 '--token-file', _addon_k3s_shared_remote_dir ~ '/k3s-token',
+                 '--data-dir', '/data/pg/addon/k3s/k3s/data',
+                 '--kubelet-dir', '/data/pg/addon/k3s/k3s/kubelet',
+                 '--cni-dir', '/data/pg/addon/k3s/k3s/cni',
+                 '--log-dir', '/data/pg/addon/k3s/k3s/log'] -%}
+  {%- if _addon_k3s_role == 'server' -%}
+  {%- if _addon_k3s_node_ip | length > 0 -%}
+  {%- set _ = out.extend(['--advertise-address', _addon_k3s_node_ip]) -%}
+  {%- endif -%}
+  {%- for ip in _addon_k3s_cluster_server_ips -%}
+  {%- set _ = out.extend(['--tls-san', ip]) -%}
+  {%- endfor -%}
+  {%- for san in _addon_cluster_k3s_extra_tls_sans -%}
+  {%- set _ = out.extend(['--tls-san', san]) -%}
+  {%- endfor -%}
+  {%- endif -%}
+  {%- if (_addon_k3s_cluster_index | int) == 0 -%}
+  {%- set _ = out.extend(['--cluster-init']) -%}
+  {%- else -%}
+  {%- set _ = out.extend(['--server', 'https://' ~ _addon_k3s_cluster_first_ip ~ ':6443']) -%}
+  {%- endif -%}
+  {%- if (_addon_k3s_is_initial_server | bool) and (_addon_cluster_k3s_ca_days | int > 0) -%}
+  {%- set _ = out.extend(['--ca-dir', _addon_k3s_shared_remote_dir ~ '/k3s-ca']) -%}
+  {%- endif -%}
+  {%- for component in _addon_k3s_disable -%}
+  {%- set _ = out.extend(['--disable', component]) -%}
+  {%- endfor -%}
+  {%- if (_addon_k3s_registry_mirrors | length > 0) or (_addon_k3s_registries_file | length > 0) -%}
+  {%- set _ = out.extend(['--registries-file', _addon_k3s_registries_path]) -%}
+  {%- endif -%}
+  {{ out }}
+
+# Default flags for entries that do not set their own params.
+addon_k3s_cluster_params: []
+
+addon_k3s_cluster_addons:
+  - type: k3s
+    state: present
+    name: k3s
+    params: "{{ _addon_k3s_cluster_flags }}"
+    # A changed registries.yaml only takes effect after the node container is
+    # recreated; a first install recreates as well (there is nothing running).
+    args: "{{ ['--force'] if _addon_k3s_registries_changed | default(false) | bool else [] }}"

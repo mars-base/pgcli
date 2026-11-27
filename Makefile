@@ -400,6 +400,7 @@ IMAGES := \
 	docker.io/apache/kafka:4.4.0 \
 	docker.io/library/rabbitmq:4.4.0-management \
 	docker.io/apache/rocketmq:5.5.0 \
+	docker.io/rancher/k3s:v1.37.2-k3s1 \
 	docker.io/prom/node-exporter:v1.12.1 \
 	docker.io/pgsty/pg_exporter:1.5.0 \
 	docker.io/chaitin/safeline-postgres:15.18 \

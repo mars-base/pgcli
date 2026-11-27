@@ -1,0 +1,9 @@
+# containerd registry mirrors read by K3s at node start (--private-registry).
+mirrors:
+{% for registry, endpoints in _addon_k3s_registry_mirrors | dictsort %}
+  {{ registry }}:
+    endpoint:
+{% for endpoint in endpoints %}
+      - "{{ endpoint }}"
+{% endfor %}
+{% endfor %}

@@ -1,0 +1,190 @@
+---
+# K3s shared material lives on the controller under var/addon_cluster/shared
+# (gitignored) and is pushed to every member before the install commands run.
+# The token must be identical on every node; the custom CA is only injected
+# into the initial server; the registries file is read by containerd at node
+# start, so a change also recreates the node container (--force).
+#
+# Controller-side tasks set chdir explicitly: the calling play sets
+# module_defaults chdir to the deployment account's home, which the controller
+# user running these delegated tasks cannot enter.
+
+- name: Validate the K3s registry configuration
+  ansible.builtin.assert:
+    that:
+      - _addon_k3s_registry_mirrors is mapping
+      - not ((_addon_k3s_registry_mirrors | length > 0) and (_addon_k3s_registries_file | length > 0))
+      - (_addon_k3s_registry_mirrors | dict2items | selectattr('value', 'string') | list | length) == 0
+      - (_addon_k3s_registry_mirrors | dict2items | map(attribute='value') | flatten
+         | reject('match', '^https?://') | list | length) == 0
+    fail_msg: >-
+      _addon_k3s_registry_mirrors is a mapping of registry to a list of
+      http(s) endpoints, one entry per mirrored registry
+      (docker.io: ["https://<id>.mirror.aliyuncs.com"]). It is mutually
+      exclusive with _addon_k3s_registries_file, a complete registries.yaml
+      on the controller.
+  tags: [addon]
+
+- name: Ensure the controller-side shared directory exists
+  ansible.builtin.file:
+    path: "{{ _addon_k3s_shared_dir }}"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  become: false
+  tags: [addon]
+
+- name: Resolve the K3s token source
+  ansible.builtin.set_fact:
+    _addon_k3s_token_src: >-
+      {{ _addon_cluster_k3s_token_file if _addon_cluster_k3s_token_file | length > 0
+         else _addon_k3s_shared_dir ~ '/k3s_token' }}
+  tags: [addon]
+
+- name: Check the supplied K3s token file exists
+  ansible.builtin.stat:
+    path: "{{ _addon_cluster_k3s_token_file }}"
+  register: _addon_k3s_token_stat
+  delegate_to: localhost
+  become: false
+  when: _addon_cluster_k3s_token_file | length > 0
+  tags: [addon]
+
+- name: Require the supplied K3s token file
+  ansible.builtin.assert:
+    that:
+      - _addon_k3s_token_stat.stat.exists | default(false)
+    fail_msg: >-
+      _addon_cluster_k3s_token_file points at a missing controller file:
+      {{ _addon_cluster_k3s_token_file }}.
+  when: _addon_cluster_k3s_token_file | length > 0
+  tags: [addon]
+
+- name: Generate the K3s cluster token
+  ansible.builtin.shell:
+    cmd: "openssl rand -hex 32 > {{ _addon_k3s_token_src }}"
+    creates: "{{ _addon_k3s_token_src }}"
+    chdir: "{{ _addon_k3s_shared_dir }}"
+  delegate_to: localhost
+  become: false
+  when: _addon_cluster_k3s_token_file | length == 0
+  tags: [addon]
+
+- name: Restrict the K3s token permissions
+  ansible.builtin.file:
+    path: "{{ _addon_k3s_token_src }}"
+    mode: '0600'
+  delegate_to: localhost
+  become: false
+  when: _addon_cluster_k3s_token_file | length == 0
+  tags: [addon]
+
+# K3s runs rootful (host network, privileged), so the material it reads must
+# be root-owned even on hosts whose deployment account is rootless.
+- name: Ensure the shared material directory exists on the member
+  ansible.builtin.file:
+    path: "{{ _addon_k3s_shared_remote_dir }}"
+    state: directory
+    mode: '0700'
+  become: true
+  become_user: root
+  tags: [addon]
+
+- name: Copy the K3s token to the member
+  ansible.builtin.copy:
+    src: "{{ _addon_k3s_token_src }}"
+    dest: "{{ _addon_k3s_shared_remote_dir }}/k3s-token"
+    mode: '0600'
+  become: true
+  become_user: root
+  no_log: true
+  tags: [addon]
+
+- name: Generate the custom K3s CA set
+  ansible.builtin.command:
+    cmd: "bash {{ role_path }}/files/generate-custom-ca-certs.sh"
+    creates: "{{ _addon_k3s_shared_dir }}/k3s-ca/server/tls/server-ca.crt"
+    chdir: "{{ _addon_k3s_shared_dir }}"
+  environment:
+    DATA_DIR: "{{ _addon_k3s_shared_dir }}/k3s-ca"
+    DAYS: "{{ _addon_cluster_k3s_ca_days | string }}"
+  delegate_to: localhost
+  become: false
+  when:
+    - _addon_cluster_k3s_ca_days | int > 0
+    - _addon_k3s_is_initial_server | bool
+  tags: [addon]
+
+- name: Ensure the custom CA directory exists on the initial server
+  ansible.builtin.file:
+    path: "{{ _addon_k3s_shared_remote_dir }}/k3s-ca/etcd"
+    state: directory
+    mode: '0700'
+  become: true
+  become_user: root
+  when:
+    - _addon_cluster_k3s_ca_days | int > 0
+    - _addon_k3s_is_initial_server | bool
+  tags: [addon]
+
+# Only the leaf CA files and the service account key are needed by K3s; the
+# root and intermediate keys stay on the controller.
+- name: Copy the custom CA certificates to the initial server
+  ansible.builtin.copy:
+    src: "{{ _addon_k3s_shared_dir }}/k3s-ca/server/tls/{{ item }}"
+    dest: "{{ _addon_k3s_shared_remote_dir }}/k3s-ca/{{ item }}"
+    mode: '0644'
+  loop: "{{ _addon_k3s_ca_certs }}"
+  become: true
+  become_user: root
+  when:
+    - _addon_cluster_k3s_ca_days | int > 0
+    - _addon_k3s_is_initial_server | bool
+  tags: [addon]
+
+- name: Copy the custom CA private keys to the initial server
+  ansible.builtin.copy:
+    src: "{{ _addon_k3s_shared_dir }}/k3s-ca/server/tls/{{ item }}"
+    dest: "{{ _addon_k3s_shared_remote_dir }}/k3s-ca/{{ item }}"
+    mode: '0600'
+  loop: "{{ _addon_k3s_ca_keys }}"
+  become: true
+  become_user: root
+  no_log: true
+  when:
+    - _addon_cluster_k3s_ca_days | int > 0
+    - _addon_k3s_is_initial_server | bool
+  tags: [addon]
+
+- name: Copy the custom registries file to the member
+  ansible.builtin.copy:
+    src: "{{ _addon_k3s_registries_file }}"
+    dest: "{{ _addon_k3s_registries_path }}"
+    mode: '0600'
+  register: _addon_k3s_registries_copy
+  become: true
+  become_user: root
+  when: _addon_k3s_registries_file | length > 0
+  tags: [addon]
+
+- name: Render the registry mirrors as registries.yaml on the member
+  ansible.builtin.template:
+    src: registries.yaml.j2
+    dest: "{{ _addon_k3s_registries_path }}"
+    mode: '0600'
+  register: _addon_k3s_registries_render
+  become: true
+  become_user: root
+  when:
+    - _addon_k3s_registries_file | length == 0
+    - _addon_k3s_registry_mirrors | length > 0
+  tags: [addon]
+
+# containerd reads registries.yaml only at node start, and pgcli only
+# recreates a node when --force is passed: a changed file has to force.
+- name: Record whether the registries configuration changed
+  ansible.builtin.set_fact:
+    _addon_k3s_registries_changed: >-
+      {{ (_addon_k3s_registries_copy is defined and _addon_k3s_registries_copy is changed)
+         or (_addon_k3s_registries_render is defined and _addon_k3s_registries_render is changed) }}
+  tags: [addon]

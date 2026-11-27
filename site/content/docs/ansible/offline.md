@@ -128,6 +128,10 @@ pgcli_images:
     archive: pgbouncer_v1.25.2-p0.tar
     auto_load: true
     addons: [pgbouncer]
+  - image: docker.io/rancher/k3s:v1.37.2-k3s1
+    archive: k3s_v1.37.2-k3s1.tar
+    auto_load: true
+    addons: [k3s]
 ```
 
 How the list is consumed:
@@ -164,6 +168,14 @@ the pre-flight `HEAD` check verifies all of them, whether they load at
 install time or on demand. The lazy core entries (`pgcli-pg`,
 `pgcli-patroni`, `pgcli-backup`) cost nothing until their feature runs, so
 keeping them is safe.
+
+The `k3s` entry only carries the node image. K3s separately pulls the
+system/Pod images it bundles (pause, coredns, traefik, metrics-server,
+local-path-provisioner, ...) from the node's containerd configuration. A truly
+air-gapped cluster therefore also needs the K3s **airgap-images tarball**
+(`k3s-airgap-images-<arch>.tar.zst`) placed in
+`/var/lib/rancher/k3s/agent/images/` — inside the node's `--data-dir` — on
+every member, or a containerd registry mirror that can reach them.
 
 Transferred tarballs are cached on the target host. The cache is kept across
 runs — only missing images are transferred again — and is safe to delete:

@@ -231,6 +231,7 @@ type TopAddonsConfig struct {
 	Kafka            map[string]KafkaConfig            `yaml:"kafka,omitempty"`
 	RabbitMQ         map[string]RabbitMQConfig         `yaml:"rabbitmq,omitempty"`
 	RocketMQ         map[string]RocketMQConfig         `yaml:"rocketmq,omitempty"`
+	K3s              map[string]K3sConfig              `yaml:"k3s,omitempty"`
 	Safeline         map[string]SafelineConfig         `yaml:"safeline,omitempty"`
 }
 
@@ -3230,6 +3231,93 @@ func ParseRocketMQHeap(value string) (string, error) {
 		return "", fmt.Errorf("invalid heap size %q: must be at least 1m or 1g", value)
 	}
 	return v, nil
+}
+
+// K3s constants. Upstream writes the release as v1.37.2+k3s1, but Docker
+// tags do not allow '+', so the same release is pulled/stored as
+// v1.37.2-k3s1.
+const (
+	DefaultK3sVersion  = "v1.37.2-k3s1"
+	K3sImageRepo       = "docker.io/rancher/k3s"
+	DefaultK3sImageTag = K3sImageRepo + ":" + DefaultK3sVersion
+)
+
+// K3sCertificateFiles is the complete custom-CA file set K3s expects under
+// <data-dir>/server/tls before the first server start.
+var K3sCertificateFiles = []string{
+	"server-ca.crt", "server-ca.key",
+	"client-ca.crt", "client-ca.key",
+	"request-header-ca.crt", "request-header-ca.key",
+	"etcd/peer-ca.crt", "etcd/peer-ca.key",
+	"etcd/server-ca.crt", "etcd/server-ca.key",
+	"service.key",
+}
+
+// K3sConfig holds one K3s node running in a rootful Podman container on the
+// host network. A host can run only one K3s node because the API, etcd and
+// kubelet ports are fixed. Role=server without ClusterInit/ServerURL is a
+// standalone server (SQLite); ClusterInit starts the first HA server
+// (embedded etcd); ServerURL joins an existing cluster.
+type K3sConfig struct {
+	ContainerName string `yaml:"container_name"`
+	Name          string `yaml:"name,omitempty"`
+	Version       string `yaml:"version,omitempty"`   // image tag, e.g. v1.37.2-k3s1
+	ImageTag      string `yaml:"image_tag,omitempty"` // full image reference override
+
+	Role        string `yaml:"role,omitempty"`         // server (default) or agent
+	ClusterInit bool   `yaml:"cluster_init,omitempty"` // first server of an HA cluster (embedded etcd)
+	ServerURL   string `yaml:"server_url,omitempty"`   // https://<first-server>:6443 when joining
+	NodeName    string `yaml:"node_name,omitempty"`    // --node-name, default hostname
+
+	AdvertiseAddress string   `yaml:"advertise_address,omitempty"`
+	TLSSAN           []string `yaml:"tls_san,omitempty"`
+	Disable          []string `yaml:"disable,omitempty"`
+
+	DataDir    string `yaml:"data_dir,omitempty"`     // host dir -> /var/lib/rancher/k3s
+	KubeletDir string `yaml:"kubelet_dir,omitempty"`  // host dir -> /var/lib/kubelet
+	CNIDir     string `yaml:"cni_dir,omitempty"`      // host dir -> /var/lib/cni
+	LogDir     string `yaml:"log_dir,omitempty"`      // host dir -> /var/log
+	LogFile    string `yaml:"log_file,omitempty"`     // optional host file -> /var/log/k3s.log
+	// ContainerLogFile optionally pins Podman's k8s-file log path. Empty uses
+	// Podman's own default logging.
+	ContainerLogFile string `yaml:"container_log_file,omitempty"`
+
+	TokenFile string `yaml:"token_file"`          // host token file, mounted read-only at /run/k3s-token
+	CADir     string `yaml:"ca_dir,omitempty"`    // custom CA for the initial server only
+	// RegistriesFile is a complete registries.yaml (may include auth/TLS).
+	// Mutually exclusive with RegistryMirrors.
+	RegistriesFile  string              `yaml:"registries_file,omitempty"`
+	RegistryMirrors map[string][]string `yaml:"registry_mirrors,omitempty"`
+
+	Autostart bool `yaml:"autostart,omitempty"`
+}
+
+// InitialServer reports whether this node bootstraps its own datastore: a
+// standalone server or the --cluster-init server.
+func (k K3sConfig) InitialServer() bool {
+	return k.Role == "server" && k.ServerURL == ""
+}
+
+// Joiner reports whether the node joins an existing server.
+func (k K3sConfig) Joiner() bool { return k.ServerURL != "" }
+
+// ValidateK3sCADir checks that dir contains the complete custom CA file set
+// K3s expects before the initial server boot. Empty means no custom CA.
+func ValidateK3sCADir(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	for _, rel := range K3sCertificateFiles {
+		path := filepath.Join(dir, rel)
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("custom CA file %s: %w", path, err)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("custom CA path %s is a directory, expected a file", path)
+		}
+	}
+	return nil
 }
 
 // SafeLine (雷池 WAF) Community Edition constants. The component images share
@@ -6275,6 +6363,96 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("addons.safeline.%s.data_dir must be an absolute path, got %q", name, sc.DataDir)
 		}
 	}
+	if len(c.Addons.K3s) > 1 {
+		names := make([]string, 0, len(c.Addons.K3s))
+		for name := range c.Addons.K3s {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		return fmt.Errorf("addons.k3s allows only one node per host, found %d (%s)", len(names), strings.Join(names, ", "))
+	}
+	for name, kc := range c.Addons.K3s {
+		path := "addons.k3s." + name
+		if kc.Role != "server" && kc.Role != "agent" {
+			return fmt.Errorf("%s.role must be server or agent, got %q", path, kc.Role)
+		}
+		if strings.TrimSpace(kc.TokenFile) == "" {
+			return fmt.Errorf("%s.token_file is required for every node", path)
+		}
+		if kc.ServerURL != "" {
+			u, err := url.Parse(kc.ServerURL)
+			if err != nil || u.Scheme != "https" || u.Host == "" {
+				return fmt.Errorf("%s.server_url %q must be https://host[:port]", path, kc.ServerURL)
+			}
+		}
+		if kc.Role == "agent" {
+			if kc.ServerURL == "" {
+				return fmt.Errorf("%s: agent nodes must set server_url", path)
+			}
+			if kc.ClusterInit {
+				return fmt.Errorf("%s: cluster_init is only valid on a server", path)
+			}
+			if kc.AdvertiseAddress != "" || len(kc.TLSSAN) > 0 || len(kc.Disable) > 0 {
+				return fmt.Errorf("%s: advertise_address, tls_san and disable are server-only options", path)
+			}
+			if kc.CADir != "" {
+				return fmt.Errorf("%s: ca_dir is only valid on the initial server", path)
+			}
+		}
+		if kc.ClusterInit && kc.ServerURL != "" {
+			return fmt.Errorf("%s: cluster_init and server_url are mutually exclusive", path)
+		}
+		if kc.CADir != "" {
+			if kc.Role != "server" || kc.Joiner() {
+				return fmt.Errorf("%s: ca_dir is only valid on a standalone or --cluster-init server", path)
+			}
+			if !filepath.IsAbs(kc.CADir) {
+				return fmt.Errorf("%s.ca_dir must be an absolute path, got %q", path, kc.CADir)
+			}
+		}
+		if kc.RegistriesFile != "" && len(kc.RegistryMirrors) > 0 {
+			return fmt.Errorf("%s: registries_file and registry_mirrors are mutually exclusive", path)
+		}
+		if kc.RegistriesFile != "" && !filepath.IsAbs(kc.RegistriesFile) {
+			return fmt.Errorf("%s.registries_file must be an absolute path, got %q", path, kc.RegistriesFile)
+		}
+		for registry, endpoints := range kc.RegistryMirrors {
+			if strings.TrimSpace(registry) == "" || strings.Contains(registry, "://") || strings.HasSuffix(registry, "/") {
+				return fmt.Errorf("%s.registry_mirrors has invalid registry %q", path, registry)
+			}
+			if len(endpoints) == 0 {
+				return fmt.Errorf("%s.registry_mirrors[%s] needs at least one endpoint", path, registry)
+			}
+			for _, endpoint := range endpoints {
+				u, err := url.Parse(endpoint)
+				if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+					return fmt.Errorf("%s.registry_mirrors[%s] endpoint %q must be http(s)://host[:port]", path, registry, endpoint)
+				}
+			}
+		}
+		if strings.Contains(kc.Version, "+") {
+			return fmt.Errorf("%s.version %q contains '+'; Docker tags use '-', e.g. v1.37.2-k3s1", path, kc.Version)
+		}
+		if tag := kc.ImageTag; strings.Contains(tag[strings.LastIndex(tag, ":")+1:], "+") {
+			return fmt.Errorf("%s.image_tag %q contains '+'; Docker tags use '-'", path, kc.ImageTag)
+		}
+		if kc.NodeName == "" {
+			return fmt.Errorf("%s.node_name must not be empty", path)
+		}
+		for field, value := range map[string]string{
+			"token_file":         kc.TokenFile,
+			"data_dir":           kc.DataDir,
+			"kubelet_dir":        kc.KubeletDir,
+			"cni_dir":            kc.CNIDir,
+			"log_dir":            kc.LogDir,
+			"log_file":           kc.LogFile,
+			"container_log_file": kc.ContainerLogFile,
+		} {
+			if value != "" && !filepath.IsAbs(value) {
+				return fmt.Errorf("%s.%s must be an absolute path, got %q", path, field, value)
+			}
+		}
+	}
 	for name, ec := range c.Addons.Etcd {
 		if (ec.TLSCertFile == "") != (ec.TLSKeyFile == "") {
 			return fmt.Errorf("addons.etcd.%s.tls_cert_file and tls_key_file must be set together", name)
@@ -7963,6 +8141,52 @@ func (c *Config) ApplyDefaults() {
 			addon.DataDir = filepath.Join(addonDir, "data")
 		}
 		c.Addons.RocketMQ[name] = addon
+	}
+
+	// Top-level K3s nodes. One node per host; host-network ports are fixed.
+	// Directories default under <base>/addon/k3s/<name>; every host-side path
+	// is configurable so large clusters can place data/kubelet/CNI/log dirs on
+	// dedicated disks.
+	k3sBaseDir := platform.DefaultConfigDir()
+	if c.BaseDir != "" {
+		k3sBaseDir = c.BaseDir
+	}
+	for name, addon := range c.Addons.K3s {
+		if addon.Name == "" {
+			addon.Name = name
+		}
+		if addon.ContainerName == "" {
+			addon.ContainerName = "pgcli-k3s" + nsSuffix(c.Namespace) + "-" + name
+		}
+		if addon.ImageTag == "" && addon.Version == "" {
+			addon.Version = DefaultK3sVersion
+		}
+		if addon.ImageTag == "" {
+			addon.ImageTag = K3sImageRepo + ":" + addon.Version
+		}
+		addon.Role = strings.ToLower(strings.TrimSpace(addon.Role))
+		if addon.Role == "" {
+			addon.Role = "server"
+		}
+		if addon.NodeName == "" {
+			if hostname, err := os.Hostname(); err == nil {
+				addon.NodeName = hostname
+			}
+		}
+		instanceDir := filepath.Join(k3sBaseDir, "addon", "k3s", name)
+		if addon.DataDir == "" {
+			addon.DataDir = filepath.Join(instanceDir, "data")
+		}
+		if addon.KubeletDir == "" {
+			addon.KubeletDir = filepath.Join(instanceDir, "kubelet")
+		}
+		if addon.CNIDir == "" {
+			addon.CNIDir = filepath.Join(instanceDir, "cni")
+		}
+		if addon.LogDir == "" {
+			addon.LogDir = filepath.Join(instanceDir, "log")
+		}
+		c.Addons.K3s[name] = addon
 	}
 
 	// Top-level SafeLine WAF stacks. Seven containers share one data root at

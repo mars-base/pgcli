@@ -98,6 +98,10 @@ pgcli_images:
     archive: pgbouncer_v1.25.2-p0.tar
     auto_load: true
     addons: [pgbouncer]
+  - image: docker.io/rancher/k3s:v1.37.2-k3s1
+    archive: k3s_v1.37.2-k3s1.tar
+    auto_load: true
+    addons: [k3s]
 ```
 
 清单的消费方式：
@@ -110,6 +114,8 @@ pgcli_images:
 - 预加载只覆盖 Ansible play 用到的镜像。play 之外的手动命令（临时 `pg backup ...`、`pgcli_daemons` 条目）不会触发加载；这类主机请先手动加载镜像，或去掉该条目的 `auto_load`。
 
 按场景裁剪清单：删掉的条目不会被检查也不会被传输；保留的条目必须真实存在于镜像服务器上——无论安装阶段加载还是按需加载，预检 `HEAD` 都会验证。懒加载的核心条目（`pgcli-pg`、`pgcli-patroni`、`pgcli-backup`）在对应功能运行前不产生传输，保留它们没有额外代价。
+
+`k3s` 条目只包含节点镜像。K3s 还会根据节点的 containerd 配置单独拉取它自带的系统/Pod 镜像（pause、coredns、traefik、metrics-server、local-path-provisioner 等）。因此真正隔离的集群还需要把 K3s 的 **airgap-images tarball**（`k3s-airgap-images-<arch>.tar.zst`）放到每个成员的 `/var/lib/rancher/k3s/agent/images/`（位于节点的 `--data-dir` 下），或者提供一个能访问这些镜像的 containerd registry mirror。
 
 下载过的 tar 包会缓存在目标主机上，缓存跨多次运行保留（只重新传输缺失的镜像），可以随时删除：
 

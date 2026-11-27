@@ -27,6 +27,7 @@ pgcli 使用的容器镜像及其默认 tag。
 | `docker.io/apache/kafka` | `4.4.0` | Apache Kafka 4.x（KRaft-only，无需 ZooKeeper）broker+controller combined 节点，支持单机或跨主机静态 controller quorum，纯上游官方镜像无 wrapper，多架构 manifest list；host 网络，以 uid/gid 1000 运行 | `DefaultKafkaImageTag`（`KafkaImageTagForVersion`） |
 | `docker.io/library/rabbitmq` | `4.4.0-management` | RabbitMQ 消息代理（AMQP + management Web UI/API），单机或跨主机 etcd peer discovery 集群，纯上游官方镜像无 wrapper，多架构 manifest list；host 网络，以 uid/gid 999 运行 | `DefaultRabbitMQImageTag` |
 | `docker.io/apache/rocketmq` | `5.5.0` | Apache RocketMQ 5.x 消息队列（每个实例 NameServer + broker + proxy 三容器），单机或 DLedger controller-mode 集群，纯上游官方镜像无 wrapper；host 网络，以 uid/gid 3000 运行 | `DefaultRocketMQImageTag` |
+| `docker.io/rancher/k3s` | `v1.37.2-k3s1` | K3s（轻量 Kubernetes）server/agent 节点，纯上游官方镜像无 wrapper，多架构 manifest list（amd64 + arm64 + arm）；`FROM scratch` 无 shell，rootful Podman + host 网络 + privileged 运行 | `DefaultK3sImageTag` |
 | `docker.io/edoburu/pgbouncer` | `v1.25.2-p0` | PostgreSQL 连接池 | `DefaultPgBouncerImageTag` |
 | `docker.io/postgrest/postgrest` | `v16.3` | PostgREST（REST API over PostgreSQL） | `DefaultPostgrestImageTag` |
 | `docker.io/library/haproxy` | `3.2.23-alpine` | HTTP/TCP 负载均衡 | `DefaultHAProxyImageTag` |
@@ -178,6 +179,11 @@ podman save -o "$TARGET/rabbitmq_4.4.0-management.tar" \
 # rocketmq 上游镜像先按 amd64 pull 再 save
 podman pull --platform linux/amd64 docker.io/apache/rocketmq:5.5.0
 podman save -o "$TARGET/rocketmq_5.5.0.tar" docker.io/apache/rocketmq:5.5.0
+
+# k3s 上游镜像同样是多架构 manifest list（amd64/arm64/arm），先按 amd64 pull 再 save
+podman pull --platform linux/amd64 docker.io/rancher/k3s:v1.37.2-k3s1
+podman save -o "$TARGET/k3s_v1.37.2-k3s1.tar" \
+  docker.io/rancher/k3s:v1.37.2-k3s1
 
 # safeline 全栈（雷池 WAF CE）上游镜像仅 linux/amd64，逐个 pull + save
 for img in safeline-postgres:15.18 safeline-mgt:9.4.7 safeline-detector:9.4.7 \
@@ -516,11 +522,21 @@ done
   规则/模板目录（只读挂载，只加载 `*.yaml`/`*.tpl`），重载走 `GET /-/reload`（异步）。
   每个实例只有一个 datasource：默认 VictoriaLogs `9428`，指标场景需显式
   `--datasource-url` 指向 `8428`。单 HTTP 端口（默认 8880）
+- **k3s**：纯上游官方 `docker.io/rancher/k3s`，无 wrapper，pin 到
+  `v1.37.2-k3s1`（K3s 版本写作 `v1.37.2+k3s1`，Docker tag 把 `+` 换成 `-`；
+  多架构 manifest list，amd64 + arm64 + arm）。镜像 `FROM scratch`、无 shell，
+  `ENTRYPOINT /bin/k3s`，`server`/`agent` 作为镜像名后的第一个参数。pgcli 以
+  **rootful Podman + host 网络 + privileged** 运行它，数据/kubelet/CNI/log 目录
+  全部 bind mount，token 与 `registries.yaml` 只读挂载。K3s 系统镜像
+  （pause/coredns/traefik 等）**不在本清单**——离线环境还需预置 K3s
+  airgap-images tarball（见 [K3s 文档](../site/content/docs/addon/k3s.zh.md)）
 - **pgbouncer** / **postgrest** / **haproxy** / **etcd** / **pgdog**：上游官方或社区维护的稳定版本
 
 ---
 
-**最后更新**：2026-11-26（新增 valkey 三个大版本镜像并同步 Makefile IMAGES 与 Ansible
+**最后更新**：2026-11-27（新增 k3s 节点镜像并同步 Makefile IMAGES、Ansible
+`pgcli_images` 与 `scripts/export-images.sh` 清单来源；2026-11-26 新增 valkey
+三个大版本镜像并同步 Makefile IMAGES 与 Ansible
 `pgcli_images`；同日补录 clickhouse-keeper 镜像并同步 Makefile IMAGES 与 Ansible
 `pgcli_images`——此前代码在用但三个清单均未收录；2026-11-24 SafeLine 全栈 7 个镜像进入
 主镜像表；2026-11-13 pgcli-privoxy 接入 pg addon 并进入主镜像表、同步 Makefile IMAGES；2026-11-03 新增 vmalert 镜像并同步 Makefile IMAGES；2026-11-02 补入 RabbitMQ、RocketMQ、node_exporter、pg_exporter 镜像并同步 Makefile IMAGES；同日新增 pgcli-mongosh；同步补入 pgcli-documentdb-gateway；2026-10-28 新增 Kafka 4.4.0 镜像；2026-10-27 新增 clickhouse 与 influx2tsdb 镜像；2026-10-23 新增 vlagent 镜像；同日新增 victorialogs 镜像；此前新增 vmcluster 三镜像于 2026-10-22；
