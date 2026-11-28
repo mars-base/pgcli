@@ -76,6 +76,15 @@ chmod 0755 /srv/offline-images/podman-launcher-linux_amd64
 assets ansible_host=192.0.2.10 ansible_user=root
 ```
 
+如果资产服务器是机房内部主机、本身不能直接访问 GitHub，可以直接在它上面运行
+playbook、在 inventory 里把它声明为本机：运行 Ansible 的这台机器通过 VPN 访问
+GitHub，首次安装 `pg` 因此仍能完成。
+
+```ini
+[http]
+localhost ansible_connection=local
+```
+
 ```yaml
 pgcli_http_servers:
   - name: images

@@ -83,6 +83,16 @@ tarballs and the two binaries:
 assets ansible_host=192.0.2.10 ansible_user=root
 ```
 
+If the asset server is an internal data-center host that cannot reach GitHub
+directly, run the playbook on that host and declare it as local: the machine
+running Ansible reaches GitHub over VPN, so the first-run `pg` install still
+works.
+
+```ini
+[http]
+localhost ansible_connection=local
+```
+
 ```yaml
 pgcli_http_servers:
   - name: images
