@@ -76,26 +76,6 @@ Switching the proxy mode on a running cluster is disruptive (set it on
 install, or recreate the node with `--force`), and NodePorts on 127.0.0.1 are
 not supported in nftables mode before Kubernetes 1.38 (KEP-6032).
 
-## Metrics server
-
-K3s bundles the **metrics-server** and starts it by default; the add-on
-deploys nothing extra. It serves the resource metrics API (`metrics.k8s.io`),
-which backs `kubectl top` and horizontal pod autoscaling. Metrics are scraped
-from every kubelet, so servers and agents are covered alike.
-
-```bash
-pg k3s kubectl --name k3s -- get pods -n kube-system -l k8s-app=metrics-server
-pg k3s kubectl --name k3s -- top nodes
-pg k3s kubectl --name k3s -- top pods -n kube-system
-```
-
-`top` needs the pod running and the aggregated API available
-(`pg k3s kubectl --name k3s -- get apiservice v1beta1.metrics.k8s.io`); right
-after cluster creation it can take about a minute before the first samples
-exist. Disable the component with `--disable metrics-server` (Ansible: add
-`metrics-server` to `addon_k3s_disable`) when HPA is not needed or another
-metrics stack is in use — `kubectl top` stops working afterwards.
-
 ## Single-node install
 
 **The SQLite single-node install is for local testing and development.** Production deployments should use the HA cluster layout below (embedded etcd, at least three servers).
@@ -226,11 +206,11 @@ Mirrors affect **Pod images only** — the K3s node image itself is pulled by Po
 pg k3s kubectl get nodes                          # the only configured node
 pg k3s kubectl -- get nodes -o wide
 pg k3s kubectl -- get pods -n kube-system
-pg k3s kubectl -- apply -f manifest.yaml
+pg k3s kubectl -- apply -f - < manifest.yaml
 pg k3s kubectl --name k3s get pods                # several nodes: pick one
 ```
 
-`kubectl` and `kubeconfig` are server-only; an agent is rejected. With several nodes configured, `--name` selects the server. `stdin` is attached, so `kubectl apply -f -` works.
+`kubectl` and `kubeconfig` are server-only; an agent is rejected. With several nodes configured, `--name` selects the server. `stdin` is attached, so `kubectl apply -f -` works. kubectl runs inside the node container, which cannot see host paths — pipe manifests through stdin (`apply -f - < file.yaml`) instead of passing a host `-f` path.
 
 ```bash
 pg k3s kubeconfig --name k3s > kubeconfig.yaml       # stdout
@@ -311,3 +291,118 @@ Ansible-managed cluster also drop the host from the group's inventory and
 - **Traefik/ServiceLB bind ports 80 and 443 on the host.** Disable them with `--disable traefik` (ServiceLB keeps serving LoadBalancer services) or `--disable servicelb` when nginx/safeline/other web add-ons use those ports.
 - **Token and CA rotation are manual.** pgcli does not rotate them; use `k3s certificate rotate-ca` or reinstall from a clean data directory.
 - **No daemon integration.** Nodes rely on `--restart unless-stopped` for self-healing and on `pg start --autostart` for boot order, like the other add-ons.
+
+## Metrics server
+
+K3s bundles the **metrics-server** and starts it by default; the add-on
+deploys nothing extra. It serves the resource metrics API (`metrics.k8s.io`),
+which backs `kubectl top` and horizontal pod autoscaling. Metrics are scraped
+from every kubelet, so servers and agents are covered alike.
+
+```bash
+pg k3s kubectl --name k3s -- get pods -n kube-system -l k8s-app=metrics-server
+pg k3s kubectl --name k3s -- top nodes
+pg k3s kubectl --name k3s -- top pods -n kube-system
+```
+
+`top` needs the pod running and the aggregated API available
+(`pg k3s kubectl --name k3s -- get apiservice v1beta1.metrics.k8s.io`); right
+after cluster creation it can take about a minute before the first samples
+exist. Disable the component with `--disable metrics-server` (Ansible: add
+`metrics-server` to `addon_k3s_disable`) when HPA is not needed or another
+metrics stack is in use — `kubectl top` stops working afterwards.
+
+## Traefik ingress
+
+K3s also bundles **Traefik v3** as the default ingress controller and starts it
+with the cluster, so in-cluster Services can be published without any extra
+add-on. Traefik runs as a single-replica Deployment in `kube-system`, and
+ServiceLB publishes its `LoadBalancer` Service on ports 80/443 of **every**
+node — whichever node the Traefik pod itself runs on.
+
+```bash
+pg k3s kubectl --name k3s -- -n kube-system get deploy,svc traefik
+pg k3s kubectl --name k3s -- -n kube-system get pods -l app.kubernetes.io/name=traefik
+```
+
+Routes come from standard `Ingress` objects (with `ingressClassName: traefik`)
+or from the Traefik CRDs the bundle installs (`IngressRoute`, `Middleware`,
+`TLSOption`, ...). A minimal Service plus Ingress publishes `/hi`:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: hi-server
+  namespace: default
+spec:
+  selector:
+    app: hi-server
+  ports:
+    - name: http
+      port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hi-server
+  namespace: default
+spec:
+  ingressClassName: traefik
+  rules:
+    - http:
+        paths:
+          - path: /hi
+            pathType: Prefix
+            backend:
+              service:
+                name: hi-server
+                port:
+                  name: http
+```
+
+```bash
+pg k3s kubectl --name k3s -- apply -f - < hi-server-ingress.yaml
+curl http://<any-node-ip>/hi/world
+```
+
+The full manifests behind this example are in the repository:
+`misc/k3s/hi-server-deployment.yaml` (the Deployment) and
+`misc/k3s/hi-server-ingress.yaml` (the Service and Ingress). Both live in the
+`default` namespace.
+
+A rule without `host` matches every hostname — the quickest way to try a route
+by node IP. Pin routes to a name with `host: app.example.com` (optionally plus
+`path`) to split several apps across the same entry points. The same route as a
+Traefik CRD:
+
+```yaml
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: hi-server
+  namespace: default
+spec:
+  entryPoints: [web]
+  routes:
+    - match: Host(`hi.example.com`) && PathPrefix(`/hi`)
+      kind: Rule
+      services:
+        - name: hi-server
+          port: 8080
+```
+
+HTTP is served as-is without a redirect; the `websecure` entry point presents
+Traefik's self-signed default certificate until an Ingress asks for a TLS
+secret (`tls: [{hosts: [...], secretName: my-cert}]`). The dashboard is enabled
+in the bundled controller but not published through a Service; reach it with a
+port-forward:
+
+```bash
+pg k3s kubectl --name k3s -- -n kube-system port-forward deploy/traefik 8080:8080
+# open http://127.0.0.1:8080/dashboard/
+```
+
+Disabling the bundle (`--disable traefik`, Ansible `addon_k3s_disable: [traefik]`)
+frees 80/443 but makes `Ingress` objects inert — publish Services with
+`NodePort` or ServiceLB instead.

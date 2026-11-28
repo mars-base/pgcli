@@ -80,24 +80,6 @@ nf_tables；只有 alternatives 指向 `iptables-legacy` 的主机才是真 lega
 节点），且 Kubernetes 1.38 之前的 nftables 模式不支持 127.0.0.1 上的 NodePort
 （KEP-6032）。
 
-## metrics-server
-
-K3s **内置** metrics-server 且默认启用，本插件不需要额外部署。它提供 resource
-metrics API（`metrics.k8s.io`），是 `kubectl top` 与 HPA 的数据来源；指标由每个
-节点的 kubelet 采集，server 和 agent 都被覆盖。
-
-```bash
-pg k3s kubectl --name k3s -- get pods -n kube-system -l k8s-app=metrics-server
-pg k3s kubectl --name k3s -- top nodes
-pg k3s kubectl --name k3s -- top pods -n kube-system
-```
-
-`top` 需要 Pod 处于 Running 且聚合 API 可用
-（`pg k3s kubectl --name k3s -- get apiservice v1beta1.metrics.k8s.io`）；集群刚
-建好时可能要等一分钟左右才有首批采样数据。不需要 HPA 或已有其他监控栈时可用
-`--disable metrics-server` 关闭（Ansible：在 `addon_k3s_disable` 里加
-`metrics-server`），关闭后 `kubectl top` 不可用。
-
 ## 单机安装
 
 **SQLite 单机安装仅用于本地测试与开发。** 生产环境应使用下面的 HA 集群形态（嵌入式 etcd，至少三台 server）。
@@ -269,12 +251,14 @@ local-path-provisioner 等），放到 containerd 能导入的位置。
 pg k3s kubectl get nodes                          # 唯一配置的节点
 pg k3s kubectl -- get nodes -o wide
 pg k3s kubectl -- get pods -n kube-system
-pg k3s kubectl -- apply -f manifest.yaml
+pg k3s kubectl -- apply -f - < manifest.yaml
 pg k3s kubectl --name k3s get pods                # 多个节点：指定其一
 ```
 
 `kubectl` 与 `kubeconfig` 仅限 server；agent 会被拒绝。配置了多个节点时必须用 `--name`
-选择 server。stdin 已接上，因此 `kubectl apply -f -` 可用。
+选择 server。stdin 已接上，因此 `kubectl apply -f -` 可用。kubectl 在节点容器内执行，
+看不到宿主路径——清单要通过 stdin 管道（`apply -f - < file.yaml`），不能直接传宿主的
+`-f` 路径。
 
 ```bash
 pg k3s kubeconfig --name k3s > kubeconfig.yaml       # 输出到 stdout
@@ -362,3 +346,111 @@ pg k3s kubectl --name k3s -- delete node node3
   数据目录重装。
 - **不接入 pg daemon。** 与其他插件一样，节点依靠 `--restart unless-stopped` 自愈、依靠
   `pg start --autostart` 控制开机顺序。
+
+## metrics-server
+
+K3s **内置** metrics-server 且默认启用，本插件不需要额外部署。它提供 resource
+metrics API（`metrics.k8s.io`），是 `kubectl top` 与 HPA 的数据来源；指标由每个
+节点的 kubelet 采集，server 和 agent 都被覆盖。
+
+```bash
+pg k3s kubectl --name k3s -- get pods -n kube-system -l k8s-app=metrics-server
+pg k3s kubectl --name k3s -- top nodes
+pg k3s kubectl --name k3s -- top pods -n kube-system
+```
+
+`top` 需要 Pod 处于 Running 且聚合 API 可用
+（`pg k3s kubectl --name k3s -- get apiservice v1beta1.metrics.k8s.io`）；集群刚
+建好时可能要等一分钟左右才有首批采样数据。不需要 HPA 或已有其他监控栈时可用
+`--disable metrics-server` 关闭（Ansible：在 `addon_k3s_disable` 里加
+`metrics-server`），关闭后 `kubectl top` 不可用。
+
+## Traefik（Ingress）
+
+K3s 还**内置 Traefik v3** 作为默认 Ingress 控制器，随集群一起启动，无需额外插件
+即可对外发布集群内 Service。Traefik 以单副本 Deployment 跑在 `kube-system`，它的
+`LoadBalancer` Service 由 ServiceLB 发布到**每台节点**的 80/443 端口——与 Traefik
+Pod 本身调度在哪台节点无关。
+
+```bash
+pg k3s kubectl --name k3s -- -n kube-system get deploy,svc traefik
+pg k3s kubectl --name k3s -- -n kube-system get pods -l app.kubernetes.io/name=traefik
+```
+
+路由来自标准 `Ingress` 对象（设置 `ingressClassName: traefik`），或内置的 Traefik
+CRD（`IngressRoute`、`Middleware`、`TLSOption` 等）。最小的 Service + Ingress
+示例把 `/hi` 转发到 8080 端口的负载：
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: hi-server
+  namespace: default
+spec:
+  selector:
+    app: hi-server
+  ports:
+    - name: http
+      port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hi-server
+  namespace: default
+spec:
+  ingressClassName: traefik
+  rules:
+    - http:
+        paths:
+          - path: /hi
+            pathType: Prefix
+            backend:
+              service:
+                name: hi-server
+                port:
+                  name: http
+```
+
+```bash
+pg k3s kubectl --name k3s -- apply -f - < hi-server-ingress.yaml
+curl http://<任一节点 IP>/hi/world
+```
+
+本节示例对应的完整文件在仓库里：`misc/k3s/hi-server-deployment.yaml`（Deployment）
+与 `misc/k3s/hi-server-ingress.yaml`（Service 与 Ingress），都部署在 `default`
+namespace。
+
+不写 `host` 的规则匹配所有主机名，按节点 IP 直接访问最省事；用
+`host: app.example.com`（可再加 `path`）把路由固定到域名，让多个应用共享同一组
+入口。等价的 IngressRoute CRD 写法：
+
+```yaml
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: hi-server
+  namespace: default
+spec:
+  entryPoints: [web]
+  routes:
+    - match: Host(`hi.example.com`) && PathPrefix(`/hi`)
+      kind: Rule
+      services:
+        - name: hi-server
+          port: 8080
+```
+
+HTTP 默认直接提供服务、不做跳转；`websecure`（443）在 Ingress 指定 TLS secret
+之前使用 Traefik 的自签默认证书
+（`tls: [{hosts: [...], secretName: my-cert}]`）。dashboard 在内置控制器里已启用，
+但没有发布成 Service，可用 port-forward 访问：
+
+```bash
+pg k3s kubectl --name k3s -- -n kube-system port-forward deploy/traefik 8080:8080
+# 浏览器打开 http://127.0.0.1:8080/dashboard/
+```
+
+关闭内置组件（`--disable traefik`，Ansible 里 `addon_k3s_disable: [traefik]`）会
+释放 80/443，但 `Ingress` 对象随之失效——改用 `NodePort` 或 ServiceLB 发布服务。
