@@ -77,6 +77,7 @@ ansible/
 |------|----------------|
 | [Quick deploy](./quick-deploy/) | Copy-paste commands: one host, one standalone instance, from clone to `pg list` |
 | [Setup and example files](./setup/) | Which `*.example` file becomes which live file, `hosts.ini` groups, `group_vars` fields, first run |
+| [Offline deployment](./offline-deploy/) | End-to-end air-gapped runbook: export assets, serve over HTTP, point `group_vars/all`, run `apply.yaml`, verify |
 | [Offline and air-gapped installs](./offline/) | LAN HTTP server: image manifest and lazy loading, `pg`/podman binaries, runtime host binaries and DocumentDB DEBs |
 | [Offline image server](./image-server/) | Export all images from `pgcli_images` with `export-images.sh`, serve them with `pg http`, wire up Ansible |
 | [HTTP file server](./http-server/) | The `pg_http` role and `deploy-http.yaml`: every `pg http` parameter (TLS, auth, write modes, autostart) plus offline binary sync |

@@ -74,6 +74,7 @@ ansible/
 |------|------|
 | [快速部署](./quick-deploy/) | 可直接粘贴的命令：一台主机、一个单机实例，从 clone 到 `pg list` |
 | [安装与示例文件](./setup/) | 每个 `*.example` 对应哪个实际文件、`hosts.ini` 分组、`group_vars` 字段、首次运行 |
+| [离线部署](./offline-deploy/) | 端到端隔离部署流程：导出资产、HTTP 服务、配置 `group_vars/all`、运行 `apply.yaml`、验证 |
 | [离线与隔离环境安装](./offline/) | 局域网 HTTP 服务器：镜像清单与懒加载、`pg`/podman 二进制、运行时主机二进制与 DocumentDB DEB |
 | [离线镜像服务器](./image-server/) | 用 `export-images.sh` 从 `pgcli_images` 导出全部镜像 tar 包，`pg http` 提供服务并接入 Ansible |
 | [HTTP 文件服务器](./http-server/) | `pg_http` 角色与 `deploy-http.yaml`：覆盖 `pg http` 全部参数（TLS、认证、写模式、autostart），并同步离线二进制 |
