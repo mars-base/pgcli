@@ -277,7 +277,11 @@ func (m *K3sManager) KubectlOutput(kc *config.K3sConfig, args ...string) (string
 // kubectlWithKubeconfigArgs builds the argv for running kubectl from a
 // throwaway K3s image container against a host kubeconfig. K3s images bundle
 // kubectl, so a management host needs Podman but no kubectl package.
-func kubectlWithKubeconfigArgs(image, kubeconfig string, args []string, terminal bool) []string {
+func kubectlWithKubeconfigArgs(image, kubeconfig string, args []string, terminal bool) ([]string, error) {
+	args, localPorts, err := portForwardRunArgs(args)
+	if err != nil {
+		return nil, err
+	}
 	// --http-proxy=false: the host's proxy env would point at 127.0.0.1
 	// inside the container. Kubeconfig API addresses are normally reachable
 	// directly.
@@ -285,12 +289,79 @@ func kubectlWithKubeconfigArgs(image, kubeconfig string, args []string, terminal
 	if terminal {
 		runArgs = append(runArgs, "-t")
 	}
+	for _, port := range localPorts {
+		runArgs = append(runArgs, "-p", "127.0.0.1:"+port+":"+port)
+	}
 	runArgs = append(runArgs,
 		"-v", hostMountPath(kubeconfig)+":/run/pgcli-kubeconfig:ro,z",
 		"--entrypoint", "/bin/kubectl",
 		image, "--kubeconfig", "/run/pgcli-kubeconfig",
 	)
-	return append(runArgs, args...)
+	return append(runArgs, args...), nil
+}
+
+// kubectlPortForwardLocalPort extracts the local port from one kubectl
+// port-forward spec: "8080", "8080:8080" or "127.0.0.1:8080:8080".
+func kubectlPortForwardLocalPort(spec string) (string, bool) {
+	isPort := func(s string) bool {
+		n, err := strconv.Atoi(s)
+		return err == nil && n > 0 && n <= 65535
+	}
+	if isPort(spec) {
+		return spec, true
+	}
+	parts := strings.Split(spec, ":")
+	switch len(parts) {
+	case 2:
+		if isPort(parts[0]) && isPort(parts[1]) {
+			return parts[0], true
+		}
+	case 3:
+		if isPort(parts[1]) && isPort(parts[2]) {
+			return parts[1], true
+		}
+	}
+	return "", false
+}
+
+// portForwardRunArgs adapts kubectl port-forward for the throwaway container:
+// the container would otherwise bind on its own loopback only, so bind kubectl
+// on all container interfaces and publish each explicit local port on the host
+// loopback. Returns the (possibly rewritten) args and the local ports to
+// publish.
+func portForwardRunArgs(args []string) ([]string, []string, error) {
+	idx := -1
+	for i, a := range args {
+		if a == "port-forward" {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return args, nil, nil
+	}
+	hasAddress := false
+	seen := map[string]bool{}
+	var localPorts []string
+	for _, a := range args[idx+1:] {
+		if a == "--address" || strings.HasPrefix(a, "--address=") {
+			hasAddress = true
+		}
+		if port, ok := kubectlPortForwardLocalPort(a); ok && !seen[port] {
+			seen[port] = true
+			localPorts = append(localPorts, port)
+		}
+	}
+	if len(localPorts) == 0 {
+		return nil, nil, errors.New("port-forward with --kubeconfig needs an explicit local port (LOCAL:REMOTE) so it can be published on the host")
+	}
+	out := make([]string, 0, len(args)+2)
+	out = append(out, args[:idx+1]...)
+	if !hasAddress {
+		out = append(out, "--address", "0.0.0.0")
+	}
+	out = append(out, args[idx+1:]...)
+	return out, localPorts, nil
 }
 
 // KubectlWithKubeconfig runs kubectl from a temporary container of the K3s
@@ -314,7 +385,11 @@ func KubectlWithKubeconfig(image, kubeconfig string, args []string, terminal boo
 		}
 	}
 
-	cmd := podmanCommand(podmanPath, kubectlWithKubeconfigArgs(image, kubeconfig, args, terminal)...)
+	runArgs, err := kubectlWithKubeconfigArgs(image, kubeconfig, args, terminal)
+	if err != nil {
+		return err
+	}
+	cmd := podmanCommand(podmanPath, runArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

@@ -55,8 +55,11 @@ func TestK3sUnsupported(t *testing.T) {
 
 func TestKubectlWithKubeconfigArgs(t *testing.T) {
 	kubeconfig := "/home/user/kubeconfig.yaml"
-	got := kubectlWithKubeconfigArgs("docker.io/rancher/k3s:v1.37.2-k3s1", kubeconfig,
+	got, err := kubectlWithKubeconfigArgs("docker.io/rancher/k3s:v1.37.2-k3s1", kubeconfig,
 		[]string{"get", "nodes"}, true)
+	if err != nil {
+		t.Fatalf("args: %v", err)
+	}
 	want := []string{
 		"run", "--rm", "-i", "--http-proxy=false", "-t",
 		"-v", kubeconfig + ":/run/pgcli-kubeconfig:ro,z",
@@ -69,12 +72,41 @@ func TestKubectlWithKubeconfigArgs(t *testing.T) {
 		t.Errorf("argv = %v, want %v", got, want)
 	}
 
-	got = kubectlWithKubeconfigArgs("img", kubeconfig, []string{"apply", "-f", "-"}, false)
+	got, err = kubectlWithKubeconfigArgs("img", kubeconfig, []string{"apply", "-f", "-"}, false)
+	if err != nil {
+		t.Fatalf("args: %v", err)
+	}
 	if slices.Contains(got, "-t") {
 		t.Errorf("non-terminal argv must not enable a TTY: %v", got)
 	}
 	if got[len(got)-3] != "apply" || got[len(got)-2] != "-f" || got[len(got)-1] != "-" {
 		t.Errorf("kubectl args not appended verbatim: %v", got)
+	}
+}
+
+func TestKubectlWithKubeconfigPortForward(t *testing.T) {
+	got, err := kubectlWithKubeconfigArgs("img", "/kubeconfig",
+		[]string{"-n", "kube-system", "port-forward", "deploy/traefik", "8080:8080", "9090"}, false)
+	if err != nil {
+		t.Fatalf("args: %v", err)
+	}
+	want := []string{
+		"run", "--rm", "-i", "--http-proxy=false",
+		"-p", "127.0.0.1:8080:8080",
+		"-p", "127.0.0.1:9090:9090",
+		"-v", "/kubeconfig:/run/pgcli-kubeconfig:ro,z",
+		"--entrypoint", "/bin/kubectl",
+		"img", "--kubeconfig", "/run/pgcli-kubeconfig",
+		"-n", "kube-system", "port-forward", "--address", "0.0.0.0",
+		"deploy/traefik", "8080:8080", "9090",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("argv = %v, want %v", got, want)
+	}
+
+	if _, err := kubectlWithKubeconfigArgs("img", "/kubeconfig",
+		[]string{"port-forward", "deploy/traefik", ":8080"}, false); err == nil || !strings.Contains(err.Error(), "explicit local port") {
+		t.Errorf("random local port = %v, want an explicit-port error", err)
 	}
 }
 
