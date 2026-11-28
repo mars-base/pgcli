@@ -8,6 +8,11 @@ weight: 14
 主机的操作流程，把[离线与隔离环境安装](./offline/)的资源清单、
 [离线镜像服务器](./image-server/)的导出与服务细节，按实际执行顺序串起来。
 
+所有自定义都在 `group_vars/` 里：每个分组目录都带一份描述对应编排的
+`main.yml.example`——全局默认（`all/`）、部署模式、插件、HA、S3、HTTP
+服务器。这些示例本身就是参考文档，定制部署通常就是复制一份再改，容易理解也不
+容易改错。
+
 各主机角色：
 
 | 角色 | 需要 |
@@ -69,9 +74,7 @@ chmod 0755 /srv/offline-images/podman-launcher-linux_amd64
 
 先在 `hosts.ini` 里声明资产服务器（`deploy-http.yaml` 作用于 `[http]` 组），
 再在 `group_vars/http/main.yml`（从同目录 `.example` 复制）里声明服务器。
-`http` 与所有 add-on 分组遵循同一套路：每个 `group_vars/<分组>/` 只提交
-`main.yml.example`，复制成旁边的 `main.yml` 再改；这些实际文件都在 gitignore
-里。它就是离线镜像 tar 包和两个二进制的 HTTP 下载站点：
+它就是离线镜像 tar 包和两个二进制的 HTTP 下载站点：
 
 ```ini
 [http]

@@ -10,6 +10,12 @@ ghcr.io, Docker Hub or distro mirrors. It chains the asset reference in
 in [Offline image server](./image-server/) into the order you actually run
 them.
 
+All customization lives in `group_vars/`: each group directory ships a
+`main.yml.example` for the orchestration it drives — global defaults
+(`all/`), deployment modes, add-ons, HA, S3, HTTP servers. The examples
+double as the reference, so adapting a deployment is usually copying one and
+editing it.
+
 Host roles:
 
 | Role | Needs |
@@ -74,11 +80,9 @@ binary; archives are not unpacked there.
 ## 3. Deploy the HTTP asset server
 
 Declare the asset server in `hosts.ini` — `deploy-http.yaml` targets the
-`[http]` group — then declare the server in `group_vars/http/main.yml` (copy
-the `.example` next to it first). `http` follows the same pattern as every
-add-on group: each `group_vars/<group>/` ships only a `main.yml.example`,
-so copy it to `main.yml` and edit; the live files are gitignored. It is the
-download site for the image tarballs and the two binaries:
+`[http]` group — then declare the server in `group_vars/http/main.yml`
+(copied from the `.example` next to it). It is the download site for the
+image tarballs and the two binaries:
 
 ```ini
 [http]
