@@ -76,3 +76,7 @@ images/
 # Local CA and sample certificates for the SafeLine add-on example
 # (staged under misc/ca/, contains private keys — never committed).
 misc/ca/
+
+# kubeconfig exported by `pg k3s kubeconfig` (cluster credentials — never
+# committed).
+kubeconfig.yaml
