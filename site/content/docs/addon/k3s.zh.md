@@ -514,11 +514,15 @@ spec:
     permanent: true
 ```
 
+注解挂在 Ingress 上即可：Traefik 给该 Ingress 生成的路由默认同时监听 **web（80）** 与
+**websecure（443）**，所以 80 上收到请求时返回 301 跳到 https，443 上已经加密则原样
+放行。这里默认**注释掉**注解（80 保持可直连），需要强制跳转时取消注释：
+
 ```yaml
-# 在 Ingress 上加：
 metadata:
   annotations:
-    traefik.ingress.kubernetes.io/router.middlewares: default-redirect-https@kubernetescrd
+    # 开启后，80 上的请求会 301 跳到 HTTPS（该 Ingress 的路由同时监听 80/443）。
+    # traefik.ingress.kubernetes.io/router.middlewares: default-redirect-https@kubernetescrd
 ```
 
 DNS 还没就绪时用 `--resolve` 验证：

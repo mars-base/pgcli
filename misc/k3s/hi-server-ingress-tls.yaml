@@ -13,6 +13,11 @@ kind: Ingress
 metadata:
   name: hi-server-tls
   namespace: default
+  annotations:
+    # Uncomment to 301 port-80 requests for this host to HTTPS (Traefik
+    # attaches the Ingress routers to both web:80 and websecure:443). The
+    # redirect-https Middleware must exist first (see docs/addon/k3s.md).
+    # traefik.ingress.kubernetes.io/router.middlewares: default-redirect-https@kubernetescrd
 spec:
   ingressClassName: traefik
   tls:
@@ -29,3 +34,17 @@ spec:
                 name: hi-server
                 port:
                   name: http
+---
+# Optional HTTP -> HTTPS redirect. Uncomment this Middleware and the
+# router.middlewares annotation above, then re-apply the file; the Middleware
+# must exist before the annotated Ingress is reconciled.
+#
+# apiVersion: traefik.io/v1alpha1
+# kind: Middleware
+# metadata:
+#   name: redirect-https
+#   namespace: default
+# spec:
+#   redirectScheme:
+#     scheme: https
+#     permanent: true

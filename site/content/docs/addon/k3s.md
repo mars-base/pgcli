@@ -465,11 +465,18 @@ spec:
     permanent: true
 ```
 
+The annotation goes on the Ingress itself: Traefik attaches that Ingress's
+routers to both **web (80)** and **websecure (443)** by default, so requests
+arriving on 80 get a 301 to https while requests already on 443 pass through.
+The annotation is **commented out** here (port 80 stays directly reachable);
+uncomment it to enforce the redirect:
+
 ```yaml
-# on the Ingress:
 metadata:
   annotations:
-    traefik.ingress.kubernetes.io/router.middlewares: default-redirect-https@kubernetescrd
+    # Uncomment to 301 port-80 requests to HTTPS (this Ingress's routers listen
+    # on both 80 and 443).
+    # traefik.ingress.kubernetes.io/router.middlewares: default-redirect-https@kubernetescrd
 ```
 
 Test with `--resolve` before the DNS record is in place:
