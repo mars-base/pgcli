@@ -15,7 +15,7 @@ Host roles:
 | Role | Needs |
 |------|-------|
 | Staging host (has internet) | `pgcli` repo checkout, Podman, Go and make — runs the exporter |
-| Asset server (LAN) | `[http]` inventory group; `pg` already installed; no internet |
+| Asset server (LAN) | `[http]` inventory group; GitHub egress on the first run so the play can install `pg` (or pre-place the binaries); otherwise no internet |
 | Control node | `pgcli-ansible` checkout with synced `uv` env; reaches the targets |
 | Targets | Reach the asset server; Podman installed (no internet) |
 
@@ -98,7 +98,10 @@ pgcli_http_servers:
 `pgcli_install_path`. The URL must be reachable when the play runs, so point
 it at an already-running asset server for the first deploy — a fresh server
 cannot serve its own binary before `pg` exists. Alternatively place a `pg`
-binary on the host beforehand and the role skips the download.
+binary on the host beforehand and the role skips the download. Without
+either, the bundled installer downloads `pg` from GitHub, so the host needs
+outbound access to github.com (and its distro repositories for `curl` and
+`tar`).
 
 ```bash
 uv run ansible-playbook playbooks/deploy-http.yaml --limit http

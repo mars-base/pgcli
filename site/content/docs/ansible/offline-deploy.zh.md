@@ -13,7 +13,7 @@ weight: 14
 | 角色 | 需要 |
 |------|------|
 | 导出机（可联网） | `pgcli` 主仓库 checkout、Podman、Go 与 make——运行导出脚本 |
-| 资产服务器（局域网） | `[http]` inventory 分组；已安装 `pg`；不联网 |
+| 资产服务器（局域网） | `[http]` inventory 分组；首次运行需能访问 GitHub 以便 play 安装 `pg`（或预先放好二进制）；除此之外不联网 |
 | 控制节点 | 已 `uv sync` 的 `pgcli-ansible` checkout；能连到目标主机 |
 | 目标主机 | 能访问资产服务器；已安装 Podman（不联网） |
 
@@ -89,7 +89,9 @@ pgcli_http_servers:
 下载二进制并以 `--skip-binary --skip-pull` 运行仓库自带的安装脚本；若
 `pgcli_install_path` 上已有 `pg`，这整套流程直接跳过。因此该 URL 在 play 运行时
 必须可达——首次部署请指向一台已在运行的资产服务器（全新服务器在 `pg` 就位前无法
-提供自己的二进制）；或者事先把 `pg` 放到主机上，role 就会跳过下载。
+提供自己的二进制）；或者事先把 `pg` 放到主机上，role 就会跳过下载。两者都没有时，
+仓库自带的安装脚本会从 GitHub 下载 `pg`，该主机需要能出网访问 github.com（以及
+提供 `curl`、`tar` 的发行版仓库）。
 
 ```bash
 uv run ansible-playbook playbooks/deploy-http.yaml --limit http
