@@ -446,11 +446,14 @@ spec:
                   name: http
 ```
 
-The domain must resolve to any node IP. This variant is also in the repository
-as `misc/k3s/hi-server-ingress-tls.yaml`; as a separate object it coexists with
-the plain Ingress, and Traefik prefers the longer Host+Path rule for
-`hi.example.com` while other hostnames keep matching the plain rule. HTTP is
-not redirected to HTTPS by
+The domain must resolve to a node IP. If you are using your own domain, add A
+records pointing it at the cluster's agent nodes **before going live** (one A
+record per agent; ServiceLB publishes Traefik on every node, so multiple
+records give round-robin and redundancy). This variant is also in the
+repository as `misc/k3s/hi-server-ingress-tls.yaml`; as a separate object it
+coexists with the plain Ingress, and Traefik prefers the longer Host+Path rule
+for `hi.example.com` while other hostnames keep matching the plain rule. HTTP
+is not redirected to HTTPS by
 default; opt in with a redirect middleware and an annotation on the Ingress:
 
 ```yaml

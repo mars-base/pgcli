@@ -496,7 +496,9 @@ spec:
                   name: http
 ```
 
-域名需解析到任一节点 IP。该变体同样放在仓库的
+域名需解析到任一节点 IP。**如果用自己的域名，上线前先在 DNS 里添加 A 记录，把域名
+指向集群的 agent 节点**（每个 agent 一条 A 记录；ServiceLB 在每台节点上发布
+Traefik，多条记录可做轮询与冗余）。该变体同样放在仓库的
 `misc/k3s/hi-server-ingress-tls.yaml`；它是独立对象，与普通 Ingress 共存——
 `hi.example.com` 由更长的 Host+Path 规则优先匹配，其他主机名仍走普通规则。
 HTTP 默认不跳转 HTTPS，需要跳转时加重定向 Middleware
