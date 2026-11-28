@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: hi-server
+  namespace: default
   labels:
     app: hi-server
 spec:

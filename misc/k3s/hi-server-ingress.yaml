@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: hi-server
+  namespace: default
+  labels:
+    app: hi-server
+spec:
+  selector:
+    app: hi-server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hi-server
+  namespace: default
+spec:
+  ingressClassName: traefik
+  rules:
+    - http:
+        paths:
+          - path: /hi
+            pathType: Prefix
+            backend:
+              service:
+                name: hi-server
+                port:
+                  name: http
