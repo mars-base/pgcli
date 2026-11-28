@@ -63,8 +63,9 @@ from GitHub straight into the served directory (Linux amd64 shown):
 
 ```bash
 # pg: release tarball (the role unpacks the top-level `pg`)
-curl -fLo /srv/offline-images/pgcli_2.9.8_linux_amd64.tar.gz \
-  https://github.com/mars-base/pgcli/releases/download/v2.9.8/pgcli_2.9.8_linux_amd64.tar.gz
+version=xxx                         # your pgcli release, e.g. 2.9.8
+curl -fLo /srv/offline-images/pgcli_${version}_linux_amd64.tar.gz \
+  https://github.com/mars-base/pgcli/releases/download/v${version}/pgcli_${version}_linux_amd64.tar.gz
 
 # podman launcher: latest upstream release
 curl -fLo /srv/offline-images/podman-launcher-linux_amd64 \
@@ -158,7 +159,7 @@ answer `HEAD` and support `Range` just like `pg http` does.
 In `group_vars/all/main.yml` (copied from the example on first use):
 
 ```yaml
-pgcli_install_binary_url: "http://192.0.2.10:18080/pgcli_2.9.8_linux_amd64.tar.gz"
+pgcli_install_binary_url: "http://192.0.2.10:18080/pgcli_xxx_linux_amd64.tar.gz"
 pgcli_podman_binary_url: "http://192.0.2.10:18080/podman-launcher-linux_amd64"
 pgcli_download_mirror: "http://192.0.2.10:18080"
 pgcli_images_http_url: "http://192.0.2.10:18080"

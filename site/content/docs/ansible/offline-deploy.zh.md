@@ -57,8 +57,9 @@ cp hosts.ini.example hosts.ini        # 再按实际主机修改
 
 ```bash
 # pg：发布压缩包（角色会解出顶层的 `pg`）
-curl -fLo /srv/offline-images/pgcli_2.9.8_linux_amd64.tar.gz \
-  https://github.com/mars-base/pgcli/releases/download/v2.9.8/pgcli_2.9.8_linux_amd64.tar.gz
+version=xxx                         # 你的 pgcli 发布版本，如 2.9.8
+curl -fLo /srv/offline-images/pgcli_${version}_linux_amd64.tar.gz \
+  https://github.com/mars-base/pgcli/releases/download/v${version}/pgcli_${version}_linux_amd64.tar.gz
 
 # podman launcher：上游最新发布
 curl -fLo /srv/offline-images/podman-launcher-linux_amd64 \
@@ -143,7 +144,7 @@ server {
 首次使用时从模板复制 `group_vars/all/main.yml`，再填入：
 
 ```yaml
-pgcli_install_binary_url: "http://192.0.2.10:18080/pgcli_2.9.8_linux_amd64.tar.gz"
+pgcli_install_binary_url: "http://192.0.2.10:18080/pgcli_xxx_linux_amd64.tar.gz"
 pgcli_podman_binary_url: "http://192.0.2.10:18080/podman-launcher-linux_amd64"
 pgcli_download_mirror: "http://192.0.2.10:18080"
 pgcli_images_http_url: "http://192.0.2.10:18080"
