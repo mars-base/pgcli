@@ -488,11 +488,36 @@ Test with `--resolve` before the DNS record is in place:
 curl -k --resolve hi.example.com:443:10.0.0.11 https://hi.example.com/hi/world
 ```
 
-The dashboard is enabled in the bundled controller but not published through a
-Service; reach it with a port-forward:
+The dashboard is enabled in the bundled controller, but K3s leaves
+`--api.insecure` off: there is no dashboard router on the `traefik` entrypoint
+(:8080), so a bare port-forward answers 404. Route `api@internal` onto that
+entrypoint first (`misc/k3s/traefik-dashboard.yaml` in the repo); it is not
+published by ServiceLB, so the API stays cluster-internal:
+
+```yaml
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: traefik-dashboard
+  namespace: kube-system
+spec:
+  entryPoints: [traefik]
+  routes:
+    - match: PathPrefix(`/dashboard`) || PathPrefix(`/api`)
+      kind: Rule
+      services:
+        - name: api@internal
+          kind: TraefikService
+```
 
 ```bash
+pg k3s kubectl --name k3s -- apply -f - < misc/k3s/traefik-dashboard.yaml
+
+# on a node: forward through its container
 pg k3s kubectl --name k3s -- -n kube-system port-forward deploy/traefik 8080:8080
+# on any host with an exported kubeconfig: pg publishes the local port on that
+# host's 127.0.0.1 (an explicit LOCAL:REMOTE port is required)
+pg k3s kubectl --kubeconfig kubeconfig.yaml -- -n kube-system port-forward deploy/traefik 8080:8080
 # open http://127.0.0.1:8080/dashboard/
 ```
 

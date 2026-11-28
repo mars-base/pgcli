@@ -533,10 +533,35 @@ DNS 还没就绪时用 `--resolve` 验证：
 curl -k --resolve hi.example.com:443:10.0.0.11 https://hi.example.com/hi/world
 ```
 
-dashboard 在内置控制器里已启用，但没有发布成 Service，可用 port-forward 访问：
+dashboard 在内置控制器里已启用，但 K3s 没有开 `--api.insecure`：`traefik` 入口
+（:8080）上没有 dashboard 路由，直接 port-forward 会 404。先把 `api@internal`
+挂到该入口（仓库里的 `misc/k3s/traefik-dashboard.yaml`；它不经 ServiceLB 发布，
+API 只留在集群内部）：
+
+```yaml
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: traefik-dashboard
+  namespace: kube-system
+spec:
+  entryPoints: [traefik]
+  routes:
+    - match: PathPrefix(`/dashboard`) || PathPrefix(`/api`)
+      kind: Rule
+      services:
+        - name: api@internal
+          kind: TraefikService
+```
 
 ```bash
+pg k3s kubectl --name k3s -- apply -f - < misc/k3s/traefik-dashboard.yaml
+
+# 在节点上：经节点容器转发
 pg k3s kubectl --name k3s -- -n kube-system port-forward deploy/traefik 8080:8080
+# 在任意有导出 kubeconfig 的主机上：pg 把本地端口发布到该主机的 127.0.0.1
+# （必须写显式的 LOCAL:REMOTE 端口）
+pg k3s kubectl --kubeconfig kubeconfig.yaml -- -n kube-system port-forward deploy/traefik 8080:8080
 # 浏览器打开 http://127.0.0.1:8080/dashboard/
 ```
 

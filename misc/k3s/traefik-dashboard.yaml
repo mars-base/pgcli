@@ -1,0 +1,20 @@
+# Exposes the bundled Traefik dashboard. K3s enables the dashboard API but not
+# --api.insecure, so api@internal has no router on the traefik entrypoint (:8080)
+# and a bare port-forward answers 404. The entrypoint is not published by
+# ServiceLB, so the dashboard stays cluster-internal; reach it with:
+#
+#   pg k3s kubectl --name k3s -- -n kube-system port-forward deploy/traefik 8080:8080
+#   # open http://127.0.0.1:8080/dashboard/
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: traefik-dashboard
+  namespace: kube-system
+spec:
+  entryPoints: [traefik]
+  routes:
+    - match: PathPrefix(`/dashboard`) || PathPrefix(`/api`)
+      kind: Rule
+      services:
+        - name: api@internal
+          kind: TraefikService
