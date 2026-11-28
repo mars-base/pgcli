@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Export container images as docker-archive tar files in one flat directory.
 # The image list comes from docs/images.md or, with --ansible, from the
-# pgcli_images variable in an Ansible group_vars file. Archive names follow
-# the offline manifest convention, so the directory can be served as-is by
-# `pg http` or any static HTTP server.
+# pgcli_images variable in an Ansible group_vars file; without either flag it
+# uses docs/images.md when present and falls back to group_vars/all in a
+# standalone pgcli-ansible checkout. Archive names follow the offline manifest
+# convention, so the directory can be served as-is by `pg http` or any static
+# HTTP server.
 #
 # Images are pulled with --platform before saving: podman save cannot write a
 # multi-arch manifest list to docker-archive. HTTP_PROXY / HTTPS_PROXY from the
@@ -36,6 +38,8 @@ Image source (one of):
       --manifest FILE   Markdown table list (default: docs/images.md)
       --ansible FILE    pgcli_images list from an Ansible group_vars file;
                         archive names are taken from each entry
+                        Without either flag: docs/images.md when it exists,
+                        otherwise group_vars/all/main.yml (or its .example).
 
 Options:
   -o, --output DIR      output directory (default: $OUT)
@@ -92,10 +96,25 @@ done
     && die "--manifest and --ansible are mutually exclusive"
 [[ -n $OUT ]] || die "output directory must not be empty"
 [[ -n $PLATFORM ]] || die "platform must not be empty"
+
+# A standalone pgcli-ansible checkout has no docs/images.md; its image list is
+# the pgcli_images block in group_vars/all (main.yml when configured, else the
+# committed .example).
+if [[ $MANIFEST_SET != true && $ANSIBLE_SET != true && ! -r $MANIFEST ]]; then
+    for f in "$REPO_ROOT/group_vars/all/main.yml" \
+             "$REPO_ROOT/group_vars/all/main.yml.example"; do
+        if [[ -r $f ]]; then
+            ANSIBLE_FILE=$f
+            ANSIBLE_SET=true
+            break
+        fi
+    done
+fi
+
 if [[ $ANSIBLE_SET == true ]]; then
     [[ -r $ANSIBLE_FILE ]] || die "cannot read Ansible file: $ANSIBLE_FILE"
 else
-    [[ -r $MANIFEST ]] || die "cannot read image manifest: $MANIFEST"
+    [[ -r $MANIFEST ]] || die "cannot read image manifest: $MANIFEST (try --ansible FILE)"
 fi
 
 BIN_OS=${PLATFORM%%/*}
