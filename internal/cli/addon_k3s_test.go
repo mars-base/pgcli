@@ -77,6 +77,12 @@ func writeK3sCLITestConfig(t *testing.T, nodes map[string]config.K3sConfig) {
 	t.Cleanup(func() { cfgPath = oldPath })
 }
 
+func TestRunRemoteKubectlMissingKubeconfig(t *testing.T) {
+	if err := runRemoteKubectl(filepath.Join(t.TempDir(), "missing.yaml"), []string{"get", "nodes"}); err == nil || !strings.Contains(err.Error(), "kubeconfig") {
+		t.Errorf("missing kubeconfig = %v, want a kubeconfig error", err)
+	}
+}
+
 func TestK3sCLITarget(t *testing.T) {
 	writeK3sCLITestConfig(t, map[string]config.K3sConfig{
 		"k3s":     {Name: "k3s", Role: "server", TokenFile: "/token"},

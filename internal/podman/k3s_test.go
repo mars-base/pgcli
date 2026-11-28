@@ -53,6 +53,31 @@ func TestK3sUnsupported(t *testing.T) {
 	}
 }
 
+func TestKubectlWithKubeconfigArgs(t *testing.T) {
+	kubeconfig := "/home/user/kubeconfig.yaml"
+	got := kubectlWithKubeconfigArgs("docker.io/rancher/k3s:v1.37.2-k3s1", kubeconfig,
+		[]string{"get", "nodes"}, true)
+	want := []string{
+		"run", "--rm", "-i", "--http-proxy=false", "-t",
+		"-v", kubeconfig + ":/run/pgcli-kubeconfig:ro,z",
+		"--entrypoint", "/bin/kubectl",
+		"docker.io/rancher/k3s:v1.37.2-k3s1",
+		"--kubeconfig", "/run/pgcli-kubeconfig",
+		"get", "nodes",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("argv = %v, want %v", got, want)
+	}
+
+	got = kubectlWithKubeconfigArgs("img", kubeconfig, []string{"apply", "-f", "-"}, false)
+	if slices.Contains(got, "-t") {
+		t.Errorf("non-terminal argv must not enable a TTY: %v", got)
+	}
+	if got[len(got)-3] != "apply" || got[len(got)-2] != "-f" || got[len(got)-1] != "-" {
+		t.Errorf("kubectl args not appended verbatim: %v", got)
+	}
+}
+
 func TestK3sRunArgsServer(t *testing.T) {
 	kc := k3sTestConfig(t, config.K3sConfig{
 		ClusterInit:      true,

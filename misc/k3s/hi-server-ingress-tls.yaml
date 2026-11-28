@@ -1,0 +1,31 @@
+# TLS + hostname variant of hi-server-ingress.yaml; a separate object, so it
+# coexists with the plain Ingress (Traefik prefers the longer Host+Path rule
+# for hi.example.com). Create the secret first:
+#
+#   pg cert --host hi.example.com \
+#     --cert-file hi.example.com.crt --key-file hi.example.com.key
+#
+# then create the hi-server-tls secret with `pg k3s kubectl apply -f -` (kubectl
+# runs inside the node container and cannot read host paths, so the cert/key go
+# in as base64 data via stdin — see docs/addon/k3s.md, Traefik section).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hi-server-tls
+  namespace: default
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [hi.example.com]
+      secretName: hi-server-tls
+  rules:
+    - host: hi.example.com
+      http:
+        paths:
+          - path: /hi
+            pathType: Prefix
+            backend:
+              service:
+                name: hi-server
+                port:
+                  name: http

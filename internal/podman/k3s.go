@@ -274,6 +274,53 @@ func (m *K3sManager) KubectlOutput(kc *config.K3sConfig, args ...string) (string
 	return m.run(podmanArgs...)
 }
 
+// kubectlWithKubeconfigArgs builds the argv for running kubectl from a
+// throwaway K3s image container against a host kubeconfig. K3s images bundle
+// kubectl, so a management host needs Podman but no kubectl package.
+func kubectlWithKubeconfigArgs(image, kubeconfig string, args []string, terminal bool) []string {
+	// --http-proxy=false: the host's proxy env would point at 127.0.0.1
+	// inside the container. Kubeconfig API addresses are normally reachable
+	// directly.
+	runArgs := []string{"run", "--rm", "-i", "--http-proxy=false"}
+	if terminal {
+		runArgs = append(runArgs, "-t")
+	}
+	runArgs = append(runArgs,
+		"-v", hostMountPath(kubeconfig)+":/run/pgcli-kubeconfig:ro,z",
+		"--entrypoint", "/bin/kubectl",
+		image, "--kubeconfig", "/run/pgcli-kubeconfig",
+	)
+	return append(runArgs, args...)
+}
+
+// KubectlWithKubeconfig runs kubectl from a temporary container of the K3s
+// image against an exported kubeconfig. Unlike the add-on manager this needs
+// neither a local K3s node nor rootful Podman: the container is unprivileged
+// and removed after the command finishes.
+func KubectlWithKubeconfig(image, kubeconfig string, args []string, terminal bool) error {
+	podmanPath, err := findPodman()
+	if err != nil {
+		return fmt.Errorf("podman is not installed: %w", err)
+	}
+	ensurePodmanStateReady(podmanPath)
+
+	if podmanCommand(podmanPath, "image", "exists", image).Run() != nil {
+		fmt.Printf("-> Pulling image %s...\n", image)
+		pull := podmanCommand(podmanPath, "pull", image)
+		pull.Stdout = os.Stdout
+		pull.Stderr = os.Stderr
+		if err := pull.Run(); err != nil {
+			return fmt.Errorf("pulling kubectl image %s: %w", image, err)
+		}
+	}
+
+	cmd := podmanCommand(podmanPath, kubectlWithKubeconfigArgs(image, kubeconfig, args, terminal)...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
 // Kubeconfig returns the node's admin kubeconfig. When AdvertiseAddress is
 // set, the loopback API server URL is rewritten to that address so the file
 // works from other hosts.

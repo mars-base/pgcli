@@ -245,7 +245,7 @@ local-path-provisioner 等），放到 containerd 能导入的位置。
 
 ## kubectl 与 kubeconfig
 
-`pg k3s` 通过 `podman exec` 驱动本机的节点容器；宿主无需安装任何东西，也不涉及远程集群。
+`pg k3s` 通过 `podman exec` 驱动本机的节点容器；宿主无需安装任何东西。
 
 ```bash
 pg k3s kubectl get nodes                          # 唯一配置的节点
@@ -253,6 +253,7 @@ pg k3s kubectl -- get nodes -o wide
 pg k3s kubectl -- get pods -n kube-system
 pg k3s kubectl -- apply -f - < manifest.yaml
 pg k3s kubectl --name k3s get pods                # 多个节点：指定其一
+pg k3s kubectl --kubeconfig kubeconfig.yaml -- get nodes   # 远程集群
 ```
 
 `kubectl` 与 `kubeconfig` 仅限 server；agent 会被拒绝。配置了多个节点时必须用 `--name`
@@ -266,8 +267,10 @@ pg k3s kubeconfig --name k3s --output ~/.kube/config # 权限 0600
 ```
 
 server 安装时若给了 `--advertise-address`，kubeconfig 里的 loopback API 地址
-（`https://127.0.0.1:6443`）会被改写成该地址，文件可直接在其他主机使用。远程集群请用导出
-的 kubeconfig 配合任意 kubectl——`pg k3s` 只操作本机。
+（`https://127.0.0.1:6443`）会被改写成该地址，文件可直接在其他主机使用。在非 K3s
+节点的主机上把导出的 kubeconfig 传给 `--kubeconfig`：pg 用 K3s 镜像（pgcli 默认 tag，
+缺失时自动拉取到 Podman）起一个一次性容器执行 kubectl；容器不走宿主代理、直连 API
+server，因此只要主机有 Podman，无需安装 kubectl 软件包即可操作任意集群。
 
 ## 生命周期
 
@@ -367,6 +370,16 @@ pg k3s kubectl --name k3s -- top pods -n kube-system
 
 ## Traefik（Ingress）
 
+完整示例在仓库里：`misc/k3s/hi-server-deployment.yaml`（Deployment）与
+`misc/k3s/hi-server-ingress.yaml`（Service 与 Ingress），都部署在 `default`
+namespace。
+
+```bash
+pg k3s kubectl --name k3s -- apply -f - < misc/k3s/hi-server-deployment.yaml
+pg k3s kubectl --name k3s -- apply -f - < misc/k3s/hi-server-ingress.yaml
+curl http://<任一节点 IP>/hi/world
+```
+
 K3s 还**内置 Traefik v3** 作为默认 Ingress 控制器，随集群一起启动，无需额外插件
 即可对外发布集群内 Service。Traefik 以单副本 Deployment 跑在 `kube-system`，它的
 `LoadBalancer` Service 由 ServiceLB 发布到**每台节点**的 80/443 端口——与 Traefik
@@ -413,15 +426,6 @@ spec:
                   name: http
 ```
 
-```bash
-pg k3s kubectl --name k3s -- apply -f - < hi-server-ingress.yaml
-curl http://<任一节点 IP>/hi/world
-```
-
-本节示例对应的完整文件在仓库里：`misc/k3s/hi-server-deployment.yaml`（Deployment）
-与 `misc/k3s/hi-server-ingress.yaml`（Service 与 Ingress），都部署在 `default`
-namespace。
-
 不写 `host` 的规则匹配所有主机名，按节点 IP 直接访问最省事；用
 `host: app.example.com`（可再加 `path`）把路由固定到域名，让多个应用共享同一组
 入口。等价的 IngressRoute CRD 写法：
@@ -442,10 +446,88 @@ spec:
           port: 8080
 ```
 
-HTTP 默认直接提供服务、不做跳转；`websecure`（443）在 Ingress 指定 TLS secret
-之前使用 Traefik 的自签默认证书
-（`tls: [{hosts: [...], secretName: my-cert}]`）。dashboard 在内置控制器里已启用，
-但没有发布成 Service，可用 port-forward 访问：
+把路由固定到域名并启用 TLS：增加 `host` 规则和 `kubernetes.io/tls` Secret。没有现成
+CA 时用 `pg cert` 生成一张自签叶证书（SAN 覆盖域名；叶证书本身就是信任锚，需要信任
+它的客户端导入该 `.crt` 即可）：
+
+```bash
+pg cert --host hi.example.com \
+  --cert-file hi.example.com.crt --key-file hi.example.com.key
+```
+
+再用 `pg k3s kubectl` 从这两个文件创建 Secret。kubectl 在节点容器内执行，看不到宿主
+文件，因此把证书内容以 base64 内嵌进清单、经 stdin 传入：
+
+```bash
+pg k3s kubectl --name k3s -- apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hi-server-tls
+  namespace: default
+type: kubernetes.io/tls
+data:
+  tls.crt: $(base64 -w0 hi.example.com.crt)
+  tls.key: $(base64 -w0 hi.example.com.key)
+EOF
+```
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hi-server-tls
+  namespace: default
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [hi.example.com]
+      secretName: hi-server-tls   # 省略 secretName 则用 Traefik 自签默认证书
+  rules:
+    - host: hi.example.com
+      http:
+        paths:
+          - path: /hi
+            pathType: Prefix
+            backend:
+              service:
+                name: hi-server
+                port:
+                  name: http
+```
+
+域名需解析到任一节点 IP。该变体同样放在仓库的
+`misc/k3s/hi-server-ingress-tls.yaml`；它是独立对象，与普通 Ingress 共存——
+`hi.example.com` 由更长的 Host+Path 规则优先匹配，其他主机名仍走普通规则。
+HTTP 默认不跳转 HTTPS，需要跳转时加重定向 Middleware
+并在 Ingress 上加注解：
+
+```yaml
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-https
+  namespace: default
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+```
+
+```yaml
+# 在 Ingress 上加：
+metadata:
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: default-redirect-https@kubernetescrd
+```
+
+DNS 还没就绪时用 `--resolve` 验证：
+
+```bash
+curl -k --resolve hi.example.com:443:10.0.0.11 https://hi.example.com/hi/world
+```
+
+dashboard 在内置控制器里已启用，但没有发布成 Service，可用 port-forward 访问：
 
 ```bash
 pg k3s kubectl --name k3s -- -n kube-system port-forward deploy/traefik 8080:8080

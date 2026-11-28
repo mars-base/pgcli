@@ -200,7 +200,7 @@ Mirrors affect **Pod images only** — the K3s node image itself is pulled by Po
 
 ## kubectl and kubeconfig
 
-`pg k3s` drives the local node containers through `podman exec`; nothing has to be installed on the host and no remote cluster is involved.
+`pg k3s` drives the local node containers through `podman exec`; nothing has to be installed on the host.
 
 ```bash
 pg k3s kubectl get nodes                          # the only configured node
@@ -208,6 +208,7 @@ pg k3s kubectl -- get nodes -o wide
 pg k3s kubectl -- get pods -n kube-system
 pg k3s kubectl -- apply -f - < manifest.yaml
 pg k3s kubectl --name k3s get pods                # several nodes: pick one
+pg k3s kubectl --kubeconfig kubeconfig.yaml -- get nodes   # remote cluster
 ```
 
 `kubectl` and `kubeconfig` are server-only; an agent is rejected. With several nodes configured, `--name` selects the server. `stdin` is attached, so `kubectl apply -f -` works. kubectl runs inside the node container, which cannot see host paths — pipe manifests through stdin (`apply -f - < file.yaml`) instead of passing a host `-f` path.
@@ -217,7 +218,7 @@ pg k3s kubeconfig --name k3s > kubeconfig.yaml       # stdout
 pg k3s kubeconfig --name k3s --output ~/.kube/config # mode 0600
 ```
 
-When the server was installed with `--advertise-address`, the loopback API URL (`https://127.0.0.1:6443`) in the kubeconfig is rewritten to that address so the file works from other hosts. Remote clusters use an exported kubeconfig with any kubectl — `pg k3s` is local-only.
+When the server was installed with `--advertise-address`, the loopback API URL (`https://127.0.0.1:6443`) in the kubeconfig is rewritten to that address so the file works from other hosts. From a host that is not a K3s node, pass that kubeconfig to `--kubeconfig`: pg runs kubectl from a temporary container of the K3s image (pgcli's default tag, pulled into Podman on demand) against that file. The container bypasses the host's proxy settings and talks to the API server directly, so any host with Podman can operate the cluster without installing a kubectl package.
 
 ## Lifecycle
 
@@ -314,6 +315,17 @@ metrics stack is in use — `kubectl top` stops working afterwards.
 
 ## Traefik ingress
 
+The complete manifests are in the repository:
+`misc/k3s/hi-server-deployment.yaml` (the Deployment) and
+`misc/k3s/hi-server-ingress.yaml` (the Service and Ingress), both in the
+`default` namespace.
+
+```bash
+pg k3s kubectl --name k3s -- apply -f - < misc/k3s/hi-server-deployment.yaml
+pg k3s kubectl --name k3s -- apply -f - < misc/k3s/hi-server-ingress.yaml
+curl http://<any-node-ip>/hi/world
+```
+
 K3s also bundles **Traefik v3** as the default ingress controller and starts it
 with the cluster, so in-cluster Services can be published without any extra
 add-on. Traefik runs as a single-replica Deployment in `kube-system`, and
@@ -361,16 +373,6 @@ spec:
                   name: http
 ```
 
-```bash
-pg k3s kubectl --name k3s -- apply -f - < hi-server-ingress.yaml
-curl http://<any-node-ip>/hi/world
-```
-
-The full manifests behind this example are in the repository:
-`misc/k3s/hi-server-deployment.yaml` (the Deployment) and
-`misc/k3s/hi-server-ingress.yaml` (the Service and Ingress). Both live in the
-`default` namespace.
-
 A rule without `host` matches every hostname — the quickest way to try a route
 by node IP. Pin routes to a name with `host: app.example.com` (optionally plus
 `path`) to split several apps across the same entry points. The same route as a
@@ -392,11 +394,92 @@ spec:
           port: 8080
 ```
 
-HTTP is served as-is without a redirect; the `websecure` entry point presents
-Traefik's self-signed default certificate until an Ingress asks for a TLS
-secret (`tls: [{hosts: [...], secretName: my-cert}]`). The dashboard is enabled
-in the bundled controller but not published through a Service; reach it with a
-port-forward:
+To pin the route to a hostname and terminate TLS, add `host` rules and a
+`kubernetes.io/tls` secret. Without a CA at hand, `pg cert` mints a self-signed
+pair whose SANs cover the hostname (the leaf is its own trust anchor — add the
+`.crt` to the clients that should trust it):
+
+```bash
+pg cert --host hi.example.com \
+  --cert-file hi.example.com.crt --key-file hi.example.com.key
+```
+
+Then create the secret from those files with `pg k3s kubectl`. kubectl runs
+inside the node container and cannot read host paths, so embed the files as
+base64 data in a manifest piped through stdin:
+
+```bash
+pg k3s kubectl --name k3s -- apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hi-server-tls
+  namespace: default
+type: kubernetes.io/tls
+data:
+  tls.crt: $(base64 -w0 hi.example.com.crt)
+  tls.key: $(base64 -w0 hi.example.com.key)
+EOF
+```
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hi-server-tls
+  namespace: default
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [hi.example.com]
+      secretName: hi-server-tls   # omit secretName for Traefik's self-signed default
+  rules:
+    - host: hi.example.com
+      http:
+        paths:
+          - path: /hi
+            pathType: Prefix
+            backend:
+              service:
+                name: hi-server
+                port:
+                  name: http
+```
+
+The domain must resolve to any node IP. This variant is also in the repository
+as `misc/k3s/hi-server-ingress-tls.yaml`; as a separate object it coexists with
+the plain Ingress, and Traefik prefers the longer Host+Path rule for
+`hi.example.com` while other hostnames keep matching the plain rule. HTTP is
+not redirected to HTTPS by
+default; opt in with a redirect middleware and an annotation on the Ingress:
+
+```yaml
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-https
+  namespace: default
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+```
+
+```yaml
+# on the Ingress:
+metadata:
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: default-redirect-https@kubernetescrd
+```
+
+Test with `--resolve` before the DNS record is in place:
+
+```bash
+curl -k --resolve hi.example.com:443:10.0.0.11 https://hi.example.com/hi/world
+```
+
+The dashboard is enabled in the bundled controller but not published through a
+Service; reach it with a port-forward:
 
 ```bash
 pg k3s kubectl --name k3s -- -n kube-system port-forward deploy/traefik 8080:8080

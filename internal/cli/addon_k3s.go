@@ -399,30 +399,41 @@ func runAddonStopK3s(cmd *cobra.Command) error {
 
 var k3sCmd = &cobra.Command{
 	Use:   "k3s",
-	Short: "Run kubectl against a local K3s add-on node and export its kubeconfig",
+	Short: "Run kubectl against a local K3s add-on node or a remote cluster, and export kubeconfigs",
 	Long: `Drive the K3s add-on installed by "pg addon install k3s".
 
 K3s nodes run as rootful Podman containers on the host network, so pgcli
 reaches their kubectl through "podman exec" — nothing has to be installed on
-the host and no remote cluster is involved. Put kubectl flags after -- :
-pg's own parser would otherwise swallow or reject them (-o is pg's config
-output flag, -n is unknown to it).
+the host. To reach a cluster from a host that is not a K3s node, export its
+kubeconfig ("pg k3s kubeconfig --output ...") and pass --kubeconfig: pg then
+runs kubectl from a temporary K3s image container against that file, so no
+kubectl package is needed on the management host either. Put kubectl flags
+after -- : pg's own parser would otherwise swallow or reject them (-o is pg's
+config output flag, -n is unknown to it).
 
 Examples:
   pg k3s kubectl get nodes
   pg k3s kubectl -- get nodes -o wide
   pg k3s kubectl -- get pods -n kube-system
   pg k3s kubectl -- apply -f manifest.yaml
+  pg k3s kubectl --kubeconfig kubeconfig.yaml -- get nodes   # remote cluster
   pg k3s kubeconfig --output ~/.kube/config
   pg k3s kubeconfig --name k3s > kubeconfig.yaml`,
 }
 
 var k3sKubectlCmd = &cobra.Command{
-	Use:   "kubectl [--name <node>] [-- <kubectl args...>]",
-	Short: "Run kubectl inside a K3s server container",
+	Use:   "kubectl [--name <node> | --kubeconfig <file>] [-- <kubectl args...>]",
+	Short: "Run kubectl inside a K3s server container or against a kubeconfig",
 	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name, _ := cmd.Flags().GetString("name")
+		kubeconfig, _ := cmd.Flags().GetString("kubeconfig")
+		if kubeconfig != "" {
+			if name != "" {
+				return errors.New("--name and --kubeconfig are mutually exclusive")
+			}
+			return runRemoteKubectl(kubeconfig, args)
+		}
 		cfg, kc, err := k3sCLITarget(name)
 		if err != nil {
 			return err
@@ -473,11 +484,22 @@ hosts. --output writes it with mode 0600; without it the file goes to stdout.`,
 
 func init() {
 	k3sKubectlCmd.Flags().String("name", "", "k3s server node to run kubectl in (default: the only configured node)")
+	k3sKubectlCmd.Flags().String("kubeconfig", "", "run kubectl from a temporary K3s image container against this exported kubeconfig instead of a local node (mutually exclusive with --name)")
 	k3sKubeconfigCmd.Flags().String("name", "", "k3s server node to read the kubeconfig from (default: the only configured node)")
 	k3sKubeconfigCmd.Flags().StringP("output", "o", "", "write the kubeconfig to this file (mode 0600) instead of stdout")
 
 	k3sCmd.AddCommand(k3sKubectlCmd, k3sKubeconfigCmd)
 	rootCmd.AddCommand(k3sCmd)
+}
+
+// runRemoteKubectl runs kubectl from a throwaway container of the K3s image
+// against an exported kubeconfig, so a management host needs Podman but no
+// kubectl package.
+func runRemoteKubectl(kubeconfig string, args []string) error {
+	if _, err := os.Stat(kubeconfig); err != nil {
+		return fmt.Errorf("kubeconfig: %w", err)
+	}
+	return podman.KubectlWithKubeconfig(config.DefaultK3sImageTag, kubeconfig, args, stdinIsTerminal())
 }
 
 // k3sCLITarget resolves the server node kubectl/kubeconfig operate on. An
