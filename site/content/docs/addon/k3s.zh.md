@@ -80,6 +80,24 @@ nf_tables；只有 alternatives 指向 `iptables-legacy` 的主机才是真 lega
 节点），且 Kubernetes 1.38 之前的 nftables 模式不支持 127.0.0.1 上的 NodePort
 （KEP-6032）。
 
+## metrics-server
+
+K3s **内置** metrics-server 且默认启用，本插件不需要额外部署。它提供 resource
+metrics API（`metrics.k8s.io`），是 `kubectl top` 与 HPA 的数据来源；指标由每个
+节点的 kubelet 采集，server 和 agent 都被覆盖。
+
+```bash
+pg k3s kubectl --name k3s -- get pods -n kube-system -l k8s-app=metrics-server
+pg k3s kubectl --name k3s -- top nodes
+pg k3s kubectl --name k3s -- top pods -n kube-system
+```
+
+`top` 需要 Pod 处于 Running 且聚合 API 可用
+（`pg k3s kubectl --name k3s -- get apiservice v1beta1.metrics.k8s.io`）；集群刚
+建好时可能要等一分钟左右才有首批采样数据。不需要 HPA 或已有其他监控栈时可用
+`--disable metrics-server` 关闭（Ansible：在 `addon_k3s_disable` 里加
+`metrics-server`），关闭后 `kubectl top` 不可用。
+
 ## 单机安装
 
 **SQLite 单机安装仅用于本地测试与开发。** 生产环境应使用下面的 HA 集群形态（嵌入式 etcd，至少三台 server）。

@@ -76,6 +76,26 @@ Switching the proxy mode on a running cluster is disruptive (set it on
 install, or recreate the node with `--force`), and NodePorts on 127.0.0.1 are
 not supported in nftables mode before Kubernetes 1.38 (KEP-6032).
 
+## Metrics server
+
+K3s bundles the **metrics-server** and starts it by default; the add-on
+deploys nothing extra. It serves the resource metrics API (`metrics.k8s.io`),
+which backs `kubectl top` and horizontal pod autoscaling. Metrics are scraped
+from every kubelet, so servers and agents are covered alike.
+
+```bash
+pg k3s kubectl --name k3s -- get pods -n kube-system -l k8s-app=metrics-server
+pg k3s kubectl --name k3s -- top nodes
+pg k3s kubectl --name k3s -- top pods -n kube-system
+```
+
+`top` needs the pod running and the aggregated API available
+(`pg k3s kubectl --name k3s -- get apiservice v1beta1.metrics.k8s.io`); right
+after cluster creation it can take about a minute before the first samples
+exist. Disable the component with `--disable metrics-server` (Ansible: add
+`metrics-server` to `addon_k3s_disable`) when HPA is not needed or another
+metrics stack is in use — `kubectl top` stops working afterwards.
+
 ## Single-node install
 
 **The SQLite single-node install is for local testing and development.** Production deployments should use the HA cluster layout below (embedded etcd, at least three servers).
