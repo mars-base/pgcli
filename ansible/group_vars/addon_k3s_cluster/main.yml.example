@@ -222,9 +222,6 @@ _addon_k3s_cluster_flags: >-
   {%- endif -%}
   {{ out }}
 
-# Default flags for entries that do not set their own params.
-addon_k3s_cluster_params: []
-
 addon_k3s_cluster_addons:
   - type: k3s
     state: present
