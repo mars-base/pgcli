@@ -68,8 +68,10 @@ chmod 0755 /srv/offline-images/podman-launcher-linux_amd64
 ## 3. 部署 HTTP 资产服务器
 
 先在 `hosts.ini` 里声明资产服务器（`deploy-http.yaml` 作用于 `[http]` 组），
-再在 `group_vars/http/main.yml`（从同目录 `.example` 复制）里声明服务器——
-它就是离线镜像 tar 包和两个二进制的 HTTP 下载站点：
+再在 `group_vars/http/main.yml`（从同目录 `.example` 复制）里声明服务器。
+`http` 与所有 add-on 分组遵循同一套路：每个 `group_vars/<分组>/` 只提交
+`main.yml.example`，复制成旁边的 `main.yml` 再改；这些实际文件都在 gitignore
+里。它就是离线镜像 tar 包和两个二进制的 HTTP 下载站点：
 
 ```ini
 [http]

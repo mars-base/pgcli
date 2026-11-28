@@ -75,8 +75,10 @@ binary; archives are not unpacked there.
 
 Declare the asset server in `hosts.ini` — `deploy-http.yaml` targets the
 `[http]` group — then declare the server in `group_vars/http/main.yml` (copy
-the `.example` next to it first). It is the download site for the image
-tarballs and the two binaries:
+the `.example` next to it first). `http` follows the same pattern as every
+add-on group: each `group_vars/<group>/` ships only a `main.yml.example`,
+so copy it to `main.yml` and edit; the live files are gitignored. It is the
+download site for the image tarballs and the two binaries:
 
 ```ini
 [http]
