@@ -73,7 +73,7 @@ chmod 0755 /srv/offline-images/podman-launcher-linux_amd64
 
 ```ini
 [http]
-assets ansible_host=192.0.2.11 ansible_user=root
+assets ansible_host=192.0.2.10 ansible_user=root
 ```
 
 ```yaml
@@ -84,6 +84,12 @@ pgcli_http_servers:
     port: 18080
     autostart: true
 ```
+
+`deploy-http.yaml` 会自行安装 `pg`：`pgcli` role 按 `pgcli_install_binary_url`
+下载二进制并以 `--skip-binary --skip-pull` 运行仓库自带的安装脚本；若
+`pgcli_install_path` 上已有 `pg`，这整套流程直接跳过。因此该 URL 在 play 运行时
+必须可达——首次部署请指向一台已在运行的资产服务器（全新服务器在 `pg` 就位前无法
+提供自己的二进制）；或者事先把 `pg` 放到主机上，role 就会跳过下载。
 
 ```bash
 uv run ansible-playbook playbooks/deploy-http.yaml --limit http
@@ -99,10 +105,6 @@ scp -r /srv/offline-images/. assets:/srv/offline-images/
 
 文件必须直接放在被服务目录下——所有消费者都按 `<base>/<basename>` 请求。
 服务器没有认证，只应监听在可信网络；`HEAD` 与 `Range` 支持是必需的。
-
-服务器要先有 `pg` 才能提供它：全新的隔离主机请在运行本步骤的 play 之前，先把
-`pg` 二进制放到 `/usr/local/bin/pg`（从发布压缩包解出，或用 `--binaries` 构建；
-也可以把 `pgcli_install_binary_url` 指向一台已在运行的资产服务器）。
 
 ## 4. 让 Ansible 指向服务器
 

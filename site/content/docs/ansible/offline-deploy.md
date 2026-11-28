@@ -80,7 +80,7 @@ tarballs and the two binaries:
 
 ```ini
 [http]
-assets ansible_host=192.0.2.11 ansible_user=root
+assets ansible_host=192.0.2.10 ansible_user=root
 ```
 
 ```yaml
@@ -91,6 +91,14 @@ pgcli_http_servers:
     port: 18080
     autostart: true
 ```
+
+`deploy-http.yaml` installs `pg` itself: the `pgcli` role fetches
+`pgcli_install_binary_url` and runs the bundled installer with
+`--skip-binary --skip-pull`, and skips all of it when `pg` already exists at
+`pgcli_install_path`. The URL must be reachable when the play runs, so point
+it at an already-running asset server for the first deploy — a fresh server
+cannot serve its own binary before `pg` exists. Alternatively place a `pg`
+binary on the host beforehand and the role skips the download.
 
 ```bash
 uv run ansible-playbook playbooks/deploy-http.yaml --limit http
@@ -108,12 +116,6 @@ scp -r /srv/offline-images/. assets:/srv/offline-images/
 Files must sit directly in the served directory — every consumer requests
 `<base>/<basename>`. The server has no authentication, so keep it on a trusted
 network; `HEAD` and `Range` support are required.
-
-The server needs `pg` before it can serve it: on a fresh air-gapped host,
-place a `pg` binary at `/usr/local/bin/pg` (extract it from the release
-tarball or build one with `--binaries`; alternatively point
-`pgcli_install_binary_url` at an asset server that is already running) before
-this play.
 
 ## 4. Point Ansible at the server
 
