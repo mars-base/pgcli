@@ -13,7 +13,7 @@ weight: 14
 | 角色 | 需要 |
 |------|------|
 | 导出机（可联网） | `pgcli` 主仓库 checkout、Podman、Go 与 make——运行导出脚本 |
-| 资产服务器（局域网） | `[http]` inventory 分组；首次运行需能访问 GitHub 以便 play 安装 `pg`（或预先放好二进制）；除此之外不联网 |
+| 资产服务器（局域网） | 用 HTTP 提供步骤 2 的产物——`deploy-http.yaml`（`[http]` 分组；首次运行需能访问 GitHub 以安装 `pg`），或本机/管理服务器等任意静态 Web 服务器 |
 | 控制节点 | 已 `uv sync` 的 `pgcli-ansible` checkout；能连到目标主机 |
 | 目标主机 | 能访问资产服务器；已安装 Podman（不联网） |
 
@@ -116,6 +116,22 @@ scp -r /srv/offline-images/. assets:/srv/offline-images/
 
 文件必须直接放在被服务目录下——所有消费者都按 `<base>/<basename>` 请求。
 服务器没有认证，只应监听在可信网络；`HEAD` 与 `Range` 支持是必需的。
+
+### 改用自建 HTTP 服务器
+
+`deploy-http.yaml` 不是必须的：HTTP 服务器可以是本机（管理服务器）或机房内任意
+一台跑静态文件服务的主机。把步骤 2 的产物（含两个二进制）拷进它的站点根目录，
+并确认机房内网的目标主机都能访问和下载。
+
+```nginx
+server {
+    listen 18080;
+    root /srv/offline-images;
+}
+```
+
+步骤 4 的地址照旧（`<base>/<basename>`），服务器同样必须响应 `HEAD` 并支持
+`Range`，与 `pg http` 一致。
 
 ## 4. 让 Ansible 指向服务器
 

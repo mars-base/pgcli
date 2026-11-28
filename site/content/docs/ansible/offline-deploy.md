@@ -15,7 +15,7 @@ Host roles:
 | Role | Needs |
 |------|-------|
 | Staging host (has internet) | `pgcli` repo checkout, Podman, Go and make — runs the exporter |
-| Asset server (LAN) | `[http]` inventory group; GitHub egress on the first run so the play can install `pg` (or pre-place the binaries); otherwise no internet |
+| Asset server (LAN) | Serves the step-2 output over HTTP — `deploy-http.yaml` (the `[http]` group; needs GitHub egress on the first run to install `pg`) or any static web server, such as one on the control machine |
 | Control node | `pgcli-ansible` checkout with synced `uv` env; reaches the targets |
 | Targets | Reach the asset server; Podman installed (no internet) |
 
@@ -129,6 +129,23 @@ scp -r /srv/offline-images/. assets:/srv/offline-images/
 Files must sit directly in the served directory — every consumer requests
 `<base>/<basename>`. The server has no authentication, so keep it on a trusted
 network; `HEAD` and `Range` support are required.
+
+### Use your own web server instead
+
+`deploy-http.yaml` is optional: the server can be the control machine or a
+management server running any static web server. Copy the step-2 output
+(binaries included) into its document root and confirm every target in the
+data center can reach and download from it.
+
+```nginx
+server {
+    listen 18080;
+    root /srv/offline-images;
+}
+```
+
+The step-4 URLs apply unchanged (`<base>/<basename>`), and the server must
+answer `HEAD` and support `Range` just like `pg http` does.
 
 ## 4. Point Ansible at the server
 
