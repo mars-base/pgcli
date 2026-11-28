@@ -83,7 +83,6 @@ pgcli_http_servers:
     listen: 0.0.0.0
     port: 18080
     autostart: true
-    sync_binaries: true      # 同步 pg 与 podman-launcher-linux_<arch>
 ```
 
 ```bash
@@ -91,18 +90,15 @@ uv run ansible-playbook playbooks/deploy-http.yaml --limit http
 ```
 
 角色会在这台主机上安装 pgcli、创建被服务目录、启动服务器，并在后续运行中持续
-收敛。`sync_binaries` 从运行 playbook 的 checkout 复制两个二进制；镜像 tar 包
-不由角色搬运，把步骤 2 的导出结果放进该目录即可（导出机与控制节点可以是同一台）：
+收敛。镜像 tar 包与二进制都不由角色搬运，把步骤 2 的导出结果放进该目录即可
+（导出机与控制节点可以是同一台）：
 
 ```bash
 scp -r /srv/offline-images/. assets:/srv/offline-images/
 ```
 
 文件必须直接放在被服务目录下——所有消费者都按 `<base>/<basename>` 请求。
-服务器没有认证，只应监听在可信网络；`HEAD` 与 `Range` 支持是必需的。使用独立
-`pgcli-ansible` clone 时，`sync_binaries` 需要把 `pgcli_http_repo_root` 指向
-`pgcli` 主仓库 checkout（读取其中的 `bin/pg` 与 `images/`）；或者关掉它，让
-步骤 2 `--binaries` 的产物随上面的 `scp` 一起过去。
+服务器没有认证，只应监听在可信网络；`HEAD` 与 `Range` 支持是必需的。
 
 服务器要先有 `pg` 才能提供它：全新的隔离主机请在运行本步骤的 play 之前，先把
 `pg` 二进制放到 `/usr/local/bin/pg`（从发布压缩包解出，或用 `--binaries` 构建；
@@ -120,8 +116,8 @@ pgcli_images_http_url: "http://192.0.2.10:18080"
 ```
 
 变量留空表示该类产物继续走在线路径。示例的 `pgcli_install_binary_url` 对应
-步骤 2 的压缩包；若服务器上放的是裸二进制（`export-images.sh --binaries` 或
-`sync_binaries`），把地址改成 `/pg`。隔离的控制节点还要把
+步骤 2 的压缩包；若服务器上放的是裸二进制（`export-images.sh --binaries`），
+把地址改成 `/pg`。隔离的控制节点还要把
 `pgcli_install_script_src` 指向本地 `pgcli` checkout 里的 `scripts/install.sh`
 （例如 `/srv/pgcli/scripts/install.sh`）。设置了
 `pgcli_images_http_url` 后，安装过程带 `--skip-pull` 运行。

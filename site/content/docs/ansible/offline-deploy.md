@@ -90,7 +90,6 @@ pgcli_http_servers:
     listen: 0.0.0.0
     port: 18080
     autostart: true
-    sync_binaries: true      # publishes pg + podman-launcher-linux_<arch>
 ```
 
 ```bash
@@ -98,10 +97,9 @@ uv run ansible-playbook playbooks/deploy-http.yaml --limit http
 ```
 
 The role installs pgcli on the host, creates the served directory, starts the
-server and re-converges on later runs. `sync_binaries` copies the two
-binaries from the checkout running the playbook; image tarballs are not
-copied by the role, so put the step-2 output into the directory (staging host
-and control node may be the same machine):
+server and re-converges on later runs. The role does not copy image tarballs
+or binaries, so put the step-2 output into the directory (staging host and
+control node may be the same machine):
 
 ```bash
 scp -r /srv/offline-images/. assets:/srv/offline-images/
@@ -109,10 +107,7 @@ scp -r /srv/offline-images/. assets:/srv/offline-images/
 
 Files must sit directly in the served directory — every consumer requests
 `<base>/<basename>`. The server has no authentication, so keep it on a trusted
-network; `HEAD` and `Range` support are required. With a standalone
-`pgcli-ansible` clone, `sync_binaries` needs `pgcli_http_repo_root` pointing
-at a `pgcli` checkout (it reads `bin/pg` and `images/`); alternatively skip it
-and let the `--binaries` files from step 2 travel with the `scp` above.
+network; `HEAD` and `Range` support are required.
 
 The server needs `pg` before it can serve it: on a fresh air-gapped host,
 place a `pg` binary at `/usr/local/bin/pg` (extract it from the release
@@ -133,8 +128,8 @@ pgcli_images_http_url: "http://192.0.2.10:18080"
 
 Leaving a variable empty keeps that class of asset on the online path. The
 `pgcli_install_binary_url` example matches the step-2 tarball; point it at
-`/pg` instead when the served artifact is the raw binary
-(`export-images.sh --binaries` or `sync_binaries`). On an
+`/pg` instead when the served artifact is the raw binary from
+`export-images.sh --binaries`. On an
 isolated control node also point `pgcli_install_script_src` at the
 `scripts/install.sh` of your local `pgcli` checkout (for example
 `/srv/pgcli/scripts/install.sh`). With
