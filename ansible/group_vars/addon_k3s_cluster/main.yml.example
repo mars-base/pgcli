@@ -229,6 +229,9 @@ addon_k3s_cluster_addons:
   - type: k3s
     state: present
     name: "{{ addon_k3s_name }}"
+    # Register the node in pg's boot hook (pg start --autostart) so the
+    # container and its cluster membership survive a reboot.
+    autostart: true
     params: "{{ _addon_k3s_cluster_flags }}"
     # --image and --version are mutually exclusive; a changed registries.yaml
     # only takes effect after the node container is recreated.
