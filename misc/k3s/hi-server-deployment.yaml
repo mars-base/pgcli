@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hi-server
+  labels:
+    app: hi-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hi-server
+  template:
+    metadata:
+      labels:
+        app: hi-server
+    spec:
+      containers:
+        - name: hi-server
+          image: ghcr.io/mars-base/hi-server:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
