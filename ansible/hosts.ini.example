@@ -1,6 +1,10 @@
 # pgcli Ansible inventory
 # Copy to hosts.ini and edit for your environment.
 #
+# Only [all] (the host pool) and [http] are active in this example: it is the
+# inventory for an offline HTTP asset server. Uncomment the group set for any
+# other scenario (instances, S3, observability, HA, add-ons).
+#
 # Usage:
 #   uv run ansible-playbook playbooks/ping.yaml
 #   uv run ansible-playbook playbooks/apply.yaml
@@ -57,9 +61,9 @@ ansible_port=22
 # deployment account may be a different, non-root account. It is created with a
 # nologin shell automatically when missing. Run with --limit rootless to deploy
 # only these.
-[rootless]
-node1
-node2
+# [rootless]
+# node1
+# node2
 
 # Rootless Patroni HA scenario. The group is a child of [ha_cluster], so the
 # HA plays include its hosts and group_vars/rootless_ha overrides the parent's
@@ -84,11 +88,11 @@ node2
 # (gitignored; copy the .example file). Run:
 #
 #   uv run ansible-playbook playbooks/nftables.yaml --limit nftables
-[nftables]
-node1
-node2
-node3
-node4
+# [nftables]
+# node1
+# node2
+# node3
+# node4
 
 # ── HTTP file server ───────────────────────────────────────────────────────
 # Hosts that serve offline install assets (pg binary, podman launcher, image
@@ -106,20 +110,19 @@ node1
 # order; a single host means a single-node store.
 # Drives are declared with pgcli_s3_drives in group_vars/<group>/main.yml (or
 # per node in host_vars/<host>.yml). deploy-s3.yaml defaults to
-# pgcli_s3_group=s3; the [s3] parent lists exactly one active store-type
-# child. Keep inactive groups declared but empty so the play pattern still
-# resolves without a warning.
-[minio_s3]
-node1
-
-[silo_s3]
+# pgcli_s3_group=s3; uncomment exactly one store-type group, list its hosts,
+# and uncomment the matching child entry under [s3:children].
+# [minio_s3]
 # node1
-
-[rustfs_s3]
+#
+# [silo_s3]
 # node1
-
-[s3:children]
-minio_s3
+#
+# [rustfs_s3]
+# node1
+#
+# [s3:children]
+# minio_s3
 # silo_s3
 # rustfs_s3
 
@@ -166,14 +169,14 @@ minio_s3
 # order for clustered components: the add-on play runs serial: 1.
 # Enables pgcli_instances at group level, so keep the other scenario groups
 # disabled while it is active.
-[observable]
-node1
-node2
-node3
-node4
-
-[observable:vars]
-ansible_group_priority=20
+# [observable]
+# node1
+# node2
+# node3
+# node4
+#
+# [observable:vars]
+# ansible_group_priority=20
 
 # DCS role: hosts that run the shared etcd cluster. Order matters: the first
 # host bootstraps etcd; the rest join it in apply.yaml's serial: 1 add-on play.
